@@ -1,0 +1,195 @@
+# GitHub Issue Mapping for Ouroboros
+# Generated: 2026-01-14
+# Project: https://github.com/users/Q00/projects/1
+# Repository: Q00/ouroboros
+
+# This file maps local story files to GitHub issue numbers
+# Used for syncing status between local sprint-status.yaml and GitHub
+
+epics:
+  epic-0:
+    issue: 1
+    url: https://github.com/Q00/ouroboros/issues/1
+    title: "[Epic 0] Project Foundation & Infrastructure"
+  epic-1:
+    issue: 2
+    url: https://github.com/Q00/ouroboros/issues/2
+    title: "[Epic 1] Seed Creation via Big Bang"
+  epic-2:
+    issue: 3
+    url: https://github.com/Q00/ouroboros/issues/3
+    title: "[Epic 2] Intelligent Task Routing (PAL)"
+  epic-3:
+    issue: 4
+    url: https://github.com/Q00/ouroboros/issues/4
+    title: "[Epic 3] Double Diamond Execution"
+  epic-4:
+    issue: 5
+    url: https://github.com/Q00/ouroboros/issues/5
+    title: "[Epic 4] Resilience & Stagnation Recovery"
+  epic-5:
+    issue: 6
+    url: https://github.com/Q00/ouroboros/issues/6
+    title: "[Epic 5] Three-Stage Evaluation Pipeline"
+  epic-6:
+    issue: 7
+    url: https://github.com/Q00/ouroboros/issues/7
+    title: "[Epic 6] Drift Control & Retrospective"
+  epic-7:
+    issue: 8
+    url: https://github.com/Q00/ouroboros/issues/8
+    title: "[Epic 7] Secondary Loop & TODO Processing"
+
+stories:
+  # Epic 0: Project Foundation & Infrastructure
+  0-1-project-initialization-with-uv:
+    issue: 22
+    url: https://github.com/Q00/ouroboros/issues/22
+    parent_epic: 1
+  0-2-core-types-and-error-handling:
+    issue: 25
+    url: https://github.com/Q00/ouroboros/issues/25
+    parent_epic: 1
+  0-3-event-store-with-sqlalchemy-core:
+    issue: 27
+    url: https://github.com/Q00/ouroboros/issues/27
+    parent_epic: 1
+  0-4-configuration-and-credentials-management:
+    issue: 31
+    url: https://github.com/Q00/ouroboros/issues/31
+    parent_epic: 1
+  0-5-llm-provider-adapter-with-litellm:
+    issue: 33
+    url: https://github.com/Q00/ouroboros/issues/33
+    parent_epic: 1
+  0-6-cli-skeleton-with-typer-and-rich:
+    issue: 35
+    url: https://github.com/Q00/ouroboros/issues/35
+    parent_epic: 1
+  0-7-structured-logging-with-structlog:
+    issue: 37
+    url: https://github.com/Q00/ouroboros/issues/37
+    parent_epic: 1
+  0-8-checkpoint-and-recovery-system:
+    issue: 38
+    url: https://github.com/Q00/ouroboros/issues/38
+    parent_epic: 1
+  0-9-context-compression-engine:
+    issue: 39
+    url: https://github.com/Q00/ouroboros/issues/39
+    parent_epic: 1
+
+  # Epic 1: Seed Creation via Big Bang
+  1-1-interview-protocol-engine:
+    issue: 12
+    url: https://github.com/Q00/ouroboros/issues/12
+    parent_epic: 2
+  1-2-ambiguity-score-calculation:
+    issue: 14
+    url: https://github.com/Q00/ouroboros/issues/14
+    parent_epic: 2
+  1-3-immutable-seed-generation:
+    issue: 16
+    url: https://github.com/Q00/ouroboros/issues/16
+    parent_epic: 2
+
+  # Epic 2: Intelligent Task Routing (PAL)
+  2-1-three-tier-model-configuration:
+    issue: 18
+    url: https://github.com/Q00/ouroboros/issues/18
+    parent_epic: 3
+  2-2-complexity-based-routing:
+    issue: 20
+    url: https://github.com/Q00/ouroboros/issues/20
+    parent_epic: 3
+  2-3-escalation-on-failure:
+    issue: 23
+    url: https://github.com/Q00/ouroboros/issues/23
+    parent_epic: 3
+  2-4-downgrade-on-success:
+    issue: 26
+    url: https://github.com/Q00/ouroboros/issues/26
+    parent_epic: 3
+
+  # Epic 3: Double Diamond Execution
+  3-1-double-diamond-cycle-implementation:
+    issue: 29
+    url: https://github.com/Q00/ouroboros/issues/29
+    parent_epic: 4
+  3-2-hierarchical-ac-decomposition:
+    issue: 32
+    url: https://github.com/Q00/ouroboros/issues/32
+    parent_epic: 4
+  3-3-atomicity-detection:
+    issue: 34
+    url: https://github.com/Q00/ouroboros/issues/34
+    parent_epic: 4
+  3-4-subagent-isolation:
+    issue: 36
+    url: https://github.com/Q00/ouroboros/issues/36
+    parent_epic: 4
+
+  # Epic 4: Resilience & Stagnation Recovery
+  4-1-stagnation-detection-4-patterns:
+    issue: 9
+    url: https://github.com/Q00/ouroboros/issues/9
+    parent_epic: 5
+  4-2-lateral-thinking-personas:
+    issue: 10
+    url: https://github.com/Q00/ouroboros/issues/10
+    parent_epic: 5
+  4-3-persona-rotation-strategy:
+    issue: 11
+    url: https://github.com/Q00/ouroboros/issues/11
+    parent_epic: 5
+
+  # Epic 5: Three-Stage Evaluation Pipeline
+  5-1-stage-1-mechanical-verification:
+    issue: 13
+    url: https://github.com/Q00/ouroboros/issues/13
+    parent_epic: 6
+  5-2-stage-2-semantic-evaluation:
+    issue: 15
+    url: https://github.com/Q00/ouroboros/issues/15
+    parent_epic: 6
+  5-3-stage-3-multi-model-consensus:
+    issue: 17
+    url: https://github.com/Q00/ouroboros/issues/17
+    parent_epic: 6
+  5-4-consensus-trigger-matrix:
+    issue: 19
+    url: https://github.com/Q00/ouroboros/issues/19
+    parent_epic: 6
+
+  # Epic 6: Drift Control & Retrospective
+  6-1-drift-measurement-engine:
+    issue: 21
+    url: https://github.com/Q00/ouroboros/issues/21
+    parent_epic: 7
+  6-2-automatic-retrospective:
+    issue: 24
+    url: https://github.com/Q00/ouroboros/issues/24
+    parent_epic: 7
+
+  # Epic 7: Secondary Loop & TODO Processing
+  7-1-todo-registry:
+    issue: 28
+    url: https://github.com/Q00/ouroboros/issues/28
+    parent_epic: 8
+  7-2-secondary-loop-batch-processing:
+    issue: 30
+    url: https://github.com/Q00/ouroboros/issues/30
+    parent_epic: 8
+
+# Status Sync Instructions:
+# ========================
+# When updating a story status locally (in sprint-status.yaml):
+# 1. Update sprint-status.yaml with new status
+# 2. Use gh cli to update the GitHub issue:
+#    - ready-for-dev: No GitHub change needed (default state)
+#    - in-progress: gh issue edit <number> --add-label "in-progress"
+#    - review: gh issue edit <number> --add-label "review"
+#    - done: gh issue close <number>
+#
+# When an Epic is complete (all stories done):
+#    gh issue close <epic_number>

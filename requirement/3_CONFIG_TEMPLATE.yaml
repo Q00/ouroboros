@@ -1,0 +1,344 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Ouroboros System Configuration v0.4
+# ═══════════════════════════════════════════════════════════════════════════
+# Philosophy: "Frugal by Default, Rigorous in Verification"
+# ═══════════════════════════════════════════════════════════════════════════
+
+system:
+  name: "ouroboros"
+  version: "0.4.0"
+  philosophy: "Frugal by Default, Rigorous in Verification"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Economic Model: Tiered Routing
+# ─────────────────────────────────────────────────────────────────────────────
+economics:
+  default_tier: "frugal"
+  
+  tiers:
+    frugal:
+      cost_factor: 1
+      intelligence_range: [9, 11]
+      models:
+        - provider: "openai"
+          model: "gpt-4o-mini"
+        - provider: "google"
+          model: "gemini-2.0-flash"
+        - provider: "anthropic"
+          model: "claude-3-5-haiku"
+      use_cases:
+        - "routine_coding"
+        - "log_analysis"
+        - "stage1_fix"
+        - "simple_decomposition"
+        
+    standard:
+      cost_factor: 10
+      intelligence_range: [14, 16]
+      models:
+        - provider: "openai"
+          model: "gpt-4o"
+        - provider: "anthropic"
+          model: "claude-sonnet-4-20250514"
+        - provider: "google"
+          model: "gemini-2.5-pro"
+      use_cases:
+        - "logic_design"
+        - "stage2_evaluation"
+        - "refactoring"
+        - "interview"
+        
+    frontier:
+      cost_factor: 30
+      intelligence_range: [18, 20]
+      models:
+        - provider: "openai"
+          model: "o3"
+        - provider: "anthropic"
+          model: "claude-opus-4-5-20251101"
+      use_cases:
+        - "consensus"
+        - "lateral_thinking"
+        - "big_bang"
+        - "architecture_decisions"
+
+  routing:
+    escalation_threshold: 2          # 2 failures -> upgrade tier
+    downgrade_success_streak: 5      # 5 successes -> downgrade tier
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 0: Big Bang (Clarification)
+# ─────────────────────────────────────────────────────────────────────────────
+clarification:
+  ambiguity_threshold: 0.2           # Must be ≤ 0.2 to proceed
+  max_interview_rounds: 10
+  model_tier: "standard"
+  
+  measurement_criteria:
+    measurability: 0.30              # Success metrics measurable?
+    constraints: 0.30                # Constraints clear?
+    scope: 0.20                      # Scope defined?
+    technical: 0.20                  # Technical specificity?
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2: Execution
+# ─────────────────────────────────────────────────────────────────────────────
+execution:
+  double_diamond:
+    phases: ["discover", "define", "design", "deliver"]
+    ontology_reflection: true        # Check ontology at each narrow phase
+    
+  iteration:
+    max_per_ac: 10
+    retrospective_interval: 3        # Every 3 iterations
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3: Resilience (Stagnation & Lateral Thinking)
+# ─────────────────────────────────────────────────────────────────────────────
+resilience:
+  stagnation:
+    enabled: true
+    
+    patterns:
+      spinning:
+        description: "Same error signature repeated"
+        threshold: 2
+        
+      oscillation:
+        description: "State cycles A→B→A"
+        threshold: 2
+        
+      no_drift:
+        description: "Output generated but no goal progress"
+        threshold: 3
+        
+      diminishing_returns:
+        description: "Improvement rate declining"
+        threshold: 3
+        epsilon: 0.01
+
+  lateral_thinking:
+    enabled: true
+    model_tier: "frontier"
+    temperature: 0.8
+    
+    personas:
+      - id: "the_hacker"
+        trigger: "repeated_implementation_failure"
+        prompt: |
+          Ignore elegance. Make it work via dirty hacks, hardcoding, 
+          or any ugly method. Working code beats beautiful failure.
+          
+      - id: "the_researcher"
+        trigger: "unknown_error"
+        prompt: |
+          Stop coding immediately. Focus only on searching documentation, 
+          external libraries, and web resources. Find the answer first.
+          
+      - id: "the_simplifier"
+        trigger: "complexity_overload"
+        prompt: |
+          Cut features by 50%. Return to MVP. Keep only the core 
+          and discard everything else.
+          
+      - id: "the_architect"
+        trigger: "structural_deadend"
+        prompt: |
+          Question the architecture. Revisit first principles. 
+          Consider if the entire approach is wrong.
+          
+      - id: "the_contrarian"
+        trigger: "all_attempts_failed"
+        prompt: |
+          Challenge every assumption. Consider the opposite of 
+          current approach. Question the problem definition itself.
+
+  subagent:
+    default_mode: "isolated"
+    context_filter:
+      include:
+        - "task_definition"
+        - "relevant_constraints"
+        - "what_tried_summary"
+      exclude:
+        - "failed_attempts_detail"
+        - "debug_logs"
+        - "tangential_discussions"
+    max_concurrent: 3
+    default_timeout: "10m"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 4: Evaluation Pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+evaluation:
+  stage_1_mechanical:
+    enabled: true
+    cost: 0                          # No LLM cost
+    
+    checks:
+      lint:
+        tools: ["eslint", "pylint", "rustfmt"]
+        fail_on: "error"
+        
+      build:
+        timeout: "5m"
+        
+      test:
+        coverage_threshold: 0.7
+        
+      static_analysis:
+        tools: ["sonarqube", "semgrep"]
+        severity_threshold: "high"
+
+  stage_2_semantic:
+    enabled: true
+    model_tier: "standard"           # 10x cost
+    
+    thresholds:
+      satisfaction_score: 0.8
+      uncertainty_threshold: 0.3     # Above this -> trigger consensus
+      
+    evaluations:
+      - "ac_compliance"
+      - "goal_alignment"
+      - "constraint_check"
+      - "drift_measurement"
+
+  stage_3_consensus:
+    enabled: true
+    model_tier: "frontier"           # 30x cost × 3 models
+    
+    config:
+      min_models: 3
+      diversity_requirement: true    # Different providers
+      threshold: 0.67                # 2/3 majority
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 5: Consensus Protocol
+# ─────────────────────────────────────────────────────────────────────────────
+consensus:
+  triggers:
+    # Mandatory: Always use consensus
+    mandatory:
+      - "final_delivery"
+      - "ontology_change"
+      - "lateral_proposal"
+      - "seed_drift_alert"           # drift > 0.3
+      
+    # Conditional: Use consensus if condition met
+    conditional:
+      high_uncertainty:
+        condition: "stage2.uncertainty_score > 0.3"
+      critical_constraint:
+        condition: "hard_constraint_margin < 0.1"
+        
+    # Never: Do not use consensus
+    never:
+      - "routine_ac_evaluation"
+      - "atomic_task_completion"
+      - "stage1_failure"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 6: Secondary Loop
+# ─────────────────────────────────────────────────────────────────────────────
+secondary_loop:
+  enabled: true
+  
+  trigger: "primary_goal_satisfied"
+  
+  todo_registry:
+    categories:
+      - "optimization"
+      - "security"
+      - "refactoring"
+      - "documentation"
+      - "technical_debt"
+      - "test_coverage"
+      
+    triage:
+      execute_now:
+        - "blocks_current_ac"
+        - "critical_security"
+      defer:
+        - "not_blocking"
+      discard:
+        - "out_of_scope"
+
+  execution:
+    model_tier: "standard"           # 10x cost
+    max_items_per_session: 10
+    mode: "async_batch"
+    auto_execute: false              # Require user approval
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Infrastructure: Persistence
+# ─────────────────────────────────────────────────────────────────────────────
+persistence:
+  enabled: true
+  
+  storage:
+    type: "postgresql"
+    connection: "${DATABASE_URL}"
+    
+  checkpointing:
+    strategy: "after_each_node"
+    periodic_interval: "5m"
+    
+  recovery:
+    on_restart: "load_latest_checkpoint"
+    on_corruption: "rollback_to_previous"
+    max_rollback_depth: 3
+    
+  context_compression:
+    enabled: true
+    max_age: "6h"
+    max_tokens: 100000
+    strategy: "summarize_and_archive"
+    
+    preserve_always:
+      - "seed"
+      - "current_ac"
+      - "recent_failures"
+      - "active_constraints"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Drift Monitoring
+# ─────────────────────────────────────────────────────────────────────────────
+drift:
+  measurement:
+    dimensions:
+      goal_alignment: 0.5
+      constraint_compliance: 0.3
+      ontology_deviation: 0.2
+      
+  thresholds:
+    warning: 0.3                     # Trigger alert
+    critical: 0.5                    # Force intervention
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging & Observability
+# ─────────────────────────────────────────────────────────────────────────────
+logging:
+  level: "info"
+  include_reasoning: true
+  
+  cost_tracking:
+    enabled: true
+    unit: "cost_factor"              # Track in 1x/10x/30x units
+    
+  archive:
+    after: "24h"
+    storage: "cold_storage"
+    retention: "30d"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature Flags (Future Enhancements)
+# ─────────────────────────────────────────────────────────────────────────────
+features:
+  self_tooling:
+    enabled: false                   # v1.0+
+    description: "Agent creates own tools at runtime"
+    
+  hive_mind:
+    enabled: false                   # v1.0+
+    description: "Share successful strategies across instances"

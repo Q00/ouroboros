@@ -1,0 +1,127 @@
+# generated: 2026-01-14
+# project: Ouroboros
+# project_key: ouroboros
+# tracking_system: github
+# story_location: stories/
+
+# STATUS DEFINITIONS:
+# Epic: backlog -> in-progress -> done
+# Story: backlog -> ready-for-dev -> in-progress -> review -> done
+# Retrospective: optional <-> done
+
+generated: "2026-01-14"
+project: "Ouroboros"
+project_key: "ouroboros"
+tracking_system: "github"
+story_location: "stories/"
+
+development_status:
+  # =============================================================================
+  # Epic 0: Project Foundation & Infrastructure
+  # Goal: Developers can install and configure Ouroboros as a working CLI tool
+  #       with persistence, observability, and LLM provider integration.
+  # FRs covered: FR19, FR20, FR21
+  # NFRs covered: NFR3, NFR12
+  # =============================================================================
+  epic-0: in-progress
+  0-1-project-initialization-with-uv: done
+  0-2-core-types-and-error-handling: done
+  0-3-event-store-with-sqlalchemy-core: done
+  0-4-configuration-and-credentials-management: review
+  0-5-llm-provider-adapter-with-litellm: review
+  0-6-cli-skeleton-with-typer-and-rich: review
+  0-7-structured-logging-with-structlog: review
+  0-8-checkpoint-and-recovery-system: ready-for-dev
+  0-9-context-compression-engine: ready-for-dev
+  epic-0-retrospective: optional
+
+  # =============================================================================
+  # Epic 1: Seed Creation via Big Bang
+  # Goal: Developers can create clear, unambiguous Seed specifications through
+  #       an interactive interview process that ensures requirement clarity.
+  # FRs covered: FR1, FR2, FR3
+  # NFRs covered: NFR6
+  # =============================================================================
+  epic-1: in-progress
+  1-1-interview-protocol-engine: ready-for-dev
+  1-2-ambiguity-score-calculation: ready-for-dev
+  1-3-immutable-seed-generation: ready-for-dev
+  epic-1-retrospective: optional
+
+  # =============================================================================
+  # Epic 2: Intelligent Task Routing (PAL)
+  # Goal: Developers benefit from cost-optimized LLM routing that automatically
+  #       selects the right model tier based on task complexity.
+  # FRs covered: FR4, FR5, FR6, FR7
+  # NFRs covered: NFR1, NFR4
+  # =============================================================================
+  epic-2: in-progress
+  2-1-three-tier-model-configuration: ready-for-dev
+  2-2-complexity-based-routing: ready-for-dev
+  2-3-escalation-on-failure: ready-for-dev
+  2-4-downgrade-on-success: ready-for-dev
+  epic-2-retrospective: optional
+
+  # =============================================================================
+  # Epic 3: Double Diamond Execution
+  # Goal: Developers can execute complex tasks through recursive decomposition
+  #       with structured diverge-converge cycles.
+  # FRs covered: FR8, FR9, FR12
+  # NFRs covered: NFR10
+  # =============================================================================
+  epic-3: in-progress
+  3-1-double-diamond-cycle-implementation: review
+  3-2-hierarchical-ac-decomposition: ready-for-dev
+  3-3-atomicity-detection: ready-for-dev
+  3-4-subagent-isolation: review
+  epic-3-retrospective: optional
+
+  # =============================================================================
+  # Epic 4: Resilience & Stagnation Recovery
+  # Goal: Developers experience zero-stop operation where the system
+  #       automatically recovers from stagnation.
+  # FRs covered: FR10, FR11
+  # NFRs covered: NFR2
+  # =============================================================================
+  epic-4: in-progress
+  4-1-stagnation-detection-4-patterns: done
+  4-2-lateral-thinking-personas: done
+  4-3-persona-rotation-strategy: ready-for-dev
+  epic-4-retrospective: optional
+
+  # =============================================================================
+  # Epic 5: Three-Stage Evaluation Pipeline
+  # Goal: Developers get rigorous verification of all outputs through
+  #       mechanical, semantic, and consensus stages.
+  # FRs covered: FR13, FR14, FR15, FR16
+  # NFRs covered: NFR9
+  # =============================================================================
+  epic-5: in-progress
+  5-1-stage-1-mechanical-verification: ready-for-dev
+  5-2-stage-2-semantic-evaluation: ready-for-dev
+  5-3-stage-3-multi-model-consensus: ready-for-dev
+  5-4-consensus-trigger-matrix: ready-for-dev
+  epic-5-retrospective: optional
+
+  # =============================================================================
+  # Epic 6: Drift Control & Retrospective
+  # Goal: Developers maintain goal alignment through continuous drift
+  #       measurement and periodic retrospectives.
+  # FRs covered: FR22, FR23
+  # NFRs covered: NFR5
+  # =============================================================================
+  epic-6: in-progress
+  6-1-drift-measurement-engine: ready-for-dev
+  6-2-automatic-retrospective: ready-for-dev
+  epic-6-retrospective: optional
+
+  # =============================================================================
+  # Epic 7: Secondary Loop & TODO Processing
+  # Goal: Developers can defer non-critical improvements and process them
+  #       in batches after primary goals are met.
+  # FRs covered: FR17, FR18
+  # =============================================================================
+  epic-7: in-progress
+  7-1-todo-registry: ready-for-dev
+  7-2-secondary-loop-batch-processing: ready-for-dev
+  epic-7-retrospective: optional
