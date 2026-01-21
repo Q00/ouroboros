@@ -23,16 +23,16 @@ development_status:
   # FRs covered: FR19, FR20, FR21
   # NFRs covered: NFR3, NFR12
   # =============================================================================
-  epic-0: in-progress
+  epic-0: done
   0-1-project-initialization-with-uv: done
   0-2-core-types-and-error-handling: done
   0-3-event-store-with-sqlalchemy-core: done
-  0-4-configuration-and-credentials-management: review
-  0-5-llm-provider-adapter-with-litellm: review
-  0-6-cli-skeleton-with-typer-and-rich: review
-  0-7-structured-logging-with-structlog: review
-  0-8-checkpoint-and-recovery-system: ready-for-dev
-  0-9-context-compression-engine: ready-for-dev
+  0-4-configuration-and-credentials-management: done
+  0-5-llm-provider-adapter-with-litellm: done
+  0-6-cli-skeleton-with-typer-and-rich: done
+  0-7-structured-logging-with-structlog: done
+  0-8-checkpoint-and-recovery-system: done
+  0-9-context-compression-engine: done
   epic-0-retrospective: optional
 
   # =============================================================================
@@ -42,10 +42,10 @@ development_status:
   # FRs covered: FR1, FR2, FR3
   # NFRs covered: NFR6
   # =============================================================================
-  epic-1: in-progress
-  1-1-interview-protocol-engine: ready-for-dev
-  1-2-ambiguity-score-calculation: ready-for-dev
-  1-3-immutable-seed-generation: ready-for-dev
+  epic-1: done
+  1-1-interview-protocol-engine: done
+  1-2-ambiguity-score-calculation: done
+  1-3-immutable-seed-generation: done
   epic-1-retrospective: optional
 
   # =============================================================================
@@ -55,11 +55,11 @@ development_status:
   # FRs covered: FR4, FR5, FR6, FR7
   # NFRs covered: NFR1, NFR4
   # =============================================================================
-  epic-2: in-progress
-  2-1-three-tier-model-configuration: ready-for-dev
-  2-2-complexity-based-routing: ready-for-dev
-  2-3-escalation-on-failure: ready-for-dev
-  2-4-downgrade-on-success: ready-for-dev
+  epic-2: done
+  2-1-three-tier-model-configuration: done
+  2-2-complexity-based-routing: done
+  2-3-escalation-on-failure: done
+  2-4-downgrade-on-success: done
   epic-2-retrospective: optional
 
   # =============================================================================
@@ -69,11 +69,11 @@ development_status:
   # FRs covered: FR8, FR9, FR12
   # NFRs covered: NFR10
   # =============================================================================
-  epic-3: in-progress
-  3-1-double-diamond-cycle-implementation: review
-  3-2-hierarchical-ac-decomposition: ready-for-dev
-  3-3-atomicity-detection: ready-for-dev
-  3-4-subagent-isolation: review
+  epic-3: done
+  3-1-double-diamond-cycle-implementation: done
+  3-2-hierarchical-ac-decomposition: done
+  3-3-atomicity-detection: done
+  3-4-subagent-isolation: done
   epic-3-retrospective: optional
 
   # =============================================================================
@@ -83,10 +83,10 @@ development_status:
   # FRs covered: FR10, FR11
   # NFRs covered: NFR2
   # =============================================================================
-  epic-4: in-progress
+  epic-4: done
   4-1-stagnation-detection-4-patterns: done
   4-2-lateral-thinking-personas: done
-  4-3-persona-rotation-strategy: ready-for-dev
+  4-3-persona-rotation-strategy: done
   epic-4-retrospective: optional
 
   # =============================================================================
