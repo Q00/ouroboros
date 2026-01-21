@@ -96,11 +96,11 @@ development_status:
   # FRs covered: FR13, FR14, FR15, FR16
   # NFRs covered: NFR9
   # =============================================================================
-  epic-5: in-progress
-  5-1-stage-1-mechanical-verification: ready-for-dev
-  5-2-stage-2-semantic-evaluation: ready-for-dev
-  5-3-stage-3-multi-model-consensus: ready-for-dev
-  5-4-consensus-trigger-matrix: ready-for-dev
+  epic-5: done
+  5-1-stage-1-mechanical-verification: done
+  5-2-stage-2-semantic-evaluation: done
+  5-3-stage-3-multi-model-consensus: done
+  5-4-consensus-trigger-matrix: done
   epic-5-retrospective: optional
 
   # =============================================================================
