@@ -139,7 +139,7 @@ class ACTreeWidget(Widget):
         status = node_data.get("status", "pending")
         content = node_data.get("content", "Unknown")
         node_id = node_data.get("id", "")
-        depth = node_data.get("depth", 0)
+        _depth = node_data.get("depth", 0)  # Reserved for future indentation
         is_atomic = node_data.get("is_atomic", False)
 
         # Truncate content for display

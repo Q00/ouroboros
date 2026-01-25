@@ -9,7 +9,7 @@ Provides detailed view of the current execution including:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
@@ -297,7 +297,7 @@ class ExecutionScreen(Screen[None]):
                             for event_data in self._events[-20:]:  # Last 20 events
                                 yield EventTimelineItem(
                                     timestamp=datetime.fromisoformat(
-                                        event_data.get("timestamp", datetime.now().isoformat())
+                                        event_data.get("timestamp", datetime.now(UTC).isoformat())
                                     ),
                                     event_type=event_data.get("type", "unknown"),
                                     details=event_data.get("details", ""),
@@ -343,7 +343,7 @@ class ExecutionScreen(Screen[None]):
             category: Event category.
         """
         self._events.append({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "type": event_type,
             "details": details,
             "category": category,

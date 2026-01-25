@@ -6,7 +6,7 @@ and search capabilities.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
@@ -425,7 +425,7 @@ class LogsScreen(Screen[None]):
             data: Additional data.
         """
         self._logs.append({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": level,
             "source": source,
             "message": message,
