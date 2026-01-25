@@ -37,6 +37,8 @@ ouroboros [OPTIONS] COMMAND [ARGS]
 | `ouroboros run` | Execute workflows |
 | `ouroboros config` | Manage configuration |
 | `ouroboros status` | Check system status |
+| `ouroboros tui` | Interactive TUI monitor |
+| `ouroboros mcp` | MCP server commands |
 
 ---
 
@@ -481,4 +483,158 @@ ouroboros run workflow --dry-run seed.yaml
 
 # Execute with verbose logging
 OUROBOROS_LOG_LEVEL=DEBUG ouroboros run workflow --orchestrator seed.yaml
+```
+
+---
+
+## `ouroboros tui` - Interactive TUI Monitor
+
+The `tui` command group provides an interactive terminal user interface for monitoring workflow execution in real-time.
+
+### `ouroboros tui monitor`
+
+Launch the interactive TUI monitor.
+
+```bash
+ouroboros tui monitor [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--execution-id`, `-e ID` | Monitor a specific execution |
+| `--session-id`, `-s ID` | Monitor a specific session |
+
+#### Examples
+
+```bash
+# Launch TUI monitor
+ouroboros tui monitor
+
+# Monitor specific execution
+ouroboros tui monitor --execution-id exec_abc123
+
+# Monitor specific session
+ouroboros tui monitor --session-id sess_xyz789
+```
+
+#### TUI Screens
+
+The TUI provides 5 screens, accessible via number keys:
+
+| Key | Screen | Description |
+|-----|--------|-------------|
+| `1` | Dashboard | Overview with phase progress, drift meter, cost tracker |
+| `2` | Logs | Filterable log viewer with level filtering |
+| `3` | Execution | Execution details, timeline, phase outputs |
+| `4` | Debug | State inspector, raw events, configuration |
+| `5` | Help | Keyboard shortcuts and help |
+
+#### Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `1-5` | Switch screens |
+| `q` | Quit |
+| `r` | Refresh |
+| `↑/↓` | Scroll |
+| `Tab` | Next widget |
+
+#### Dashboard Widgets
+
+- **Phase Progress**: Double Diamond visualization of 6 phases
+- **Drift Meter**: Shows drift score with weighted formula
+- **Cost Tracker**: Token usage and cost in USD
+- **AC Tree**: Acceptance criteria hierarchy
+
+---
+
+## `ouroboros mcp` - MCP Server Commands
+
+The `mcp` command group manages the Model Context Protocol server, allowing Claude Desktop and other MCP clients to interact with Ouroboros.
+
+### `ouroboros mcp serve`
+
+Start the MCP server.
+
+```bash
+ouroboros mcp serve [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--host`, `-h HOST` | Host to bind to (default: localhost) |
+| `--port`, `-p PORT` | Port to bind to (default: 8080) |
+| `--transport`, `-t TYPE` | Transport type: `stdio` or `sse` (default: stdio) |
+
+#### Examples
+
+```bash
+# Start with stdio transport (for Claude Desktop)
+ouroboros mcp serve
+
+# Start with SSE transport on custom port
+ouroboros mcp serve --transport sse --port 9000
+
+# Start on specific host
+ouroboros mcp serve --host 0.0.0.0 --port 8080 --transport sse
+```
+
+#### Claude Desktop Integration
+
+Add to your Claude Desktop config (`~/.config/claude/config.json`):
+
+```json
+{
+  "mcpServers": {
+    "ouroboros": {
+      "command": "ouroboros",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+### `ouroboros mcp info`
+
+Show MCP server information and available tools.
+
+```bash
+ouroboros mcp info
+```
+
+#### Example
+
+```bash
+ouroboros mcp info
+```
+
+Output:
+```
+MCP Server Information
+  Name: ouroboros-mcp
+  Version: 1.0.0
+
+Capabilities
+  Tools: True
+  Resources: False
+  Prompts: False
+
+Available Tools
+  ouroboros_execute_seed
+    Execute a seed specification
+    Parameters:
+      - seed_yaml*: YAML content of the seed specification
+      - dry_run: Whether to validate without executing
+
+  ouroboros_session_status
+    Get the status of a session
+    Parameters:
+      - session_id*: Session ID to query
+
+  ouroboros_query_events
+    Query event history
+    Parameters:
+      - aggregate_id: Filter by aggregate ID
+      - event_type: Filter by event type
+      - limit: Maximum events to return
 ```
