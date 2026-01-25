@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 
 from ouroboros import __version__
-from ouroboros.cli.commands import config, init, mcp, run, status
+from ouroboros.cli.commands import config, init, mcp, run, status, tui
 from ouroboros.cli.formatters import console
 
 # Create the main Typer app
@@ -26,6 +26,7 @@ app.add_typer(run.app, name="run")
 app.add_typer(config.app, name="config")
 app.add_typer(status.app, name="status")
 app.add_typer(mcp.app, name="mcp")
+app.add_typer(tui.app, name="tui")
 
 
 def version_callback(value: bool) -> None:
