@@ -793,6 +793,194 @@ So that I can run orchestrator mode from the command line.
 
 ---
 
+## Epic 9: MCP Protocol Integration
+
+**Value Proposition:** Enable Ouroboros to be controlled via Model Context Protocol, allowing Claude Desktop and other MCP clients to execute workflows.
+
+**Dependencies:** Epic 0 (Foundation), Epic 8 (Orchestrator)
+
+**Stories:** 4
+
+---
+
+### Story 9.1: MCP Type Definitions
+
+As a developer,
+I want well-typed MCP protocol types,
+So that I can implement type-safe MCP communication.
+
+**Acceptance Criteria:**
+
+**Given** the mcp/types.py module
+**When** I import MCP types
+**Then** MCPToolDefinition, MCPToolResult, MCPResourceDefinition are available
+**And** MCPCapabilities, MCPServerInfo describe server capabilities
+**And** all types are immutable dataclasses with validation
+
+---
+
+### Story 9.2: MCP Server Adapter
+
+As a developer,
+I want an MCP server that exposes Ouroboros tools,
+So that MCP clients can interact with Ouroboros.
+
+**Acceptance Criteria:**
+
+**Given** the mcp/server/adapter.py module
+**When** I create and start an MCPServerAdapter
+**Then** tools are registered via register_tool()
+**And** resources are registered via register_resource()
+**And** server supports stdio and SSE transports
+**And** FastMCP SDK is used for protocol handling
+
+---
+
+### Story 9.3: MCP Tools Implementation
+
+As a developer,
+I want Ouroboros functionality exposed as MCP tools,
+So that Claude Desktop can execute seeds and query status.
+
+**Acceptance Criteria:**
+
+**Given** the mcp/tools/definitions.py module
+**When** OUROBOROS_TOOLS are registered
+**Then** ouroboros_execute_seed executes a seed specification
+**And** ouroboros_session_status returns session state
+**And** ouroboros_query_events queries event history
+**And** all tools return Result types for error handling
+
+---
+
+### Story 9.4: MCP CLI Integration
+
+As a developer,
+I want CLI commands for MCP server management,
+So that I can start and inspect MCP servers from the command line.
+
+**Acceptance Criteria:**
+
+**Given** the cli/commands/mcp.py module
+**When** I run `ouroboros mcp serve`
+**Then** MCP server starts with configured transport
+**And** `ouroboros mcp info` shows server information and tools
+**And** `--transport`, `--host`, `--port` options are available
+
+---
+
+## Epic 10: Interactive TUI Mode
+
+**Value Proposition:** Provide real-time visual monitoring of workflow execution through an interactive terminal interface.
+
+**Dependencies:** Epic 0 (Foundation), Epic 8 (Orchestrator)
+
+**Stories:** 6
+
+---
+
+### Story 10.1: TUI Application Framework
+
+As a developer,
+I want a Textual-based TUI application,
+So that I can monitor workflows in real-time.
+
+**Acceptance Criteria:**
+
+**Given** the tui/app.py module
+**When** I launch OuroborosTUI
+**Then** application initializes with TUIState
+**And** screens are registered and switchable via number keys
+**And** events from EventStore update the UI reactively
+**And** keyboard shortcuts are documented in help screen
+
+---
+
+### Story 10.2: Dashboard Screen
+
+As a developer,
+I want a dashboard showing execution overview,
+So that I can see phase progress, drift, and costs at a glance.
+
+**Acceptance Criteria:**
+
+**Given** the tui/screens/dashboard.py module
+**When** Dashboard screen is displayed
+**Then** PhaseProgressWidget shows Double Diamond phases
+**And** DriftMeterWidget shows weighted drift score
+**And** CostTrackerWidget shows token usage and cost
+**And** ACTreeWidget shows acceptance criteria hierarchy
+
+---
+
+### Story 10.3: Logs Screen
+
+As a developer,
+I want a filterable log viewer,
+So that I can inspect execution logs by level.
+
+**Acceptance Criteria:**
+
+**Given** the tui/screens/logs.py module
+**When** Logs screen is displayed
+**Then** logs are displayed with timestamps and levels
+**And** LogFilterBar allows filtering by level (DEBUG/INFO/WARNING/ERROR)
+**And** logs auto-scroll and can be paused
+**And** filter changes refresh the log display
+
+---
+
+### Story 10.4: Execution Screen
+
+As a developer,
+I want detailed execution information,
+So that I can inspect phase outputs and event timeline.
+
+**Acceptance Criteria:**
+
+**Given** the tui/screens/execution.py module
+**When** Execution screen is displayed
+**Then** current phase and status are shown
+**And** event timeline shows chronological events
+**And** phase outputs are displayed per phase
+**And** events update reactively from EventStore
+
+---
+
+### Story 10.5: Debug Screen
+
+As a developer,
+I want debug tools for inspecting state,
+So that I can troubleshoot issues during development.
+
+**Acceptance Criteria:**
+
+**Given** the tui/screens/debug.py module
+**When** Debug screen is displayed
+**Then** StateInspector shows TUIState fields
+**And** raw events tab shows unprocessed events
+**And** config tab shows current configuration
+**And** state can be refreshed manually
+
+---
+
+### Story 10.6: TUI CLI Integration
+
+As a developer,
+I want CLI commands for launching TUI,
+So that I can monitor executions from the command line.
+
+**Acceptance Criteria:**
+
+**Given** the cli/commands/tui.py module
+**When** I run `ouroboros tui monitor`
+**Then** TUI application launches
+**And** `--execution-id` monitors specific execution
+**And** `--session-id` monitors specific session
+**And** keyboard navigation works (1-5 for screens, q to quit)
+
+---
+
 ## Epic Summary
 
 | Epic | Title | Stories | FRs | Key Value |
@@ -806,7 +994,9 @@ So that I can run orchestrator mode from the command line.
 | 6 | Drift Control & Retrospective | 2 | 2 | Goal alignment |
 | 7 | Secondary Loop & TODO Processing | 2 | 2 | Deferred improvements |
 | 8 | Orchestrator (Claude Agent SDK) | 4 | - | Real code execution via SDK |
-| **Total** | | **35** | **23** | |
+| 9 | MCP Protocol Integration | 4 | - | External client integration |
+| 10 | Interactive TUI Mode | 6 | - | Real-time visual monitoring |
+| **Total** | | **45** | **23** | |
 
 ---
 
@@ -824,6 +1014,10 @@ Epic 1 (Seed) ──→ Epic 2 (Routing) ──→ Epic 3 (Execution)
                                       Epic 6 (Drift) ──→ Epic 7 (Secondary)
                                                               ↓
                                                         Epic 8 (Orchestrator)
+                                                              ↓
+                                              ┌───────────────┴───────────────┐
+                                              ↓                               ↓
+                                        Epic 9 (MCP)                   Epic 10 (TUI)
 ```
 
 Each Epic provides **complete, standalone functionality** while building upon previous Epics. No Epic requires a future Epic to function.
@@ -831,5 +1025,5 @@ Each Epic provides **complete, standalone functionality** while building upon pr
 ---
 
 _Generated: 2026-01-14_
-_Updated: 2026-01-23_
+_Updated: 2026-01-26_
 _Status: Complete_
