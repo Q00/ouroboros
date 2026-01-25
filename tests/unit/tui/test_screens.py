@@ -2,8 +2,6 @@
 
 from datetime import UTC, datetime
 
-import pytest
-
 from ouroboros.tui.events import TUIState
 from ouroboros.tui.screens.dashboard import DashboardScreen, StatusPanel
 from ouroboros.tui.screens.debug import DebugScreen, JsonViewer, StateInspector

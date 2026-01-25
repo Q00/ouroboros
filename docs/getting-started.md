@@ -4,7 +4,7 @@ This guide will help you install Ouroboros and run your first self-improving AI 
 
 ## Prerequisites
 
-- Python 3.14 or higher
+- Python 3.12 or higher
 - [uv](https://github.com/astral-sh/uv) package manager (recommended)
 - An LLM API key (OpenAI, Anthropic, or other supported providers)
 
@@ -100,7 +100,7 @@ After the interview completes, Ouroboros generates a **Seed** - an immutable spe
 # seed.yaml
 goal: "Build a CLI task management tool with SQLite storage"
 constraints:
-  - "Python 3.14+"
+  - "Python 3.12+"
   - "No external database dependencies"
   - "Must work offline"
 acceptance_criteria:
