@@ -22,11 +22,11 @@
 </p>
 
 <p align="center">
-  <a href="#philosophy">Philosophy</a> •
-  <a href="#the-six-phases">Phases</a> •
-  <a href="#architecture">Architecture</a> •
-  <a href="#quick-start">Start</a> •
-  <a href="#the-personas">Personas</a>
+  <a href="#-philosophy">Philosophy</a> •
+  <a href="#-the-six-phases">Phases</a> •
+  <a href="#-architecture">Architecture</a> •
+  <a href="#-quick-start">Start</a> •
+  <a href="#-the-personas-lateral-thinking-agents">Personas</a>
 </p>
 
 <br/>
