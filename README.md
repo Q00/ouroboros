@@ -598,6 +598,8 @@ Contributions are welcome! Please see:
 [■■■■■■■■■■] Epic 6  Drift Control       ✓
 [■■■■■■■■■■] Epic 7  Secondary Loop      ✓
 [■■■■■■■■■■] Epic 8  Orchestrator        ✓
+[■■■■■■■■■■] Epic 9  MCP Integration     ✓
+[■■■■■■■■■■] Epic 10 TUI Mode            ✓
 ```
 
 ### Upcoming
