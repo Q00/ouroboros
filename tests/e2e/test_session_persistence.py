@@ -378,7 +378,7 @@ class TestSessionResumption:
         repo = SessionRepository(event_store)
 
         # Create and complete a session
-        create_result = await repo.create_session(
+        _create_result = await repo.create_session(
             execution_id="exec_completed",
             seed_id=sample_seed.metadata.seed_id,
             session_id="completed_session",

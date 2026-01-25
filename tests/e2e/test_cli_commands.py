@@ -92,7 +92,7 @@ class TestInitCommand:
                         # Just verify the command structure works
                         mock_run.return_value = None
 
-                        result = runner.invoke(
+                        _result = runner.invoke(
                             app,
                             [
                                 "init",
@@ -103,7 +103,7 @@ class TestInitCommand:
                             ],
                         )
 
-                        # asyncio.run should have been called
+                        # asyncio.run should have been called (result unused intentionally)
                         assert mock_run.called
 
     def test_init_list_no_interviews(self, temp_state_dir: Path) -> None:
@@ -129,18 +129,6 @@ class TestInitCommand:
             with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
                 from ouroboros.core.errors import ValidationError
                 from ouroboros.core.types import Result
-
-                # Simulate load_state failure
-                async def mock_interview():
-                    from ouroboros.bigbang.interview import InterviewEngine
-
-                    engine = MagicMock(spec=InterviewEngine)
-                    engine.load_state = AsyncMock(
-                        return_value=Result.err(
-                            ValidationError("Interview not found")
-                        )
-                    )
-                    return engine
 
                 # The function should raise typer.Exit on error
                 import typer
@@ -212,7 +200,7 @@ class TestRunWorkflowCommand:
             # Mock successful execution
             mock_run.return_value = None
 
-            result = runner.invoke(
+            _result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--orchestrator"],
             )
@@ -225,7 +213,7 @@ class TestRunWorkflowCommand:
         with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
             mock_run.return_value = None
 
-            result = runner.invoke(
+            _result = runner.invoke(
                 app,
                 [
                     "run",
