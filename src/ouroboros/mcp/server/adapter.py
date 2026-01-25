@@ -282,11 +282,14 @@ class MCPServerAdapter:
                 )
             )
 
-    async def serve(self) -> None:
+    async def serve(self, transport: str = "stdio") -> None:
         """Start serving MCP requests.
 
         This method blocks until the server is stopped.
         Uses the MCP SDK's FastMCP server implementation.
+
+        Args:
+            transport: Transport type - "stdio" or "sse".
         """
         try:
             from mcp.server.fastmcp import FastMCP
@@ -349,8 +352,11 @@ class MCPServerAdapter:
             resources=len(self._resource_handlers),
         )
 
-        # Run the server
-        await self._mcp_server.run_async()
+        # Run the server with the appropriate transport
+        if transport == "sse":
+            await self._mcp_server.run_sse_async()
+        else:
+            await self._mcp_server.run_stdio_async()
 
     async def shutdown(self) -> None:
         """Shutdown the server gracefully."""
