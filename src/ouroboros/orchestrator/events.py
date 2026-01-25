@@ -1,0 +1,278 @@
+"""Event creation helpers for orchestrator.
+
+This module provides factory functions for creating orchestrator-related events
+following the project's event naming convention (dot.notation.past_tense).
+
+Event Types:
+    - orchestrator.session.started: Session began execution
+    - orchestrator.session.completed: Session finished successfully
+    - orchestrator.session.failed: Session encountered fatal error
+    - orchestrator.session.paused: Session paused for resumption
+    - orchestrator.progress.updated: Progress checkpoint
+    - orchestrator.task.started: Individual task started
+    - orchestrator.task.completed: Individual task completed
+    - orchestrator.tool.called: Tool was invoked by agent
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+
+from ouroboros.events.base import BaseEvent
+
+
+def create_session_started_event(
+    session_id: str,
+    execution_id: str,
+    seed_id: str,
+    seed_goal: str,
+) -> BaseEvent:
+    """Create session started event.
+
+    Args:
+        session_id: Unique session identifier.
+        execution_id: Associated workflow execution ID.
+        seed_id: ID of the seed being executed.
+        seed_goal: Goal from the seed specification.
+
+    Returns:
+        BaseEvent for session start.
+    """
+    return BaseEvent(
+        type="orchestrator.session.started",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "execution_id": execution_id,
+            "seed_id": seed_id,
+            "seed_goal": seed_goal,
+            "start_time": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_session_completed_event(
+    session_id: str,
+    summary: dict[str, Any],
+    messages_processed: int,
+) -> BaseEvent:
+    """Create session completed event.
+
+    Args:
+        session_id: Session that completed.
+        summary: Execution summary data.
+        messages_processed: Total messages processed.
+
+    Returns:
+        BaseEvent for session completion.
+    """
+    return BaseEvent(
+        type="orchestrator.session.completed",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "summary": summary,
+            "messages_processed": messages_processed,
+            "completed_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_session_failed_event(
+    session_id: str,
+    error_message: str,
+    error_type: str | None = None,
+    messages_processed: int = 0,
+) -> BaseEvent:
+    """Create session failed event.
+
+    Args:
+        session_id: Session that failed.
+        error_message: Error description.
+        error_type: Type/category of error.
+        messages_processed: Messages processed before failure.
+
+    Returns:
+        BaseEvent for session failure.
+    """
+    return BaseEvent(
+        type="orchestrator.session.failed",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "error": error_message,
+            "error_type": error_type,
+            "messages_processed": messages_processed,
+            "failed_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_session_paused_event(
+    session_id: str,
+    reason: str,
+    resume_hint: str | None = None,
+) -> BaseEvent:
+    """Create session paused event.
+
+    Args:
+        session_id: Session being paused.
+        reason: Why the session was paused.
+        resume_hint: Hint for resumption (e.g., last AC processed).
+
+    Returns:
+        BaseEvent for session pause.
+    """
+    return BaseEvent(
+        type="orchestrator.session.paused",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "reason": reason,
+            "resume_hint": resume_hint,
+            "paused_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_progress_event(
+    session_id: str,
+    message_type: str,
+    content_preview: str,
+    step: int | None = None,
+    tool_name: str | None = None,
+) -> BaseEvent:
+    """Create progress update event.
+
+    Emitted periodically during execution to track progress.
+    Useful for reconstructing session state during resumption.
+
+    Args:
+        session_id: Session being updated.
+        message_type: Type of message ("assistant", "tool", etc.).
+        content_preview: Preview of message content (truncated).
+        step: Optional step number.
+        tool_name: Tool being called (if message_type="tool").
+
+    Returns:
+        BaseEvent for progress update.
+    """
+    data: dict[str, Any] = {
+        "message_type": message_type,
+        "content_preview": content_preview[:200],  # Truncate for storage
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+    if step is not None:
+        data["step"] = step
+
+    if tool_name:
+        data["tool_name"] = tool_name
+
+    return BaseEvent(
+        type="orchestrator.progress.updated",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data=data,
+    )
+
+
+def create_task_started_event(
+    session_id: str,
+    task_description: str,
+    acceptance_criterion: str,
+) -> BaseEvent:
+    """Create task started event.
+
+    Args:
+        session_id: Session executing the task.
+        task_description: What the task aims to accomplish.
+        acceptance_criterion: AC from the seed being executed.
+
+    Returns:
+        BaseEvent for task start.
+    """
+    return BaseEvent(
+        type="orchestrator.task.started",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "task_description": task_description,
+            "acceptance_criterion": acceptance_criterion,
+            "started_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_task_completed_event(
+    session_id: str,
+    acceptance_criterion: str,
+    success: bool,
+    result_summary: str | None = None,
+) -> BaseEvent:
+    """Create task completed event.
+
+    Args:
+        session_id: Session that completed the task.
+        acceptance_criterion: AC that was executed.
+        success: Whether the task succeeded.
+        result_summary: Summary of what was accomplished.
+
+    Returns:
+        BaseEvent for task completion.
+    """
+    return BaseEvent(
+        type="orchestrator.task.completed",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "acceptance_criterion": acceptance_criterion,
+            "success": success,
+            "result_summary": result_summary,
+            "completed_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_tool_called_event(
+    session_id: str,
+    tool_name: str,
+    tool_input_preview: str | None = None,
+) -> BaseEvent:
+    """Create tool called event.
+
+    Args:
+        session_id: Session where tool was called.
+        tool_name: Name of the tool (Read, Edit, Bash, etc.).
+        tool_input_preview: Preview of tool input (truncated).
+
+    Returns:
+        BaseEvent for tool invocation.
+    """
+    data: dict[str, Any] = {
+        "tool_name": tool_name,
+        "called_at": datetime.now(UTC).isoformat(),
+    }
+
+    if tool_input_preview:
+        data["tool_input_preview"] = tool_input_preview[:100]
+
+    return BaseEvent(
+        type="orchestrator.tool.called",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data=data,
+    )
+
+
+__all__ = [
+    "create_progress_event",
+    "create_session_completed_event",
+    "create_session_failed_event",
+    "create_session_paused_event",
+    "create_session_started_event",
+    "create_task_completed_event",
+    "create_task_started_event",
+    "create_tool_called_event",
+]

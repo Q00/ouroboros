@@ -1,6 +1,6 @@
 ---
-stepsCompleted: [1, 2]
-status: 'in-progress'
+stepsCompleted: [1, 2, 3]
+status: 'complete'
 inputDocuments:
   - requirement/1_EXECUTIVE_SUMMARY.md
   - requirement/2_FULL_SPECIFICATION.md
@@ -158,6 +158,10 @@ Developers maintain goal alignment through continuous drift measurement and peri
 ### Epic 7: Secondary Loop & TODO Processing
 Developers can defer non-critical improvements and process them in batches after primary goals are met.
 **FRs covered:** FR17, FR18
+
+### Epic 8: Orchestrator (Claude Agent SDK Integration)
+Developers can execute seeds via Claude Agent SDK for real code generation and execution through `ouroboros run --orchestrator`.
+**Features:** Claude Agent SDK adapter, session tracking, event sourcing, CLI integration
 
 ---
 
@@ -716,6 +720,79 @@ So that improvements are implemented efficiently.
 
 ---
 
+## Epic 8: Orchestrator (Claude Agent SDK Integration)
+
+**Goal:** Developers can execute seeds via Claude Agent SDK for real code generation and execution through a separate orchestrator mode.
+
+**User Outcome:** Running `ouroboros run workflow --orchestrator seed.yaml` delegates task execution to Claude Agent SDK, which can read, write, and edit code autonomously with session tracking and resumption support.
+
+### Story 8.1: Claude Agent Adapter
+
+As a developer,
+I want a wrapper around Claude Agent SDK,
+So that I can execute tasks with streaming progress and normalized message handling.
+
+**Acceptance Criteria:**
+
+**Given** the orchestrator/adapter.py module
+**When** I call adapter.execute_task() with a prompt
+**Then** messages are streamed via async generator
+**And** SDK messages are normalized to AgentMessage dataclass
+**And** errors are wrapped in Result type
+**And** DEFAULT_TOOLS include Read, Write, Edit, Bash, Glob, Grep
+
+---
+
+### Story 8.2: Session Tracking
+
+As a developer,
+I want session state tracked via event sourcing,
+So that I can resume interrupted sessions without losing progress.
+
+**Acceptance Criteria:**
+
+**Given** the orchestrator/session.py module
+**When** a session is created or updated
+**Then** SessionTracker is immutable (frozen dataclass)
+**And** SessionRepository uses EventStore for persistence
+**And** sessions can be reconstructed from event replay
+**And** status transitions: RUNNING → PAUSED/COMPLETED/FAILED
+
+---
+
+### Story 8.3: Orchestrator Runner
+
+As a developer,
+I want a runner that converts Seed to prompts and executes via Claude Agent,
+So that I get full workflow execution with progress display.
+
+**Acceptance Criteria:**
+
+**Given** the orchestrator/runner.py module
+**When** execute_seed() is called
+**Then** system prompt is built from Seed (goal, constraints, principles)
+**And** task prompt is built from acceptance criteria
+**And** progress is displayed via Rich Progress bar
+**And** events are emitted for observability (progress, completion, failure)
+
+---
+
+### Story 8.4: CLI Integration
+
+As a developer,
+I want --orchestrator and --resume flags in the CLI,
+So that I can run orchestrator mode from the command line.
+
+**Acceptance Criteria:**
+
+**Given** the cli/commands/run.py module
+**When** I run `ouroboros run workflow --orchestrator seed.yaml`
+**Then** execution is delegated to OrchestratorRunner
+**And** `--resume <session_id>` continues a previous session
+**And** success/failure summary is displayed with session ID
+
+---
+
 ## Epic Summary
 
 | Epic | Title | Stories | FRs | Key Value |
@@ -728,7 +805,8 @@ So that improvements are implemented efficiently.
 | 5 | Three-Stage Evaluation Pipeline | 4 | 4 | Rigorous verification |
 | 6 | Drift Control & Retrospective | 2 | 2 | Goal alignment |
 | 7 | Secondary Loop & TODO Processing | 2 | 2 | Deferred improvements |
-| **Total** | | **31** | **23** | |
+| 8 | Orchestrator (Claude Agent SDK) | 4 | - | Real code execution via SDK |
+| **Total** | | **35** | **23** | |
 
 ---
 
@@ -744,6 +822,8 @@ Epic 1 (Seed) ──→ Epic 2 (Routing) ──→ Epic 3 (Execution)
                                       Epic 5 (Evaluation)
                                             ↓
                                       Epic 6 (Drift) ──→ Epic 7 (Secondary)
+                                                              ↓
+                                                        Epic 8 (Orchestrator)
 ```
 
 Each Epic provides **complete, standalone functionality** while building upon previous Epics. No Epic requires a future Epic to function.
@@ -751,4 +831,5 @@ Each Epic provides **complete, standalone functionality** while building upon pr
 ---
 
 _Generated: 2026-01-14_
-_Status: In Progress_
+_Updated: 2026-01-23_
+_Status: Complete_

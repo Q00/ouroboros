@@ -110,9 +110,9 @@ development_status:
   # FRs covered: FR22, FR23
   # NFRs covered: NFR5
   # =============================================================================
-  epic-6: in-progress
-  6-1-drift-measurement-engine: ready-for-dev
-  6-2-automatic-retrospective: ready-for-dev
+  epic-6: done
+  6-1-drift-measurement-engine: done
+  6-2-automatic-retrospective: done
   epic-6-retrospective: optional
 
   # =============================================================================
@@ -121,7 +121,20 @@ development_status:
   #       in batches after primary goals are met.
   # FRs covered: FR17, FR18
   # =============================================================================
-  epic-7: in-progress
-  7-1-todo-registry: ready-for-dev
-  7-2-secondary-loop-batch-processing: ready-for-dev
+  epic-7: done
+  7-1-todo-registry: done
+  7-2-secondary-loop-batch-processing: done
   epic-7-retrospective: optional
+
+  # =============================================================================
+  # Epic 8: Orchestrator (Claude Agent SDK Integration)
+  # Goal: Developers can execute seeds via Claude Agent SDK for real code
+  #       generation and execution through `ouroboros run --orchestrator`.
+  # Features: Claude Agent SDK adapter, session tracking, event sourcing
+  # =============================================================================
+  epic-8: done
+  8-1-claude-agent-adapter: done
+  8-2-session-tracking: done
+  8-3-orchestrator-runner: done
+  8-4-cli-integration: done
+  epic-8-retrospective: optional
