@@ -6,12 +6,11 @@ Claude Agent SDK) and setting up isolated test environments.
 
 from __future__ import annotations
 
-import json
 import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
