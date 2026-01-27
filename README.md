@@ -399,6 +399,10 @@ not to restart, but to **re-crystallize** with new understanding.
 
 <br/>
 
+### Using Claude Code Max Plan (Recommended)
+
+No API key required — uses your Claude Code subscription directly.
+
 ```bash
 # Clone
 git clone https://github.com/Q00/ouroboros
@@ -407,15 +411,26 @@ cd ouroboros
 # Install
 uv sync
 
-# Begin the Big Bang
-uv run ouroboros init "I want to build a task management CLI"
+# Begin the Big Bang (interactive interview)
+uv run ouroboros init start --orchestrator "I want to build a task management CLI"
 
-# Check status
-uv run ouroboros status
-
-# Execute via Claude Agent SDK (Orchestrator mode)
+# Execute via Claude Agent SDK
 uv run ouroboros run workflow --orchestrator seed.yaml
 ```
+
+### Using External LLM (LiteLLM)
+
+Requires API key (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, etc.)
+
+```bash
+# Begin the Big Bang
+uv run ouroboros init start "I want to build a task management CLI"
+
+# Check status
+uv run ouroboros status health
+```
+
+> 📖 **[Full Guide: Running with Claude Code](docs/running-with-claude-code.md)**
 
 <br/>
 
