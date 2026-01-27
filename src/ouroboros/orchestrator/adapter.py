@@ -187,9 +187,11 @@ class ClaudeAgentAdapter:
 
         try:
             # Build options
+            import os
             options_kwargs: dict[str, Any] = {
                 "allowed_tools": effective_tools,
                 "permission_mode": self._permission_mode,
+                "cwd": os.getcwd(),  # Use current working directory
             }
 
             if system_prompt:
@@ -247,46 +249,74 @@ class ClaudeAgentAdapter:
         Returns:
             Normalized AgentMessage.
         """
-        msg_type = getattr(sdk_message, "type", "unknown")
+        # SDK uses class names, not 'type' attribute
+        class_name = type(sdk_message).__name__
 
-        # Extract content based on message type
+        log.debug(
+            "orchestrator.adapter.message_received",
+            class_name=class_name,
+            sdk_message=str(sdk_message)[:500],
+        )
+
+        # Extract content based on message class
         content = ""
         tool_name = None
         data: dict[str, Any] = {}
+        msg_type = "unknown"
 
-        if msg_type == "assistant":
+        if class_name == "AssistantMessage":
+            msg_type = "assistant"
             # Assistant message with content blocks
-            message_obj = getattr(sdk_message, "message", None)
-            if message_obj and hasattr(message_obj, "content"):
-                for block in message_obj.content:
-                    if hasattr(block, "text"):
-                        content = block.text
-                        break
-                    elif hasattr(block, "name"):
-                        tool_name = block.name
-                        content = f"Calling tool: {tool_name}"
-                        break
+            content_blocks = getattr(sdk_message, "content", [])
+            for block in content_blocks:
+                block_type = type(block).__name__
+                if block_type == "TextBlock" and hasattr(block, "text"):
+                    content = block.text
+                    break
+                elif block_type == "ToolUseBlock" and hasattr(block, "name"):
+                    tool_name = block.name
+                    content = f"Calling tool: {tool_name}"
+                    break
 
-        elif msg_type == "result":
+        elif class_name == "ResultMessage":
+            msg_type = "result"
             # Final result message
-            content = getattr(sdk_message, "result", str(sdk_message))
+            content = getattr(sdk_message, "result", "") or ""
             data["subtype"] = getattr(sdk_message, "subtype", "success")
+            data["is_error"] = getattr(sdk_message, "is_error", False)
+            data["session_id"] = getattr(sdk_message, "session_id", None)
+            log.info(
+                "orchestrator.adapter.result_message",
+                result_content=content[:200] if content else "empty",
+                subtype=data["subtype"],
+                is_error=data["is_error"],
+            )
 
-        elif msg_type == "system":
-            # System message (init, etc.)
+        elif class_name == "SystemMessage":
+            msg_type = "system"
             subtype = getattr(sdk_message, "subtype", "")
+            msg_data = getattr(sdk_message, "data", {})
             if subtype == "init":
-                session_id = getattr(sdk_message, "session_id", None)
+                session_id = msg_data.get("session_id")
                 content = f"Session initialized: {session_id}"
                 data["session_id"] = session_id
             else:
                 content = f"System: {subtype}"
             data["subtype"] = subtype
 
+        elif class_name == "UserMessage":
+            msg_type = "user"
+            # Tool result message
+            content_blocks = getattr(sdk_message, "content", [])
+            for block in content_blocks:
+                if hasattr(block, "content"):
+                    content = str(block.content)[:500]
+                    break
+
         else:
             # Unknown message type
             content = str(sdk_message)
-            data["raw_type"] = msg_type
+            data["raw_class"] = class_name
 
         return AgentMessage(
             type=msg_type,

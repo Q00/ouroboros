@@ -1,18 +1,20 @@
 """Init command for starting interactive interview.
 
 This command initiates the Big Bang phase interview process.
+Supports both LiteLLM (external API) and Claude Code (Max Plan) modes.
 """
 
 import asyncio
 from pathlib import Path
 from typing import Annotated
 
-import typer
 from rich.prompt import Confirm, Prompt
+import typer
 
-from ouroboros.bigbang.interview import InterviewEngine, MAX_INTERVIEW_ROUNDS
+from ouroboros.bigbang.interview import MAX_INTERVIEW_ROUNDS, InterviewEngine
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
 app = typer.Typer(
@@ -22,10 +24,28 @@ app = typer.Typer(
 )
 
 
+def _get_adapter(use_orchestrator: bool) -> LLMAdapter:
+    """Get the appropriate LLM adapter.
+
+    Args:
+        use_orchestrator: If True, use Claude Code (Max Plan). Otherwise LiteLLM.
+
+    Returns:
+        LLM adapter instance.
+    """
+    if use_orchestrator:
+        from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
+
+        return ClaudeCodeAdapter()
+    else:
+        return LiteLLMAdapter()
+
+
 async def _run_interview(
     initial_context: str,
     resume_id: str | None = None,
     state_dir: Path | None = None,
+    use_orchestrator: bool = False,
 ) -> None:
     """Run the interview process.
 
@@ -33,9 +53,10 @@ async def _run_interview(
         initial_context: Initial context or idea for the interview.
         resume_id: Optional interview ID to resume.
         state_dir: Optional custom state directory.
+        use_orchestrator: If True, use Claude Code (Max Plan) instead of LiteLLM.
     """
     # Initialize components
-    llm_adapter = LiteLLMAdapter()
+    llm_adapter = _get_adapter(use_orchestrator)
     engine = InterviewEngine(
         llm_adapter=llm_adapter,
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",
@@ -170,6 +191,14 @@ def start(
             dir_okay=True,
         ),
     ] = None,
+    orchestrator: Annotated[
+        bool,
+        typer.Option(
+            "--orchestrator",
+            "-o",
+            help="Use Claude Code (Max Plan) instead of LiteLLM. No API key required.",
+        ),
+    ] = False,
 ) -> None:
     """Start an interactive interview to refine your requirements.
 
@@ -177,11 +206,13 @@ def start(
     into clear, executable requirements through iterative questioning.
 
     Example:
-        ouroboros init "I want to build a task management CLI tool"
+        ouroboros init start "I want to build a task management CLI tool"
 
-        ouroboros init --resume interview_20260116_120000
+        ouroboros init start --orchestrator "Build a REST API"
 
-        ouroboros init
+        ouroboros init start --resume interview_20260116_120000
+
+        ouroboros init start
     """
     # Get initial context if not provided
     if not resume and not context:
@@ -205,9 +236,15 @@ def start(
         print_error("Initial context is required when not resuming.")
         raise typer.Exit(code=1)
 
+    # Show mode info
+    if orchestrator:
+        print_info("Using Claude Code (Max Plan) - no API key required")
+    else:
+        print_info("Using LiteLLM - API key required")
+
     # Run interview
     try:
-        asyncio.run(_run_interview(context or "", resume, state_dir))
+        asyncio.run(_run_interview(context or "", resume, state_dir, orchestrator))
     except KeyboardInterrupt:
         console.print()
         print_info("Interview interrupted. Progress has been saved.")

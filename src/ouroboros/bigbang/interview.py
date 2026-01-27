@@ -4,26 +4,26 @@ This module implements the interview protocol that refines vague ideas into
 clear requirements through iterative questioning (max 10 rounds).
 """
 
-import fcntl
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+import fcntl
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-import structlog
 from pydantic import BaseModel, Field
+import structlog
 
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
-    CompletionResponse,
+    LLMAdapter,
     Message,
     MessageRole,
 )
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
 
 @contextmanager
@@ -153,7 +153,7 @@ class InterviewEngine:
         or passed directly to the constructor.
     """
 
-    llm_adapter: LiteLLMAdapter
+    llm_adapter: LLMAdapter
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
     model: str = _FALLBACK_MODEL
     temperature: float = 0.7
