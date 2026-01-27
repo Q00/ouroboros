@@ -42,6 +42,7 @@ class EventStore:
             database_url: SQLAlchemy database URL.
                          If not provided, defaults to ~/.ouroboros/events.db
                          For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
+                         If not provided, defaults to ~/.ouroboros/events.db
         """
         if database_url is None:
             db_path = Path.home() / ".ouroboros" / "events.db"
