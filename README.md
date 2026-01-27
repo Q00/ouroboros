@@ -527,6 +527,8 @@ uv run ruff format src/
 [■■■■■■■■■■] Epic 6  Drift Control
 [■■■■■■■■■■] Epic 7  Secondary Loop
 [■■■■■■■■■■] Epic 8  Orchestrator      ✓ Complete
+[■■■■■■■■■■] Epic 9  MCP Integration   ✓ Complete
+[■■■■■■■■■■] Epic 10 TUI Mode          ✓ Complete
 ```
 
 <br/>
