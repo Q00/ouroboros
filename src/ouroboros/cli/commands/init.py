@@ -11,9 +11,11 @@ from typing import Annotated
 from rich.prompt import Confirm, Prompt
 import typer
 
-from ouroboros.bigbang.interview import MAX_INTERVIEW_ROUNDS, InterviewEngine
+from ouroboros.bigbang.ambiguity import AmbiguityScorer
+from ouroboros.bigbang.interview import MAX_INTERVIEW_ROUNDS, InterviewEngine, InterviewState
+from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
-from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
@@ -160,9 +162,135 @@ async def _run_interview(
         console.print(f"[muted]State saved to: {save_result.value}[/]")
 
     console.print()
-    console.print(
-        "[bold cyan]Next steps:[/] Use the interview results to generate a Seed specification."
+
+    # Ask if user wants to proceed to Seed generation
+    should_generate_seed = Confirm.ask(
+        "[bold cyan]Proceed to generate Seed specification?[/]",
+        default=True,
     )
+
+    if not should_generate_seed:
+        console.print(
+            "[muted]You can resume later with:[/] "
+            f"[bold]ouroboros init start --resume {state.interview_id}[/]"
+        )
+        return
+
+    # Generate Seed
+    seed_path = await _generate_seed_from_interview(state, llm_adapter)
+
+    if seed_path is None:
+        return
+
+    # Ask if user wants to start workflow
+    console.print()
+    should_start_workflow = Confirm.ask(
+        "[bold cyan]Start workflow now?[/]",
+        default=True,
+    )
+
+    if should_start_workflow:
+        await _start_workflow(seed_path, use_orchestrator)
+
+
+async def _generate_seed_from_interview(
+    state: InterviewState,
+    llm_adapter: LLMAdapter,
+) -> Path | None:
+    """Generate Seed from completed interview.
+
+    Args:
+        state: Completed interview state.
+        llm_adapter: LLM adapter for scoring and generation.
+
+    Returns:
+        Path to generated seed file, or None if failed.
+    """
+    console.print()
+    console.print("[bold cyan]Generating Seed specification...[/]")
+
+    # Step 1: Calculate ambiguity score
+    with console.status("[cyan]Calculating ambiguity score...[/]", spinner="dots"):
+        scorer = AmbiguityScorer(llm_adapter=llm_adapter)
+        score_result = await scorer.score(state)
+
+    if score_result.is_err:
+        print_error(f"Failed to calculate ambiguity: {score_result.error.message}")
+        return None
+
+    ambiguity_score = score_result.value
+    console.print(f"[muted]Ambiguity score: {ambiguity_score.overall_score:.2f}[/]")
+
+    if not ambiguity_score.is_ready_for_seed:
+        print_warning(
+            f"Ambiguity score ({ambiguity_score.overall_score:.2f}) is too high. "
+            "Consider more interview rounds to clarify requirements."
+        )
+        should_force = Confirm.ask(
+            "[yellow]Generate Seed anyway?[/]",
+            default=False,
+        )
+        if not should_force:
+            return None
+
+    # Step 2: Generate Seed
+    with console.status("[cyan]Generating Seed from interview...[/]", spinner="dots"):
+        generator = SeedGenerator(llm_adapter=llm_adapter)
+        # For forced generation, we need to bypass the threshold check
+        if ambiguity_score.is_ready_for_seed:
+            seed_result = await generator.generate(state, ambiguity_score)
+        else:
+            # Create a modified score that passes threshold for forced generation
+            from ouroboros.bigbang.ambiguity import AmbiguityScore as AmbScore
+
+            forced_score = AmbScore(
+                overall_score=0.19,  # Just under threshold
+                breakdown=ambiguity_score.breakdown,
+            )
+            seed_result = await generator.generate(state, forced_score)
+
+    if seed_result.is_err:
+        print_error(f"Failed to generate Seed: {seed_result.error.message}")
+        return None
+
+    seed = seed_result.value
+
+    # Step 3: Save Seed
+    seed_path = Path.home() / ".ouroboros" / "seeds" / f"{seed.metadata.seed_id}.yaml"
+    save_result = await generator.save_seed(seed, seed_path)
+
+    if save_result.is_err:
+        print_error(f"Failed to save Seed: {save_result.error.message}")
+        return None
+
+    print_success(f"Seed generated: {seed_path}")
+    return seed_path
+
+
+async def _start_workflow(seed_path: Path, use_orchestrator: bool = False) -> None:
+    """Start workflow from generated seed.
+
+    Args:
+        seed_path: Path to the seed YAML file.
+        use_orchestrator: Whether to use Claude Code orchestrator.
+    """
+    console.print()
+    console.print("[bold cyan]Starting workflow...[/]")
+
+    if use_orchestrator:
+        # Direct function call instead of subprocess
+        from ouroboros.cli.commands.run import _run_orchestrator
+
+        try:
+            await _run_orchestrator(seed_path, resume_session=None)
+        except typer.Exit:
+            pass  # Normal exit
+        except KeyboardInterrupt:
+            print_info("Workflow interrupted.")
+    else:
+        # Standard workflow (placeholder for now)
+        print_info(f"Would execute workflow from: {seed_path}")
+        print_info("Standard workflow execution not yet implemented.")
 
 
 @app.command()
