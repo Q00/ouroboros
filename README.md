@@ -395,6 +395,22 @@ not to restart, but to **re-crystallize** with new understanding.
 
 <br/>
 
+## ◈ Installation
+
+<br/>
+
+```bash
+pip install ouroboros-ai
+# or
+uv pip install ouroboros-ai
+```
+
+<br/>
+
+---
+
+<br/>
+
 ## ◈ Quick Start
 
 <br/>
@@ -402,6 +418,16 @@ not to restart, but to **re-crystallize** with new understanding.
 ### Using Claude Code Max Plan (Recommended)
 
 No API key required — uses your Claude Code subscription directly.
+
+```bash
+# Begin the Big Bang (interactive interview)
+ouroboros init start --orchestrator "I want to build a task management CLI"
+
+# Execute via Claude Agent SDK
+ouroboros run workflow --orchestrator seed.yaml
+```
+
+### From Source (Development)
 
 ```bash
 # Clone

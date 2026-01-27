@@ -6,16 +6,24 @@ Ouroboros can leverage your **Claude Code Max Plan** subscription to execute wor
 
 - Claude Code CLI installed and authenticated (Max Plan)
 - Python 3.14+
-- uv package manager
 
-## Quick Start
-
-### 1. Install Dependencies
+## Installation
 
 ```bash
+pip install ouroboros-ai
+# or
+uv pip install ouroboros-ai
+```
+
+### From Source (Development)
+
+```bash
+git clone https://github.com/Q00/ouroboros
 cd ouroboros
 uv sync
 ```
+
+## Quick Start
 
 ### 2. Check System Health
 
