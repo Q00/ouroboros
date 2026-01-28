@@ -15,6 +15,16 @@ from ouroboros.orchestrator.adapter import (
 )
 
 
+# Helper function to create mock SDK messages with correct class names
+def _create_mock_sdk_message(class_name: str, **attrs: Any) -> Any:
+    """Create a mock object with a specific class name for SDK message testing."""
+    mock_class = type(class_name, (), {})
+    instance = mock_class()
+    for key, value in attrs.items():
+        setattr(instance, key, value)
+    return instance
+
+
 class TestAgentMessage:
     """Tests for AgentMessage dataclass."""
 
@@ -123,14 +133,14 @@ class TestClaudeAgentAdapter:
         """Test converting SDK assistant message."""
         adapter = ClaudeAgentAdapter(api_key="test")
 
-        # Mock SDK message structure
-        mock_block = MagicMock()
-        mock_block.text = "I am analyzing the code."
+        # Create mock block with correct class name
+        mock_block = _create_mock_sdk_message("TextBlock", text="I am analyzing the code.")
 
-        mock_message = MagicMock()
-        mock_message.type = "assistant"
-        mock_message.message = MagicMock()
-        mock_message.message.content = [mock_block]
+        # Create mock message with correct class name
+        mock_message = _create_mock_sdk_message(
+            "AssistantMessage",
+            content=[mock_block],
+        )
 
         result = adapter._convert_message(mock_message)
 
@@ -141,15 +151,14 @@ class TestClaudeAgentAdapter:
         """Test converting SDK tool call message."""
         adapter = ClaudeAgentAdapter(api_key="test")
 
-        # Mock SDK message with tool call
-        mock_block = MagicMock()
-        mock_block.name = "Edit"
-        del mock_block.text  # Remove text attribute
+        # Create mock block with correct class name (ToolUseBlock)
+        mock_block = _create_mock_sdk_message("ToolUseBlock", name="Edit")
 
-        mock_message = MagicMock()
-        mock_message.type = "assistant"
-        mock_message.message = MagicMock()
-        mock_message.message.content = [mock_block]
+        # Create mock message with correct class name
+        mock_message = _create_mock_sdk_message(
+            "AssistantMessage",
+            content=[mock_block],
+        )
 
         result = adapter._convert_message(mock_message)
 
@@ -161,10 +170,12 @@ class TestClaudeAgentAdapter:
         """Test converting SDK result message."""
         adapter = ClaudeAgentAdapter(api_key="test")
 
-        mock_message = MagicMock()
-        mock_message.type = "result"
-        mock_message.result = "Task completed"
-        mock_message.subtype = "success"
+        # Create mock message with correct class name
+        mock_message = _create_mock_sdk_message(
+            "ResultMessage",
+            result="Task completed",
+            subtype="success",
+        )
 
         result = adapter._convert_message(mock_message)
 
@@ -176,10 +187,12 @@ class TestClaudeAgentAdapter:
         """Test converting SDK system init message."""
         adapter = ClaudeAgentAdapter(api_key="test")
 
-        mock_message = MagicMock()
-        mock_message.type = "system"
-        mock_message.subtype = "init"
-        mock_message.session_id = "sess_abc123"
+        # Create mock message with correct class name
+        mock_message = _create_mock_sdk_message(
+            "SystemMessage",
+            subtype="init",
+            data={"session_id": "sess_abc123"},
+        )
 
         result = adapter._convert_message(mock_message)
 
