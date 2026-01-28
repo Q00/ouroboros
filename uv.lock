@@ -891,8 +891,8 @@ wheels = [
 ]
 
 [[package]]
-name = "ouroboros"
-version = "0.1.0"
+name = "ouroboros-ai"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
