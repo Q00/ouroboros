@@ -657,6 +657,267 @@ register_tool(MyHandler(), category="custom")
 
 ---
 
+## Ouroboros MCP Tools
+
+### ExecuteSeedHandler
+
+Executes a seed (task specification) in Ouroboros with real-time progress visualization.
+
+```python
+@dataclass
+class ExecuteSeedHandler:
+    event_store: EventStore | None = None
+    console: Console | None = None
+
+    @property
+    def definition(self) -> MCPToolDefinition: ...
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]: ...
+```
+
+#### Tool Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `seed_content` | string | Yes | YAML seed specification with goal, constraints, acceptance criteria |
+| `session_id` | string | No | Session ID to resume (creates new if not provided) |
+| `model_tier` | string | No | Model tier: "small", "medium", "large" (default: "medium") |
+| `max_iterations` | integer | No | Max execution iterations (default: 10) |
+
+#### Progress Display
+
+The tool shows real-time progress during execution:
+
+```
+🚀 Ouroboros Seed Execution Progress
+────────────────────────────────────
+Session ID      │ orch_abc123def456
+Phase           │ Executing via Claude Agent
+Duration        │ 45.3s
+Messages        │ 23
+Cost            │ $0.0234
+Tokens          │ 2,341
+────────────────────────────────────
+Acceptance Criteria
+  1. Parse seed_content YAML           ✅
+  2. Initialize EventStore              ✅
+  3. Connect to OrchestratorRunner      🔄
+  4. Display progress in real-time      ⏳
+  5. Return execution summary           ⏳
+────────────────────────────────────
+Overall Progress            60% (3/5)
+```
+
+Status symbols: ⏳ Pending, 🔄 In Progress, ✅ Completed, ❌ Failed
+
+#### Event-Driven Updates
+
+Progress is updated in real-time via EventStore polling:
+- `orchestrator.session.started` → Updates session_id
+- `orchestrator.tool.called` → Shows "Using {tool}"
+- `orchestrator.task.started` → Marks AC as 🔄
+- `orchestrator.task.completed` → Marks AC as ✅ or ❌
+- `orchestrator.progress.updated` → Increments message count
+- `orchestrator.session.completed` → Final summary
+
+#### Returns
+
+```python
+MCPToolResult(
+    content=[
+        MCPContentItem(
+            type="text",
+            text="""
+                ✅ Seed execution completed successfully!
+
+                Session ID: orch_abc123def456
+                Execution ID: exec_789ghi012
+                Duration: 45.32s
+                Messages processed: 23
+                Cost: $0.0234
+                Tokens: 2,341
+                Goal: Build a simple hello world CLI
+                Acceptance criteria: 3
+
+                Final message:
+                All acceptance criteria have been successfully completed...
+            """
+        )
+    ],
+    is_error=False,
+    meta={
+        "session_id": "orch_abc123def456",
+        "execution_id": "exec_789ghi012",
+        "duration_seconds": 45.32,
+        "messages_processed": 23,
+        "cost": 0.0234,
+        "tokens_used": 2341,
+        "success": True
+    }
+)
+```
+
+### SessionStatusHandler
+
+Queries EventStore for real session data using SessionRepository.
+
+```python
+@dataclass
+class SessionStatusHandler:
+    event_store: EventStore | None = None
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]: ...
+```
+
+#### Tool Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | Yes | Session ID to query |
+
+#### Implementation
+
+Uses `SessionRepository.reconstruct_session()` to rebuild state from events:
+
+```python
+# Reconstruct session from EventStore
+session_result = await session_repo.reconstruct_session(session_id)
+
+# Returns:
+# - session_id, execution_id, seed_id
+# - status: running, paused, completed, failed
+# - messages_processed
+# - start_time, last_message_time
+```
+
+#### Returns
+
+```python
+MCPToolResult(
+    content=[
+        MCPContentItem(
+            type="text",
+            text="""
+                Session: orch_abc123def456
+                Status: completed
+                Execution ID: exec_789ghi012
+                Messages processed: 23
+                Started: 2026-01-28T10:30:45.123456+00:00
+                Last activity: 2026-01-28T10:31:30.456789+00:00
+            """
+        )
+    ],
+    meta={
+        "session_id": "orch_abc123def456",
+        "status": "completed",
+        "execution_id": "exec_789ghi012",
+        "messages_processed": 23
+    }
+)
+```
+
+### QueryEventsHandler
+
+Uses EventStore.replay() for event history retrieval.
+
+```python
+@dataclass
+class QueryEventsHandler:
+    event_store: EventStore | None = None
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]: ...
+```
+
+#### Tool Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `session_id` | string | Yes | Session ID to query events for |
+| `event_type` | string | No | Filter by event type (e.g., "orchestrator.tool.called") |
+| `limit` | integer | No | Max events to return (default: 50) |
+
+#### Implementation
+
+Uses EventStore.replay() to get chronological event history:
+
+```python
+# Replay events for session
+events = await event_store.replay("session", session_id)
+
+# Filter by type if specified
+if event_type:
+    events = [e for e in events if e.type == event_type]
+
+# Apply limit
+events = events[:limit]
+```
+
+#### Returns
+
+```python
+MCPToolResult(
+    content=[
+        MCPContentItem(
+            type="text",
+            text="""
+                Event Query Results
+                ==================================================
+                Session: orch_abc123def456
+                Type filter: orchestrator.tool.called
+                Events found: 5
+
+                1. [10:30:46] orchestrator.tool.called
+                   Data: {'tool_name': 'Read', ...}
+
+                2. [10:30:48] orchestrator.tool.called
+                   Data: {'tool_name': 'Edit', ...}
+                ...
+            """
+        )
+    ],
+    meta={
+        "total_events": 5,
+        "session_id": "orch_abc123def456",
+        "event_type": "orchestrator.tool.called"
+    }
+)
+```
+
+### Helper Functions
+
+```python
+# Create handlers with shared dependencies
+def execute_seed_handler(
+    event_store: EventStore | None = None,
+    console: Console | None = None,
+) -> ExecuteSeedHandler: ...
+
+def session_status_handler(
+    event_store: EventStore | None = None
+) -> SessionStatusHandler: ...
+
+def query_events_handler(
+    event_store: EventStore | None = None
+) -> QueryEventsHandler: ...
+
+# Create all tools at once
+def create_ouroboros_tools(
+    event_store: EventStore | None = None,
+    console: Console | None = None,
+) -> tuple[ExecuteSeedHandler | SessionStatusHandler | QueryEventsHandler, ...]: ...
+```
+
+---
+
 ## Convenience Functions
 
 ### `create_mcp_client`

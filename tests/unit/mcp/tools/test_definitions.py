@@ -1,7 +1,10 @@
 """Tests for Ouroboros tool definitions."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
+from ouroboros.core.types import Result
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
     ExecuteSeedHandler,
@@ -9,6 +12,7 @@ from ouroboros.mcp.tools.definitions import (
     SessionStatusHandler,
 )
 from ouroboros.mcp.types import ToolInputType
+from ouroboros.orchestrator.session import SessionStatus, SessionTracker
 
 
 class TestExecuteSeedHandler:
@@ -52,13 +56,28 @@ class TestExecuteSeedHandler:
     async def test_handle_success(self) -> None:
         """handle returns success with valid input."""
         handler = ExecuteSeedHandler()
+
+        # Valid YAML seed content
+        seed_yaml = """
+goal: Test seed execution
+acceptance_criteria:
+  - Test criterion 1
+  - Test criterion 2
+ontology_schema:
+  name: TestOntology
+  description: Test ontology for unit testing
+  fields: []
+metadata:
+  ambiguity_score: 0.15
+"""
+
         result = await handler.handle({
-            "seed_content": "Test seed content",
+            "seed_content": seed_yaml,
             "model_tier": "medium",
         })
 
         assert result.is_ok
-        assert "Seed execution initiated" in result.value.text_content
+        assert "Session ID:" in result.value.text_content
 
 
 class TestSessionStatusHandler:
@@ -88,11 +107,38 @@ class TestSessionStatusHandler:
 
     async def test_handle_success(self) -> None:
         """handle returns success with valid session_id."""
-        handler = SessionStatusHandler()
-        result = await handler.handle({"session_id": "test-session"})
+        from datetime import UTC, datetime
 
-        assert result.is_ok
-        assert "test-session" in result.value.text_content
+        # Create a mock event store that returns a valid session
+        mock_event_store = MagicMock()
+        mock_event_store.initialize = AsyncMock()
+
+        # Create a mock session tracker
+        mock_tracker = SessionTracker(
+            session_id="test-session",
+            execution_id="exec_test123",
+            seed_id="seed_test456",
+            status=SessionStatus.RUNNING,
+            start_time=datetime.now(UTC),
+            messages_processed=5,
+        )
+
+        # Create handler with mocked components
+        handler = SessionStatusHandler(event_store=mock_event_store)
+
+        # Mock the SessionRepository.reconstruct_session to return our tracker
+        from unittest.mock import patch
+
+        with patch(
+            "ouroboros.mcp.tools.definitions.SessionRepository.reconstruct_session",
+            new_callable=AsyncMock,
+        ) as mock_reconstruct:
+            mock_reconstruct.return_value = Result.ok(mock_tracker)
+
+            result = await handler.handle({"session_id": "test-session"})
+
+            assert result.is_ok
+            assert "test-session" in result.value.text_content
 
 
 class TestQueryEventsHandler:
@@ -114,17 +160,28 @@ class TestQueryEventsHandler:
         assert "limit" in param_names
         assert "offset" in param_names
 
-        # All should be optional
+        # session_id is required, others are optional
+        session_id_param = next(p for p in defn.parameters if p.name == "session_id")
+        assert session_id_param.required is True
+
+        # Other filter parameters should be optional
         for param in defn.parameters:
-            assert param.required is False
+            if param.name != "session_id":
+                assert param.required is False
 
     async def test_handle_success_no_filters(self) -> None:
-        """handle returns success without filters."""
-        handler = QueryEventsHandler()
-        result = await handler.handle({})
+        """handle returns success with only session_id (no other filters)."""
+        # Create a mock event store that returns empty events
+        mock_event_store = MagicMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_event_store.replay = AsyncMock(return_value=[])
+
+        handler = QueryEventsHandler(event_store=mock_event_store)
+        result = await handler.handle({"session_id": "test-session"})
 
         assert result.is_ok
         assert "Event Query Results" in result.value.text_content
+        assert "test-session" in result.value.text_content
 
     async def test_handle_with_filters(self) -> None:
         """handle accepts filter parameters."""
