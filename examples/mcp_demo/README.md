@@ -1,102 +1,86 @@
-# MCP Demo Examples
+# MCP Demo: TODO CLI Application
 
-This directory contains examples demonstrating how users interact with Claude Desktop using Ouroboros MCP tools.
+This example demonstrates how users interact with Claude Desktop using Ouroboros MCP tools to build a complete TODO CLI application.
 
-## What These Demos Show
+## 📹 Demo Video
 
-These demos simulate the complete user experience when Claude Desktop uses the MCP `execute_seed` tool:
+![TODO CLI Demo](./todo_cli_demo.gif)
 
-1. 👤 User makes a request in Claude Desktop
-2. 🤖 Claude decides to use the `ouroboros_execute_seed` MCP tool
-3. 📺 **Real-time progress display** appears in the MCP server terminal showing:
-   - Acceptance criteria status (⏳ → 🔄 → ✅)
-   - Progress spinner and timing
-   - Live session metrics
-4. ✅ Results are returned to Claude and shown to the user
+**What you're seeing:**
+1. 👤 User requests a TODO CLI app from Claude Desktop
+2. 🤖 Claude uses the `ouroboros_execute_seed` MCP tool
+3. 📺 **Real-time progress display** in MCP server terminal:
+   - Acceptance criteria status tracking (⏳ → 🔄 → ✅)
+   - Progress spinner and elapsed time
+   - Live session metrics (49 messages, 105 seconds)
+4. ✅ Complete application delivered with tests
 
-## Available Demos
+## About This Demo
 
-### 1. Hello World (Simple)
-**File:** `demo_seed.yaml`
+**Seed:** `todo_cli_seed.yaml`
 
-A minimal example that creates a Python hello world script.
-- 4 acceptance criteria
-- ~30-40 seconds execution time
-- Good for understanding the basic flow
-
-### 2. TODO CLI Application (Realistic)
-**File:** `todo_cli_seed.yaml`
-
-A more realistic example that builds a complete command-line TODO application.
-- 6 acceptance criteria
+Builds a complete command-line TODO application with:
+- **6 acceptance criteria**
 - CLI with subcommands (add/list/complete)
 - JSON-based persistent storage
-- Error handling and tests
-- ~2-3 minutes execution time
-- Shows real-world complexity
+- Error handling for edge cases
+- Comprehensive test suite
+- **~2 minutes execution time**
 
-## Running the Demos
+This demonstrates real-world complexity where the orchestrator overhead is justified by the task complexity.
 
-### Option 1: Live Execution (See Real Progress)
+## Running the Demo
+
+### Option 1: Watch the Recording (Quickest)
+
+The GIF above shows the complete flow (2x speed). For the full-speed terminal recording:
+
+```bash
+asciinema play examples/mcp_demo/todo_cli_demo.cast
+```
+
+**Playback controls:**
+- `Space`: Pause/resume
+- `q`: Quit
+- `.`: Step forward one frame
+
+### Option 2: Run It Yourself (Live Execution)
 
 ```bash
 # From repo root
 uv run ouroboros run workflow --orchestrator examples/mcp_demo/todo_cli_seed.yaml
 ```
 
-You'll see real-time progress as Ouroboros executes each acceptance criterion.
+You'll see the same real-time progress display as the demo shows.
 
-### Option 2: Full User Experience Simulation
+## Re-recording the Demo
+
+If you want to modify and re-record:
 
 ```bash
-# Record the TODO CLI demo
-cd examples/mcp_demo
+# Edit the seed
+vim todo_cli_seed.yaml
+
+# Re-record
 ./record_todo_cli.sh
 
-# Replay the recording
-asciinema play todo_cli_demo.cast
+# Convert to GIF
+brew install agg
+agg todo_cli_demo.cast todo_cli_demo.gif --speed 2
 ```
-
-This shows the complete flow: user request → Claude response → MCP execution → results.
-
-## Recording Your Own Demos
-
-### Prerequisites
-
-```bash
-# Install asciinema for terminal recording
-brew install asciinema  # macOS
-# or: apt install asciinema  # Linux
-```
-
-### Create a Custom Demo
-
-1. Create a seed file (see `todo_cli_seed.yaml` as template)
-2. Create a demo script (see `demo_todo_cli.sh` as template)
-3. Create a recording script (see `record_todo_cli.sh` as template)
-4. Run the recording script
-
-### Playback Controls
-
-- `Space`: Pause/resume
-- `q`: Quit
-- `.`: Step forward one frame
 
 ## What Makes a Good Demo Seed?
 
-**Too Simple (like hello world):**
-- Execution time is mostly orchestrator overhead
-- Doesn't showcase the value of progress tracking
+**This TODO CLI example demonstrates ideal complexity:**
+- ✅ Multiple meaningful acceptance criteria (6)
+- ✅ Mix of file operations, logic, and testing
+- ✅ Takes 1-2 minutes to complete
+- ✅ Shows clear progress updates
+- ✅ Produces a usable application
 
-**Good Complexity (like TODO CLI):**
-- Multiple meaningful acceptance criteria (4-8)
-- Mix of file operations, logic, and testing
-- Takes 1-5 minutes to complete
-- Shows real progress updates
-
-**Too Complex:**
-- Takes >10 minutes (recordings become unwieldy)
-- Too many criteria (hard to follow)
+**Avoid:**
+- ❌ Too simple (hello world) - mostly orchestrator overhead
+- ❌ Too complex (>10 min) - recordings become unwieldy
 
 ## Architecture Notes
 
@@ -120,13 +104,11 @@ The progress display runs in the **MCP server's terminal**, not in Claude Deskto
 
 ## Files
 
-- `demo_seed.yaml` - Simple hello world seed
-- `todo_cli_seed.yaml` - TODO CLI application seed
-- `demo_mcp_experience.sh` - Hello world user experience simulation
-- `demo_todo_cli.sh` - TODO CLI user experience simulation
-- `record_mcp_demo.sh` - Record hello world demo
-- `record_todo_cli.sh` - Record TODO CLI demo
-- `*.cast` - Asciinema recordings (gitignored)
+- **`todo_cli_seed.yaml`** - Seed definition with 6 acceptance criteria
+- **`todo_cli_demo.gif`** - Animated demo (206KB, 2x speed)
+- **`todo_cli_demo.cast`** - Terminal recording (147KB, full speed)
+- **`demo_todo_cli.sh`** - Script simulating user experience
+- **`record_todo_cli.sh`** - Script to re-record the demo
 
 ## Tips
 
