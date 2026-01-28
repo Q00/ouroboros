@@ -22,17 +22,25 @@
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/ouroboros-ai/"><img src="https://img.shields.io/pypi/v/ouroboros-ai?color=blue" alt="PyPI"></a>
+  <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.14+-blue" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
+</p>
+
+<p align="center">
   <a href="#-philosophy">Philosophy</a> •
   <a href="#-the-six-phases">Phases</a> •
   <a href="#-architecture">Architecture</a> •
+  <a href="#-prerequisites">Prerequisites</a> •
   <a href="#-quick-start">Start</a> •
-  <a href="#-the-personas-lateral-thinking-agents">Personas</a>
+  <a href="#-roadmap">Roadmap</a> •
+  <a href="#-contributing">Contributing</a>
 </p>
 
 <br/>
 
 <p align="center">
-  <code>74 modules</code> · <code>1,341 tests</code> · <code>97%+ coverage</code>
+  <code>75 modules</code> · <code>1,341 tests</code> · <code>97%+ coverage</code> · <code>v0.2.x</code>
 </p>
 
 <br/>
@@ -332,7 +340,7 @@ src/ouroboros/
 
 <br/>
 
-**작동 방식**: Stagnation Detection (4 patterns) → Persona Rotation → 새로운 관점으로 재시도
+**How it works**: Stagnation Detection (4 patterns) → Persona Rotation → Retry with fresh perspective
 
 <br/>
 
@@ -388,6 +396,22 @@ It **questions its own direction**.
 
 When drift exceeds threshold, it returns to the beginning—
 not to restart, but to **re-crystallize** with new understanding.
+
+<br/>
+
+---
+
+<br/>
+
+## ◈ Prerequisites
+
+<br/>
+
+| Requirement | Description |
+|-------------|-------------|
+| **Python 3.14+** | Required (uses latest language features) |
+| **Claude Code Max Plan** | For orchestrator mode (no API key needed) |
+| **OR API Key** | OpenRouter, Anthropic, or OpenAI for LiteLLM mode |
 
 <br/>
 
@@ -456,7 +480,7 @@ uv run ouroboros init start "I want to build a task management CLI"
 uv run ouroboros status health
 ```
 
-> 📖 **[Full Guide: Running with Claude Code](docs/running-with-claude-code.md)**
+> 📖 **[Full Guide: Running with Claude Code](docs/running-with-claude-code.md)** | **[CLI Reference](docs/cli-reference.md)**
 
 <br/>
 
@@ -543,21 +567,48 @@ uv run ruff format src/
 
 <br/>
 
+## ◈ Contributing
+
+<br/>
+
+Contributions are welcome! Please see:
+
+- **Issues**: [GitHub Issues](https://github.com/Q00/ouroboros/issues) for bugs and feature requests
+- **Discussions**: [GitHub Discussions](https://github.com/Q00/ouroboros/discussions) for questions and ideas
+
+<br/>
+
+---
+
+<br/>
+
 ## ◈ Roadmap
 
 <br/>
 
+### Completed
+
 ```
-[■■■■■■■■■■] Epic 0  Foundation
-[■■■■■■■■■■] Epic 1  Big Bang
-[■■■■■■■■■■] Epic 2  PAL Router
-[■■■■■■■■■■] Epic 3  Double Diamond
-[■■■■■■■■■■] Epic 4  Resilience
-[■■■■■■■■■■] Epic 5  Evaluation
-[■■■■■■■■■■] Epic 6  Drift Control
-[■■■■■■■■■■] Epic 7  Secondary Loop
-[■■■■■■■■■■] Epic 8  Orchestrator      ✓ Complete
+[■■■■■■■■■■] Epic 0  Foundation          ✓
+[■■■■■■■■■■] Epic 1  Big Bang            ✓
+[■■■■■■■■■■] Epic 2  PAL Router          ✓
+[■■■■■■■■■■] Epic 3  Double Diamond      ✓
+[■■■■■■■■■■] Epic 4  Resilience          ✓
+[■■■■■■■■■■] Epic 5  Evaluation          ✓
+[■■■■■■■■■■] Epic 6  Drift Control       ✓
+[■■■■■■■■■■] Epic 7  Secondary Loop      ✓
+[■■■■■■■■■■] Epic 8  Orchestrator        ✓
 ```
+
+### Upcoming
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| **Worker MCP** | MCP server for distributed task execution | Planned |
+| **TUI Enhancement** | Rich terminal UI with real-time progress | Planned |
+| **AC Tree Visualization** | Interactive acceptance criteria graph | Planned |
+| **Plugin System** | Custom evaluators and personas | Planned |
+| **Web Dashboard** | Execution monitoring and analytics | Planned |
 
 <br/>
 
