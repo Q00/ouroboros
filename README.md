@@ -40,7 +40,7 @@
 <br/>
 
 <p align="center">
-  <code>75 modules</code> · <code>1,341 tests</code> · <code>97%+ coverage</code> · <code>v0.2.x</code>
+  <code>75 modules</code> · <code>1,341 tests</code> · <code>97%+ coverage</code>
 </p>
 
 <br/>
