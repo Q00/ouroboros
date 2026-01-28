@@ -110,15 +110,15 @@ class AmbiguityScorer:
     from interview conversation, producing reproducible scores.
 
     Uses adaptive token allocation: starts with `initial_max_tokens` and
-    doubles on truncation up to `MAX_TOKEN_LIMIT`. Retries up to `max_retries`
-    times on both provider errors and parse failures.
+    doubles on truncation up to `MAX_TOKEN_LIMIT`. Retries until success
+    by default (unlimited), or up to `max_retries` if specified.
 
     Attributes:
         llm_adapter: The LLM adapter for completions.
         model: Model identifier to use.
         temperature: Temperature for reproducibility (default 0.1).
         initial_max_tokens: Starting token limit (default 2048).
-        max_retries: Maximum retry attempts (default 3).
+        max_retries: Maximum retry attempts, or None for unlimited (default).
 
     Example:
         scorer = AmbiguityScorer(llm_adapter=LiteLLMAdapter())
@@ -138,7 +138,7 @@ class AmbiguityScorer:
     model: str = DEFAULT_MODEL
     temperature: float = SCORING_TEMPERATURE
     initial_max_tokens: int = 2048
-    max_retries: int = 3
+    max_retries: int | None = None  # None = unlimited retries
 
     async def score(
         self, state: InterviewState
@@ -180,8 +180,15 @@ class AmbiguityScorer:
         current_max_tokens = self.initial_max_tokens
         last_error: Exception | ProviderError | None = None
         last_response: str = ""
+        attempt = 0
 
-        for attempt in range(self.max_retries):
+        while True:
+            # Check retry limit if set
+            if self.max_retries is not None and attempt >= self.max_retries:
+                break
+
+            attempt += 1
+
             config = CompletionConfig(
                 model=self.model,
                 temperature=self.temperature,
@@ -190,15 +197,15 @@ class AmbiguityScorer:
 
             result = await self.llm_adapter.complete(messages, config)
 
-            # Fix #3: Retry on provider errors (rate limits, transient failures)
+            # Retry on provider errors (rate limits, transient failures)
             if result.is_err:
                 last_error = result.error
                 log.warning(
                     "ambiguity.scoring.provider_error_retrying",
                     interview_id=state.interview_id,
                     error=str(result.error),
-                    attempt=attempt + 1,
-                    max_retries=self.max_retries,
+                    attempt=attempt,
+                    max_retries=self.max_retries or "unlimited",
                 )
                 continue
 
@@ -221,7 +228,7 @@ class AmbiguityScorer:
                     constraint_clarity=breakdown.constraint_clarity.clarity_score,
                     success_criteria_clarity=breakdown.success_criteria_clarity.clarity_score,
                     tokens_used=current_max_tokens,
-                    attempt=attempt + 1,
+                    attempt=attempt,
                 )
 
                 return Result.ok(ambiguity_score)
@@ -230,11 +237,11 @@ class AmbiguityScorer:
                 last_error = e
                 last_response = result.value.content
 
-                # Fix #2: Only increase tokens if response was truncated
+                # Only increase tokens if response was truncated
                 is_truncated = result.value.finish_reason == "length"
 
                 if is_truncated:
-                    # Double tokens on truncation (no upper limit)
+                    # Double tokens on truncation, capped at MAX_TOKEN_LIMIT if set
                     next_tokens = current_max_tokens * 2
                     if MAX_TOKEN_LIMIT is not None:
                         next_tokens = min(next_tokens, MAX_TOKEN_LIMIT)
@@ -242,7 +249,7 @@ class AmbiguityScorer:
                         "ambiguity.scoring.truncated_retrying",
                         interview_id=state.interview_id,
                         error=str(e),
-                        attempt=attempt + 1,
+                        attempt=attempt,
                         current_tokens=current_max_tokens,
                         next_tokens=next_tokens,
                     )
@@ -253,11 +260,11 @@ class AmbiguityScorer:
                         "ambiguity.scoring.format_error_retrying",
                         interview_id=state.interview_id,
                         error=str(e),
-                        attempt=attempt + 1,
+                        attempt=attempt,
                         finish_reason=result.value.finish_reason,
                     )
 
-        # All retries exhausted
+        # All retries exhausted (only reached if max_retries is set)
         log.warning(
             "ambiguity.scoring.failed",
             interview_id=state.interview_id,
