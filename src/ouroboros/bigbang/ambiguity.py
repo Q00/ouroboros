@@ -36,6 +36,9 @@ DEFAULT_MODEL = "openrouter/google/gemini-2.0-flash-001"
 # Temperature for reproducible scoring
 SCORING_TEMPERATURE = 0.1
 
+# Maximum token limit to prevent cost explosion
+MAX_TOKEN_LIMIT = 8192
+
 
 class ComponentScore(BaseModel):
     """Individual component score with justification.
@@ -106,6 +109,17 @@ class AmbiguityScorer:
     Uses LLM to evaluate clarity of goals, constraints, and success criteria
     from interview conversation, producing reproducible scores.
 
+    Uses adaptive token allocation: starts with `initial_max_tokens` and
+    doubles on truncation up to `MAX_TOKEN_LIMIT`. Retries up to `max_retries`
+    times on both provider errors and parse failures.
+
+    Attributes:
+        llm_adapter: The LLM adapter for completions.
+        model: Model identifier to use.
+        temperature: Temperature for reproducibility (default 0.1).
+        initial_max_tokens: Starting token limit (default 2048).
+        max_retries: Maximum retry attempts (default 3).
+
     Example:
         scorer = AmbiguityScorer(llm_adapter=LiteLLMAdapter())
 
@@ -123,7 +137,8 @@ class AmbiguityScorer:
     llm_adapter: LiteLLMAdapter
     model: str = DEFAULT_MODEL
     temperature: float = SCORING_TEMPERATURE
-    max_tokens: int = 2048
+    initial_max_tokens: int = 2048
+    max_retries: int = 3
 
     async def score(
         self, state: InterviewState
@@ -134,6 +149,9 @@ class AmbiguityScorer:
         - Goal statement (40% weight)
         - Constraints (30% weight)
         - Success criteria (30% weight)
+
+        Uses adaptive token allocation: starts with initial_max_tokens and
+        doubles on parse failure, up to max_retries attempts.
 
         Args:
             state: The interview state to score.
@@ -159,57 +177,98 @@ class AmbiguityScorer:
             Message(role=MessageRole.USER, content=user_prompt),
         ]
 
-        config = CompletionConfig(
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        current_max_tokens = self.initial_max_tokens
+        last_error: Exception | ProviderError | None = None
+        last_response: str = ""
 
-        result = await self.llm_adapter.complete(messages, config)
-
-        if result.is_err:
-            log.warning(
-                "ambiguity.scoring.failed",
-                interview_id=state.interview_id,
-                error=str(result.error),
-            )
-            return Result.err(result.error)
-
-        # Parse the LLM response into scores
-        try:
-            breakdown = self._parse_scoring_response(result.value.content)
-            overall_score = self._calculate_overall_score(breakdown)
-
-            ambiguity_score = AmbiguityScore(
-                overall_score=overall_score,
-                breakdown=breakdown,
+        for attempt in range(self.max_retries):
+            config = CompletionConfig(
+                model=self.model,
+                temperature=self.temperature,
+                max_tokens=current_max_tokens,
             )
 
-            log.info(
-                "ambiguity.scoring.completed",
-                interview_id=state.interview_id,
-                overall_score=overall_score,
-                is_ready_for_seed=ambiguity_score.is_ready_for_seed,
-                goal_clarity=breakdown.goal_clarity.clarity_score,
-                constraint_clarity=breakdown.constraint_clarity.clarity_score,
-                success_criteria_clarity=breakdown.success_criteria_clarity.clarity_score,
-            )
+            result = await self.llm_adapter.complete(messages, config)
 
-            return Result.ok(ambiguity_score)
-
-        except (ValueError, KeyError) as e:
-            log.warning(
-                "ambiguity.scoring.parse_failed",
-                interview_id=state.interview_id,
-                error=str(e),
-                response=result.value.content[:500],
-            )
-            return Result.err(
-                ProviderError(
-                    f"Failed to parse scoring response: {e}",
-                    details={"response_preview": result.value.content[:200]},
+            # Fix #3: Retry on provider errors (rate limits, transient failures)
+            if result.is_err:
+                last_error = result.error
+                log.warning(
+                    "ambiguity.scoring.provider_error_retrying",
+                    interview_id=state.interview_id,
+                    error=str(result.error),
+                    attempt=attempt + 1,
+                    max_retries=self.max_retries,
                 )
+                continue
+
+            # Parse the LLM response into scores
+            try:
+                breakdown = self._parse_scoring_response(result.value.content)
+                overall_score = self._calculate_overall_score(breakdown)
+
+                ambiguity_score = AmbiguityScore(
+                    overall_score=overall_score,
+                    breakdown=breakdown,
+                )
+
+                log.info(
+                    "ambiguity.scoring.completed",
+                    interview_id=state.interview_id,
+                    overall_score=overall_score,
+                    is_ready_for_seed=ambiguity_score.is_ready_for_seed,
+                    goal_clarity=breakdown.goal_clarity.clarity_score,
+                    constraint_clarity=breakdown.constraint_clarity.clarity_score,
+                    success_criteria_clarity=breakdown.success_criteria_clarity.clarity_score,
+                    tokens_used=current_max_tokens,
+                    attempt=attempt + 1,
+                )
+
+                return Result.ok(ambiguity_score)
+
+            except (ValueError, KeyError) as e:
+                last_error = e
+                last_response = result.value.content
+
+                # Fix #2: Only increase tokens if response was truncated
+                is_truncated = result.value.finish_reason == "length"
+
+                if is_truncated:
+                    # Fix #1: Cap token growth with MAX_TOKEN_LIMIT
+                    next_tokens = min(current_max_tokens * 2, MAX_TOKEN_LIMIT)
+                    log.warning(
+                        "ambiguity.scoring.truncated_retrying",
+                        interview_id=state.interview_id,
+                        error=str(e),
+                        attempt=attempt + 1,
+                        current_tokens=current_max_tokens,
+                        next_tokens=next_tokens,
+                    )
+                    current_max_tokens = next_tokens
+                else:
+                    # Format error without truncation - retry with same tokens
+                    log.warning(
+                        "ambiguity.scoring.format_error_retrying",
+                        interview_id=state.interview_id,
+                        error=str(e),
+                        attempt=attempt + 1,
+                        finish_reason=result.value.finish_reason,
+                    )
+
+        # All retries exhausted
+        log.warning(
+            "ambiguity.scoring.failed",
+            interview_id=state.interview_id,
+            error=str(last_error),
+            response=last_response[:500] if last_response else None,
+            max_retries_exhausted=True,
+        )
+        return Result.err(
+            ProviderError(
+                f"Failed to parse scoring response after {self.max_retries} attempts: {last_error}",
+                details={"response_preview": last_response[:200] if last_response else None},
             )
+        )
 
     def _build_interview_context(self, state: InterviewState) -> str:
         """Build context string from interview state.
@@ -254,15 +313,17 @@ Evaluate three components:
 
 For each component, provide:
 - A clarity score between 0.0 (completely unclear) and 1.0 (perfectly clear)
-- A brief justification explaining the score
+- A brief justification (1-2 sentences max) explaining the score
+
+IMPORTANT: You MUST provide ALL six fields below. Keep justifications concise.
 
 Respond in this exact format:
 GOAL_CLARITY_SCORE: <score>
-GOAL_CLARITY_JUSTIFICATION: <justification>
+GOAL_CLARITY_JUSTIFICATION: <justification in 1-2 sentences>
 CONSTRAINT_CLARITY_SCORE: <score>
-CONSTRAINT_CLARITY_JUSTIFICATION: <justification>
+CONSTRAINT_CLARITY_JUSTIFICATION: <justification in 1-2 sentences>
 SUCCESS_CRITERIA_CLARITY_SCORE: <score>
-SUCCESS_CRITERIA_CLARITY_JUSTIFICATION: <justification>
+SUCCESS_CRITERIA_CLARITY_JUSTIFICATION: <justification in 1-2 sentences>
 
 Be strict in your evaluation. Scores above 0.8 require very specific, measurable requirements."""
 
