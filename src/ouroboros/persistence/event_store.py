@@ -5,6 +5,8 @@ with aiosqlite backend.
 """
 
 
+from pathlib import Path
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -33,13 +35,18 @@ class EventStore:
         await store.close()
     """
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str | None = None) -> None:
         """Initialize EventStore with database URL.
 
         Args:
             database_url: SQLAlchemy database URL.
+                         If not provided, defaults to ~/.ouroboros/events.db
                          For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
         """
+        if database_url is None:
+            db_path = Path.home() / ".ouroboros" / "events.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            database_url = f"sqlite+aiosqlite:///{db_path}"
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
 
