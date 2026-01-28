@@ -5,6 +5,7 @@ Supports both LiteLLM (external API) and Claude Code (Max Plan) modes.
 """
 
 import asyncio
+from enum import Enum, auto
 from pathlib import Path
 from typing import Annotated
 
@@ -12,12 +13,27 @@ from rich.prompt import Confirm, Prompt
 import typer
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
-from ouroboros.bigbang.interview import MAX_INTERVIEW_ROUNDS, InterviewEngine, InterviewState
+from ouroboros.bigbang.interview import (
+    MIN_ROUNDS_BEFORE_EARLY_EXIT,
+    SOFT_LIMIT_WARNING_THRESHOLD,
+    InterviewEngine,
+    InterviewState,
+    InterviewStatus,
+)
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+
+class SeedGenerationResult(Enum):
+    """Result of seed generation attempt."""
+
+    SUCCESS = auto()
+    CANCELLED = auto()
+    CONTINUE_INTERVIEW = auto()
+
 
 app = typer.Typer(
     name="init",
@@ -41,6 +57,91 @@ def _get_adapter(use_orchestrator: bool) -> LLMAdapter:
         return ClaudeCodeAdapter()
     else:
         return LiteLLMAdapter()
+
+
+async def _run_interview_loop(
+    engine: InterviewEngine,
+    state: InterviewState,
+) -> InterviewState:
+    """Run the interview question loop until completion or user exit.
+
+    Implements tiered confirmation:
+    - Rounds 1-3: Auto-continue (minimum context)
+    - Rounds 4-15: Ask "Continue?" after each round
+    - Rounds 16+: Ask "Continue?" with diminishing returns warning
+
+    Args:
+        engine: Interview engine instance.
+        state: Current interview state.
+
+    Returns:
+        Updated interview state.
+    """
+    while not state.is_complete:
+        current_round = state.current_round_number
+        console.print(f"[bold]Round {current_round}[/]")
+
+        # Generate question
+        with console.status("[cyan]Generating question...[/]", spinner="dots"):
+            question_result = await engine.ask_next_question(state)
+
+        if question_result.is_err:
+            print_error(f"Failed to generate question: {question_result.error.message}")
+            should_retry = Confirm.ask("Retry?", default=True)
+            if not should_retry:
+                break
+            continue
+
+        question = question_result.value
+
+        # Display question
+        console.print()
+        console.print(f"[bold yellow]Q:[/] {question}")
+        console.print()
+
+        # Get user response
+        response = Prompt.ask("[bold green]Your response[/]")
+
+        if not response.strip():
+            print_error("Response cannot be empty. Please try again.")
+            continue
+
+        # Record response
+        record_result = await engine.record_response(state, response, question)
+        if record_result.is_err:
+            print_error(f"Failed to record response: {record_result.error.message}")
+            continue
+
+        state = record_result.value
+
+        # Save state immediately after recording
+        save_result = await engine.save_state(state)
+        if save_result.is_err:
+            print_error(f"Warning: Failed to save state: {save_result.error.message}")
+
+        console.print()
+
+        # Tiered confirmation logic
+        if current_round >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
+            # Show warning for rounds beyond soft limit
+            if current_round >= SOFT_LIMIT_WARNING_THRESHOLD:
+                print_warning(
+                    f"Round {current_round}: Diminishing returns expected. "
+                    "Consider generating Seed to check ambiguity score."
+                )
+
+            should_continue = Confirm.ask(
+                "Continue with more questions?",
+                default=True,
+            )
+            if not should_continue:
+                complete_result = await engine.complete_interview(state)
+                if complete_result.is_ok:
+                    state = complete_result.value
+                await engine.save_state(state)
+                break
+
+    return state
 
 
 async def _run_interview(
@@ -81,106 +182,60 @@ async def _run_interview(
         state = state_result.value
 
     console.print()
-    console.print(
-        f"[bold cyan]Interview Session: {state.interview_id}[/]",
-    )
-    console.print(f"[muted]Max rounds: {MAX_INTERVIEW_ROUNDS}[/]")
+    console.print(f"[bold cyan]Interview Session: {state.interview_id}[/]")
+    console.print("[muted]No round limit - you decide when to stop[/]")
     console.print()
 
-    # Interview loop
-    while not state.is_complete:
-        current_round = state.current_round_number
-        console.print(
-            f"[bold]Round {current_round}/{MAX_INTERVIEW_ROUNDS}[/]",
-        )
+    # Run initial interview loop
+    state = await _run_interview_loop(engine, state)
 
-        # Generate question
-        with console.status(
-            "[cyan]Generating question...[/]",
-            spinner="dots",
-        ):
-            question_result = await engine.ask_next_question(state)
-
-        if question_result.is_err:
-            print_error(f"Failed to generate question: {question_result.error.message}")
-            should_retry = Confirm.ask("Retry?", default=True)
-            if not should_retry:
-                break
-            continue
-
-        question = question_result.value
-
-        # Display question
+    # Outer loop for retry on high ambiguity
+    while True:
+        # Interview complete
         console.print()
-        console.print(f"[bold yellow]Q:[/] {question}")
-        console.print()
+        print_success("Interview completed!")
+        console.print(f"[muted]Total rounds: {len(state.rounds)}[/]")
+        console.print(f"[muted]Interview ID: {state.interview_id}[/]")
 
-        # Get user response
-        response = Prompt.ask("[bold green]Your response[/]")
-
-        if not response.strip():
-            print_error("Response cannot be empty. Please try again.")
-            continue
-
-        # Record response
-        record_result = await engine.record_response(state, response, question)
-        if record_result.is_err:
-            print_error(f"Failed to record response: {record_result.error.message}")
-            continue
-
-        state = record_result.value
-
-        # Save state
+        # Save final state
         save_result = await engine.save_state(state)
-        if save_result.is_err:
-            print_error(f"Warning: Failed to save state: {save_result.error.message}")
+        if save_result.is_ok:
+            console.print(f"[muted]State saved to: {save_result.value}[/]")
 
         console.print()
 
-        # Check if user wants to continue or finish early
-        if not state.is_complete and current_round >= 3:
-            should_continue = Confirm.ask(
-                "Continue with more questions?",
-                default=True,
-            )
-            if not should_continue:
-                complete_result = await engine.complete_interview(state)
-                if complete_result.is_ok:
-                    state = complete_result.value
-                    await engine.save_state(state)
-                break
-
-    # Interview complete
-    console.print()
-    print_success("Interview completed!")
-    console.print(f"[muted]Total rounds: {len(state.rounds)}[/]")
-    console.print(f"[muted]Interview ID: {state.interview_id}[/]")
-
-    # Save final state
-    save_result = await engine.save_state(state)
-    if save_result.is_ok:
-        console.print(f"[muted]State saved to: {save_result.value}[/]")
-
-    console.print()
-
-    # Ask if user wants to proceed to Seed generation
-    should_generate_seed = Confirm.ask(
-        "[bold cyan]Proceed to generate Seed specification?[/]",
-        default=True,
-    )
-
-    if not should_generate_seed:
-        console.print(
-            "[muted]You can resume later with:[/] "
-            f"[bold]ouroboros init start --resume {state.interview_id}[/]"
+        # Ask if user wants to proceed to Seed generation
+        should_generate_seed = Confirm.ask(
+            "[bold cyan]Proceed to generate Seed specification?[/]",
+            default=True,
         )
-        return
 
-    # Generate Seed
-    seed_path = await _generate_seed_from_interview(state, llm_adapter)
+        if not should_generate_seed:
+            console.print(
+                "[muted]You can resume later with:[/] "
+                f"[bold]ouroboros init start --resume {state.interview_id}[/]"
+            )
+            return
 
-    if seed_path is None:
-        return
+        # Generate Seed
+        seed_path, result = await _generate_seed_from_interview(state, llm_adapter)
+
+        if result == SeedGenerationResult.CONTINUE_INTERVIEW:
+            # Re-open interview for more questions
+            console.print()
+            print_info("Continuing interview to reduce ambiguity...")
+            state.status = InterviewStatus.IN_PROGRESS
+            await engine.save_state(state)  # Save status change immediately
+
+            # Continue interview loop (reusing the same helper)
+            state = await _run_interview_loop(engine, state)
+            continue
+
+        if result == SeedGenerationResult.CANCELLED:
+            return
+
+        # Success - proceed to workflow
+        break
 
     # Ask if user wants to start workflow
     console.print()
@@ -196,7 +251,7 @@ async def _run_interview(
 async def _generate_seed_from_interview(
     state: InterviewState,
     llm_adapter: LLMAdapter,
-) -> Path | None:
+) -> tuple[Path | None, SeedGenerationResult]:
     """Generate Seed from completed interview.
 
     Args:
@@ -204,7 +259,7 @@ async def _generate_seed_from_interview(
         llm_adapter: LLM adapter for scoring and generation.
 
     Returns:
-        Path to generated seed file, or None if failed.
+        Tuple of (path to generated seed file or None, result status).
     """
     console.print()
     console.print("[bold cyan]Generating Seed specification...[/]")
@@ -216,7 +271,7 @@ async def _generate_seed_from_interview(
 
     if score_result.is_err:
         print_error(f"Failed to calculate ambiguity: {score_result.error.message}")
-        return None
+        return None, SeedGenerationResult.CANCELLED
 
     ambiguity_score = score_result.value
     console.print(f"[muted]Ambiguity score: {ambiguity_score.overall_score:.2f}[/]")
@@ -226,12 +281,24 @@ async def _generate_seed_from_interview(
             f"Ambiguity score ({ambiguity_score.overall_score:.2f}) is too high. "
             "Consider more interview rounds to clarify requirements."
         )
-        should_force = Confirm.ask(
-            "[yellow]Generate Seed anyway?[/]",
-            default=False,
+        console.print()
+        console.print("[bold]What would you like to do?[/]")
+        console.print("  [cyan]1[/] - Continue interview with more questions")
+        console.print("  [cyan]2[/] - Generate Seed anyway (force)")
+        console.print("  [cyan]3[/] - Cancel")
+        console.print()
+
+        choice = Prompt.ask(
+            "[yellow]Select option[/]",
+            choices=["1", "2", "3"],
+            default="1",
         )
-        if not should_force:
-            return None
+
+        if choice == "1":
+            return None, SeedGenerationResult.CONTINUE_INTERVIEW
+        elif choice == "3":
+            return None, SeedGenerationResult.CANCELLED
+        # choice == "2" falls through to generate anyway
 
     # Step 2: Generate Seed
     with console.status("[cyan]Generating Seed from interview...[/]", spinner="dots"):
@@ -240,18 +307,20 @@ async def _generate_seed_from_interview(
         if ambiguity_score.is_ready_for_seed:
             seed_result = await generator.generate(state, ambiguity_score)
         else:
-            # Create a modified score that passes threshold for forced generation
+            # TODO: Add force=True parameter to SeedGenerator.generate() instead of this hack
+            # Creating a modified score to bypass threshold check
             from ouroboros.bigbang.ambiguity import AmbiguityScore as AmbScore
 
+            FORCED_SCORE_VALUE = 0.19  # Just under threshold (0.2)
             forced_score = AmbScore(
-                overall_score=0.19,  # Just under threshold
+                overall_score=FORCED_SCORE_VALUE,
                 breakdown=ambiguity_score.breakdown,
             )
             seed_result = await generator.generate(state, forced_score)
 
     if seed_result.is_err:
         print_error(f"Failed to generate Seed: {seed_result.error.message}")
-        return None
+        return None, SeedGenerationResult.CANCELLED
 
     seed = seed_result.value
 
@@ -261,10 +330,10 @@ async def _generate_seed_from_interview(
 
     if save_result.is_err:
         print_error(f"Failed to save Seed: {save_result.error.message}")
-        return None
+        return None, SeedGenerationResult.CANCELLED
 
     print_success(f"Seed generated: {seed_path}")
-    return seed_path
+    return seed_path, SeedGenerationResult.SUCCESS
 
 
 async def _start_workflow(seed_path: Path, use_orchestrator: bool = False) -> None:
@@ -344,21 +413,17 @@ def start(
     """
     # Get initial context if not provided
     if not resume and not context:
-        console.print(
-            "[bold cyan]Welcome to Ouroboros Interview![/]",
-        )
+        console.print("[bold cyan]Welcome to Ouroboros Interview![/]")
         console.print()
         console.print(
             "This interactive process will help refine your ideas into clear requirements.",
         )
         console.print(
-            f"You'll be asked up to {MAX_INTERVIEW_ROUNDS} questions to reduce ambiguity.",
+            "You control when to stop - no arbitrary round limit.",
         )
         console.print()
 
-        context = Prompt.ask(
-            "[bold]What would you like to build?[/]",
-        )
+        context = Prompt.ask("[bold]What would you like to build?[/]")
 
     if not resume and not context:
         print_error("Initial context is required when not resuming.")

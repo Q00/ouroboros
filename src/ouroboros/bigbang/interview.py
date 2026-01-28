@@ -1,7 +1,7 @@
 """Interactive interview engine for requirement clarification.
 
 This module implements the interview protocol that refines vague ideas into
-clear requirements through iterative questioning (max 10 rounds).
+clear requirements through iterative questioning. Users control when to stop.
 """
 
 from collections.abc import Iterator
@@ -52,9 +52,16 @@ def _file_lock(file_path: Path, exclusive: bool = True) -> Iterator[None]:
 
 log = structlog.get_logger()
 
-MAX_INTERVIEW_ROUNDS = 10
+# Interview round constants
+MIN_ROUNDS_BEFORE_EARLY_EXIT = 3  # Must complete at least 3 rounds
+SOFT_LIMIT_WARNING_THRESHOLD = 15  # Warn about diminishing returns after this
+DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
+
 # Default model moved to config.models.ClarificationConfig.default_model
 _FALLBACK_MODEL = "openrouter/google/gemini-2.0-flash-001"
+
+# Legacy alias for backward compatibility
+MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS
 
 
 class InterviewStatus(StrEnum):
@@ -69,13 +76,13 @@ class InterviewRound(BaseModel):
     """A single round of interview questions and responses.
 
     Attributes:
-        round_number: 1-based round number (1 to MAX_INTERVIEW_ROUNDS).
+        round_number: 1-based round number (no upper limit - user controls).
         question: The question asked by the system.
         user_response: The user's response (None if not yet answered).
         timestamp: When this round was created.
     """
 
-    round_number: int = Field(ge=1, le=MAX_INTERVIEW_ROUNDS)
+    round_number: int = Field(ge=1)  # No upper limit - user decides when to stop
     question: str
     user_response: str | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -107,11 +114,8 @@ class InterviewState(BaseModel):
 
     @property
     def is_complete(self) -> bool:
-        """Check if interview has reached max rounds or is marked complete."""
-        return (
-            self.status == InterviewStatus.COMPLETED
-            or len(self.rounds) >= MAX_INTERVIEW_ROUNDS
-        )
+        """Check if interview is marked complete (user-controlled)."""
+        return self.status == InterviewStatus.COMPLETED
 
     def mark_updated(self) -> None:
         """Update the updated_at timestamp."""
@@ -321,14 +325,8 @@ class InterviewEngine:
             response_length=len(user_response),
         )
 
-        # Check if we've reached max rounds
-        if len(state.rounds) >= MAX_INTERVIEW_ROUNDS:
-            state.status = InterviewStatus.COMPLETED
-            log.info(
-                "interview.max_rounds_reached",
-                interview_id=state.interview_id,
-                total_rounds=len(state.rounds),
-            )
+        # Note: No auto-complete on round limit. User controls when to stop.
+        # CLI handles prompting user to continue after each round.
 
         return Result.ok(state)
 
@@ -437,7 +435,7 @@ class InterviewEngine:
         Returns:
             The system prompt.
         """
-        round_info = f"Round {state.current_round_number} of {MAX_INTERVIEW_ROUNDS}"
+        round_info = f"Round {state.current_round_number}"
 
         return f"""You are an expert requirements engineer conducting an interview to refine vague ideas into clear, executable requirements.
 

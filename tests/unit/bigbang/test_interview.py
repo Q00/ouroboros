@@ -85,12 +85,12 @@ class TestInterviewState:
 
         assert state.is_complete
 
-    def test_is_complete_when_max_rounds_reached(self) -> None:
-        """is_complete returns True when max rounds reached."""
+    def test_is_complete_only_checks_status(self) -> None:
+        """is_complete only returns True when status is COMPLETED (user-controlled)."""
         state = InterviewState(interview_id="test_001")
 
-        # Add MAX_INTERVIEW_ROUNDS rounds
-        for i in range(MAX_INTERVIEW_ROUNDS):
+        # Add many rounds - should NOT auto-complete
+        for i in range(20):
             state.rounds.append(
                 InterviewRound(
                     round_number=i + 1,
@@ -99,8 +99,13 @@ class TestInterviewState:
                 )
             )
 
+        # Still not complete - user must explicitly complete
+        assert not state.is_complete
+        assert len(state.rounds) == 20
+
+        # Only complete when status is set
+        state.status = InterviewStatus.COMPLETED
         assert state.is_complete
-        assert len(state.rounds) == MAX_INTERVIEW_ROUNDS
 
     def test_mark_updated(self) -> None:
         """mark_updated updates the updated_at timestamp."""
@@ -156,17 +161,18 @@ class TestInterviewRound:
                 question="Invalid round",
             )
 
-    def test_round_validation_max(self) -> None:
-        """InterviewRound validates maximum round number."""
-        with pytest.raises(ValueError):
-            InterviewRound(
-                round_number=MAX_INTERVIEW_ROUNDS + 1,
-                question="Invalid round",
-            )
+    def test_round_accepts_high_numbers(self) -> None:
+        """InterviewRound accepts high round numbers (no max limit)."""
+        # No upper limit - user controls when to stop
+        round_data = InterviewRound(
+            round_number=100,
+            question="Round 100 question",
+        )
+        assert round_data.round_number == 100
 
     def test_valid_round_numbers(self) -> None:
-        """InterviewRound accepts valid round numbers."""
-        for i in range(1, MAX_INTERVIEW_ROUNDS + 1):
+        """InterviewRound accepts valid round numbers (1 and above)."""
+        for i in range(1, 25):  # Test up to 25 rounds
             round_data = InterviewRound(round_number=i, question=f"Q{i}")
             assert round_data.round_number == i
 
@@ -438,15 +444,15 @@ class TestInterviewEngineRecordResponse:
         assert isinstance(result.error, ValidationError)
 
     @pytest.mark.asyncio
-    async def test_record_response_marks_complete_at_max_rounds(self) -> None:
-        """record_response marks interview complete at max rounds."""
+    async def test_record_response_does_not_auto_complete(self) -> None:
+        """record_response does NOT auto-complete (user controls when to stop)."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
         state = InterviewState(interview_id="test_001")
 
-        # Add MAX_INTERVIEW_ROUNDS - 1 rounds
-        for i in range(MAX_INTERVIEW_ROUNDS - 1):
+        # Add many rounds
+        for i in range(19):
             state.rounds.append(
                 InterviewRound(
                     round_number=i + 1,
@@ -457,18 +463,19 @@ class TestInterviewEngineRecordResponse:
 
         assert not state.is_complete
 
-        # Add the final round
+        # Add another round - should NOT auto-complete
         result = await engine.record_response(
             state,
-            user_response="Final answer",
-            question="Final question",
+            user_response="Round 20 answer",
+            question="Round 20 question",
         )
 
         assert result.is_ok
         updated_state = result.value
-        assert updated_state.is_complete
-        assert updated_state.status == InterviewStatus.COMPLETED
-        assert len(updated_state.rounds) == MAX_INTERVIEW_ROUNDS
+        # Still NOT complete - user must explicitly complete
+        assert not updated_state.is_complete
+        assert updated_state.status == InterviewStatus.IN_PROGRESS
+        assert len(updated_state.rounds) == 20
 
 
 class TestInterviewEnginePersistence:
@@ -725,7 +732,8 @@ class TestInterviewEngineSystemPrompt:
 
         prompt = engine._build_system_prompt(state)
 
-        assert f"Round 1 of {MAX_INTERVIEW_ROUNDS}" in prompt
+        # Now just shows "Round N" without max limit
+        assert "Round 1" in prompt
 
     def test_system_prompt_includes_context(self) -> None:
         """_build_system_prompt includes initial context."""
