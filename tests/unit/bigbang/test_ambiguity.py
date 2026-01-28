@@ -8,6 +8,7 @@ from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
     CONSTRAINT_CLARITY_WEIGHT,
     GOAL_CLARITY_WEIGHT,
+    MAX_TOKEN_LIMIT,
     SCORING_TEMPERATURE,
     SUCCESS_CRITERIA_CLARITY_WEIGHT,
     AmbiguityScore,
@@ -26,13 +27,14 @@ from ouroboros.providers.base import CompletionResponse, UsageInfo
 def create_mock_completion_response(
     content: str,
     model: str = "openrouter/google/gemini-2.0-flash-001",
+    finish_reason: str = "stop",
 ) -> CompletionResponse:
     """Create a mock completion response."""
     return CompletionResponse(
         content=content,
         model=model,
         usage=UsageInfo(prompt_tokens=200, completion_tokens=100, total_tokens=300),
-        finish_reason="stop",
+        finish_reason=finish_reason,
     )
 
 
@@ -299,7 +301,8 @@ class TestAmbiguityScorerInit:
         assert scorer.llm_adapter == mock_adapter
         assert scorer.model == "openrouter/google/gemini-2.0-flash-001"
         assert scorer.temperature == SCORING_TEMPERATURE
-        assert scorer.max_tokens == 2048
+        assert scorer.initial_max_tokens == 2048
+        assert scorer.max_retries == 3
 
     def test_scorer_custom_values(self) -> None:
         """AmbiguityScorer accepts custom values."""
@@ -308,12 +311,14 @@ class TestAmbiguityScorerInit:
             llm_adapter=mock_adapter,
             model="custom-model",
             temperature=0.2,
-            max_tokens=1024,
+            initial_max_tokens=1024,
+            max_retries=5,
         )
 
         assert scorer.model == "custom-model"
         assert scorer.temperature == 0.2
-        assert scorer.max_tokens == 1024
+        assert scorer.initial_max_tokens == 1024
+        assert scorer.max_retries == 5
 
 
 class TestAmbiguityScorerScore:
@@ -371,22 +376,48 @@ class TestAmbiguityScorerScore:
         # Expected: 1 - (0.9 * 0.4 + 0.8 * 0.3 + 0.7 * 0.3) = 1 - 0.81 = 0.19
         assert abs(ambiguity.overall_score - 0.19) < 0.01
 
-    async def test_score_provider_error(self) -> None:
-        """score returns error on provider failure."""
+    async def test_score_provider_error_retries_then_fails(self) -> None:
+        """score retries on provider errors and returns error after max retries."""
         mock_adapter = MagicMock()
         provider_error = ProviderError("Rate limit exceeded", provider="openai")
         mock_adapter.complete = AsyncMock(return_value=Result.err(provider_error))
 
-        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter, max_retries=3)
         state = create_interview_state_with_rounds()
 
         result = await scorer.score(state)
 
         assert result.is_err
-        assert result.error == provider_error
+        assert "Rate limit exceeded" in result.error.message
+        # Should have retried 3 times
+        assert mock_adapter.complete.call_count == 3
 
-    async def test_score_parse_error(self) -> None:
-        """score returns error on invalid response format."""
+    async def test_score_provider_error_recovers_on_retry(self) -> None:
+        """score recovers when provider error is transient."""
+        mock_adapter = MagicMock()
+        provider_error = ProviderError("Rate limit exceeded", provider="openai")
+        # First call fails, second succeeds
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.err(provider_error),
+                Result.ok(
+                    create_mock_completion_response(
+                        content=create_valid_scoring_response()
+                    )
+                ),
+            ]
+        )
+
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter, max_retries=3)
+        state = create_interview_state_with_rounds()
+
+        result = await scorer.score(state)
+
+        assert result.is_ok
+        assert mock_adapter.complete.call_count == 2
+
+    async def test_score_parse_error_after_retries(self) -> None:
+        """score returns error after all retries exhausted."""
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
@@ -396,7 +427,7 @@ class TestAmbiguityScorerScore:
             )
         )
 
-        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter, max_retries=3)
         state = create_interview_state_with_rounds()
 
         result = await scorer.score(state)
@@ -404,6 +435,75 @@ class TestAmbiguityScorerScore:
         assert result.is_err
         assert isinstance(result.error, ProviderError)
         assert "Failed to parse" in result.error.message
+        assert "after 3 attempts" in result.error.message
+        # Should have retried 3 times
+        assert mock_adapter.complete.call_count == 3
+
+    async def test_score_retries_with_increased_tokens_on_truncation(self) -> None:
+        """score doubles tokens only when response is truncated (finish_reason=length)."""
+        mock_adapter = MagicMock()
+        # First call truncated (finish_reason="length"), second succeeds
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(
+                    create_mock_completion_response(
+                        content="GOAL_CLARITY_SCORE: 0.8\nGOAL_CLARITY_JUSTIFICATION: Good",
+                        finish_reason="length",  # Truncated!
+                    )
+                ),
+                Result.ok(
+                    create_mock_completion_response(
+                        content=create_valid_scoring_response()
+                    )
+                ),
+            ]
+        )
+
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter, initial_max_tokens=1024)
+        state = create_interview_state_with_rounds()
+
+        result = await scorer.score(state)
+
+        assert result.is_ok
+        assert mock_adapter.complete.call_count == 2
+        # Verify tokens were doubled on truncation retry
+        first_config = mock_adapter.complete.call_args_list[0][0][1]
+        second_config = mock_adapter.complete.call_args_list[1][0][1]
+        assert first_config.max_tokens == 1024
+        assert second_config.max_tokens == 2048
+
+    async def test_score_retries_without_token_increase_on_format_error(self) -> None:
+        """score does not increase tokens when format error without truncation."""
+        mock_adapter = MagicMock()
+        # First call has format error but not truncated, second succeeds
+        mock_adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(
+                    create_mock_completion_response(
+                        content="GOAL_CLARITY_SCORE: 0.8\nGOAL_CLARITY_JUSTIFICATION: Good",
+                        finish_reason="stop",  # Not truncated
+                    )
+                ),
+                Result.ok(
+                    create_mock_completion_response(
+                        content=create_valid_scoring_response()
+                    )
+                ),
+            ]
+        )
+
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter, initial_max_tokens=1024)
+        state = create_interview_state_with_rounds()
+
+        result = await scorer.score(state)
+
+        assert result.is_ok
+        assert mock_adapter.complete.call_count == 2
+        # Verify tokens were NOT increased (same value)
+        first_config = mock_adapter.complete.call_args_list[0][0][1]
+        second_config = mock_adapter.complete.call_args_list[1][0][1]
+        assert first_config.max_tokens == 1024
+        assert second_config.max_tokens == 1024  # Same, not doubled
 
     async def test_score_uses_reproducible_temperature(self) -> None:
         """score uses low temperature for reproducibility."""
@@ -972,3 +1072,40 @@ class TestScoringTemperature:
     def test_temperature_is_low(self) -> None:
         """SCORING_TEMPERATURE is 0.1 for reproducibility."""
         assert SCORING_TEMPERATURE == 0.1
+
+
+class TestMaxTokenLimit:
+    """Test MAX_TOKEN_LIMIT constant."""
+
+    def test_max_token_limit_value(self) -> None:
+        """MAX_TOKEN_LIMIT prevents unbounded token growth."""
+        assert MAX_TOKEN_LIMIT == 8192
+
+    async def test_token_growth_capped_at_max_limit(self) -> None:
+        """Token growth is capped at MAX_TOKEN_LIMIT even with repeated truncation."""
+        mock_adapter = MagicMock()
+        # All calls fail with truncation - tokens should cap at MAX_TOKEN_LIMIT
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(
+                create_mock_completion_response(
+                    content="GOAL_CLARITY_SCORE: 0.8\nGOAL_CLARITY_JUSTIFICATION: Good",
+                    finish_reason="length",  # Truncated
+                )
+            )
+        )
+
+        # Start with 4096, should try 4096 -> 8192 -> 8192 (capped)
+        scorer = AmbiguityScorer(
+            llm_adapter=mock_adapter, initial_max_tokens=4096, max_retries=3
+        )
+        state = create_interview_state_with_rounds()
+
+        result = await scorer.score(state)
+
+        assert result.is_err  # All retries fail
+        assert mock_adapter.complete.call_count == 3
+        # Verify token progression: 4096 -> 8192 -> 8192 (capped at MAX_TOKEN_LIMIT)
+        configs = [call[0][1] for call in mock_adapter.complete.call_args_list]
+        assert configs[0].max_tokens == 4096
+        assert configs[1].max_tokens == 8192  # Doubled
+        assert configs[2].max_tokens == 8192  # Capped, not 16384
