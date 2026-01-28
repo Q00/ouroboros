@@ -1078,13 +1078,13 @@ class TestMaxTokenLimit:
     """Test MAX_TOKEN_LIMIT constant."""
 
     def test_max_token_limit_value(self) -> None:
-        """MAX_TOKEN_LIMIT prevents unbounded token growth."""
-        assert MAX_TOKEN_LIMIT == 8192
+        """MAX_TOKEN_LIMIT is None (no limit, rely on model's context window)."""
+        assert MAX_TOKEN_LIMIT is None
 
-    async def test_token_growth_capped_at_max_limit(self) -> None:
-        """Token growth is capped at MAX_TOKEN_LIMIT even with repeated truncation."""
+    async def test_token_growth_unbounded_when_no_limit(self) -> None:
+        """Token growth doubles without cap when MAX_TOKEN_LIMIT is None."""
         mock_adapter = MagicMock()
-        # All calls fail with truncation - tokens should cap at MAX_TOKEN_LIMIT
+        # All calls fail with truncation - tokens should keep doubling
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
                 create_mock_completion_response(
@@ -1094,7 +1094,7 @@ class TestMaxTokenLimit:
             )
         )
 
-        # Start with 4096, should try 4096 -> 8192 -> 8192 (capped)
+        # Start with 4096, should try 4096 -> 8192 -> 16384 (no cap)
         scorer = AmbiguityScorer(
             llm_adapter=mock_adapter, initial_max_tokens=4096, max_retries=3
         )
@@ -1104,8 +1104,8 @@ class TestMaxTokenLimit:
 
         assert result.is_err  # All retries fail
         assert mock_adapter.complete.call_count == 3
-        # Verify token progression: 4096 -> 8192 -> 8192 (capped at MAX_TOKEN_LIMIT)
+        # Verify token progression: 4096 -> 8192 -> 16384 (no cap)
         configs = [call[0][1] for call in mock_adapter.complete.call_args_list]
         assert configs[0].max_tokens == 4096
         assert configs[1].max_tokens == 8192  # Doubled
-        assert configs[2].max_tokens == 8192  # Capped, not 16384
+        assert configs[2].max_tokens == 16384  # Doubled again, no cap

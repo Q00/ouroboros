@@ -36,8 +36,8 @@ DEFAULT_MODEL = "openrouter/google/gemini-2.0-flash-001"
 # Temperature for reproducible scoring
 SCORING_TEMPERATURE = 0.1
 
-# Maximum token limit to prevent cost explosion
-MAX_TOKEN_LIMIT = 8192
+# Maximum token limit (None = no limit, rely on model's context window)
+MAX_TOKEN_LIMIT: int | None = None
 
 
 class ComponentScore(BaseModel):
@@ -234,8 +234,10 @@ class AmbiguityScorer:
                 is_truncated = result.value.finish_reason == "length"
 
                 if is_truncated:
-                    # Fix #1: Cap token growth with MAX_TOKEN_LIMIT
-                    next_tokens = min(current_max_tokens * 2, MAX_TOKEN_LIMIT)
+                    # Double tokens on truncation (no upper limit)
+                    next_tokens = current_max_tokens * 2
+                    if MAX_TOKEN_LIMIT is not None:
+                        next_tokens = min(next_tokens, MAX_TOKEN_LIMIT)
                     log.warning(
                         "ambiguity.scoring.truncated_retrying",
                         interview_id=state.interview_id,
