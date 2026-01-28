@@ -1,6 +1,6 @@
 [project]
 name = "ouroboros-ai"
-version = "0.1.0a1"
+version = "0.1.1"
 description = "Self-Improving AI Workflow System"
 readme = "README.md"
 authors = [
