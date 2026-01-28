@@ -50,6 +50,12 @@ from typing import Any
 from pydantic import BaseModel, Field
 import structlog
 
+from ouroboros.core.security import (
+    is_sensitive_field,
+    is_sensitive_value,
+    mask_api_key,
+)
+
 
 class LogMode(str, Enum):
     """Logging output mode."""
@@ -159,6 +165,68 @@ def _setup_file_handler(config: LoggingConfig) -> TimedRotatingFileHandler | Non
     return handler
 
 
+def _mask_sensitive_data(
+    _logger: Any,
+    _method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Structlog processor that masks sensitive data in log entries.
+
+    Automatically detects and masks API keys, tokens, and other sensitive
+    values to prevent accidental exposure in logs.
+
+    Args:
+        _logger: The logger instance (unused).
+        _method_name: The log method name (unused).
+        event_dict: The event dictionary to process.
+
+    Returns:
+        Event dictionary with sensitive values masked.
+    """
+    for key, value in list(event_dict.items()):
+        # Skip standard structlog keys
+        if key in ("event", "level", "timestamp", "filename", "lineno"):
+            continue
+
+        # Check if field name indicates sensitivity
+        if is_sensitive_field(key):
+            event_dict[key] = "<REDACTED>"
+            continue
+
+        # Check if value looks sensitive
+        if isinstance(value, str) and is_sensitive_value(value):
+            event_dict[key] = mask_api_key(value)
+            continue
+
+        # Recursively handle nested dicts
+        if isinstance(value, dict):
+            event_dict[key] = _mask_dict_sensitive_data(value)
+
+    return event_dict
+
+
+def _mask_dict_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Recursively mask sensitive data in a dictionary.
+
+    Args:
+        data: Dictionary to process.
+
+    Returns:
+        Dictionary with sensitive values masked.
+    """
+    result = {}
+    for key, value in data.items():
+        if is_sensitive_field(key):
+            result[key] = "<REDACTED>"
+        elif isinstance(value, str) and is_sensitive_value(value):
+            result[key] = mask_api_key(value)
+        elif isinstance(value, dict):
+            result[key] = _mask_dict_sensitive_data(value)
+        else:
+            result[key] = value
+    return result
+
+
 def _get_shared_processors() -> list[Any]:
     """Get the shared processor chain for structlog.
 
@@ -170,6 +238,8 @@ def _get_shared_processors() -> list[Any]:
     return [
         # Merge contextvars into event dict (for cross-async context)
         structlog.contextvars.merge_contextvars,
+        # Mask sensitive data (API keys, tokens, etc.) - SECURITY
+        _mask_sensitive_data,
         # Add log level to all entries
         structlog.processors.add_log_level,
         # Add timestamp in ISO 8601 format
