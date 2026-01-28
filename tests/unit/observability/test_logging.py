@@ -553,3 +553,77 @@ class TestExceptionLogging:
         captured = capsys.readouterr()
         assert "error.occurred" in captured.out
         assert "ValueError" in captured.out or "test exception" in captured.out
+
+
+class TestSensitiveDataMasking:
+    """Test that sensitive data is masked in logs."""
+
+    def test_api_key_field_masked(self, capsys: Any) -> None:
+        """API key fields are automatically masked."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info("config.loaded", api_key="sk-1234567890abcdef")
+
+        captured = capsys.readouterr()
+        output = captured.out
+        # Should not contain the actual key
+        assert "1234567890" not in output
+        # Should contain redacted marker
+        assert "REDACTED" in output
+
+    def test_password_field_masked(self, capsys: Any) -> None:
+        """Password fields are automatically masked."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info("auth.attempt", password="super_secret_123")
+
+        captured = capsys.readouterr()
+        output = captured.out
+        assert "super_secret_123" not in output
+        assert "REDACTED" in output
+
+    def test_sensitive_value_pattern_masked(self, capsys: Any) -> None:
+        """Values matching sensitive patterns are masked."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info("request.headers", some_field="sk-ant-1234567890abcdef")
+
+        captured = capsys.readouterr()
+        output = captured.out
+        # The full key should not appear
+        assert "1234567890abcdef" not in output
+
+    def test_normal_fields_not_masked(self, capsys: Any) -> None:
+        """Non-sensitive fields are not masked."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info("user.action", name="John Doe", email="john@example.com")
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out.strip())
+        assert data["name"] == "John Doe"
+        assert data["email"] == "john@example.com"
+
+    def test_nested_sensitive_fields_masked(self, capsys: Any) -> None:
+        """Sensitive fields in nested dicts are masked."""
+        config = LoggingConfig(mode=LogMode.PROD, enable_file_logging=False)
+        configure_logging(config)
+        log = get_logger()
+
+        log.info(
+            "config.loaded",
+            config={"provider": {"api_key": "sk-secret123"}, "name": "test"}
+        )
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out.strip())
+        assert data["config"]["provider"]["api_key"] == "<REDACTED>"
+        assert data["config"]["name"] == "test"

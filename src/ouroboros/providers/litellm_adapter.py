@@ -12,6 +12,7 @@ import stamina
 import structlog
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.security import InputValidator, MAX_LLM_RESPONSE_LENGTH
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -193,9 +194,22 @@ class LiteLLMAdapter:
         """
         choice = response.choices[0]
         usage = response.usage
+        content = choice.message.content or ""
+
+        # Security: Validate LLM response length to prevent DoS
+        is_valid, error_msg = InputValidator.validate_llm_response(content)
+        if not is_valid:
+            log.warning(
+                "llm.response.truncated",
+                model=config.model,
+                original_length=len(content),
+                max_length=MAX_LLM_RESPONSE_LENGTH,
+            )
+            # Truncate oversized responses instead of failing
+            content = content[:MAX_LLM_RESPONSE_LENGTH]
 
         return CompletionResponse(
-            content=choice.message.content or "",
+            content=content,
             model=response.model or config.model,
             usage=UsageInfo(
                 prompt_tokens=usage.prompt_tokens if usage else 0,

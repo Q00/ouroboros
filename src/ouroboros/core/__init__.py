@@ -27,6 +27,12 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.core.security import (
+    InputValidator,
+    mask_api_key,
+    sanitize_for_logging,
+    validate_api_key_format,
+)
 from ouroboros.core.types import CostUnits, DriftScore, EventPayload, Result
 
 __all__ = [
@@ -59,4 +65,9 @@ __all__ = [
     "compress_context",
     "compress_context_with_llm",
     "create_filtered_context",
+    # Security utilities
+    "InputValidator",
+    "mask_api_key",
+    "validate_api_key_format",
+    "sanitize_for_logging",
 ]

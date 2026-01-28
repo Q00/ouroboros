@@ -32,7 +32,7 @@
 <br/>
 
 <p align="center">
-  <code>73 modules</code> · <code>1,292 tests</code> · <code>97%+ coverage</code>
+  <code>74 modules</code> · <code>1,341 tests</code> · <code>97%+ coverage</code>
 </p>
 
 <br/>
@@ -479,6 +479,36 @@ uv run ouroboros status health
 | Infinite Retry | Stagnation | Lateral thinking |
 | Immediate Optimization | Yak shaving | TODO registry (defer) |
 | Vague Seeds | GIGO | Ambiguity ≤ 0.2 |
+
+<br/>
+
+---
+
+<br/>
+
+## ◈ Security
+
+<br/>
+
+Ouroboros includes built-in security features:
+
+| Feature | Description |
+|---------|-------------|
+| **API Key Masking** | Keys are automatically masked in logs (`sk-...xxxx`) |
+| **Log Sanitization** | Sensitive fields (password, token, secret) are redacted |
+| **Input Validation** | Size limits prevent DoS attacks (50KB context, 1MB seed files) |
+| **Credentials Protection** | `credentials.yaml` uses chmod 600 permissions |
+
+```python
+from ouroboros.core import mask_api_key, sanitize_for_logging
+
+# Mask API keys for display
+masked = mask_api_key("sk-1234567890abcdef")  # "sk-...cdef"
+
+# Sanitize dicts before logging
+safe_data = sanitize_for_logging({"api_key": "sk-secret", "name": "test"})
+# {"api_key": "<REDACTED>", "name": "test"}
+```
 
 <br/>
 

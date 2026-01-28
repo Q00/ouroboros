@@ -15,6 +15,7 @@ import yaml
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.core.security import InputValidator
 
 app = typer.Typer(
     name="run",
@@ -33,8 +34,15 @@ def _load_seed_from_yaml(seed_file: Path) -> dict:
         Seed configuration dictionary.
 
     Raises:
-        typer.Exit: If file cannot be loaded.
+        typer.Exit: If file cannot be loaded or exceeds size limit.
     """
+    # Security: Validate file size to prevent DoS
+    file_size = seed_file.stat().st_size
+    is_valid, error_msg = InputValidator.validate_seed_file_size(file_size)
+    if not is_valid:
+        print_error(f"Seed file validation failed: {error_msg}")
+        raise typer.Exit(1)
+
     try:
         with open(seed_file) as f:
             return yaml.safe_load(f)

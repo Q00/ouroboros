@@ -1,6 +1,19 @@
-"""Ouroboros - Self-Improving AI Workflow System."""
+"""Ouroboros - Self-Improving AI Workflow System.
 
-__version__ = "0.1.0"
+A workflow system that uses Socratic questioning and ontological analysis
+to transform ambiguous requirements into executable specifications.
+
+Example:
+    # Using CLI
+    ouroboros init start "I want to build a task management CLI"
+    ouroboros run workflow seed.yaml
+
+    # Using Python
+    from ouroboros.core import Result, ValidationError
+    from ouroboros.bigbang import InterviewEngine
+"""
+
+__version__ = "0.2.0"
 
 __all__ = ["__version__", "main"]
 

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 import structlog
 
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.security import InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -186,9 +187,11 @@ class InterviewEngine:
         Returns:
             Result containing the new InterviewState or ValidationError.
         """
-        if not initial_context.strip():
+        # Validate initial context with security limits
+        is_valid, error_msg = InputValidator.validate_initial_context(initial_context)
+        if not is_valid:
             return Result.err(
-                ValidationError("Initial context cannot be empty", field="initial_context")
+                ValidationError(error_msg, field="initial_context")
             )
 
         if interview_id is None:
@@ -285,9 +288,11 @@ class InterviewEngine:
         Returns:
             Result containing updated state or ValidationError.
         """
-        if not user_response.strip():
+        # Validate user response with security limits
+        is_valid, error_msg = InputValidator.validate_user_response(user_response)
+        if not is_valid:
             return Result.err(
-                ValidationError("User response cannot be empty", field="user_response")
+                ValidationError(error_msg, field="user_response")
             )
 
         if state.is_complete:
