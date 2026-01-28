@@ -1,0 +1,56 @@
+goal: Create a command-line TODO list application with persistent storage
+
+constraints:
+  - Python 3.12 or higher
+  - Use only standard library (no external dependencies)
+  - Store tasks in JSON format
+  - Command-line interface with subcommands
+
+acceptance_criteria:
+  - Create todo.py with argparse-based CLI structure supporting add/list/complete subcommands
+  - Implement 'add' command that appends new tasks to JSON file with timestamp and ID
+  - Implement 'list' command that displays all tasks with their status (pending/completed)
+  - Implement 'complete' command that marks tasks as done by ID
+  - Add proper error handling for file operations and invalid inputs
+  - Write tests that verify add/list/complete functionality
+
+ontology_schema:
+  name: TodoCLI
+  description: Command-line TODO list application
+  fields:
+    - name: cli_file
+      field_type: string
+      description: Path to todo.py CLI script
+      required: true
+    - name: test_file
+      field_type: string
+      description: Path to test file
+      required: true
+    - name: task_count
+      field_type: integer
+      description: Number of tasks managed
+      required: false
+
+evaluation_principles:
+  - name: functionality
+    description: All commands work correctly
+    weight: 1.0
+  - name: data_persistence
+    description: Tasks are saved and loaded correctly
+    weight: 1.0
+  - name: error_handling
+    description: Graceful handling of edge cases
+    weight: 0.8
+  - name: test_coverage
+    description: Key functionality is tested
+    weight: 0.7
+
+exit_conditions:
+  - name: all_criteria_met
+    description: All 6 acceptance criteria completed
+    evaluation_criteria: CLI works with persistent storage and tests pass
+
+metadata:
+  seed_id: demo_todo_cli
+  version: 1.0.0
+  ambiguity_score: 0.15

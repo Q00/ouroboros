@@ -74,6 +74,9 @@ class SessionTracker:
         progress: Progress data (message count, current step, etc.).
         messages_processed: Number of messages processed so far.
         last_message_time: Timestamp of last processed message.
+        started_at: When the session started (alias for compatibility).
+        completed_at: When the session completed (if completed).
+        error_message: Error message if session failed.
     """
 
     session_id: str
@@ -84,6 +87,9 @@ class SessionTracker:
     progress: dict[str, Any] = field(default_factory=dict)
     messages_processed: int = 0
     last_message_time: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
 
     @classmethod
     def create(
@@ -102,12 +108,14 @@ class SessionTracker:
         Returns:
             New SessionTracker instance.
         """
+        now = datetime.now(UTC)
         return cls(
             session_id=session_id or f"orch_{uuid4().hex[:12]}",
             execution_id=execution_id,
             seed_id=seed_id,
             status=SessionStatus.RUNNING,
-            start_time=datetime.now(UTC),
+            start_time=now,
+            started_at=now,
         )
 
     def with_progress(self, update: dict[str, Any]) -> SessionTracker:
@@ -424,19 +432,23 @@ class SessionRepository:
                 )
 
             # Create initial tracker from start event
+            start_time = datetime.fromisoformat(
+                start_event.data.get("start_time", datetime.now(UTC).isoformat())
+            )
             tracker = SessionTracker(
                 session_id=session_id,
                 execution_id=start_event.data.get("execution_id", ""),
                 seed_id=start_event.data.get("seed_id", ""),
                 status=SessionStatus.RUNNING,
-                start_time=datetime.fromisoformat(
-                    start_event.data.get("start_time", datetime.now(UTC).isoformat())
-                ),
+                start_time=start_time,
+                started_at=start_time,
             )
 
             # Replay subsequent events
             messages_processed = 0
             last_progress: dict[str, Any] = {}
+            completed_at: datetime | None = None
+            error_message: str | None = None
 
             for event in events:
                 if event.type == "orchestrator.progress.updated":
@@ -444,8 +456,11 @@ class SessionRepository:
                     last_progress = event.data.get("progress", {})
                 elif event.type == "orchestrator.session.completed":
                     tracker = tracker.with_status(SessionStatus.COMPLETED)
+                    if "completed_at" in event.data:
+                        completed_at = datetime.fromisoformat(event.data["completed_at"])
                 elif event.type == "orchestrator.session.failed":
                     tracker = tracker.with_status(SessionStatus.FAILED)
+                    error_message = event.data.get("error", "Unknown error")
                 elif event.type == "orchestrator.session.paused":
                     tracker = tracker.with_status(SessionStatus.PAUSED)
 
@@ -454,6 +469,8 @@ class SessionRepository:
                 tracker,
                 progress=last_progress,
                 messages_processed=messages_processed,
+                completed_at=completed_at,
+                error_message=error_message,
             )
 
             log.info(

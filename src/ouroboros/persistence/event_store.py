@@ -5,6 +5,8 @@ with aiosqlite backend.
 """
 
 
+import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from sqlalchemy import select
@@ -188,3 +190,79 @@ class EventStore:
         if self._engine is not None:
             await self._engine.dispose()
             self._engine = None
+
+    async def poll_events(
+        self,
+        aggregate_type: str,
+        aggregate_id: str,
+        since_timestamp: str | None = None,
+        poll_interval: float = 0.5,
+    ) -> AsyncIterator[BaseEvent]:
+        """Poll for new events on an aggregate.
+
+        This method continuously polls the event store for new events,
+        yielding them as they appear. Useful for real-time progress tracking.
+
+        Args:
+            aggregate_type: Type of aggregate to poll.
+            aggregate_id: ID of the aggregate.
+            since_timestamp: Optional timestamp to start from (ISO format).
+            poll_interval: Seconds between polls. Default: 0.5
+
+        Yields:
+            New events as they are appended to the store.
+
+        Raises:
+            PersistenceError: If polling fails.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="poll_events",
+            )
+
+        last_event_id = None
+
+        try:
+            while True:
+                async with self._engine.begin() as conn:
+                    query = (
+                        select(events_table)
+                        .where(events_table.c.aggregate_type == aggregate_type)
+                        .where(events_table.c.aggregate_id == aggregate_id)
+                        .order_by(events_table.c.timestamp)
+                    )
+
+                    # Filter by timestamp if provided
+                    if since_timestamp:
+                        query = query.where(events_table.c.timestamp >= since_timestamp)
+
+                    # Skip already seen events
+                    if last_event_id:
+                        query = query.where(events_table.c.id > last_event_id)
+
+                    result = await conn.execute(query)
+                    rows = result.mappings().all()
+
+                    # Yield new events
+                    for row in rows:
+                        event = BaseEvent.from_db_row(dict(row))
+                        last_event_id = event.id
+                        yield event
+
+                # Wait before next poll
+                await asyncio.sleep(poll_interval)
+
+        except GeneratorExit:
+            # Generator closed normally
+            return
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to poll events: {e}",
+                operation="poll",
+                table="events",
+                details={
+                    "aggregate_type": aggregate_type,
+                    "aggregate_id": aggregate_id,
+                },
+            ) from e
