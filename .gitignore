@@ -98,3 +98,5 @@ Thumbs.db
 # BMad framework (tooling - not project-specific)
 _bmad/
 .claude/commands/bmad/
+*.cast
+# Ignore asciinema recordings
