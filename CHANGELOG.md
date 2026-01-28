@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-01-28
+
+### Added
+
+#### Documentation
+- **CLI Reference** (`docs/cli-reference.md`) - Complete command reference with examples
+- **Prerequisites section** in README with Python 3.14+ requirement
+- **Contributing section** with links to Issues and Discussions
+- **OSS badges** - PyPI version, Python version, License
+
+#### Interview System
+- **Tiered confirmation system** for interview rounds:
+  - Rounds 1-3: Auto-continue (minimum context gathering)
+  - Rounds 4-15: Ask "Continue?" after each round
+  - Rounds 16+: Ask "Continue?" with diminishing returns warning
+- **No hard round limit** - User controls when to stop
+- New constants: `MIN_ROUNDS_BEFORE_EARLY_EXIT`, `SOFT_LIMIT_WARNING_THRESHOLD`
+
+### Changed
+
+#### Interview Engine
+- Removed `MAX_INTERVIEW_ROUNDS` hard limit (was 10)
+- `is_complete` now only checks status (user-controlled completion)
+- `record_response()` no longer auto-completes at max rounds
+- System prompt simplified to show "Round N" instead of "Round N of 10"
+
+#### CLI Init Command
+- Extracted `_run_interview_loop()` helper to eliminate code duplication (~60 lines)
+- State saved immediately after status mutation for consistency
+- Updated welcome message to reflect no round limit
+
+### Removed
+- Korean-language requirement documents (`requirement/` folder)
+- Hard round limit enforcement in interview engine
+
+### Fixed
+- Code duplication in init.py interview continuation flow
+
 ## [0.2.0] - 2026-01-27
 
 ### Added
