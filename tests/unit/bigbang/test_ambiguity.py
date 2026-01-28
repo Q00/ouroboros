@@ -46,13 +46,17 @@ def create_valid_scoring_response(
     success_score: float = 0.8,
     success_justification: str = "Success criteria are measurable.",
 ) -> str:
-    """Create a valid LLM scoring response string."""
-    return f"""GOAL_CLARITY_SCORE: {goal_score}
-GOAL_CLARITY_JUSTIFICATION: {goal_justification}
-CONSTRAINT_CLARITY_SCORE: {constraint_score}
-CONSTRAINT_CLARITY_JUSTIFICATION: {constraint_justification}
-SUCCESS_CRITERIA_CLARITY_SCORE: {success_score}
-SUCCESS_CRITERIA_CLARITY_JUSTIFICATION: {success_justification}"""
+    """Create a valid LLM scoring response string in JSON format."""
+    import json
+
+    return json.dumps({
+        "goal_clarity_score": goal_score,
+        "goal_clarity_justification": goal_justification,
+        "constraint_clarity_score": constraint_score,
+        "constraint_clarity_justification": constraint_justification,
+        "success_criteria_clarity_score": success_score,
+        "success_criteria_clarity_justification": success_justification,
+    })
 
 
 def create_interview_state_with_rounds(
@@ -665,41 +669,31 @@ class TestAmbiguityScorerParseResponse:
         mock_adapter = MagicMock()
         scorer = AmbiguityScorer(llm_adapter=mock_adapter)
 
-        response = """GOAL_CLARITY_SCORE: 0.9
-GOAL_CLARITY_JUSTIFICATION: Good goal."""
+        # JSON with missing field
+        response = '{"goal_clarity_score": 0.9, "goal_clarity_justification": "Good goal."}'
 
         with pytest.raises(ValueError, match="Missing required field"):
             scorer._parse_scoring_response(response)
 
-    def test_parse_response_invalid_score_format(self) -> None:
-        """_parse_scoring_response raises error for invalid score format."""
+    def test_parse_response_invalid_json(self) -> None:
+        """_parse_scoring_response raises error for invalid JSON."""
         mock_adapter = MagicMock()
         scorer = AmbiguityScorer(llm_adapter=mock_adapter)
 
-        response = """GOAL_CLARITY_SCORE: not_a_number
-GOAL_CLARITY_JUSTIFICATION: Test
-CONSTRAINT_CLARITY_SCORE: 0.8
-CONSTRAINT_CLARITY_JUSTIFICATION: Test
-SUCCESS_CRITERIA_CLARITY_SCORE: 0.7
-SUCCESS_CRITERIA_CLARITY_JUSTIFICATION: Test"""
+        response = "This is not valid JSON at all"
 
-        with pytest.raises(ValueError, match="Invalid score value"):
+        with pytest.raises(ValueError, match="Invalid JSON response"):
             scorer._parse_scoring_response(response)
 
-    def test_parse_response_with_extra_whitespace(self) -> None:
-        """_parse_scoring_response handles extra whitespace."""
+    def test_parse_response_with_markdown_code_block(self) -> None:
+        """_parse_scoring_response handles JSON in markdown code block."""
         mock_adapter = MagicMock()
         scorer = AmbiguityScorer(llm_adapter=mock_adapter)
 
-        response = """
-GOAL_CLARITY_SCORE:   0.85
-GOAL_CLARITY_JUSTIFICATION:   Clear goal with details.
-
-CONSTRAINT_CLARITY_SCORE: 0.75
-CONSTRAINT_CLARITY_JUSTIFICATION: Good constraints.
-
-SUCCESS_CRITERIA_CLARITY_SCORE: 0.65
-SUCCESS_CRITERIA_CLARITY_JUSTIFICATION: Clear criteria.
+        response = """Here is the analysis:
+```json
+{"goal_clarity_score": 0.85, "goal_clarity_justification": "Clear goal with details.", "constraint_clarity_score": 0.75, "constraint_clarity_justification": "Good constraints.", "success_criteria_clarity_score": 0.65, "success_criteria_clarity_justification": "Clear criteria."}
+```
 """
 
         breakdown = scorer._parse_scoring_response(response)

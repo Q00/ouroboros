@@ -9,6 +9,8 @@ The scoring algorithm evaluates three key components:
 - Success Criteria Clarity (30%): How measurable the success criteria are
 """
 
+import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -139,6 +141,7 @@ class AmbiguityScorer:
     temperature: float = SCORING_TEMPERATURE
     initial_max_tokens: int = 2048
     max_retries: int | None = None  # None = unlimited retries
+    max_format_error_retries: int = 5  # Stop after N format errors (non-truncation)
 
     async def score(
         self, state: InterviewState
@@ -303,38 +306,19 @@ class AmbiguityScorer:
         Returns:
             System prompt string.
         """
-        return """You are an expert requirements analyst evaluating the clarity of software requirements.
-
-Your task is to assess how clear and unambiguous the requirements are based on an interview conversation.
+        return """You are an expert requirements analyst. Evaluate the clarity of software requirements.
 
 Evaluate three components:
-1. Goal Clarity (40% weight): Is the goal statement specific and well-defined?
-   - Clear: "Build a CLI tool for task management with project grouping"
-   - Unclear: "Build something useful for productivity"
+1. Goal Clarity (40%): Is the goal specific and well-defined?
+2. Constraint Clarity (30%): Are constraints and limitations specified?
+3. Success Criteria Clarity (30%): Are success criteria measurable?
 
-2. Constraint Clarity (30% weight): Are constraints and limitations specified?
-   - Clear: "Must use Python 3.14+, no external database dependencies"
-   - Unclear: No mention of technical constraints or limitations
+Score each from 0.0 (unclear) to 1.0 (perfectly clear). Scores above 0.8 require very specific requirements.
 
-3. Success Criteria Clarity (30% weight): Are success criteria measurable?
-   - Clear: "Tasks can be created, edited, deleted; supports filtering by status"
-   - Unclear: "The tool should be easy to use"
+RESPOND ONLY WITH VALID JSON. No other text before or after.
 
-For each component, provide:
-- A clarity score between 0.0 (completely unclear) and 1.0 (perfectly clear)
-- A brief justification (1-2 sentences max) explaining the score
-
-IMPORTANT: You MUST provide ALL six fields below. Keep justifications concise.
-
-Respond in this exact format:
-GOAL_CLARITY_SCORE: <score>
-GOAL_CLARITY_JUSTIFICATION: <justification in 1-2 sentences>
-CONSTRAINT_CLARITY_SCORE: <score>
-CONSTRAINT_CLARITY_JUSTIFICATION: <justification in 1-2 sentences>
-SUCCESS_CRITERIA_CLARITY_SCORE: <score>
-SUCCESS_CRITERIA_CLARITY_JUSTIFICATION: <justification in 1-2 sentences>
-
-Be strict in your evaluation. Scores above 0.8 require very specific, measurable requirements."""
+Required JSON format:
+{"goal_clarity_score": 0.0, "goal_clarity_justification": "string", "constraint_clarity_score": 0.0, "constraint_clarity_justification": "string", "success_criteria_clarity_score": 0.0, "success_criteria_clarity_justification": "string"}"""
 
     def _build_scoring_user_prompt(self, context: str) -> str:
         """Build user prompt with interview context.
@@ -365,27 +349,23 @@ Analyze each component and provide scores with justifications."""
         Raises:
             ValueError: If response cannot be parsed.
         """
-        lines = response.strip().split("\n")
-        scores: dict[str, Any] = {}
+        # Extract JSON from response (handle markdown code blocks)
+        text = response.strip()
 
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
+        # Try to find JSON in markdown code block
+        json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if json_match:
+            text = json_match.group(1)
+        else:
+            # Try to find raw JSON object
+            json_match = re.search(r"\{.*\}", text, re.DOTALL)
+            if json_match:
+                text = json_match.group(0)
 
-            for prefix in [
-                "GOAL_CLARITY_SCORE:",
-                "GOAL_CLARITY_JUSTIFICATION:",
-                "CONSTRAINT_CLARITY_SCORE:",
-                "CONSTRAINT_CLARITY_JUSTIFICATION:",
-                "SUCCESS_CRITERIA_CLARITY_SCORE:",
-                "SUCCESS_CRITERIA_CLARITY_JUSTIFICATION:",
-            ]:
-                if line.startswith(prefix):
-                    key = prefix[:-1].lower()  # Remove colon and lowercase
-                    value = line[len(prefix) :].strip()
-                    scores[key] = value
-                    break
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON response: {e}") from e
 
         # Validate all required fields are present
         required_fields = [
@@ -398,35 +378,32 @@ Analyze each component and provide scores with justifications."""
         ]
 
         for field_name in required_fields:
-            if field_name not in scores:
+            if field_name not in data:
                 raise ValueError(f"Missing required field: {field_name}")
 
-        # Parse scores to float
-        def parse_score(value: str) -> float:
-            try:
-                score = float(value)
-                return max(0.0, min(1.0, score))  # Clamp to [0, 1]
-            except ValueError as e:
-                raise ValueError(f"Invalid score value: {value}") from e
+        # Parse and clamp scores
+        def clamp_score(value: Any) -> float:
+            score = float(value)
+            return max(0.0, min(1.0, score))
 
         return ScoreBreakdown(
             goal_clarity=ComponentScore(
                 name="Goal Clarity",
-                clarity_score=parse_score(scores["goal_clarity_score"]),
+                clarity_score=clamp_score(data["goal_clarity_score"]),
                 weight=GOAL_CLARITY_WEIGHT,
-                justification=scores["goal_clarity_justification"],
+                justification=str(data["goal_clarity_justification"]),
             ),
             constraint_clarity=ComponentScore(
                 name="Constraint Clarity",
-                clarity_score=parse_score(scores["constraint_clarity_score"]),
+                clarity_score=clamp_score(data["constraint_clarity_score"]),
                 weight=CONSTRAINT_CLARITY_WEIGHT,
-                justification=scores["constraint_clarity_justification"],
+                justification=str(data["constraint_clarity_justification"]),
             ),
             success_criteria_clarity=ComponentScore(
                 name="Success Criteria Clarity",
-                clarity_score=parse_score(scores["success_criteria_clarity_score"]),
+                clarity_score=clamp_score(data["success_criteria_clarity_score"]),
                 weight=SUCCESS_CRITERIA_CLARITY_WEIGHT,
-                justification=scores["success_criteria_clarity_justification"],
+                justification=str(data["success_criteria_clarity_justification"]),
             ),
         )
 
