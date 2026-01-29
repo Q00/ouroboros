@@ -156,6 +156,8 @@ src/ouroboros/
 |   +-- runner.py      # Orchestration logic
 |   +-- session.py     # Session state tracking
 |   +-- events.py      # Orchestrator events
+|   +-- mcp_tools.py   # MCP tool provider for external tools
+|   +-- mcp_config.py  # MCP client configuration loading
 |
 +-- mcp/            # Model Context Protocol integration
 |   +-- client/        # MCP client for external servers
@@ -236,9 +238,56 @@ The orchestrator module integrates with Claude Agent SDK for:
 
 ### MCP (Model Context Protocol)
 
-Ouroboros can both consume and expose MCP:
-- **Client** - Connect to external MCP servers for additional tools/resources
-- **Server** - Expose Ouroboros as an MCP server for other AI agents
+Ouroboros functions as an **MCP Hub**, capable of both consuming and exposing MCP:
+
+#### MCP Server Mode
+Expose Ouroboros as an MCP server for other AI agents:
+```bash
+ouroboros mcp serve
+```
+- Provides tools: `ouroboros_execute_seed`, `ouroboros_session_status`, `ouroboros_query_events`
+- Integrates with Claude Desktop and other MCP clients
+
+#### MCP Client Mode
+Connect to external MCP servers during workflow execution:
+```bash
+ouroboros run workflow --orchestrator --mcp-config mcp.yaml seed.yaml
+```
+- Discovers tools from configured MCP servers
+- Merges with built-in tools (Read, Write, Edit, Bash, Glob, Grep)
+- Provides additional capabilities (filesystem, GitHub, databases, etc.)
+
+**Tool Precedence:**
+1. Built-in tools always win
+2. First MCP server in config wins for duplicate tool names
+3. Use `--mcp-tool-prefix` to namespace MCP tools
+
+**Architecture:**
+```
+                           +------------------+
+                           |   Ouroboros      |
+                           | (MCP Hub)        |
+                           +--------+---------+
+                                    |
+              +---------------------+---------------------+
+              |                                           |
+    +---------v---------+                       +---------v---------+
+    | MCP Server Mode   |                       | MCP Client Mode   |
+    | (expose tools)    |                       | (consume tools)   |
+    +---------+---------+                       +---------+---------+
+              |                                           |
+    +---------v---------+                       +---------v---------+
+    | Claude Desktop    |                       | External MCP      |
+    | MCP Clients       |                       | Servers           |
+    +-------------------+                       +-------------------+
+                                                         |
+                                    +--------------------+--------------------+
+                                    |                    |                    |
+                           +--------v-------+   +--------v-------+   +--------v-------+
+                           | filesystem     |   | github         |   | postgres       |
+                           | server         |   | server         |   | server         |
+                           +----------------+   +----------------+   +----------------+
+```
 
 ### LiteLLM
 

@@ -138,6 +138,8 @@ ouroboros run workflow SEED_FILE [OPTIONS]
 |--------|-------------|
 | `--orchestrator`, `-o` | Use Claude Agent SDK for execution |
 | `--resume`, `-r ID` | Resume a previous orchestrator session |
+| `--mcp-config PATH` | Path to MCP client configuration YAML file |
+| `--mcp-tool-prefix PREFIX` | Prefix to add to all MCP tool names (e.g., 'mcp_') |
 | `--dry-run`, `-n` | Validate seed without executing |
 | `--verbose`, `-v` | Enable verbose output |
 
@@ -149,6 +151,12 @@ ouroboros run workflow seed.yaml
 
 # Orchestrator mode (Claude Agent SDK)
 ouroboros run workflow --orchestrator seed.yaml
+
+# Orchestrator with external MCP tools
+ouroboros run workflow --orchestrator --mcp-config mcp.yaml seed.yaml
+
+# With MCP tool prefix to avoid conflicts
+ouroboros run workflow -o --mcp-config mcp.yaml --mcp-tool-prefix "ext_" seed.yaml
 
 # Dry run to validate seed
 ouroboros run workflow --dry-run seed.yaml
@@ -166,11 +174,54 @@ When using `--orchestrator`, the workflow is executed via Claude Agent SDK:
 
 1. Seed is loaded and validated
 2. ClaudeAgentAdapter initialized
-3. OrchestratorRunner executes the seed
-4. Progress is streamed to console
-5. Events are persisted to the event store
+3. If `--mcp-config` provided, connects to external MCP servers
+4. OrchestratorRunner executes the seed with merged tools
+5. Progress is streamed to console
+6. Events are persisted to the event store
 
 Session ID is printed for later resumption.
+
+#### MCP Client Integration
+
+The `--mcp-config` option enables integration with external MCP servers, making Ouroboros
+a "hub" that both serves tools (via `ouroboros mcp serve`) AND consumes external tools.
+
+**Tool Precedence Rules:**
+- Built-in tools (Read, Write, Edit, Bash, Glob, Grep) always take priority
+- When MCP tools conflict with built-in tools, the MCP tool is skipped with a warning
+- When multiple MCP servers provide the same tool, the first server in config wins
+
+**Example MCP Config File (`mcp.yaml`):**
+
+```yaml
+mcp_servers:
+  - name: "filesystem"
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@anthropic/mcp-server-filesystem", "/workspace"]
+
+  - name: "github"
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@anthropic/mcp-server-github"]
+    env:
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"  # Uses environment variable
+
+connection:
+  timeout_seconds: 30
+  retry_attempts: 3
+  health_check_interval: 60
+
+# Optional: prefix all MCP tool names
+tool_prefix: ""
+```
+
+**Security Notes:**
+- Credentials must be passed via environment variables (not plaintext in config)
+- Config files with world-readable permissions trigger a warning
+- Server names are sanitized in logs to prevent credential leakage
+
+See [MCP Client Configuration](#mcp-client-configuration) for full schema details.
 
 ### `ouroboros run resume`
 
@@ -638,3 +689,150 @@ Available Tools
       - event_type: Filter by event type
       - limit: Maximum events to return
 ```
+
+---
+
+## MCP Client Configuration
+
+When using `--mcp-config` with the orchestrator, you can connect to external MCP servers
+to provide additional tools to the Claude Agent during workflow execution.
+
+### Configuration File Schema
+
+```yaml
+# MCP Server Configurations
+mcp_servers:
+  # Stdio transport (for local processes)
+  - name: "filesystem"           # Unique server name (required)
+    transport: "stdio"           # Transport type: stdio, sse, streamable-http
+    command: "npx"               # Command to execute (required for stdio)
+    args:                        # Command arguments
+      - "-y"
+      - "@anthropic/mcp-server-filesystem"
+      - "/workspace"
+    env:                         # Environment variables (optional)
+      DEBUG: "true"
+    timeout: 30.0                # Connection timeout in seconds
+
+  # With environment variable substitution
+  - name: "github"
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@anthropic/mcp-server-github"]
+    env:
+      # Use ${VAR_NAME} syntax for environment variables
+      # NEVER put credentials directly in the config file
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
+  # SSE transport (for HTTP servers)
+  - name: "remote-tools"
+    transport: "sse"
+    url: "https://tools.example.com/mcp"  # Required for sse transport
+    headers:
+      Authorization: "Bearer ${API_TOKEN}"
+
+# Connection Settings (optional)
+connection:
+  timeout_seconds: 30        # Default timeout for operations
+  retry_attempts: 3          # Number of retry attempts on failure
+  health_check_interval: 60  # Seconds between health checks
+
+# Tool Naming (optional)
+tool_prefix: ""              # Prefix to add to all MCP tool names
+```
+
+### Transport Types
+
+| Transport | Description | Required Fields |
+|-----------|-------------|-----------------|
+| `stdio` | Runs a local process, communicates via stdin/stdout | `command` |
+| `sse` | Connects to an HTTP server using Server-Sent Events | `url` |
+| `streamable-http` | HTTP with streaming support | `url` |
+
+### Environment Variable Substitution
+
+For security, credentials should be passed via environment variables:
+
+```yaml
+env:
+  GITHUB_TOKEN: "${GITHUB_TOKEN}"    # Reads GITHUB_TOKEN from environment
+  API_KEY: "${MY_API_KEY}"           # Reads MY_API_KEY from environment
+```
+
+The config loader will:
+1. Check if the environment variable is set
+2. Replace `${VAR_NAME}` with the actual value
+3. Error if the variable is not set
+
+### Tool Precedence Rules
+
+When multiple tools have the same name:
+
+1. **Built-in tools always win**: Read, Write, Edit, Bash, Glob, Grep
+   - MCP tools with these names are skipped with a warning
+
+2. **First server wins**: If multiple MCP servers provide the same tool name,
+   the server listed first in the config file takes precedence
+   - Later servers' tools are skipped with a warning
+
+3. **Use tool_prefix to avoid conflicts**: Setting `tool_prefix: "mcp_"` converts
+   tool names like `read` to `mcp_read`, avoiding conflicts with built-in `Read`
+
+### Security Considerations
+
+1. **Credentials**: Never put credentials in the config file
+   - Use `${VAR_NAME}` syntax for secrets
+   - Set environment variables before running
+
+2. **File Permissions**: The loader warns if config files are world-readable
+   - Recommended: `chmod 600 mcp.yaml`
+
+3. **Server Names**: Server names are sanitized in logs to prevent credential leakage
+
+### Troubleshooting
+
+#### MCP Server Connection Issues
+
+**Server fails to connect:**
+```
+Failed to connect to 'filesystem': Connection refused
+```
+- Verify the command exists: `which npx`
+- Check if the server package is installed
+- Try running the command manually to see error output
+
+**Environment variable not set:**
+```
+Environment variable not set: GITHUB_TOKEN
+```
+- Export the variable: `export GITHUB_TOKEN=ghp_...`
+- Or set it inline: `GITHUB_TOKEN=ghp_... ouroboros run workflow ...`
+
+**Tool name conflicts:**
+```
+MCP tool 'Read' shadowed by built-in tool
+```
+- Use `--mcp-tool-prefix mcp_` to namespace MCP tools
+- Or rename the tool in the MCP server configuration
+
+**Timeout during tool execution:**
+```
+Tool call timed out after 3 retries: file_read
+```
+- Increase `connection.timeout_seconds` in config
+- Check network connectivity to remote servers
+- Verify the MCP server is healthy
+
+#### Debugging
+
+Enable verbose logging to see MCP communication:
+
+```bash
+OUROBOROS_LOG_LEVEL=DEBUG ouroboros run workflow -o --mcp-config mcp.yaml seed.yaml
+```
+
+This will show:
+- MCP server connection attempts
+- Tool discovery from each server
+- Tool name conflict resolution
+- Tool call attempts and responses

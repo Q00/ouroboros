@@ -685,3 +685,180 @@ server = create_ouroboros_server(
 # Register additional handlers as needed
 await server.serve()
 ```
+
+---
+
+## Orchestrator MCP Integration
+
+### Class: `MCPToolProvider`
+
+Provider for MCP tools to integrate with OrchestratorRunner.
+
+```python
+from ouroboros.orchestrator import MCPToolProvider
+
+class MCPToolProvider:
+    def __init__(
+        self,
+        mcp_manager: MCPClientManager,
+        *,
+        default_timeout: float = 30.0,
+        tool_prefix: str = "",
+    ) -> None: ...
+```
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `tool_prefix` | `str` | Prefix added to tool names |
+| `conflicts` | `Sequence[ToolConflict]` | Tool conflicts detected |
+
+#### Methods
+
+##### `async get_tools(builtin_tools: Sequence[str] | None = None) -> Sequence[MCPToolInfo]`
+
+Discover tools from all connected MCP servers.
+
+```python
+provider = MCPToolProvider(manager, tool_prefix="mcp_")
+tools = await provider.get_tools(builtin_tools=["Read", "Write", "Edit"])
+# Returns MCPToolInfo for each non-conflicting tool
+```
+
+##### `get_tool_names() -> Sequence[str]`
+
+Get list of available tool names (with prefix).
+
+##### `has_tool(name: str) -> bool`
+
+Check if a tool is available.
+
+##### `get_tool_info(name: str) -> MCPToolInfo | None`
+
+Get info for a specific tool.
+
+##### `async call_tool(name: str, arguments: dict[str, Any] | None = None, *, timeout: float | None = None) -> Result[MCPToolResult, MCPToolError]`
+
+Call an MCP tool with retry logic and graceful error handling.
+
+```python
+result = await provider.call_tool("mcp_read_file", {"path": "/tmp/test"})
+if result.is_ok:
+    print(result.value.text_content)
+else:
+    print(f"Error: {result.error}")  # Never raises, returns error
+```
+
+### Class: `MCPToolInfo`
+
+Information about an available MCP tool.
+
+```python
+@dataclass(frozen=True, slots=True)
+class MCPToolInfo:
+    name: str           # Tool name (possibly prefixed)
+    original_name: str  # Original tool name from server
+    server_name: str    # Server providing this tool
+    description: str    # Tool description
+    input_schema: dict[str, Any]  # JSON Schema for parameters
+```
+
+### Class: `ToolConflict`
+
+Information about a tool name conflict.
+
+```python
+@dataclass(frozen=True, slots=True)
+class ToolConflict:
+    tool_name: str      # Conflicting tool name
+    source: str         # Server name or "built-in"
+    shadowed_by: str    # What shadowed this tool
+    resolution: str     # How conflict was resolved
+```
+
+### Configuration Loading
+
+#### Function: `load_mcp_config`
+
+Load MCP client configuration from a YAML file.
+
+```python
+from ouroboros.orchestrator import load_mcp_config
+
+result = load_mcp_config(Path("mcp.yaml"))
+if result.is_ok:
+    config = result.value
+    # config.servers - list of MCPServerConfig
+    # config.connection - MCPConnectionConfig
+    # config.tool_prefix - optional prefix
+```
+
+#### Class: `MCPClientConfig`
+
+Complete MCP client configuration.
+
+```python
+@dataclass(frozen=True, slots=True)
+class MCPClientConfig:
+    servers: tuple[MCPServerConfig, ...]
+    connection: MCPConnectionConfig
+    tool_prefix: str = ""
+```
+
+#### Class: `MCPConnectionConfig`
+
+Connection settings for MCP servers.
+
+```python
+@dataclass(frozen=True, slots=True)
+class MCPConnectionConfig:
+    timeout_seconds: float = 30.0
+    retry_attempts: int = 3
+    health_check_interval: float = 60.0
+```
+
+### Example: Using MCP Tools with OrchestratorRunner
+
+```python
+from ouroboros.orchestrator import (
+    ClaudeAgentAdapter,
+    OrchestratorRunner,
+    load_mcp_config,
+)
+from ouroboros.mcp.client.manager import MCPClientManager
+from ouroboros.persistence.event_store import EventStore
+
+# Load MCP config
+config_result = load_mcp_config(Path("mcp.yaml"))
+config = config_result.value
+
+# Create and connect MCP manager
+manager = MCPClientManager(
+    max_retries=config.connection.retry_attempts,
+    default_timeout=config.connection.timeout_seconds,
+)
+
+for server_config in config.servers:
+    await manager.add_server(server_config)
+
+await manager.connect_all()
+
+# Create runner with MCP integration
+event_store = EventStore("sqlite+aiosqlite:///~/.ouroboros/ouroboros.db")
+await event_store.initialize()
+
+adapter = ClaudeAgentAdapter()
+runner = OrchestratorRunner(
+    adapter,
+    event_store,
+    mcp_manager=manager,
+    mcp_tool_prefix=config.tool_prefix,
+)
+
+# Execute seed - MCP tools will be available to the agent
+result = await runner.execute_seed(seed)
+
+# Cleanup
+await manager.disconnect_all()
+```

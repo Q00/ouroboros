@@ -1,0 +1,88 @@
+# Example MCP Client Configuration for Ouroboros
+# This file configures external MCP servers that provide additional tools
+# to the Claude Agent during workflow execution.
+#
+# Usage:
+#   ouroboros run workflow --orchestrator --mcp-config mcp-config.yaml seed.yaml
+#
+# Security Notes:
+# - NEVER put credentials directly in this file
+# - Use ${VAR_NAME} syntax for environment variables
+# - Set restrictive file permissions: chmod 600 mcp-config.yaml
+
+# MCP Server Configurations
+mcp_servers:
+  # Filesystem Server
+  # Provides tools for reading and writing files in a sandboxed directory
+  - name: "filesystem"
+    transport: "stdio"
+    command: "npx"
+    args:
+      - "-y"
+      - "@anthropic/mcp-server-filesystem"
+      - "/workspace"  # Root directory for file access
+    timeout: 30.0
+
+  # GitHub Server
+  # Provides tools for interacting with GitHub repositories
+  - name: "github"
+    transport: "stdio"
+    command: "npx"
+    args:
+      - "-y"
+      - "@anthropic/mcp-server-github"
+    env:
+      # Set GITHUB_TOKEN environment variable before running
+      # export GITHUB_TOKEN=ghp_your_token_here
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
+  # Memory Server (example)
+  # Provides persistent memory/knowledge base tools
+  # - name: "memory"
+  #   transport: "stdio"
+  #   command: "npx"
+  #   args:
+  #     - "-y"
+  #     - "@anthropic/mcp-server-memory"
+
+  # PostgreSQL Server (example)
+  # Provides database query tools
+  # - name: "postgres"
+  #   transport: "stdio"
+  #   command: "npx"
+  #   args:
+  #     - "-y"
+  #     - "@anthropic/mcp-server-postgres"
+  #   env:
+  #     POSTGRES_CONNECTION_STRING: "${DATABASE_URL}"
+
+  # SSE Transport Example (for remote servers)
+  # - name: "remote-tools"
+  #   transport: "sse"
+  #   url: "https://tools.example.com/mcp"
+  #   headers:
+  #     Authorization: "Bearer ${API_TOKEN}"
+
+# Connection Settings
+# These apply to all MCP server connections
+connection:
+  # Timeout for individual tool calls (seconds)
+  timeout_seconds: 30
+
+  # Number of retry attempts for transient failures
+  retry_attempts: 3
+
+  # Interval between health checks (seconds)
+  health_check_interval: 60
+
+# Tool Naming
+# Optional prefix to add to all MCP tool names
+# Useful for avoiding conflicts with built-in tools
+# Example: tool_prefix: "mcp_" makes "read" become "mcp_read"
+tool_prefix: ""
+
+# Tool Precedence Notes:
+# - Built-in tools (Read, Write, Edit, Bash, Glob, Grep) always take priority
+# - If an MCP tool has the same name as a built-in, it will be skipped
+# - If multiple MCP servers provide the same tool, first server wins
+# - Use tool_prefix to namespace MCP tools if needed
