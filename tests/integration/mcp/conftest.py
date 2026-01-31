@@ -5,29 +5,23 @@ and server adapters without requiring real external MCP servers.
 """
 
 import asyncio
-import json
-import sys
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from io import StringIO
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
-from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
 from ouroboros.mcp.types import (
     ContentType,
-    MCPCapabilities,
     MCPContentItem,
     MCPPromptArgument,
     MCPPromptDefinition,
     MCPResourceContent,
     MCPResourceDefinition,
     MCPServerConfig,
-    MCPServerInfo,
     MCPToolDefinition,
     MCPToolParameter,
     MCPToolResult,

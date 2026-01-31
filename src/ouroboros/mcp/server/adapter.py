@@ -5,6 +5,7 @@ protocol using the MCP SDK (FastMCP). It handles tool registration, resource
 handling, and server lifecycle.
 """
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any
 
@@ -198,8 +199,17 @@ class MCPServerAdapter:
             return Result.err(security_result.error)
 
         try:
-            result = await handler.handle(arguments)
+            result = await asyncio.wait_for(handler.handle(arguments), timeout=30.0)
             return result
+        except asyncio.TimeoutError:
+            log.error("mcp.server.tool_timeout", tool=name)
+            return Result.err(
+                MCPToolError(
+                    f"Tool execution timed out after 30s: {name}",
+                    server_name=self._name,
+                    tool_name=name,
+                )
+            )
         except Exception as e:
             log.error("mcp.server.tool_error", tool=name, error=str(e))
             return Result.err(

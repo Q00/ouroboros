@@ -1,12 +1,9 @@
 """Tests for MCP client adapter."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from ouroboros.mcp.client.adapter import MCPClientAdapter
 from ouroboros.mcp.errors import MCPConnectionError
-from ouroboros.mcp.types import MCPServerConfig, TransportType
 
 
 class TestMCPClientAdapter:

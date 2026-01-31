@@ -5,27 +5,22 @@ mock MCP servers, testing the full flow of connection, tool calling,
 resource reading, and prompt handling.
 """
 
-import asyncio
 import sys
 from contextlib import asynccontextmanager
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.mcp.client.adapter import MCPClientAdapter, create_mcp_client
-from ouroboros.mcp.errors import MCPClientError, MCPConnectionError
+from ouroboros.mcp.client.adapter import MCPClientAdapter
 from ouroboros.mcp.types import (
-    ContentType,
     MCPServerConfig,
     TransportType,
 )
 
 from .conftest import (
     MockMCPServerState,
-    MockMCPSession,
     create_mock_client_session_class,
-    create_mock_session_factory,
 )
 
 

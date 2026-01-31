@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -38,7 +38,7 @@ def sample_seed() -> Seed:
     return Seed(
         goal="Build a task management CLI application",
         constraints=(
-            "Python 3.14+",
+            "Python 3.12+",
             "No external database required",
             "Must support CRUD operations",
         ),

@@ -4,6 +4,7 @@ This module provides a registry for managing tool handlers, supporting
 dynamic registration, discovery, and invocation of tools.
 """
 
+import threading
 from collections.abc import Sequence
 from typing import Any
 
@@ -237,6 +238,7 @@ class ToolRegistry:
 
 # Global registry instance for convenience
 _global_registry: ToolRegistry | None = None
+_global_registry_lock = threading.Lock()
 
 
 def get_global_registry() -> ToolRegistry:
@@ -247,7 +249,9 @@ def get_global_registry() -> ToolRegistry:
     """
     global _global_registry
     if _global_registry is None:
-        _global_registry = ToolRegistry()
+        with _global_registry_lock:
+            if _global_registry is None:
+                _global_registry = ToolRegistry()
     return _global_registry
 
 

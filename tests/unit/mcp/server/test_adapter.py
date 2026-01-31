@@ -3,12 +3,9 @@
 from typing import Any
 from unittest.mock import AsyncMock
 
-import pytest
-
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
 from ouroboros.mcp.server.adapter import MCPServerAdapter
-from ouroboros.mcp.server.protocol import ResourceHandler, ToolHandler
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,

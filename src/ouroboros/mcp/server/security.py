@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import hashlib
 import hmac
+import threading
 import time
 from typing import Any, TypeVar
 
@@ -133,6 +134,7 @@ class RateLimiter:
         self._burst_size = burst_size
         self._buckets: dict[str, tuple[float, float]] = {}  # client_id -> (tokens, last_update)
         self._lock = asyncio.Lock()
+        self._sync_lock = threading.Lock()
 
     async def check(self, client_id: str) -> bool:
         """Check if a request is allowed.
@@ -164,8 +166,9 @@ class RateLimiter:
         Args:
             client_id: Identifier for the client.
         """
-        if client_id in self._buckets:
-            del self._buckets[client_id]
+        with self._sync_lock:
+            if client_id in self._buckets:
+                del self._buckets[client_id]
 
 
 class Authenticator:
@@ -328,10 +331,18 @@ class Authenticator:
                 )
             )
 
-        # Check timestamp (tokens valid for 1 hour)
+        # Check timestamp (tokens valid for 1 hour, 60s clock skew tolerance)
         try:
             timestamp = int(timestamp_str)
-            if abs(time.time() - timestamp) > 3600:
+            now = time.time()
+            if timestamp > now + 60:
+                return Result.err(
+                    MCPAuthError(
+                        "Token timestamp is in the future",
+                        auth_method=AuthMethod.BEARER_TOKEN.value,
+                    )
+                )
+            if now - timestamp > 3600:
                 return Result.err(
                     MCPAuthError(
                         "Token expired",
@@ -459,7 +470,13 @@ class InputValidator:
             Result.ok(None) if valid, Result.err otherwise.
         """
         # Check for dangerous patterns in string arguments
-        dangerous_patterns = ["__import__", "subprocess", "os.popen"]
+        dangerous_patterns = [
+            "__import__", "subprocess", "os.popen", "os.system",
+            "eval(", "exec(", "compile(", "open(",
+        ]
+        path_traversal_patterns = ["../", "..\\"]
+        shell_metacharacters = [";", "|", "&&", "||"]
+
         for key, value in arguments.items():
             if isinstance(value, str):
                 for pattern in dangerous_patterns:
@@ -468,6 +485,22 @@ class InputValidator:
                             MCPServerError(
                                 f"Potentially dangerous input in {key}",
                                 details={"pattern": pattern},
+                            )
+                        )
+                for pattern in path_traversal_patterns:
+                    if pattern in value:
+                        return Result.err(
+                            MCPServerError(
+                                f"Path traversal detected in {key}",
+                                details={"pattern": pattern},
+                            )
+                        )
+                for char in shell_metacharacters:
+                    if char in value:
+                        return Result.err(
+                            MCPServerError(
+                                f"Shell metacharacter detected in {key}",
+                                details={"pattern": char},
                             )
                         )
 

@@ -9,17 +9,15 @@ import asyncio
 import sys
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from ouroboros.mcp.client.adapter import MCPClientAdapter
 from ouroboros.mcp.client.manager import (
     ConnectionState,
     MCPClientManager,
-    ServerConnection,
 )
-from ouroboros.mcp.errors import MCPClientError, MCPConnectionError, MCPTimeoutError
+from ouroboros.mcp.errors import MCPConnectionError, MCPTimeoutError
 from ouroboros.mcp.types import (
     MCPServerConfig,
     MCPToolDefinition,
