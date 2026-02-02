@@ -98,10 +98,11 @@ class ClaudeCodeAdapter:
             cli_path: Explicit CLI path from constructor.
 
         Returns:
-            Resolved Path if set and exists, None otherwise.
+            Resolved Path if set and exists, None otherwise (falls back to SDK default).
         """
         # Priority: explicit parameter > environment variable > None (SDK default)
-        path_str = cli_path or os.environ.get("OUROBOROS_CLI_PATH")
+        path_str = str(cli_path) if cli_path else os.environ.get("OUROBOROS_CLI_PATH", "")
+        path_str = path_str.strip()
 
         if not path_str:
             return None
@@ -112,6 +113,7 @@ class ClaudeCodeAdapter:
             log.warning(
                 "claude_code_adapter.cli_path_not_found",
                 cli_path=str(resolved),
+                fallback="using SDK bundled CLI",
             )
             return None
 
@@ -119,6 +121,15 @@ class ClaudeCodeAdapter:
             log.warning(
                 "claude_code_adapter.cli_path_not_file",
                 cli_path=str(resolved),
+                fallback="using SDK bundled CLI",
+            )
+            return None
+
+        if not os.access(resolved, os.X_OK):
+            log.warning(
+                "claude_code_adapter.cli_not_executable",
+                cli_path=str(resolved),
+                fallback="using SDK bundled CLI",
             )
             return None
 
