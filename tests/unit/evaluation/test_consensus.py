@@ -5,16 +5,22 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.ontology_aspect import AnalysisResult
 from ouroboros.core.types import Result
 from ouroboros.evaluation.consensus import (
     ConsensusConfig,
     ConsensusEvaluator,
+    DeliberativeConfig,
+    DeliberativeConsensus,
+    _parse_judgment_response,
     build_consensus_prompt,
     parse_vote_response,
     run_consensus_evaluation,
+    run_deliberative_evaluation,
 )
-from ouroboros.evaluation.models import EvaluationContext
+from ouroboros.evaluation.models import EvaluationContext, FinalVerdict, VoterRole
 from ouroboros.providers.base import CompletionResponse, UsageInfo
+from ouroboros.strategies.devil_advocate import DevilAdvocateStrategy
 
 
 class TestBuildConsensusPrompt:
@@ -111,6 +117,27 @@ class TestParseVoteResponse:
 
         assert result.is_err
         assert "Could not find JSON" in result.error.message
+
+    def test_json_with_code_block_after(self) -> None:
+        """Extract JSON correctly when code block follows."""
+        # Edge case: LLM response with JSON followed by code with braces
+        response = """Here is my vote:
+        {"approved": true, "confidence": 0.9, "reasoning": "Looks good"}
+
+        And here's some code: function() { return 1; }"""
+        result = parse_vote_response(response, "model")
+
+        assert result.is_ok
+        assert result.value.approved is True
+        assert result.value.confidence == 0.9
+
+    def test_json_with_nested_braces(self) -> None:
+        """Handle JSON with nested objects."""
+        response = '{"approved": true, "confidence": 0.8, "reasoning": "Config: key=1"}'
+        result = parse_vote_response(response, "model")
+
+        assert result.is_ok
+        assert result.value.approved is True
 
 
 class TestConsensusConfig:
@@ -382,3 +409,374 @@ class TestRunConsensusEvaluation:
             config=config,
         )
         assert result.is_ok
+
+
+# ============================================================================
+# Deliberative Consensus Tests
+# ============================================================================
+
+
+class TestParseJudgmentResponse:
+    """Tests for judgment parsing."""
+
+    def test_valid_approved_judgment(self) -> None:
+        """Parse valid approved judgment."""
+        response = """{
+            "verdict": "approved",
+            "confidence": 0.95,
+            "reasoning": "Both positions were valid but Advocate's arguments are stronger"
+        }"""
+        result = _parse_judgment_response(response, "judge-model")
+
+        assert result.is_ok
+        judgment = result.value
+        assert judgment.verdict == FinalVerdict.APPROVED
+        assert judgment.confidence == 0.95
+        assert "Advocate" in judgment.reasoning
+        assert judgment.conditions is None
+
+    def test_valid_conditional_judgment(self) -> None:
+        """Parse valid conditional judgment."""
+        response = """{
+            "verdict": "conditional",
+            "confidence": 0.8,
+            "reasoning": "Good but needs improvements",
+            "conditions": ["Add error handling", "Improve documentation"]
+        }"""
+        result = _parse_judgment_response(response, "judge-model")
+
+        assert result.is_ok
+        judgment = result.value
+        assert judgment.verdict == FinalVerdict.CONDITIONAL
+        assert judgment.conditions == ("Add error handling", "Improve documentation")
+
+    def test_valid_rejected_judgment(self) -> None:
+        """Parse valid rejected judgment."""
+        response = """{
+            "verdict": "rejected",
+            "confidence": 0.9,
+            "reasoning": "Treats symptoms rather than root cause"
+        }"""
+        result = _parse_judgment_response(response, "judge-model")
+
+        assert result.is_ok
+        judgment = result.value
+        assert judgment.verdict == FinalVerdict.REJECTED
+
+    def test_invalid_verdict(self) -> None:
+        """Error for invalid verdict value."""
+        response = '{"verdict": "maybe", "confidence": 0.5, "reasoning": "test"}'
+        result = _parse_judgment_response(response, "model")
+
+        assert result.is_err
+        assert "Invalid verdict" in result.error.message
+
+    def test_missing_verdict(self) -> None:
+        """Error when verdict field missing."""
+        response = '{"confidence": 0.9, "reasoning": "test"}'
+        result = _parse_judgment_response(response, "model")
+
+        assert result.is_err
+        assert "verdict" in result.error.message.lower()
+
+    def test_no_json(self) -> None:
+        """Error when no JSON found."""
+        response = "I think this should be approved"
+        result = _parse_judgment_response(response, "model")
+
+        assert result.is_err
+        assert "Could not find JSON" in result.error.message
+
+
+class TestDeliberativeConfig:
+    """Tests for DeliberativeConfig."""
+
+    def test_default_values(self) -> None:
+        """Verify default configuration."""
+        config = DeliberativeConfig()
+        assert "claude" in config.advocate_model.lower() or "anthropic" in config.advocate_model.lower()
+        assert "gpt" in config.devil_model.lower() or "openai" in config.devil_model.lower()
+        assert "gemini" in config.judge_model.lower() or "google" in config.judge_model.lower()
+
+    def test_custom_models(self) -> None:
+        """Create config with custom models."""
+        config = DeliberativeConfig(
+            advocate_model="custom-advocate",
+            devil_model="custom-devil",
+            judge_model="custom-judge",
+        )
+        assert config.advocate_model == "custom-advocate"
+        assert config.devil_model == "custom-devil"
+        assert config.judge_model == "custom-judge"
+
+
+class TestDeliberativeConsensus:
+    """Tests for DeliberativeConsensus class."""
+
+    @pytest.fixture
+    def mock_llm(self) -> AsyncMock:
+        """Create mock LLM adapter."""
+        return AsyncMock()
+
+    @pytest.fixture
+    def sample_context(self) -> EvaluationContext:
+        """Create sample evaluation context."""
+        return EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="Test criterion",
+            artifact="test code",
+            goal="Test goal",
+        )
+
+    @pytest.fixture
+    def mock_devil_strategy_approved(self) -> AsyncMock:
+        """Create mock strategy that approves (root cause addressed)."""
+        strategy = AsyncMock(spec=DevilAdvocateStrategy)
+        strategy.model = "devil"
+        strategy.analyze.return_value = AnalysisResult.valid(
+            confidence=0.8,
+            reasoning=["Addresses root cause"],
+        )
+        return strategy
+
+    @pytest.fixture
+    def mock_devil_strategy_rejected(self) -> AsyncMock:
+        """Create mock strategy that rejects (treats symptoms)."""
+        strategy = AsyncMock(spec=DevilAdvocateStrategy)
+        strategy.model = "devil"
+        strategy.analyze.return_value = AnalysisResult.invalid(
+            reasoning=["This treats symptoms not root cause"],
+            suggestions=["Analyze the underlying data model"],
+            confidence=0.85,
+        )
+        return strategy
+
+    @pytest.mark.asyncio
+    async def test_deliberation_approved(
+        self,
+        mock_llm: AsyncMock,
+        sample_context: EvaluationContext,
+        mock_devil_strategy_approved: AsyncMock,
+    ) -> None:
+        """Deliberation with final approval."""
+        # Round 1: Advocate approves via LLM, Devil approves via strategy
+        # Round 2: Judge approves via LLM
+        mock_llm.complete.side_effect = [
+            # Advocate
+            Result.ok(CompletionResponse(
+                content='{"approved": true, "confidence": 0.9, "reasoning": "Well designed"}',
+                model="advocate",
+                usage=UsageInfo(0, 0, 0),
+            )),
+            # Judge (Devil is now via strategy, not LLM)
+            Result.ok(CompletionResponse(
+                content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Both agree"}',
+                model="judge",
+                usage=UsageInfo(0, 0, 0),
+            )),
+        ]
+
+        config = DeliberativeConfig(
+            advocate_model="advocate",
+            devil_model="devil",
+            judge_model="judge",
+        )
+        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_approved)
+        result = await evaluator.deliberate(sample_context)
+
+        assert result.is_ok
+        deliberation, events = result.value
+        assert deliberation.approved is True
+        assert deliberation.final_verdict == FinalVerdict.APPROVED
+        assert deliberation.is_root_solution is True  # Devil approved via strategy
+        assert deliberation.advocate_position.role == VoterRole.ADVOCATE
+        assert deliberation.devil_position.role == VoterRole.DEVIL
+        mock_devil_strategy_approved.analyze.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_deliberation_rejected_by_devil(
+        self,
+        mock_llm: AsyncMock,
+        sample_context: EvaluationContext,
+        mock_devil_strategy_rejected: AsyncMock,
+    ) -> None:
+        """Deliberation rejected due to Devil's ontological critique."""
+        mock_llm.complete.side_effect = [
+            # Advocate approves
+            Result.ok(CompletionResponse(
+                content='{"approved": true, "confidence": 0.9, "reasoning": "Looks good"}',
+                model="advocate",
+                usage=UsageInfo(0, 0, 0),
+            )),
+            # Judge rejects based on Devil's argument (Devil is via strategy)
+            Result.ok(CompletionResponse(
+                content='{"verdict": "rejected", "confidence": 0.8, "reasoning": "Devil\'s critique is valid"}',
+                model="judge",
+                usage=UsageInfo(0, 0, 0),
+            )),
+        ]
+
+        config = DeliberativeConfig(
+            advocate_model="advocate",
+            devil_model="devil",
+            judge_model="judge",
+        )
+        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_rejected)
+        result = await evaluator.deliberate(sample_context)
+
+        assert result.is_ok
+        deliberation, _ = result.value
+        assert deliberation.approved is False
+        assert deliberation.final_verdict == FinalVerdict.REJECTED
+        assert deliberation.is_root_solution is False  # Devil rejected via strategy
+
+    @pytest.mark.asyncio
+    async def test_deliberation_conditional(
+        self,
+        mock_llm: AsyncMock,
+        sample_context: EvaluationContext,
+        mock_devil_strategy_rejected: AsyncMock,
+    ) -> None:
+        """Deliberation with conditional approval."""
+        mock_llm.complete.side_effect = [
+            # Advocate approves
+            Result.ok(CompletionResponse(
+                content='{"approved": true, "confidence": 0.85, "reasoning": "Good overall"}',
+                model="advocate",
+                usage=UsageInfo(0, 0, 0),
+            )),
+            # Judge gives conditional (Devil concerns via strategy)
+            Result.ok(CompletionResponse(
+                content='{"verdict": "conditional", "confidence": 0.75, "reasoning": "Valid with changes", "conditions": ["Add error handling"]}',
+                model="judge",
+                usage=UsageInfo(0, 0, 0),
+            )),
+        ]
+
+        config = DeliberativeConfig(
+            advocate_model="advocate",
+            devil_model="devil",
+            judge_model="judge",
+        )
+        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_rejected)
+        result = await evaluator.deliberate(sample_context)
+
+        assert result.is_ok
+        deliberation, _ = result.value
+        assert deliberation.approved is False  # CONDITIONAL != APPROVED
+        assert deliberation.final_verdict == FinalVerdict.CONDITIONAL
+        assert deliberation.has_conditions is True
+        assert deliberation.judgment.conditions == ("Add error handling",)
+
+    @pytest.mark.asyncio
+    async def test_deliberation_advocate_failure(
+        self,
+        mock_llm: AsyncMock,
+        sample_context: EvaluationContext,
+        mock_devil_strategy_approved: AsyncMock,
+    ) -> None:
+        """Handle Advocate failure gracefully."""
+        mock_llm.complete.side_effect = [
+            Result.err(ProviderError("Advocate API error")),
+        ]
+
+        config = DeliberativeConfig(
+            advocate_model="advocate",
+            devil_model="devil",
+            judge_model="judge",
+        )
+        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_approved)
+        result = await evaluator.deliberate(sample_context)
+
+        assert result.is_err
+        assert "Advocate" in result.error.message or "failed" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_deliberation_generates_events(
+        self,
+        mock_llm: AsyncMock,
+        sample_context: EvaluationContext,
+        mock_devil_strategy_approved: AsyncMock,
+    ) -> None:
+        """Events are generated correctly."""
+        mock_llm.complete.side_effect = [
+            Result.ok(CompletionResponse(
+                content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+                model="advocate",
+                usage=UsageInfo(0, 0, 0),
+            )),
+            # Judge (Devil is via strategy)
+            Result.ok(CompletionResponse(
+                content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Agreed"}',
+                model="judge",
+                usage=UsageInfo(0, 0, 0),
+            )),
+        ]
+
+        config = DeliberativeConfig(
+            advocate_model="advocate",
+            devil_model="devil",
+            judge_model="judge",
+        )
+        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_approved)
+        result = await evaluator.deliberate(sample_context, trigger_reason="test")
+
+        assert result.is_ok
+        _, events = result.value
+        assert events[0].type == "evaluation.stage3.started"
+        assert "deliberative" in events[0].data["trigger_reason"]
+        assert events[1].type == "evaluation.stage3.completed"
+
+
+class TestRunDeliberativeEvaluation:
+    """Tests for convenience function."""
+
+    @pytest.mark.asyncio
+    async def test_convenience_function(self) -> None:
+        """Test the convenience function works."""
+        mock_llm = AsyncMock()
+        mock_llm.complete.side_effect = [
+            Result.ok(CompletionResponse(
+                content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+                model="advocate",
+                usage=UsageInfo(0, 0, 0),
+            )),
+            # Judge (Devil is via strategy)
+            Result.ok(CompletionResponse(
+                content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Agreed"}',
+                model="judge",
+                usage=UsageInfo(0, 0, 0),
+            )),
+        ]
+
+        # Create mock devil strategy
+        mock_devil_strategy = AsyncMock(spec=DevilAdvocateStrategy)
+        mock_devil_strategy.model = "devil"
+        mock_devil_strategy.analyze.return_value = AnalysisResult.valid(
+            confidence=0.8,
+            reasoning=["Addresses root cause"],
+        )
+
+        context = EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="Test AC",
+            artifact="test",
+        )
+        config = DeliberativeConfig(
+            advocate_model="advocate",
+            devil_model="devil",
+            judge_model="judge",
+        )
+
+        result = await run_deliberative_evaluation(
+            context,
+            mock_llm,
+            trigger_reason="test",
+            config=config,
+            devil_strategy=mock_devil_strategy,
+        )
+        assert result.is_ok
+        deliberation, _ = result.value
+        assert deliberation.approved is True

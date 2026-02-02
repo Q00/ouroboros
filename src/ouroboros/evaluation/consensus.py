@@ -1,11 +1,20 @@
 """Stage 3: Multi-Model Consensus.
 
-Multi-model voting using Frontier tier:
-- 3 different models evaluate independently
-- 2/3 majority required for approval
-- Disagreements are logged with reasoning
+This module provides two consensus evaluation modes:
 
-The ConsensusEvaluator uses multiple LLM models for diverse verification.
+1. Simple Consensus (ConsensusEvaluator):
+   - 3 models evaluate independently
+   - 2/3 majority required for approval
+   - Fast, straightforward voting
+
+2. Deliberative Consensus (DeliberativeConsensus):
+   - Role-based evaluation: Advocate, Devil's Advocate, Judge
+   - 2-round deliberation: positions → judgment
+   - Devil's Advocate uses ontological questions
+   - Deeper analysis of whether solution addresses root cause
+
+The deliberative mode is recommended for complex decisions where
+ensuring root cause resolution is important.
 """
 
 import asyncio
@@ -13,8 +22,17 @@ from dataclasses import dataclass
 import json
 
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.ontology_aspect import AnalysisResult
 from ouroboros.core.types import Result
-from ouroboros.evaluation.models import ConsensusResult, EvaluationContext, Vote
+from ouroboros.evaluation.models import (
+    ConsensusResult,
+    DeliberationResult,
+    EvaluationContext,
+    FinalVerdict,
+    JudgmentResult,
+    Vote,
+    VoterRole,
+)
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.evaluation import (
     create_stage3_completed_event,
@@ -22,6 +40,7 @@ from ouroboros.events.evaluation import (
 )
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+from ouroboros.strategies.devil_advocate import ConsensusContext, DevilAdvocateStrategy
 
 # Default models for consensus voting (Frontier tier)
 # Can be overridden via ConsensusConfig.models
@@ -101,9 +120,10 @@ Cast your vote as a JSON object with: approved (boolean), confidence (0-1), and 
 
 
 def extract_json_payload(text: str) -> str | None:
-    """Extract JSON object from text using index-based approach.
+    """Extract JSON object from text using bracket-matching approach.
 
-    More reliable than regex for handling nested braces in code snippets.
+    Uses brace counting to find the first complete JSON object,
+    avoiding issues with multiple disjoint brace blocks (e.g., code snippets).
 
     Args:
         text: Raw text potentially containing JSON
@@ -112,9 +132,37 @@ def extract_json_payload(text: str) -> str | None:
         Extracted JSON string or None if not found
     """
     start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
+    if start == -1:
+        return None
+
+    # Count braces to find matching closing brace
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i, char in enumerate(text[start:], start=start):
+        if escape_next:
+            escape_next = False
+            continue
+
+        if char == "\\":
+            escape_next = True
+            continue
+
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+
     return None
 
 
@@ -329,6 +377,489 @@ class ConsensusEvaluator:
         return parse_vote_response(llm_result.value.content, model)
 
 
+# Role-based system prompts for deliberative consensus
+ADVOCATE_SYSTEM_PROMPT = """You are the ADVOCATE in a deliberative review.
+
+Your role is to find and articulate the STRENGTHS of this solution:
+- Does it correctly implement the acceptance criterion?
+- Does it align with the stated goal?
+- What are its positive aspects and well-designed elements?
+- Is the approach sound and maintainable?
+
+You must respond ONLY with a valid JSON object:
+{
+    "approved": true,
+    "confidence": <float between 0.0 and 1.0>,
+    "reasoning": "<string explaining the strengths you found>"
+}
+
+Be thorough but honest. If you find genuine strengths, articulate them clearly.
+If you cannot find enough strengths to advocate for approval, you may vote against,
+but this should be rare for your role."""
+
+
+JUDGE_SYSTEM_PROMPT = """You are the JUDGE in a deliberative review.
+
+You will receive:
+1. ADVOCATE's position (strengths of the solution)
+2. DEVIL'S ADVOCATE's position (ontological critique - root cause vs symptom)
+
+Your task:
+- Weigh both arguments fairly and impartially
+- Consider whether the solution addresses the ROOT CAUSE or just treats symptoms
+- Make a final verdict: APPROVED, REJECTED, or CONDITIONAL
+
+You must respond ONLY with a valid JSON object:
+{
+    "verdict": "<one of: approved, rejected, conditional>",
+    "confidence": <float between 0.0 and 1.0>,
+    "reasoning": "<string explaining your judgment>",
+    "conditions": ["<condition 1>", "<condition 2>"] or null
+}
+
+Guidelines:
+- APPROVED: Solution is sound and addresses the root problem
+- CONDITIONAL: Solution has merit but requires specific changes
+- REJECTED: Solution treats symptoms rather than root cause, or has fundamental issues
+
+Be thorough and fair. The best solutions deserve recognition.
+Symptomatic treatments deserve honest critique."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeliberativeConfig:
+    """Configuration for deliberative consensus.
+
+    Attributes:
+        advocate_model: Model for the Advocate role
+        devil_model: Model for the Devil's Advocate role
+        judge_model: Model for the Judge role
+        temperature: Sampling temperature
+        max_tokens: Maximum tokens per response
+    """
+
+    advocate_model: str = "openrouter/anthropic/claude-sonnet-4-20250514"
+    devil_model: str = "openrouter/openai/gpt-4o"
+    judge_model: str = "openrouter/google/gemini-2.5-pro"
+    temperature: float = 0.3
+    max_tokens: int = 2048
+
+
+def _parse_judgment_response(
+    response_text: str,
+    model: str,
+) -> Result[JudgmentResult, ValidationError]:
+    """Parse LLM response into JudgmentResult.
+
+    Args:
+        response_text: Raw LLM response
+        model: Model that made the judgment
+
+    Returns:
+        Result containing JudgmentResult or ValidationError
+    """
+    json_str = extract_json_payload(response_text)
+
+    if not json_str:
+        return Result.err(
+            ValidationError(
+                f"Could not find JSON in judgment from {model}",
+                field="response",
+                value=response_text[:100],
+            )
+        )
+
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        return Result.err(
+            ValidationError(
+                f"Invalid JSON in judgment from {model}: {e}",
+                field="response",
+            )
+        )
+
+    # Validate required fields
+    if "verdict" not in data:
+        return Result.err(
+            ValidationError(
+                f"Missing 'verdict' field in judgment from {model}",
+                field="verdict",
+            )
+        )
+
+    # Parse verdict
+    verdict_str = str(data["verdict"]).lower()
+    verdict_map = {
+        "approved": FinalVerdict.APPROVED,
+        "rejected": FinalVerdict.REJECTED,
+        "conditional": FinalVerdict.CONDITIONAL,
+    }
+
+    if verdict_str not in verdict_map:
+        return Result.err(
+            ValidationError(
+                f"Invalid verdict '{verdict_str}' from {model}",
+                field="verdict",
+                value=verdict_str,
+            )
+        )
+
+    try:
+        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+        conditions = data.get("conditions")
+        if conditions is not None:
+            conditions = tuple(str(c) for c in conditions)
+
+        return Result.ok(
+            JudgmentResult(
+                verdict=verdict_map[verdict_str],
+                confidence=confidence,
+                reasoning=str(data.get("reasoning", "No reasoning provided")),
+                conditions=conditions,
+            )
+        )
+    except (TypeError, ValueError) as e:
+        return Result.err(
+            ValidationError(
+                f"Invalid field types in judgment from {model}: {e}",
+                field="response",
+            )
+        )
+
+
+class DeliberativeConsensus:
+    """Two-round deliberative consensus evaluator.
+
+    Uses role-based evaluation with ontological questioning:
+    - Round 1: Advocate and Devil's Advocate present positions (parallel)
+    - Round 2: Judge reviews both and makes final decision
+
+    The Devil's Advocate uses DevilAdvocateStrategy with AOP-based
+    ontological analysis to ensure the solution addresses the root
+    cause rather than just treating symptoms.
+
+    Example:
+        evaluator = DeliberativeConsensus(llm_adapter)
+        result = await evaluator.deliberate(context, trigger_reason)
+
+        # With custom strategy for testing
+        mock_strategy = MockDevilStrategy()
+        evaluator = DeliberativeConsensus(llm_adapter, devil_strategy=mock_strategy)
+    """
+
+    def __init__(
+        self,
+        llm_adapter: LiteLLMAdapter,
+        config: DeliberativeConfig | None = None,
+        devil_strategy: DevilAdvocateStrategy | None = None,
+    ) -> None:
+        """Initialize evaluator.
+
+        Args:
+            llm_adapter: LLM adapter for completions
+            config: Deliberative configuration
+            devil_strategy: Optional custom strategy for Devil's Advocate.
+                If None, creates default DevilAdvocateStrategy.
+        """
+        self._llm = llm_adapter
+        self._config = config or DeliberativeConfig()
+        self._devil_strategy = devil_strategy or DevilAdvocateStrategy(
+            llm_adapter=llm_adapter,
+            model=self._config.devil_model,
+            temperature=self._config.temperature,
+            max_tokens=self._config.max_tokens,
+        )
+
+    async def deliberate(
+        self,
+        context: EvaluationContext,
+        trigger_reason: str = "manual",
+    ) -> Result[tuple[DeliberationResult, list[BaseEvent]], ProviderError | ValidationError]:
+        """Run 2-round deliberative consensus.
+
+        Round 1: Advocate and Devil's Advocate present positions concurrently
+        Round 2: Judge reviews both positions and makes final decision
+
+        Args:
+            context: Evaluation context
+            trigger_reason: Why consensus was triggered
+
+        Returns:
+            Result containing DeliberationResult and events, or error
+        """
+        events: list[BaseEvent] = []
+
+        # Emit start event
+        events.append(
+            create_stage3_started_event(
+                execution_id=context.execution_id,
+                models=[
+                    self._config.advocate_model,
+                    self._config.devil_model,
+                    self._config.judge_model,
+                ],
+                trigger_reason=f"deliberative:{trigger_reason}",
+            )
+        )
+
+        # Round 1: Get Advocate and Devil's Advocate positions concurrently
+        advocate_task = self._get_position(context, VoterRole.ADVOCATE)
+        devil_task = self._get_position(context, VoterRole.DEVIL)
+
+        # Type hint for asyncio.gather with return_exceptions=True
+        results: list[Result[Vote, ProviderError | ValidationError] | BaseException] = (
+            await asyncio.gather(advocate_task, devil_task, return_exceptions=True)
+        )
+        advocate_result, devil_result = results[0], results[1]
+
+        # Handle Round 1 errors - type narrowing via isinstance
+        if isinstance(advocate_result, BaseException):
+            return Result.err(
+                ValidationError(f"Advocate failed: {advocate_result}")
+            )
+        if advocate_result.is_err:
+            return Result.err(advocate_result.error)
+        advocate_vote = advocate_result.value
+
+        if isinstance(devil_result, BaseException):
+            return Result.err(
+                ValidationError(f"Devil's Advocate failed: {devil_result}")
+            )
+        if devil_result.is_err:
+            return Result.err(devil_result.error)
+        devil_vote = devil_result.value
+
+        # Round 2: Judge reviews both positions
+        judgment_result = await self._get_judgment(
+            context, advocate_vote, devil_vote
+        )
+
+        if judgment_result.is_err:
+            return Result.err(judgment_result.error)
+        judgment = judgment_result.value
+
+        # Determine if Devil confirmed this addresses root cause
+        # Devil approves (approved=True) means they couldn't find fundamental issues
+        is_root_solution = devil_vote.approved
+
+        deliberation_result = DeliberationResult(
+            final_verdict=judgment.verdict,
+            advocate_position=advocate_vote,
+            devil_position=devil_vote,
+            judgment=judgment,
+            is_root_solution=is_root_solution,
+        )
+
+        # Emit completion event
+        events.append(
+            create_stage3_completed_event(
+                execution_id=context.execution_id,
+                approved=deliberation_result.approved,
+                votes=[
+                    {
+                        "model": advocate_vote.model,
+                        "role": advocate_vote.role,
+                        "approved": advocate_vote.approved,
+                        "confidence": advocate_vote.confidence,
+                        "reasoning": advocate_vote.reasoning,
+                    },
+                    {
+                        "model": devil_vote.model,
+                        "role": devil_vote.role,
+                        "approved": devil_vote.approved,
+                        "confidence": devil_vote.confidence,
+                        "reasoning": devil_vote.reasoning,
+                    },
+                ],
+                majority_ratio=1.0 if deliberation_result.approved else 0.0,
+                disagreements=[],
+            )
+        )
+
+        return Result.ok((deliberation_result, events))
+
+    async def _get_position(
+        self,
+        context: EvaluationContext,
+        role: VoterRole,
+    ) -> Result[Vote, ProviderError | ValidationError]:
+        """Get a position from Advocate or Devil's Advocate.
+
+        Args:
+            context: Evaluation context
+            role: The role (ADVOCATE or DEVIL)
+
+        Returns:
+            Result containing Vote or error
+        """
+        if role == VoterRole.ADVOCATE:
+            # Advocate uses direct LLM call with role-specific prompt
+            system_prompt = ADVOCATE_SYSTEM_PROMPT
+            model = self._config.advocate_model
+
+            messages = [
+                Message(role=MessageRole.SYSTEM, content=system_prompt),
+                Message(role=MessageRole.USER, content=build_consensus_prompt(context)),
+            ]
+
+            config = CompletionConfig(
+                model=model,
+                temperature=self._config.temperature,
+                max_tokens=self._config.max_tokens,
+            )
+
+            llm_result = await self._llm.complete(messages, config)
+            if llm_result.is_err:
+                return Result.err(llm_result.error)
+
+            vote_result = parse_vote_response(llm_result.value.content, model)
+            if vote_result.is_err:
+                return Result.err(vote_result.error)
+
+            vote = vote_result.value
+            return Result.ok(
+                Vote(
+                    model=vote.model,
+                    approved=vote.approved,
+                    confidence=vote.confidence,
+                    reasoning=vote.reasoning,
+                    role=role,
+                )
+            )
+
+        elif role == VoterRole.DEVIL:
+            # Devil uses AOP-based DevilAdvocateStrategy for ontological analysis
+            return await self._get_devil_position(context)
+
+        else:
+            return Result.err(
+                ValidationError(f"Invalid role for position: {role}")
+            )
+
+    async def _get_devil_position(
+        self,
+        context: EvaluationContext,
+    ) -> Result[Vote, ProviderError | ValidationError]:
+        """Get Devil's Advocate position using ontological analysis.
+
+        Uses DevilAdvocateStrategy to analyze whether the artifact
+        addresses root cause or treats symptoms.
+
+        Args:
+            context: Evaluation context
+
+        Returns:
+            Result containing Vote with Devil's Advocate role
+        """
+        # Convert EvaluationContext to ConsensusContext for strategy
+        consensus_ctx = ConsensusContext(
+            artifact=context.artifact,
+            goal=context.goal,
+            current_ac=context.current_ac,
+            constraints=context.constraints,
+        )
+
+        # Strategy handles errors gracefully (returns AnalysisResult.invalid on LLM failure)
+        analysis = await self._devil_strategy.analyze(consensus_ctx)
+
+        # Convert AnalysisResult to Vote
+        vote = self._analysis_to_vote(analysis)
+        return Result.ok(vote)
+
+    def _analysis_to_vote(self, analysis: AnalysisResult) -> Vote:
+        """Convert AnalysisResult to Vote for Devil's Advocate.
+
+        Maps ontological analysis result to consensus voting format:
+        - is_valid -> approved
+        - confidence -> confidence
+        - reasoning + suggestions -> reasoning
+
+        Args:
+            analysis: The ontological analysis result
+
+        Returns:
+            Vote with Devil's Advocate role
+        """
+        # Build reasoning text
+        if analysis.is_valid:
+            reasoning_text = (
+                analysis.reasoning[0]
+                if analysis.reasoning
+                else "Passed ontological analysis: addresses root cause"
+            )
+        else:
+            # Combine reasoning and suggestions for invalid case
+            parts = list(analysis.reasoning)
+            if analysis.suggestions:
+                parts.append("Suggestions: " + "; ".join(analysis.suggestions))
+            reasoning_text = "\n".join(parts) if parts else "Failed ontological analysis"
+
+        return Vote(
+            model=self._devil_strategy.model,
+            approved=analysis.is_valid,
+            confidence=analysis.confidence,
+            reasoning=reasoning_text,
+            role=VoterRole.DEVIL,
+        )
+
+    async def _get_judgment(
+        self,
+        context: EvaluationContext,
+        advocate_vote: Vote,
+        devil_vote: Vote,
+    ) -> Result[JudgmentResult, ProviderError | ValidationError]:
+        """Get final judgment from Judge.
+
+        Args:
+            context: Evaluation context
+            advocate_vote: The Advocate's position
+            devil_vote: The Devil's Advocate's position
+
+        Returns:
+            Result containing JudgmentResult or error
+        """
+        # Build prompt with both positions
+        user_prompt = f"""{build_consensus_prompt(context)}
+
+---
+
+## Round 1 Positions
+
+### ADVOCATE's Position
+Approved: {advocate_vote.approved}
+Confidence: {advocate_vote.confidence:.2f}
+Reasoning: {advocate_vote.reasoning}
+
+### DEVIL'S ADVOCATE's Position (Ontological Analysis)
+Approved: {devil_vote.approved}
+Confidence: {devil_vote.confidence:.2f}
+Reasoning: {devil_vote.reasoning}
+
+---
+
+Based on both positions above, make your final judgment."""
+
+        messages = [
+            Message(role=MessageRole.SYSTEM, content=JUDGE_SYSTEM_PROMPT),
+            Message(role=MessageRole.USER, content=user_prompt),
+        ]
+
+        config = CompletionConfig(
+            model=self._config.judge_model,
+            temperature=self._config.temperature,
+            max_tokens=self._config.max_tokens,
+        )
+
+        llm_result = await self._llm.complete(messages, config)
+        if llm_result.is_err:
+            return Result.err(llm_result.error)
+
+        return _parse_judgment_response(
+            llm_result.value.content, self._config.judge_model
+        )
+
+
 async def run_consensus_evaluation(
     context: EvaluationContext,
     llm_adapter: LiteLLMAdapter,
@@ -348,3 +879,30 @@ async def run_consensus_evaluation(
     """
     evaluator = ConsensusEvaluator(llm_adapter, config)
     return await evaluator.evaluate(context, trigger_reason)
+
+
+async def run_deliberative_evaluation(
+    context: EvaluationContext,
+    llm_adapter: LiteLLMAdapter,
+    trigger_reason: str = "manual",
+    config: DeliberativeConfig | None = None,
+    devil_strategy: DevilAdvocateStrategy | None = None,
+) -> Result[tuple[DeliberationResult, list[BaseEvent]], ProviderError | ValidationError]:
+    """Convenience function for running deliberative consensus.
+
+    Recommended for complex decisions where ensuring root cause
+    resolution is important. Uses AOP-based DevilAdvocateStrategy
+    for ontological analysis.
+
+    Args:
+        context: Evaluation context
+        llm_adapter: LLM adapter
+        trigger_reason: Why consensus was triggered
+        config: Optional configuration
+        devil_strategy: Optional custom strategy for Devil's Advocate
+
+    Returns:
+        Result with DeliberationResult and events
+    """
+    evaluator = DeliberativeConsensus(llm_adapter, config, devil_strategy)
+    return await evaluator.deliberate(context, trigger_reason)

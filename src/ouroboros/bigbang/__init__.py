@@ -14,6 +14,11 @@ from ouroboros.bigbang.ambiguity import (
     is_ready_for_seed,
 )
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+from ouroboros.bigbang.ontology import (
+    InterviewOntologyAnalyzer,
+    OntologicalQuestionDecision,
+    default_interview_ontology_analyzer,
+)
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
     load_seed,
@@ -32,6 +37,10 @@ __all__ = [
     # Interview
     "InterviewEngine",
     "InterviewState",
+    # Ontology (for Interview)
+    "InterviewOntologyAnalyzer",
+    "OntologicalQuestionDecision",
+    "default_interview_ontology_analyzer",
     # Seed Generation
     "SeedGenerator",
     "load_seed",

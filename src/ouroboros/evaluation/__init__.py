@@ -35,7 +35,10 @@ from ouroboros.evaluation.consensus import (
     DEFAULT_CONSENSUS_MODELS,
     ConsensusConfig,
     ConsensusEvaluator,
+    DeliberativeConfig,
+    DeliberativeConsensus,
     run_consensus_evaluation,
+    run_deliberative_evaluation,
 )
 from ouroboros.evaluation.mechanical import (
     MechanicalConfig,
@@ -46,11 +49,15 @@ from ouroboros.evaluation.models import (
     CheckResult,
     CheckType,
     ConsensusResult,
+    DeliberationResult,
     EvaluationContext,
     EvaluationResult,
+    FinalVerdict,
+    JudgmentResult,
     MechanicalResult,
     SemanticResult,
     Vote,
+    VoterRole,
 )
 from ouroboros.evaluation.pipeline import (
     EvaluationPipeline,
@@ -77,11 +84,15 @@ __all__ = [
     "CheckResult",
     "CheckType",
     "ConsensusResult",
+    "DeliberationResult",
     "EvaluationContext",
     "EvaluationResult",
+    "FinalVerdict",
+    "JudgmentResult",
     "MechanicalResult",
     "SemanticResult",
     "Vote",
+    "VoterRole",
     # Stage 1
     "MechanicalConfig",
     "MechanicalVerifier",
@@ -91,11 +102,15 @@ __all__ = [
     "SemanticConfig",
     "SemanticEvaluator",
     "run_semantic_evaluation",
-    # Stage 3
+    # Stage 3 - Simple Consensus
     "DEFAULT_CONSENSUS_MODELS",
     "ConsensusConfig",
     "ConsensusEvaluator",
     "run_consensus_evaluation",
+    # Stage 3 - Deliberative Consensus
+    "DeliberativeConfig",
+    "DeliberativeConsensus",
+    "run_deliberative_evaluation",
     # Trigger
     "ConsensusTrigger",
     "TriggerConfig",
