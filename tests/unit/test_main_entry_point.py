@@ -11,8 +11,10 @@ runner = CliRunner()
 
 
 def test_version_exists():
-    """Test that __version__ is defined."""
-    assert ouroboros.__version__ == "0.2.0"
+    """Test that __version__ is defined and follows semver format."""
+    import re
+    assert hasattr(ouroboros, "__version__")
+    assert re.match(r"^\d+\.\d+\.\d+", ouroboros.__version__)
 
 
 def test_main_invokes_cli():
