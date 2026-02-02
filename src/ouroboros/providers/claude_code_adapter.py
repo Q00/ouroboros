@@ -10,11 +10,24 @@ Usage:
         messages=[Message(role=MessageRole.USER, content="Hello!")],
         config=CompletionConfig(model="claude-sonnet-4-20250514"),
     )
+
+Custom CLI Path:
+    You can specify a custom Claude CLI binary path to use instead of
+    the SDK's bundled CLI. This is useful for:
+    - Using an instrumented CLI wrapper (e.g., for OTEL tracing)
+    - Testing with a specific CLI version
+    - Using a locally built CLI
+
+    Set via constructor parameter or environment variable:
+        adapter = ClaudeCodeAdapter(cli_path="/path/to/claude")
+        # or
+        export OUROBOROS_CLI_PATH=/path/to/claude
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import structlog
 
@@ -38,6 +51,10 @@ class ClaudeCodeAdapter:
     the Claude Agent SDK under the hood. This allows users to leverage
     their Claude Code Max Plan subscription without needing separate API keys.
 
+    Attributes:
+        cli_path: Path to the Claude CLI binary. If not set, the SDK will
+            use its bundled CLI. Set this to use a custom/instrumented CLI.
+
     Example:
         adapter = ClaudeCodeAdapter()
         result = await adapter.complete(
@@ -46,11 +63,15 @@ class ClaudeCodeAdapter:
         )
         if result.is_ok:
             print(result.value.content)
+
+    Example with custom CLI:
+        adapter = ClaudeCodeAdapter(cli_path="/usr/local/bin/claude")
     """
 
     def __init__(
         self,
         permission_mode: str = "default",
+        cli_path: str | Path | None = None,
     ) -> None:
         """Initialize Claude Code adapter.
 
@@ -58,12 +79,65 @@ class ClaudeCodeAdapter:
             permission_mode: Permission mode for SDK operations.
                 - "default": Standard permissions
                 - "acceptEdits": Auto-approve edits (not needed for interview)
+            cli_path: Path to the Claude CLI binary. If not provided,
+                checks OUROBOROS_CLI_PATH env var, then falls back to
+                SDK's bundled CLI.
         """
         self._permission_mode: str = permission_mode
+        self._cli_path: Path | None = self._resolve_cli_path(cli_path)
         log.info(
             "claude_code_adapter.initialized",
             permission_mode=permission_mode,
+            cli_path=str(self._cli_path) if self._cli_path else None,
         )
+
+    def _resolve_cli_path(self, cli_path: str | Path | None) -> Path | None:
+        """Resolve the CLI path from parameter or environment variable.
+
+        Args:
+            cli_path: Explicit CLI path from constructor.
+
+        Returns:
+            Resolved Path if set and exists, None otherwise (falls back to SDK default).
+        """
+        # Priority: explicit parameter > environment variable > None (SDK default)
+        path_str = str(cli_path) if cli_path else os.environ.get("OUROBOROS_CLI_PATH", "")
+        path_str = path_str.strip()
+
+        if not path_str:
+            return None
+
+        resolved = Path(path_str).expanduser().resolve()
+
+        if not resolved.exists():
+            log.warning(
+                "claude_code_adapter.cli_path_not_found",
+                cli_path=str(resolved),
+                fallback="using SDK bundled CLI",
+            )
+            return None
+
+        if not resolved.is_file():
+            log.warning(
+                "claude_code_adapter.cli_path_not_file",
+                cli_path=str(resolved),
+                fallback="using SDK bundled CLI",
+            )
+            return None
+
+        if not os.access(resolved, os.X_OK):
+            log.warning(
+                "claude_code_adapter.cli_not_executable",
+                cli_path=str(resolved),
+                fallback="using SDK bundled CLI",
+            )
+            return None
+
+        log.debug(
+            "claude_code_adapter.using_custom_cli",
+            cli_path=str(resolved),
+        )
+        return resolved
 
     async def complete(
         self,
@@ -107,6 +181,7 @@ class ClaudeCodeAdapter:
                 allowed_tools=[],  # No tools - pure conversation
                 permission_mode=self._permission_mode,  # type: ignore[arg-type]
                 cwd=os.getcwd(),
+                cli_path=self._cli_path,
             )
 
             # Collect the response
