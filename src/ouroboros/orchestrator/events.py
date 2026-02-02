@@ -266,7 +266,47 @@ def create_tool_called_event(
     )
 
 
+def create_mcp_tools_loaded_event(
+    session_id: str,
+    tool_count: int,
+    server_names: tuple[str, ...],
+    conflict_count: int = 0,
+    tool_names: list[str] | None = None,
+) -> BaseEvent:
+    """Create MCP tools loaded event.
+
+    Emitted when MCP tools are discovered and loaded for a session.
+
+    Args:
+        session_id: Session loading the tools.
+        tool_count: Number of MCP tools loaded.
+        server_names: Names of MCP servers providing tools.
+        conflict_count: Number of tool name conflicts detected.
+        tool_names: Optional list of loaded tool names.
+
+    Returns:
+        BaseEvent for MCP tools loaded.
+    """
+    data: dict[str, Any] = {
+        "tool_count": tool_count,
+        "server_names": list(server_names),
+        "conflict_count": conflict_count,
+        "loaded_at": datetime.now(UTC).isoformat(),
+    }
+
+    if tool_names:
+        data["tool_names"] = tool_names[:50]  # Limit to 50 for storage
+
+    return BaseEvent(
+        type="orchestrator.mcp_tools.loaded",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data=data,
+    )
+
+
 __all__ = [
+    "create_mcp_tools_loaded_event",
     "create_progress_event",
     "create_session_completed_event",
     "create_session_failed_event",
