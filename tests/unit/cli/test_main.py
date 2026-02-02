@@ -130,3 +130,27 @@ class TestStatusCommands:
         result = runner.invoke(app, ["status", "health"])
         assert result.exit_code == 0
         assert "System Health" in result.output
+
+
+class TestMCPCommands:
+    """Tests for mcp command group."""
+
+    def test_mcp_command_group_registered(self) -> None:
+        """Test that mcp command group is registered."""
+        result = runner.invoke(app, ["mcp", "--help"])
+        assert result.exit_code == 0
+        assert "MCP" in result.output
+
+    def test_mcp_serve_help(self) -> None:
+        """Test mcp serve command help."""
+        result = runner.invoke(app, ["mcp", "serve", "--help"])
+        assert result.exit_code == 0
+        assert "transport" in result.output.lower()
+        assert "port" in result.output.lower()
+
+    def test_mcp_info(self) -> None:
+        """Test mcp info command."""
+        result = runner.invoke(app, ["mcp", "info"])
+        assert result.exit_code == 0
+        assert "ouroboros-mcp" in result.output
+        assert "ouroboros_execute_seed" in result.output

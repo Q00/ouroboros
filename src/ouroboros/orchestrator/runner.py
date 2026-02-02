@@ -34,16 +34,19 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import DEFAULT_TOOLS, AgentMessage, ClaudeAgentAdapter
 from ouroboros.orchestrator.events import (
+    create_mcp_tools_loaded_event,
     create_progress_event,
     create_session_completed_event,
     create_session_failed_event,
     create_session_started_event,
     create_tool_called_event,
 )
+from ouroboros.orchestrator.mcp_tools import MCPToolProvider
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
+    from ouroboros.mcp.client.manager import MCPClientManager
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
@@ -168,6 +171,9 @@ class OrchestratorRunner:
 
     Converts Seed specifications to agent prompts, executes via adapter,
     tracks progress through event emission, and displays status via Rich.
+
+    Optionally integrates with external MCP servers via MCPClientManager
+    to provide additional tools to the Claude Agent during execution.
     """
 
     def __init__(
@@ -175,6 +181,8 @@ class OrchestratorRunner:
         adapter: ClaudeAgentAdapter,
         event_store: EventStore,
         console: Console | None = None,
+        mcp_manager: MCPClientManager | None = None,
+        mcp_tool_prefix: str = "",
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -182,11 +190,108 @@ class OrchestratorRunner:
             adapter: Claude Agent adapter for task execution.
             event_store: Event store for persistence.
             console: Rich console for output. Uses default if not provided.
+            mcp_manager: Optional MCP client manager for external tool integration.
+                        When provided, tools from connected MCP servers will be
+                        made available to the Claude Agent during execution.
+            mcp_tool_prefix: Optional prefix to add to MCP tool names to avoid
+                           conflicts (e.g., "mcp_" makes "read" become "mcp_read").
         """
         self._adapter = adapter
         self._event_store = event_store
         self._console = console or Console()
         self._session_repo = SessionRepository(event_store)
+        self._mcp_manager: MCPClientManager | None = mcp_manager
+        self._mcp_tool_prefix = mcp_tool_prefix
+
+    @property
+    def mcp_manager(self) -> MCPClientManager | None:
+        """Return the MCP client manager if configured.
+
+        Returns:
+            The MCPClientManager instance or None if not configured.
+        """
+        return self._mcp_manager
+
+    async def _get_merged_tools(
+        self,
+        session_id: str,
+        tool_prefix: str = "",
+    ) -> tuple[list[str], MCPToolProvider | None]:
+        """Get merged tool list from DEFAULT_TOOLS and MCP tools.
+
+        If MCP manager is configured, discovers tools from connected servers
+        and merges them with DEFAULT_TOOLS. DEFAULT_TOOLS always take priority.
+
+        Args:
+            session_id: Current session ID for event emission.
+            tool_prefix: Optional prefix for MCP tool names.
+
+        Returns:
+            Tuple of (merged tool names list, MCPToolProvider or None).
+        """
+        # Start with default tools
+        merged_tools = list(DEFAULT_TOOLS)
+
+        if self._mcp_manager is None:
+            return merged_tools, None
+
+        # Create provider and get MCP tools
+        provider = MCPToolProvider(
+            self._mcp_manager,
+            tool_prefix=tool_prefix,
+        )
+
+        try:
+            mcp_tools = await provider.get_tools(builtin_tools=DEFAULT_TOOLS)
+        except Exception as e:
+            log.warning(
+                "orchestrator.runner.mcp_tools_load_failed",
+                session_id=session_id,
+                error=str(e),
+            )
+            return merged_tools, None
+
+        if not mcp_tools:
+            log.info(
+                "orchestrator.runner.no_mcp_tools_available",
+                session_id=session_id,
+            )
+            return merged_tools, provider
+
+        # Add MCP tool names to merged list
+        mcp_tool_names = [t.name for t in mcp_tools]
+        merged_tools.extend(mcp_tool_names)
+
+        # Log conflicts
+        for conflict in provider.conflicts:
+            log.warning(
+                "orchestrator.runner.tool_conflict",
+                tool_name=conflict.tool_name,
+                source=conflict.source,
+                shadowed_by=conflict.shadowed_by,
+                resolution=conflict.resolution,
+            )
+
+        # Emit MCP tools loaded event
+        server_names = tuple(set(t.server_name for t in mcp_tools))
+        mcp_event = create_mcp_tools_loaded_event(
+            session_id=session_id,
+            tool_count=len(mcp_tools),
+            server_names=server_names,
+            conflict_count=len(provider.conflicts),
+            tool_names=mcp_tool_names,
+        )
+        await self._event_store.append(mcp_event)
+
+        log.info(
+            "orchestrator.runner.mcp_tools_loaded",
+            session_id=session_id,
+            mcp_tool_count=len(mcp_tools),
+            total_tools=len(merged_tools),
+            servers=server_names,
+        )
+
+        return merged_tools, provider
 
     async def execute_seed(
         self,
@@ -245,6 +350,12 @@ class OrchestratorRunner:
         system_prompt = build_system_prompt(seed)
         task_prompt = build_task_prompt(seed)
 
+        # Get merged tools (DEFAULT_TOOLS + MCP tools if configured)
+        merged_tools, mcp_provider = await self._get_merged_tools(
+            session_id=tracker.session_id,
+            tool_prefix=self._mcp_tool_prefix,
+        )
+
         # Execute with progress display
         messages_processed = 0
         final_message = ""
@@ -265,7 +376,7 @@ class OrchestratorRunner:
 
                 async for message in self._adapter.execute_task(
                     prompt=task_prompt,
-                    tools=DEFAULT_TOOLS,
+                    tools=merged_tools,
                     system_prompt=system_prompt,
                 ):
                     messages_processed += 1
@@ -460,6 +571,12 @@ Note: This is a resumed session. Please continue from where execution was interr
         # Get Claude Agent session ID if stored
         agent_session_id = tracker.progress.get("agent_session_id")
 
+        # Get merged tools (DEFAULT_TOOLS + MCP tools if configured)
+        merged_tools, mcp_provider = await self._get_merged_tools(
+            session_id=session_id,
+            tool_prefix=self._mcp_tool_prefix,
+        )
+
         start_time = datetime.now(UTC)
         messages_processed = tracker.messages_processed
         final_message = ""
@@ -480,7 +597,7 @@ Note: This is a resumed session. Please continue from where execution was interr
 
                 async for message in self._adapter.execute_task(
                     prompt=resume_prompt,
-                    tools=DEFAULT_TOOLS,
+                    tools=merged_tools,
                     system_prompt=system_prompt,
                     resume_session_id=agent_session_id,
                 ):

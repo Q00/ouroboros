@@ -368,3 +368,213 @@ class TestOrchestratorError:
         )
         assert error.details is not None
         assert error.details["code"] == 500
+
+
+class TestOrchestratorRunnerWithMCP:
+    """Tests for OrchestratorRunner with MCP integration."""
+
+    @pytest.fixture
+    def mock_adapter(self) -> MagicMock:
+        """Create a mock Claude agent adapter."""
+        adapter = MagicMock()
+        return adapter
+
+    @pytest.fixture
+    def mock_event_store(self) -> AsyncMock:
+        """Create a mock event store."""
+        store = AsyncMock()
+        store.append = AsyncMock()
+        store.replay = AsyncMock(return_value=[])
+        return store
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock Rich console."""
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_mcp_manager(self) -> MagicMock:
+        """Create a mock MCP client manager."""
+        from ouroboros.mcp.types import MCPToolDefinition
+
+        manager = MagicMock()
+        manager.list_all_tools = AsyncMock(return_value=[
+            MCPToolDefinition(
+                name="external_tool",
+                description="An external MCP tool",
+                server_name="test-server",
+            ),
+        ])
+        return manager
+
+    def test_init_with_mcp_manager(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        mock_mcp_manager: MagicMock,
+    ) -> None:
+        """Test runner initialization with MCP manager."""
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            mcp_manager=mock_mcp_manager,
+        )
+
+        assert runner.mcp_manager is mock_mcp_manager
+
+    def test_init_without_mcp_manager(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Test runner initialization without MCP manager."""
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+        )
+
+        assert runner.mcp_manager is None
+
+    def test_init_with_mcp_tool_prefix(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        mock_mcp_manager: MagicMock,
+    ) -> None:
+        """Test runner initialization with MCP tool prefix."""
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            mcp_manager=mock_mcp_manager,
+            mcp_tool_prefix="ext_",
+        )
+
+        assert runner._mcp_tool_prefix == "ext_"
+
+    @pytest.mark.asyncio
+    async def test_get_merged_tools_without_mcp(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Test getting merged tools without MCP manager."""
+        from ouroboros.orchestrator.adapter import DEFAULT_TOOLS
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+        )
+
+        merged_tools, provider = await runner._get_merged_tools("session_123")
+
+        assert merged_tools == DEFAULT_TOOLS
+        assert provider is None
+
+    @pytest.mark.asyncio
+    async def test_get_merged_tools_with_mcp(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        mock_mcp_manager: MagicMock,
+    ) -> None:
+        """Test getting merged tools with MCP manager."""
+        from ouroboros.orchestrator.adapter import DEFAULT_TOOLS
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            mcp_manager=mock_mcp_manager,
+        )
+
+        merged_tools, provider = await runner._get_merged_tools("session_123")
+
+        # Should include DEFAULT_TOOLS + MCP tools
+        assert all(t in merged_tools for t in DEFAULT_TOOLS)
+        assert "external_tool" in merged_tools
+        assert provider is not None
+
+    @pytest.mark.asyncio
+    async def test_get_merged_tools_mcp_failure(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        mock_mcp_manager: MagicMock,
+    ) -> None:
+        """Test graceful handling when MCP tool listing fails."""
+        from ouroboros.orchestrator.adapter import DEFAULT_TOOLS
+
+        mock_mcp_manager.list_all_tools = AsyncMock(
+            side_effect=Exception("Connection lost")
+        )
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            mcp_manager=mock_mcp_manager,
+        )
+
+        merged_tools, provider = await runner._get_merged_tools("session_123")
+
+        # Should still return DEFAULT_TOOLS on failure
+        assert merged_tools == DEFAULT_TOOLS
+        # Provider is still returned (error is handled gracefully inside MCPToolProvider)
+        # This allows callers to retry or check provider state
+        assert provider is not None
+        # No MCP tools should have been added
+        assert len(merged_tools) == len(DEFAULT_TOOLS)
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_with_mcp_tools(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        mock_mcp_manager: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Test seed execution uses merged tools."""
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.adapter import DEFAULT_TOOLS
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            yield AgentMessage(
+                type="result",
+                content="Done",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            mcp_manager=mock_mcp_manager,
+        )
+
+        # Mock session creation
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with patch.object(runner._session_repo, "create_session", mock_create_session):
+            with patch.object(runner._session_repo, "mark_completed", mock_mark_completed):
+                result = await runner.execute_seed(sample_seed)
+
+        assert result.is_ok
+        # MCP tools loaded event should have been emitted
+        assert mock_event_store.append.called
