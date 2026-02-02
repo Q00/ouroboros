@@ -149,6 +149,33 @@ class FilteredContext:
 - Fallback to sequential retry on partial failure
 - Minimum valid responses required before aggregation
 
+#### 6. Deliberative Consensus Pattern (v0.4.0)
+
+For high-stakes decisions requiring ontological validation:
+
+```python
+class DeliberativeConsensus:
+    """Two-round adversarial evaluation with philosophical grounding"""
+
+    async def evaluate(self, proposal: Proposal) -> DeliberativeResult:
+        # Round 1: Concurrent positions
+        advocate_task = self._run_advocate(proposal)
+        devil_task = self._run_devil(proposal)  # Uses ontology_questions
+        advocate, devil = await asyncio.gather(advocate_task, devil_task)
+
+        # Round 2: Judge renders verdict
+        verdict = await self._run_judge(advocate, devil)
+        return DeliberativeResult(
+            verdict=verdict,  # APPROVED | REJECTED | CONDITIONAL
+            is_root_solution=devil.confirmed_root_cause,
+        )
+```
+
+**Roles:**
+- **ADVOCATE**: Argues for the proposal's merits
+- **DEVIL'S ADVOCATE**: Challenges using four ontological questions (ESSENCE, ROOT_CAUSE, PREREQUISITES, HIDDEN_ASSUMPTIONS)
+- **JUDGE**: Synthesizes positions, renders final verdict
+
 ### Testing Strategy
 
 **Priority**: Observability Layer First (E0 Epic)
@@ -1000,6 +1027,46 @@ async def execute_phase(phase: Phase, uow: UnitOfWork):
     )
 ```
 
+#### Ontological Questioning Pattern (v0.4.0)
+
+```python
+from enum import Enum
+
+class OntologyQuestionType(str, Enum):
+    """Four fundamental questions for deep analysis"""
+    ESSENCE = "essence"              # "What IS this, really?"
+    ROOT_CAUSE = "root_cause"        # "Is this the root cause or a symptom?"
+    PREREQUISITES = "prerequisites"  # "What must exist first?"
+    HIDDEN_ASSUMPTIONS = "hidden_assumptions"  # "What are we assuming?"
+
+@dataclass
+class OntologyQuestion:
+    type: OntologyQuestionType
+    question: str
+    context: str
+
+    def format_prompt(self) -> str:
+        """Format for LLM consumption"""
+        return f"[{self.type.value.upper()}] {self.question}\nContext: {self.context}"
+
+# Usage in Contrarian Persona
+class ContrarianPersona:
+    def challenge(self, proposal: str) -> list[OntologyQuestion]:
+        return [
+            OntologyQuestion(
+                type=OntologyQuestionType.ROOT_CAUSE,
+                question="Is this addressing the root cause or treating a symptom?",
+                context=proposal,
+            ),
+            # ... other questions
+        ]
+```
+
+**Application Points:**
+- `resilience/personas.py`: Contrarian uses ontological questions
+- `evaluation/consensus.py`: Devil's Advocate role
+- `bigbang/ontology.py`: Interview framework discovery
+
 ### Anti-Patterns (MUST AVOID)
 
 #### 1. Zombie Objects (Detached ORM State)
@@ -1112,7 +1179,8 @@ ouroboros/
 │       │   │   ├── validate.py  # ouroboros validate <seed.yaml>
 │       │   │   ├── status.py    # ouroboros status [--seed-id]
 │       │   │   ├── resume.py    # ouroboros resume <checkpoint-id>
-│       │   │   └── config.py    # ouroboros config [show|set|init]
+│       │   │   ├── config.py    # ouroboros config [show|set|init]
+│       │   │   └── story.py     # v0.4.0: ouroboros story - narrative generation from universe
 │       │   └── formatters/
 │       │       ├── __init__.py
 │       │       ├── tables.py    # Rich table formatters
@@ -1126,6 +1194,7 @@ ouroboros/
 │       │   ├── protocols.py     # Protocol definitions (LLMAdapter, etc.)
 │       │   ├── seed.py          # Seed, OntologySchema, Constraints
 │       │   ├── ontology.py      # EffectiveOntology, OntologyEvent
+│       │   ├── ontology_questions.py  # v0.4.0: Four ontological probes (ESSENCE, ROOT_CAUSE, PREREQUISITES, HIDDEN_ASSUMPTIONS)
 │       │   ├── ac.py            # AcceptanceCriteria, ACNode, ACTree
 │       │   └── context.py       # ExecutionContext, contextvars
 │       │
@@ -1143,6 +1212,7 @@ ouroboros/
 │       │   ├── clarifier.py     # Clarification engine
 │       │   ├── ambiguity.py     # Ambiguity Gate (≤0.2 threshold)
 │       │   ├── interview.py     # Interview protocol
+│       │   ├── ontology.py      # v0.4.0: Ontological framework discovery during interview
 │       │   └── seed_generator.py # Generate Seed from interview
 │       │
 │       ├── routing/             # Phase 1: PAL Router
@@ -1169,10 +1239,12 @@ ouroboros/
 │       │
 │       ├── evaluation/          # Phase 4: Evaluation
 │       │   ├── __init__.py
+│       │   ├── models.py        # v0.4.0: EvaluationResult, ConsensusResult, Verdict
 │       │   ├── pipeline.py      # EvaluationPipeline orchestrator
 │       │   ├── mechanical.py    # Stage 1: MechanicalEvaluator ($0)
 │       │   ├── semantic.py      # Stage 2: SemanticEvaluator ($$)
-│       │   └── stage_result.py  # StageResult, EvaluationResult
+│       │   ├── consensus.py     # v0.4.0: DeliberativeConsensus (Advocate/Devil/Judge)
+│       │   └── stage_result.py  # StageResult (legacy, see models.py)
 │       │
 │       ├── consensus/           # Phase 5: Consensus
 │       │   ├── __init__.py
@@ -1748,4 +1820,8 @@ The Python 3.14 + uv + Typer stack with Event Sourcing and Domain-Driven Design 
 **Next Phase:** Begin implementation using the architectural decisions and patterns documented herein.
 
 **Document Maintenance:** Update this architecture when major technical decisions are made during implementation.
+
+---
+
+_Last Updated: 2026-02-02 (v0.4.0 additions)_
 

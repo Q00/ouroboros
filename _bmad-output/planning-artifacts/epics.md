@@ -369,6 +369,22 @@ So that I have a clear, immutable specification for execution.
 
 ---
 
+### Story 1.4: Story Generation Command
+
+As a developer,
+I want a CLI command to generate stories from my universe,
+So that I can create narrative elements based on the ontological framework.
+
+**Acceptance Criteria:**
+
+**Given** an existing universe with bigbang session
+**When** running `ouroboros story`
+**Then** the story generation wizard launches
+**And** user can select from discovered story types
+**And** narrative elements are generated based on universe ontology
+
+---
+
 ## Epic 2: Intelligent Task Routing (PAL)
 
 **Goal:** Developers benefit from cost-optimized LLM routing that automatically selects the right model tier based on task complexity, with intelligent escalation and downgrade.
@@ -547,7 +563,18 @@ So that stagnation is broken through creative approaches.
 **And** Researcher persona seeks additional information
 **And** Simplifier persona reduces complexity
 **And** Architect persona restructures the approach
-**And** Contrarian persona challenges assumptions
+**And** Contrarian persona challenges assumptions using ontological questions
+
+**Contrarian Ontological Analysis (v0.4.0):**
+
+**Given** the Contrarian persona is activated
+**When** challenging assumptions
+**Then** it uses the four ontological questions:
+  - ESSENCE: "What IS this, really?"
+  - ROOT_CAUSE: "Is this the root cause or a symptom?"
+  - PREREQUISITES: "What must exist first?"
+  - HIDDEN_ASSUMPTIONS: "What are we assuming?"
+**And** challenges are grounded in philosophical inquiry, not just contrarianism
 
 ---
 
@@ -589,6 +616,14 @@ So that obvious issues are caught before expensive LLM evaluation.
 **And** static analysis runs
 **And** coverage threshold ≥ 0.7 is verified
 
+**Unified Evaluation Protocol (v0.4.0):**
+
+**Given** any evaluation stage
+**When** `EvaluationProtocol.evaluate()` is called
+**Then** the unified interface dispatches to appropriate stage handler
+**And** `EvaluationResult` contains: passed, score, feedback, metadata
+**And** `ConsensusResult` extends with: verdicts list, majority_reached, dissenting_opinions
+
 ---
 
 ### Story 5.2: Stage 2 - Semantic Evaluation
@@ -620,6 +655,15 @@ So that important outputs have diverse verification.
 **Then** 3 different models evaluate the output
 **And** 2/3 majority agreement is required
 **And** disagreements are logged with reasoning
+
+**Deliberative Mode (v0.4.0):**
+
+**Given** a high-stakes decision requiring ontological analysis
+**When** DeliberativeConsensus is triggered
+**Then** Round 1 runs ADVOCATE and DEVIL'S ADVOCATE positions concurrently
+**And** Devil's Advocate uses ontological questions to challenge root cause vs symptom
+**And** Round 2 has JUDGE review both positions and render verdict (APPROVED/REJECTED/CONDITIONAL)
+**And** `is_root_solution` indicates whether Devil confirmed the solution addresses root cause
 
 ---
 
@@ -679,6 +723,29 @@ So that accumulated drift is caught and corrected.
 **And** drift components are analyzed
 **And** course correction recommendations are generated
 **And** high drift triggers human notification
+
+---
+
+### Story 6.3: Ontological Framework Discovery
+
+As a developer using the interview system,
+I want the bigbang interview to capture fundamental ontological insights,
+So that the generated universe has coherent philosophical foundations.
+
+**Acceptance Criteria:**
+
+**Given** a bigbang interview session
+**When** exploring the problem domain
+**Then** the system probes for:
+  - ESSENCE: The fundamental nature of concepts
+  - ROOT_CAUSE: Distinguishing symptoms from causes
+  - PREREQUISITES: Identifying foundational dependencies
+  - HIDDEN_ASSUMPTIONS: Surfacing implicit beliefs
+
+**Given** ontological insights are captured
+**When** the interview completes
+**Then** findings are stored in structured format for universe generation
+**And** can inform the Contrarian persona and Devil's Advocate evaluations
 
 ---
 
@@ -986,12 +1053,12 @@ So that I can monitor executions from the command line.
 | Epic | Title | Stories | FRs | Key Value |
 |------|-------|---------|-----|-----------|
 | 0 | Project Foundation & Infrastructure | 9 | 3 | Installable, configurable CLI |
-| 1 | Seed Creation via Big Bang | 3 | 3 | Clear requirement specification |
+| 1 | Seed Creation via Big Bang | 4 | 3 | Clear requirement specification |
 | 2 | Intelligent Task Routing (PAL) | 4 | 4 | Cost-optimized LLM usage |
 | 3 | Double Diamond Execution | 4 | 3 | Recursive task decomposition |
 | 4 | Resilience & Stagnation Recovery | 3 | 2 | Zero-stop operation |
 | 5 | Three-Stage Evaluation Pipeline | 4 | 4 | Rigorous verification |
-| 6 | Drift Control & Retrospective | 2 | 2 | Goal alignment |
+| 6 | Drift Control & Retrospective | 3 | 2 | Goal alignment |
 | 7 | Secondary Loop & TODO Processing | 2 | 2 | Deferred improvements |
 | 8 | Orchestrator (Claude Agent SDK) | 4 | - | Real code execution via SDK |
 | 9 | MCP Protocol Integration | 4 | - | External client integration |
@@ -1025,5 +1092,5 @@ Each Epic provides **complete, standalone functionality** while building upon pr
 ---
 
 _Generated: 2026-01-14_
-_Updated: 2026-01-26_
-_Status: Complete_
+_Updated: 2026-02-03_
+_Status: Complete (v0.4.0 additions)_

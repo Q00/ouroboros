@@ -224,7 +224,7 @@ These iterate until a **Seed** crystallizes—a specification with `Ambiguity �
 ┃      └────┬────┘                                                               ┃
 ┃           │      Stage 1: Mechanical ($0) — lint, build, test                  ┃
 ┃           │      Stage 2: Semantic ($$) — AC compliance, drift                 ┃
-┃           │      Stage 3: Consensus ($$$$) — multi-model vote                  ┃
+┃           │      Stage 3: Consensus ($$$$) — Advocate/Devil/Judge debate       ┃
 ┃           ▼                                                                    ┃
 ┃      ┌─────────┐                                                               ┃
 ┃      │ PHASE 5 │  S E C O N D A R Y   L O O P                                  ┃
@@ -292,9 +292,9 @@ def select_approach(task):
 ```
 src/ouroboros/
 │
-├── core/           ◆ The essence: types, errors, seed, context
+├── core/           ◆ The essence: types, errors, seed, ontology
 │
-├── bigbang/        ◇ Phase 0: Interview → Ambiguity → Seed
+├── bigbang/        ◇ Phase 0: Interview → Ontology → Ambiguity → Seed
 │
 ├── routing/        ◇ Phase 1: PAL router, complexity, tiers
 │
@@ -337,6 +337,7 @@ src/ouroboros/
 | **THE RESEARCHER** | *"Stop coding. Read the docs."* | Knowledge gap detected | Search, read documentation, find examples |
 | **THE SIMPLIFIER** | *"Cut scope in half. Return to MVP."* | Overengineering detected | Remove features, reduce complexity |
 | **THE ARCHITECT** | *"Question the foundation. Rebuild if needed."* | Structural issues | Redesign, refactor core assumptions |
+| **THE CONTRARIAN** | *"What if we're solving the wrong problem?"* | Root cause unclear | Challenge assumptions using ontological questions |
 
 <br/>
 
