@@ -61,7 +61,8 @@ def _format_ac_line(
     content: str,
     status: str,
     is_current: bool,
-    max_width: int = 60,
+    elapsed_display: str = "",
+    max_width: int = 50,
 ) -> Text:
     """Format a single AC line for display.
 
@@ -70,6 +71,7 @@ def _format_ac_line(
         content: AC content text.
         status: AC status string.
         is_current: Whether this is the current AC being worked on.
+        elapsed_display: Time spent on this AC.
         max_width: Maximum width for content truncation.
 
     Returns:
@@ -89,10 +91,13 @@ def _format_ac_line(
     line.append(f"{index}. ", style="bold" if is_current else "dim")
     line.append(content)
 
-    # Add current marker
-    if is_current and status == "in_progress":
-        line.append("  ", style="dim")
-        line.append("<- current", style="yellow italic")
+    # Add elapsed time for completed or in-progress
+    if elapsed_display:
+        line.append("  ")
+        if status == "in_progress":
+            line.append(f"[{elapsed_display}...]", style="yellow dim")
+        else:
+            line.append(f"[{elapsed_display}]", style="dim")
 
     return line
 
@@ -118,6 +123,30 @@ def _build_progress_bar(completed: int, total: int) -> Progress:
     return progress
 
 
+def _build_phase_indicator(current_phase: str) -> Text:
+    """Build the Double Diamond phase indicator.
+
+    Args:
+        current_phase: Current phase name.
+
+    Returns:
+        Formatted phase indicator text.
+    """
+    phases = ["Discover", "Define", "Develop", "Deliver"]
+    indicator = Text()
+
+    for i, phase in enumerate(phases):
+        if i > 0:
+            indicator.append(" > ", style="dim")
+
+        if phase == current_phase:
+            indicator.append(phase, style="bold cyan")
+        else:
+            indicator.append(phase, style="dim")
+
+    return indicator
+
+
 def render_workflow_state(state: WorkflowState) -> Panel:
     """Render workflow state as a Rich Panel.
 
@@ -128,6 +157,9 @@ def render_workflow_state(state: WorkflowState) -> Panel:
         Rich Panel containing the formatted display.
     """
     from ouroboros.orchestrator.workflow_state import ACStatus
+
+    # Build phase indicator
+    phase_indicator = _build_phase_indicator(state.current_phase.value)
 
     # Build header with session ID and elapsed time
     header = Text()
@@ -144,7 +176,7 @@ def render_workflow_state(state: WorkflowState) -> Panel:
     ac_header.append(f"{state.completed_count}/{state.total_count} complete ", style="cyan")
     ac_header.append(f"({state.progress_percent}%)", style="dim")
 
-    # Build AC list
+    # Build AC list with elapsed time
     ac_lines: list[Text] = []
     for ac in state.acceptance_criteria:
         is_current = ac.index == state.current_ac_index
@@ -153,11 +185,17 @@ def render_workflow_state(state: WorkflowState) -> Panel:
             ac.content,
             ac.status.value,
             is_current,
+            elapsed_display=ac.elapsed_display,
         )
         ac_lines.append(line)
 
-    # Build progress bar
+    # Build progress bar with estimated remaining time
     progress_bar = _build_progress_bar(state.completed_count, state.total_count)
+
+    # Build estimated remaining time text
+    remaining_text = Text()
+    if state.estimated_remaining_display:
+        remaining_text.append(f"  {state.estimated_remaining_display}", style="dim italic")
 
     # Build activity section
     activity_icon = ACTIVITY_ICONS.get(state.activity.value, "💻")
@@ -166,6 +204,14 @@ def render_workflow_state(state: WorkflowState) -> Panel:
     activity_text.append(state.activity.value.title(), style="bold")
     if state.activity_detail:
         activity_text.append(f" | {state.activity_detail}", style="dim")
+
+    # Build recent outputs (logs under activity)
+    output_lines: list[Text] = []
+    for output in state.recent_outputs:
+        line = Text()
+        line.append("    > ", style="dim")
+        line.append(output, style="dim italic")
+        output_lines.append(line)
 
     # Build metrics footer with individual boxes using Table for even distribution
     metrics = Table(box=None, expand=True, show_header=False, padding=(0, 1))
@@ -180,20 +226,12 @@ def render_workflow_state(state: WorkflowState) -> Panel:
         Panel(f"💰 ~${state.estimated_cost_usd:.2f}", box=box.ASCII, padding=(0, 1)),
     )
 
-    # Compose the panel content
-    content_parts = [
-        header,
-        goal_line,
-        Text(""),  # Spacer
-        ac_header,
-    ]
-    content_parts.extend(ac_lines)
-    content_parts.append(Text(""))  # Spacer
-
     # Create a renderables group
     from rich.console import Group as RenderGroup
 
     renderables = [
+        phase_indicator,
+        Text(""),
         header,
         goal_line,
         Text(""),
@@ -201,8 +239,10 @@ def render_workflow_state(state: WorkflowState) -> Panel:
         *ac_lines,
         Text(""),
         progress_bar,
+        remaining_text,
         Text(""),
         activity_text,
+        *output_lines,
         Text(""),
         metrics,
     ]

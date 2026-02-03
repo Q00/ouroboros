@@ -59,6 +59,15 @@ TOOL_ACTIVITY_MAP: dict[str, ActivityType] = {
 }
 
 
+class Phase(Enum):
+    """Double Diamond phase."""
+
+    DISCOVER = "Discover"
+    DEFINE = "Define"
+    DEVELOP = "Develop"
+    DELIVER = "Deliver"
+
+
 @dataclass
 class AcceptanceCriterion:
     """State of a single acceptance criterion.
@@ -92,6 +101,26 @@ class AcceptanceCriterion:
         self.status = ACStatus.FAILED
         self.completed_at = datetime.now(UTC)
 
+    @property
+    def elapsed_seconds(self) -> float | None:
+        """Seconds spent on this AC."""
+        if self.started_at is None:
+            return None
+        end = self.completed_at or datetime.now(UTC)
+        return (end - self.started_at).total_seconds()
+
+    @property
+    def elapsed_display(self) -> str:
+        """Elapsed time formatted for display."""
+        elapsed = self.elapsed_seconds
+        if elapsed is None:
+            return ""
+        elapsed_int = int(elapsed)
+        minutes, seconds = divmod(elapsed_int, 60)
+        if minutes > 0:
+            return f"{minutes}m {seconds}s"
+        return f"{seconds}s"
+
 
 @dataclass
 class WorkflowState:
@@ -117,6 +146,7 @@ class WorkflowState:
     goal: str = ""
     acceptance_criteria: list[AcceptanceCriterion] = field(default_factory=list)
     current_ac_index: int = 0
+    current_phase: Phase = Phase.DISCOVER
     activity: ActivityType = ActivityType.IDLE
     activity_detail: str = ""
     last_tool: str = ""
@@ -126,7 +156,9 @@ class WorkflowState:
     estimated_cost_usd: float = 0.0
     start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
     activity_log: list[str] = field(default_factory=list)
-    max_activity_log: int = 5
+    max_activity_log: int = 3
+    recent_outputs: list[str] = field(default_factory=list)
+    max_recent_outputs: int = 2
 
     @property
     def completed_count(self) -> int:
@@ -169,6 +201,33 @@ class WorkflowState:
         else:
             return f"{seconds}s"
 
+    @property
+    def estimated_remaining_seconds(self) -> float | None:
+        """Estimated seconds remaining based on current progress."""
+        if self.completed_count == 0:
+            return None  # Can't estimate without any completed ACs
+        elapsed = self.elapsed_seconds
+        # Calculate average time per AC and multiply by remaining
+        avg_time_per_ac = elapsed / self.completed_count
+        remaining_acs = self.total_count - self.completed_count
+        return avg_time_per_ac * remaining_acs
+
+    @property
+    def estimated_remaining_display(self) -> str:
+        """Estimated remaining time formatted for display."""
+        remaining = self.estimated_remaining_seconds
+        if remaining is None:
+            return ""
+        remaining_int = int(remaining)
+        minutes, seconds = divmod(remaining_int, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"~{hours}h {minutes}m remaining"
+        elif minutes > 0:
+            return f"~{minutes}m remaining"
+        else:
+            return f"~{seconds}s remaining"
+
     def add_activity(self, entry: str) -> None:
         """Add an activity log entry.
 
@@ -178,6 +237,19 @@ class WorkflowState:
         self.activity_log.append(entry)
         if len(self.activity_log) > self.max_activity_log:
             self.activity_log = self.activity_log[-self.max_activity_log :]
+
+    def add_output(self, output: str) -> None:
+        """Add a recent output entry (for display under activity).
+
+        Args:
+            output: Output text (will be truncated).
+        """
+        # Truncate and clean the output
+        clean = output.strip().replace("\n", " ")[:60]
+        if clean:
+            self.recent_outputs.append(clean)
+            if len(self.recent_outputs) > self.max_recent_outputs:
+                self.recent_outputs = self.recent_outputs[-self.max_recent_outputs :]
 
 
 # Claude 3.5 Sonnet pricing (as of 2024)
@@ -274,6 +346,13 @@ class WorkflowStateTracker:
 
         # Parse AC markers and heuristics
         self._parse_ac_markers(content)
+
+        # Add recent output for display (assistant messages only, not tool results)
+        if message_type == "assistant" and not tool_name and content.strip():
+            self._state.add_output(content)
+
+        # Update phase based on progress
+        self._update_phase()
 
     def _update_cost_estimate(self) -> None:
         """Update token and cost estimates."""
@@ -379,6 +458,18 @@ class WorkflowStateTracker:
         self._state.activity = ActivityType.FINALIZING
         self._state.activity_detail = "All ACs completed"
 
+    def _update_phase(self) -> None:
+        """Update current phase based on progress."""
+        progress = self._state.progress_fraction
+        if progress == 0:
+            self._state.current_phase = Phase.DISCOVER
+        elif progress < 0.33:
+            self._state.current_phase = Phase.DEFINE
+        elif progress < 0.66:
+            self._state.current_phase = Phase.DEVELOP
+        else:
+            self._state.current_phase = Phase.DELIVER
+
     def to_dict(self) -> dict[str, Any]:
         """Export state as dictionary for events/serialization.
 
@@ -440,6 +531,7 @@ __all__ = [
     "ACStatus",
     "AcceptanceCriterion",
     "ActivityType",
+    "Phase",
     "WorkflowState",
     "WorkflowStateTracker",
     "get_ac_tracking_prompt",
