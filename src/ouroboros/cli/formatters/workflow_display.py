@@ -18,6 +18,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, AsyncIterator
 
+from rich import box
 from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
@@ -163,7 +164,7 @@ def render_workflow_state(state: WorkflowState) -> Panel:
     activity_text.append(f" {activity_icon} ", style="bold")
     activity_text.append(state.activity.value.title(), style="bold")
     if state.activity_detail:
-        activity_text.append(f" │ {state.activity_detail}", style="dim")
+        activity_text.append(f" | {state.activity_detail}", style="dim")
 
     # Build metrics footer
     metrics = Table.grid(padding=(0, 2))
@@ -211,6 +212,7 @@ def render_workflow_state(state: WorkflowState) -> Panel:
         RenderGroup(*renderables),
         title="[bold blue]Ouroboros Workflow[/bold blue]",
         border_style="blue",
+        box=box.ASCII,
         padding=(1, 2),
     )
 
