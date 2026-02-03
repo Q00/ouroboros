@@ -182,7 +182,9 @@ class ACProgressWidget(Widget):
                 yield self._render_ac_item(ac)
 
             # Progress bar
-            self._progress_bar = ProgressBar(total=max(self.total_count, 1), show_eta=False)
+            self._progress_bar = ProgressBar(
+                total=max(self.total_count, 1), show_eta=False, show_percentage=False
+            )
             self._progress_bar.advance(self.completed_count)
             yield self._progress_bar
 

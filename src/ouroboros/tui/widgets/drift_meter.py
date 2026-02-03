@@ -95,7 +95,7 @@ class DriftBar(Widget):
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
         yield Label(self._label)
-        self._progress_bar = ProgressBar(total=100, show_eta=False)
+        self._progress_bar = ProgressBar(total=100, show_eta=False, show_percentage=False)
         yield self._progress_bar
         self._value_label = Static(f"{self.value:.1%}", classes="value")
         yield self._value_label
