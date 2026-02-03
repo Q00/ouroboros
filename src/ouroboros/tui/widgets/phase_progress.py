@@ -170,23 +170,12 @@ class PhaseProgressWidget(Widget):
         color: $text-muted;
     }
 
-    PhaseProgressWidget .diamond-labels {
-        text-align: center;
-        color: $text-muted;
-        margin-bottom: 1;
-    }
-
-    PhaseProgressWidget .diamond-connector {
+    PhaseProgressWidget .diamond-symbol {
         width: 3;
         height: 3;
         content-align: center middle;
         color: $primary;
-    }
-
-    PhaseProgressWidget .legend {
-        text-align: center;
-        margin-top: 1;
-        color: $text-muted;
+        text-style: bold;
     }
     """
 
@@ -222,16 +211,11 @@ class PhaseProgressWidget(Widget):
         """Compose the widget layout."""
         yield Label("Double Diamond", classes="header")
 
-        # Visual diamond representation:
-        #   ◇ Diamond 1: Problem Space    ◇ Diamond 2: Solution Space
-        #   Discover → Define              Design → Deliver
-        yield Label(
-            "[dim]◇ Problem[/dim]                    [dim]◇ Solution[/dim]",
-            classes="diamond-labels",
-        )
-
         with Horizontal():
-            for i, phase in enumerate(PHASES):
+            # First Diamond: Problem Space
+            yield Static(" ◇ ", classes="diamond-symbol")
+
+            for i, phase in enumerate(PHASES[:2]):
                 is_active = phase["name"] == self.current_phase
                 is_completed = self._is_phase_completed(phase["name"])
 
@@ -245,11 +229,27 @@ class PhaseProgressWidget(Widget):
                 self._phase_indicators[phase["name"]] = indicator
                 yield indicator
 
-                # Add diamond connector between phases
-                if i == 1:
-                    # Between Define and Design (between diamonds)
-                    yield Static(" ◆ ", classes="diamond-connector")
-                elif i < len(PHASES) - 1:
+                if i == 0:
+                    yield Static(" → ", classes="arrow")
+
+            # Second Diamond: Solution Space
+            yield Static(" ◇ ", classes="diamond-symbol")
+
+            for i, phase in enumerate(PHASES[2:]):
+                is_active = phase["name"] == self.current_phase
+                is_completed = self._is_phase_completed(phase["name"])
+
+                indicator = PhaseIndicator(
+                    phase_name=phase["name"],
+                    phase_label=phase["label"],
+                    phase_type=phase["type"],
+                    is_active=is_active,
+                    is_completed=is_completed,
+                )
+                self._phase_indicators[phase["name"]] = indicator
+                yield indicator
+
+                if i == 0:
                     yield Static(" → ", classes="arrow")
 
     def _is_phase_completed(self, phase_name: str) -> bool:
