@@ -16,10 +16,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Label, Static
+from textual.widgets import Footer, Label, Static
 
 if TYPE_CHECKING:
-    from ouroboros.tui.events import TUIState
+    from ouroboros.tui.events import TUIState, WorkflowProgressUpdated
 
 
 class EventTimelineItem(Static):
@@ -215,6 +215,15 @@ class ExecutionScreen(Screen[None]):
         layout: vertical;
     }
 
+    ExecutionScreen > .screen-header {
+        dock: top;
+        height: 1;
+        width: 100%;
+        background: $primary;
+        text-align: center;
+        padding: 0 1;
+    }
+
     ExecutionScreen > Container {
         height: 1fr;
         width: 100%;
@@ -274,7 +283,10 @@ class ExecutionScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
-        yield Header()
+        yield Static(
+            "[bold blue]Ouroboros TUI[/bold blue] — [dim]Execution Detail[/dim]",
+            classes="screen-header",
+        )
 
         with Container():
             exec_id = self._state.execution_id if self._state else "None"
@@ -421,6 +433,45 @@ class ExecutionScreen(Screen[None]):
                     self.update_phase_output(phase_name, phase_output)
             else:
                 self.refresh(recompose=True)
+
+    def on_workflow_progress_updated(self, message: WorkflowProgressUpdated) -> None:
+        """Handle workflow progress update event.
+
+        Updates event timeline and phase outputs from workflow progress.
+
+        Args:
+            message: WorkflowProgressUpdated message with progress info.
+        """
+        # Add activity to event timeline
+        activity = getattr(message, "activity", "idle")
+        activity_detail = getattr(message, "activity_detail", "")
+        current_phase = getattr(message, "current_phase", "Discover")
+        completed = getattr(message, "completed_count", 0)
+        total = getattr(message, "total_count", 0)
+
+        # Map phase name to lowercase key
+        phase_key = current_phase.lower() if current_phase else "discover"
+
+        # Add event to timeline
+        if activity_detail:
+            self.add_event(
+                event_type=activity,
+                details=f"{activity_detail} ({completed}/{total} ACs)",
+                category="tool" if activity in ("exploring", "building", "testing") else "phase",
+            )
+
+        # Update phase output with current activity
+        if phase_key in self._phase_outputs or phase_key in ["discover", "define", "design", "deliver"]:
+            current_output = self._phase_outputs.get(phase_key, "")
+            if activity_detail and activity_detail not in current_output:
+                # Append new activity to phase output
+                new_output = f"{current_output}\n• {activity_detail}" if current_output else f"• {activity_detail}"
+                # Keep only last 500 chars
+                if len(new_output) > 500:
+                    new_output = "..." + new_output[-497:]
+                self._phase_outputs[phase_key] = new_output
+
+        self.refresh(recompose=True)
 
 
 __all__ = ["EventTimelineItem", "ExecutionScreen", "PhaseOutputPanel"]

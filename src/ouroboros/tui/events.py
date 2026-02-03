@@ -252,10 +252,15 @@ class WorkflowProgressUpdated(Message):
         completed_count: Number of completed ACs.
         total_count: Total number of ACs.
         current_ac_index: Index of current AC being worked on.
+        current_phase: Current Double Diamond phase.
         activity: Current activity type.
         activity_detail: Activity detail string.
         estimated_remaining: Estimated remaining time display.
         elapsed_display: Total elapsed time display.
+        messages_count: Total messages processed.
+        tool_calls_count: Total tool calls made.
+        estimated_tokens: Estimated token usage.
+        estimated_cost_usd: Estimated cost in USD.
     """
 
     def __init__(
@@ -265,34 +270,32 @@ class WorkflowProgressUpdated(Message):
         completed_count: int,
         total_count: int,
         current_ac_index: int | None = None,
+        current_phase: str = "Discover",
         activity: str = "idle",
         activity_detail: str = "",
         estimated_remaining: str = "",
         elapsed_display: str = "",
+        messages_count: int = 0,
+        tool_calls_count: int = 0,
+        estimated_tokens: int = 0,
+        estimated_cost_usd: float = 0.0,
     ) -> None:
-        """Initialize WorkflowProgressUpdated message.
-
-        Args:
-            execution_id: The execution with updated progress.
-            acceptance_criteria: List of AC progress dicts.
-            completed_count: Number of completed ACs.
-            total_count: Total number of ACs.
-            current_ac_index: Index of current AC.
-            activity: Current activity type.
-            activity_detail: Activity detail string.
-            estimated_remaining: Estimated remaining time.
-            elapsed_display: Total elapsed time display.
-        """
+        """Initialize WorkflowProgressUpdated message."""
         super().__init__()
         self.execution_id = execution_id
         self.acceptance_criteria = acceptance_criteria
         self.completed_count = completed_count
         self.total_count = total_count
         self.current_ac_index = current_ac_index
+        self.current_phase = current_phase
         self.activity = activity
         self.activity_detail = activity_detail
         self.estimated_remaining = estimated_remaining
         self.elapsed_display = elapsed_display
+        self.messages_count = messages_count
+        self.tool_calls_count = tool_calls_count
+        self.estimated_tokens = estimated_tokens
+        self.estimated_cost_usd = estimated_cost_usd
 
 
 class PauseRequested(Message):
@@ -506,10 +509,15 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             completed_count=data.get("completed_count", 0),
             total_count=data.get("total_count", 0),
             current_ac_index=data.get("current_ac_index"),
+            current_phase=data.get("current_phase", "Discover"),
             activity=data.get("activity", "idle"),
             activity_detail=data.get("activity_detail", ""),
             estimated_remaining=data.get("estimated_remaining", ""),
             elapsed_display=data.get("elapsed_display", ""),
+            messages_count=data.get("messages_count", 0),
+            tool_calls_count=data.get("tool_calls_count", 0),
+            estimated_tokens=data.get("estimated_tokens", 0),
+            estimated_cost_usd=data.get("estimated_cost_usd", 0.0),
         )
 
     # Return None for unhandled event types

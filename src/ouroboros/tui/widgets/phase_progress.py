@@ -169,6 +169,25 @@ class PhaseProgressWidget(Widget):
         content-align: center middle;
         color: $text-muted;
     }
+
+    PhaseProgressWidget .diamond-labels {
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+
+    PhaseProgressWidget .diamond-connector {
+        width: 3;
+        height: 3;
+        content-align: center middle;
+        color: $primary;
+    }
+
+    PhaseProgressWidget .legend {
+        text-align: center;
+        margin-top: 1;
+        color: $text-muted;
+    }
     """
 
     current_phase: reactive[str] = reactive("")
@@ -201,7 +220,15 @@ class PhaseProgressWidget(Widget):
 
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
-        yield Label("Double Diamond Progress", classes="header")
+        yield Label("Double Diamond", classes="header")
+
+        # Visual diamond representation:
+        #   ◇ Diamond 1: Problem Space    ◇ Diamond 2: Solution Space
+        #   Discover → Define              Design → Deliver
+        yield Label(
+            "[dim]◇ Problem[/dim]                    [dim]◇ Solution[/dim]",
+            classes="diamond-labels",
+        )
 
         with Horizontal():
             for i, phase in enumerate(PHASES):
@@ -218,12 +245,12 @@ class PhaseProgressWidget(Widget):
                 self._phase_indicators[phase["name"]] = indicator
                 yield indicator
 
-                # Add arrow between phases (except after last)
-                if i < len(PHASES) - 1:
-                    yield Static(" > ", classes="arrow")
-
-        if self.iteration > 0:
-            yield Label(f"Iteration: {self.iteration}", classes="iteration-info")
+                # Add diamond connector between phases
+                if i == 1:
+                    # Between Define and Design (between diamonds)
+                    yield Static(" ◆ ", classes="diamond-connector")
+                elif i < len(PHASES) - 1:
+                    yield Static(" → ", classes="arrow")
 
     def _is_phase_completed(self, phase_name: str) -> bool:
         """Check if a phase is completed based on current phase.

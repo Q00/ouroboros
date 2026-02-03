@@ -277,10 +277,15 @@ class WorkflowState:
             "completed_count": self.completed_count,
             "total_count": self.total_count,
             "current_ac_index": self.current_ac_index,
+            "current_phase": self.current_phase.value,
             "activity": self.activity.value,
             "activity_detail": self.activity_detail,
             "estimated_remaining": self.estimated_remaining_display,
             "elapsed_display": self.elapsed_display,
+            "messages_count": self.messages_count,
+            "tool_calls_count": self.tool_calls_count,
+            "estimated_tokens": self.estimated_tokens,
+            "estimated_cost_usd": self.estimated_cost_usd,
         }
 
 

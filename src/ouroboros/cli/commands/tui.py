@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info
+from ouroboros.persistence.event_store import EventStore
+
+DEFAULT_DB_PATH = Path(os.path.expanduser("~/.ouroboros/ouroboros.db"))
 
 app = typer.Typer(
     name="tui",
@@ -21,99 +24,57 @@ app = typer.Typer(
 )
 
 
-@app.command()
-def monitor(
-    execution_id: Annotated[
-        str | None,
+@app.command(name="monitor")
+def monitor_command(
+    db_path: Annotated[
+        Path,
         typer.Option(
-            "--execution-id",
-            "-e",
-            help="Execution ID to monitor.",
+            "--db-path",
+            help="Path to the Ouroboros database file to monitor.",
+            resolve_path=True,
+            show_default=True,
         ),
-    ] = None,
-    session_id: Annotated[
-        str | None,
-        typer.Option(
-            "--session-id",
-            "-s",
-            help="Session ID to monitor.",
-        ),
-    ] = None,
+    ] = DEFAULT_DB_PATH,
 ) -> None:
     """Launch interactive TUI monitor.
 
-    Start the terminal UI for real-time monitoring of Ouroboros
-    workflow executions.
-
-    Examples:
-
-        # Launch TUI without monitoring a specific execution
-        ouroboros tui monitor
-
-        # Monitor a specific execution
-        ouroboros tui monitor --execution-id exec_abc123
-
-        # Monitor a specific session
-        ouroboros tui monitor --session-id sess_xyz789
+    Starts a terminal UI that shows a list of all sessions found in the
+    database. You can then select a session to monitor in real-time.
     """
+    print_info(f"Connecting to database: {db_path}")
+
     try:
         from ouroboros.tui import OuroborosTUI
     except ImportError as e:
         print_error(
-            f"TUI dependencies not installed. Install with: pip install ouroboros[tui]\n"
-            f"Error: {e}"
+            "TUI dependencies not installed. Install with: pip install 'ouroboros[tui]'",
         )
         raise typer.Exit(1) from e
 
-    if execution_id:
-        print_info(f"Monitoring execution: {execution_id}")
-    elif session_id:
-        print_info(f"Monitoring session: {session_id}")
-    else:
-        print_info("Starting TUI monitor...")
-
-    # Initialize EventStore with same path as runner
-    from ouroboros.persistence.event_store import EventStore
-
-    db_path = os.path.expanduser("~/.ouroboros/ouroboros.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
+    # Initialize EventStore
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
 
-    # Initialize event store before running TUI
+    # Initialize and run the TUI
     async def init_and_run() -> None:
         await event_store.initialize()
-        tui = OuroborosTUI(event_store=event_store, execution_id=execution_id)
-        if session_id:
-            tui.set_execution(execution_id or "", session_id)
+        tui = OuroborosTUI(event_store=event_store)
         await tui.run_async()
 
-    asyncio.run(init_and_run())
+    try:
+        asyncio.run(init_and_run())
+    except Exception as e:
+        print_error(f"Failed to run TUI: {e}")
+        raise typer.Exit(1) from None
 
 
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
 ) -> None:
-    """Interactive TUI monitor for Ouroboros workflows.
-
-    Launch a terminal-based user interface for real-time monitoring
-    of workflow executions, including:
-
-    - Phase progress visualization (Double Diamond)
-    - Drift metrics monitoring
-    - Cost/token tracking
-    - AC tree visualization
-    - Log viewer
-
-    Use keyboard shortcuts to navigate:
-    - 1-4: Switch screens
-    - p/r: Pause/Resume execution
-    - q: Quit
-    """
-    # If no subcommand, run monitor directly
+    """Interactive TUI monitor for Ouroboros workflows."""
     if ctx.invoked_subcommand is None:
-        monitor(execution_id=None, session_id=None)
+        ctx.invoke(monitor_command)
 
 
 __all__ = ["app"]

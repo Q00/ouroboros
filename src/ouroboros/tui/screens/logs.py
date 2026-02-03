@@ -14,7 +14,7 @@ from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Input, Label, Static
+from textual.widgets import Footer, Input, Label, Static
 
 if TYPE_CHECKING:
     from ouroboros.tui.events import TUIState
@@ -292,10 +292,14 @@ class LogsScreen(Screen[None]):
             self._logs = list(state.logs)
         self._filter_bar: LogFilterBar | None = None
         self._log_scroll: VerticalScroll | None = None
+        self._entry_counter: int = 0  # Unique ID counter
 
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
-        yield Header()
+        yield Static(
+            "[bold blue]Ouroboros TUI[/bold blue] — [dim]Logs[/dim]",
+            id="screen-header",
+        )
 
         self._filter_bar = LogFilterBar(min_level=self.min_level)
         yield self._filter_bar
@@ -305,21 +309,27 @@ class LogsScreen(Screen[None]):
             with self._log_scroll:
                 filtered = self._get_filtered_logs()
                 if filtered:
-                    for i, log in enumerate(filtered):
+                    for log in filtered:
+                        self._entry_counter += 1
                         yield LogEntry(
                             timestamp=datetime.fromisoformat(log["timestamp"]),
                             level=log.get("level", "info"),
                             source=log.get("source", "unknown"),
                             message=log.get("message", ""),
-                            id=f"log-entry-{i}",
+                            id=f"log-entry-{self._entry_counter}",
                         )
                 else:
                     yield Static(
                         "No logs to display",
                         classes="empty-message",
+                        id="empty-logs-message",
                     )
 
         yield Footer()
+
+    def on_show(self) -> None:
+        """Called when the screen is shown - refresh logs display."""
+        self._refresh_logs()
 
     def _refresh_logs(self) -> None:
         """Refresh log display after filter change or new log."""
@@ -333,21 +343,24 @@ class LogsScreen(Screen[None]):
         filtered = self._get_filtered_logs()
 
         if filtered:
-            for i, log in enumerate(filtered):
+            for log in filtered:
+                self._entry_counter += 1
                 container.mount(
                     LogEntry(
                         timestamp=datetime.fromisoformat(log["timestamp"]),
                         level=log.get("level", "info"),
                         source=log.get("source", "unknown"),
                         message=log.get("message", ""),
-                        id=f"log-entry-{i}",
+                        id=f"log-entry-{self._entry_counter}",
                     )
                 )
         else:
+            self._entry_counter += 1
             container.mount(
                 Static(
                     "No logs to display",
                     classes="empty-message",
+                    id=f"empty-logs-{self._entry_counter}",
                 )
             )
 
@@ -355,8 +368,14 @@ class LogsScreen(Screen[None]):
         """Get logs filtered by level and search."""
         min_priority = int(LOG_LEVELS.get(self.min_level, {}).get("priority", 0))
 
+        # Use state logs if available, otherwise use local logs
+        if self._state:
+            source_logs = self._state.logs
+        else:
+            source_logs = self._logs
+
         filtered = []
-        for log in self._logs:
+        for log in source_logs:
             level = log.get("level", "info").lower()
             level_priority = int(LOG_LEVELS.get(level, {}).get("priority", 1))
 

@@ -312,10 +312,15 @@ def create_workflow_progress_event(
     completed_count: int,
     total_count: int,
     current_ac_index: int | None = None,
+    current_phase: str = "Discover",
     activity: str = "idle",
     activity_detail: str = "",
     elapsed_display: str = "",
     estimated_remaining: str = "",
+    messages_count: int = 0,
+    tool_calls_count: int = 0,
+    estimated_tokens: int = 0,
+    estimated_cost_usd: float = 0.0,
 ) -> BaseEvent:
     """Create workflow progress event.
 
@@ -329,10 +334,15 @@ def create_workflow_progress_event(
         completed_count: Number of completed ACs.
         total_count: Total number of ACs.
         current_ac_index: Index of AC currently being worked on.
+        current_phase: Current Double Diamond phase.
         activity: Current activity type.
         activity_detail: Activity detail string.
         elapsed_display: Total elapsed time display.
         estimated_remaining: Estimated remaining time display.
+        messages_count: Total messages processed.
+        tool_calls_count: Total tool calls made.
+        estimated_tokens: Estimated token usage.
+        estimated_cost_usd: Estimated cost in USD.
 
     Returns:
         BaseEvent for workflow progress update.
@@ -347,16 +357,60 @@ def create_workflow_progress_event(
             "completed_count": completed_count,
             "total_count": total_count,
             "current_ac_index": current_ac_index,
+            "current_phase": current_phase,
             "activity": activity,
             "activity_detail": activity_detail,
             "elapsed_display": elapsed_display,
             "estimated_remaining": estimated_remaining,
+            "messages_count": messages_count,
+            "tool_calls_count": tool_calls_count,
+            "estimated_tokens": estimated_tokens,
+            "estimated_cost_usd": estimated_cost_usd,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_drift_measured_event(
+    execution_id: str,
+    goal_drift: float,
+    constraint_drift: float,
+    ontology_drift: float,
+    combined_drift: float,
+    is_acceptable: bool,
+) -> BaseEvent:
+    """Create drift measured event.
+
+    Emitted when drift is measured during workflow execution.
+
+    Args:
+        execution_id: Current execution ID.
+        goal_drift: Goal drift value (0.0-1.0).
+        constraint_drift: Constraint drift value (0.0-1.0).
+        ontology_drift: Ontology drift value (0.0-1.0).
+        combined_drift: Combined weighted drift value.
+        is_acceptable: Whether drift is within acceptable threshold.
+
+    Returns:
+        BaseEvent for drift measurement.
+    """
+    return BaseEvent(
+        type="observability.drift.measured",
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data={
+            "goal_drift": goal_drift,
+            "constraint_drift": constraint_drift,
+            "ontology_drift": ontology_drift,
+            "combined_drift": combined_drift,
+            "is_acceptable": is_acceptable,
             "timestamp": datetime.now(UTC).isoformat(),
         },
     )
 
 
 __all__ = [
+    "create_drift_measured_event",
     "create_mcp_tools_loaded_event",
     "create_progress_event",
     "create_session_completed_event",

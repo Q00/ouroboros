@@ -30,9 +30,11 @@ from rich.text import Text
 
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.types import Result
+from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import DEFAULT_TOOLS, AgentMessage, ClaudeAgentAdapter
 from ouroboros.orchestrator.events import (
+    create_drift_measured_event,
     create_mcp_tools_loaded_event,
     create_progress_event,
     create_session_completed_event,
@@ -413,10 +415,15 @@ class OrchestratorRunner:
                         completed_count=progress_data["completed_count"],
                         total_count=progress_data["total_count"],
                         current_ac_index=progress_data["current_ac_index"],
+                        current_phase=progress_data["current_phase"],
                         activity=progress_data["activity"],
                         activity_detail=progress_data["activity_detail"],
                         elapsed_display=progress_data["elapsed_display"],
                         estimated_remaining=progress_data["estimated_remaining"],
+                        messages_count=progress_data["messages_count"],
+                        tool_calls_count=progress_data["tool_calls_count"],
+                        estimated_tokens=progress_data["estimated_tokens"],
+                        estimated_cost_usd=progress_data["estimated_cost_usd"],
                     )
                     await self._event_store.append(workflow_event)
 
@@ -438,6 +445,24 @@ class OrchestratorRunner:
                             tool_name=message.tool_name,
                         )
                         await self._event_store.append(progress_event)
+
+                        # Measure and emit drift
+                        drift_measurement = DriftMeasurement()
+                        drift_metrics = drift_measurement.measure(
+                            current_output=message.content,
+                            constraint_violations=[],  # TODO: track violations
+                            current_concepts=[],  # TODO: extract concepts
+                            seed=seed,
+                        )
+                        drift_event = create_drift_measured_event(
+                            execution_id=exec_id,
+                            goal_drift=drift_metrics.goal_drift,
+                            constraint_drift=drift_metrics.constraint_drift,
+                            ontology_drift=drift_metrics.ontology_drift,
+                            combined_drift=drift_metrics.combined_drift,
+                            is_acceptable=drift_metrics.is_acceptable,
+                        )
+                        await self._event_store.append(drift_event)
 
                     # Handle final message
                     if message.is_final:
@@ -653,10 +678,15 @@ Note: This is a resumed session. Please continue from where execution was interr
                         completed_count=progress_data["completed_count"],
                         total_count=progress_data["total_count"],
                         current_ac_index=progress_data["current_ac_index"],
+                        current_phase=progress_data["current_phase"],
                         activity=progress_data["activity"],
                         activity_detail=progress_data["activity_detail"],
                         elapsed_display=progress_data["elapsed_display"],
                         estimated_remaining=progress_data["estimated_remaining"],
+                        messages_count=progress_data["messages_count"],
+                        tool_calls_count=progress_data["tool_calls_count"],
+                        estimated_tokens=progress_data["estimated_tokens"],
+                        estimated_cost_usd=progress_data["estimated_cost_usd"],
                     )
                     await self._event_store.append(workflow_event)
 

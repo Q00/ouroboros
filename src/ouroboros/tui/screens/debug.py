@@ -16,7 +16,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Label, Static, TabbedContent, TabPane
+from textual.widgets import Footer, Label, Static, TabbedContent, TabPane
 
 if TYPE_CHECKING:
     from ouroboros.tui.events import TUIState
@@ -87,6 +87,10 @@ class JsonViewer(Static):
         """Compose the widget layout."""
         if self._data is None:
             yield Static("No data available", classes="empty")
+        elif isinstance(self._data, dict) and not self._data:
+            yield Static("(empty object - no data yet)", classes="empty")
+        elif isinstance(self._data, list) and not self._data:
+            yield Static("(empty list - no events yet)", classes="empty")
         else:
             try:
                 formatted = json.dumps(self._data, indent=2, default=str)
@@ -239,6 +243,15 @@ class DebugScreen(Screen[None]):
         layout: vertical;
     }
 
+    DebugScreen > #screen-header {
+        dock: top;
+        height: 1;
+        width: 100%;
+        background: $primary;
+        text-align: center;
+        padding: 0 1;
+    }
+
     DebugScreen > Container {
         height: 1fr;
         width: 100%;
@@ -281,7 +294,10 @@ class DebugScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
-        yield Header()
+        yield Static(
+            "[bold blue]Ouroboros TUI[/bold blue] — [dim]Debug[/dim]",
+            id="screen-header",
+        )
 
         # Load config if not already loaded
         if not self._config:

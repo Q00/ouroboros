@@ -207,9 +207,11 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
-                query = select(events_table).order_by(
-                    events_table.c.timestamp.desc()
-                ).limit(limit)
+                query = (
+                    select(events_table)
+                    .order_by(events_table.c.timestamp.desc())
+                    .limit(limit)
+                )
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
@@ -222,6 +224,45 @@ class EventStore:
                 f"Failed to get recent events: {e}",
                 operation="select",
                 table="events",
+            ) from e
+
+    async def get_all_sessions(self) -> list[BaseEvent]:
+        """Get all session start events.
+
+        This method retrieves all events of type 'orchestrator.session.started'
+        to identify every session recorded in the event store.
+
+        Returns:
+            List of session start events, ordered by timestamp descending.
+
+        Raises:
+            PersistenceError: If the query fails.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="get_all_sessions",
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                query = (
+                    select(events_table)
+                    .where(
+                        events_table.c.event_type == "orchestrator.session.started"
+                    )
+                    .order_by(events_table.c.timestamp.desc())
+                )
+
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                return [BaseEvent.from_db_row(dict(row)) for row in rows]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to get all sessions: {e}",
+                operation="select",
+                table="events",
+                details={"event_type": "orchestrator.session.started"},
             ) from e
 
     async def close(self) -> None:

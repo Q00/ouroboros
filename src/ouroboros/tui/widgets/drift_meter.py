@@ -153,6 +153,10 @@ class DriftMeterWidget(Widget):
     DriftMeterWidget > .header {
         text-align: center;
         text-style: bold;
+    }
+
+    DriftMeterWidget > .explanation {
+        text-align: center;
         margin-bottom: 1;
     }
 
@@ -229,24 +233,30 @@ class DriftMeterWidget(Widget):
 
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
-        yield Label("Drift Metrics", classes="header")
+        yield Label("Drift Metrics [dim](deviation from goal)[/dim]", classes="header")
+
+        # Brief explanation
+        yield Static(
+            "[dim]Lower is better (0% = perfect, 30%+ = warning)[/dim]",
+            classes="explanation",
+        )
 
         self._goal_bar = DriftBar(
-            "Goal (50%)",
+            "Goal",
             self.goal_drift,
             id="goal-drift",
         )
         yield self._goal_bar
 
         self._constraint_bar = DriftBar(
-            "Constraint (30%)",
+            "Constraint",
             self.constraint_drift,
             id="constraint-drift",
         )
         yield self._constraint_bar
 
         self._ontology_bar = DriftBar(
-            "Ontology (20%)",
+            "Ontology",
             self.ontology_drift,
             id="ontology-drift",
         )
@@ -268,10 +278,10 @@ class DriftMeterWidget(Widget):
     def _get_status_text(self) -> str:
         """Get status text based on drift."""
         if self.is_acceptable:
-            return f"OK Drift within threshold ({DRIFT_THRESHOLD:.0%})"
+            return f"✓ OK (within {DRIFT_THRESHOLD:.0%} threshold)"
         else:
             exceeded_by = self.combined_drift - DRIFT_THRESHOLD
-            return f"WARNING Threshold exceeded by {exceeded_by:.1%}"
+            return f"⚠ Warning: exceeded by {exceeded_by:.1%}"
 
     def _update_bars(self) -> None:
         """Update all drift bars."""

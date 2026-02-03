@@ -10,7 +10,7 @@ The dashboard provides a unified view of:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -403,8 +403,8 @@ class DashboardScreen(Screen[None]):
         Args:
             message: Workflow progress update message.
         """
+        # Update AC progress list
         if self._ac_progress is not None:
-            # Convert message data to ACProgressItem list
             items = [
                 ACProgressItem(
                     index=ac.get("index", 0),
@@ -422,12 +422,104 @@ class DashboardScreen(Screen[None]):
                 estimated_remaining=message.estimated_remaining,
             )
 
-        # Also update status panel with current AC
-        if self._status_panel is not None and message.current_ac_index is not None:
-            for ac in message.acceptance_criteria:
-                if ac.get("index") == message.current_ac_index:
-                    self._status_panel.update_status(current_ac=ac.get("content", ""))
-                    break
+        # Update phase progress
+        if self._phase_progress is not None:
+            # Map phase name to lowercase (widget expects lowercase)
+            phase = message.current_phase.lower() if message.current_phase else "discover"
+            iteration = message.completed_count
+            self._phase_progress.update_phase(phase, iteration)
+
+        # Update cost tracker
+        if self._cost_tracker is not None:
+            self._cost_tracker.update_cost(
+                total_tokens=message.estimated_tokens,
+                total_cost_usd=message.estimated_cost_usd,
+            )
+
+        # Update status panel with current AC and status
+        if self._status_panel is not None:
+            current_ac_content = ""
+            if message.current_ac_index is not None:
+                for ac in message.acceptance_criteria:
+                    if ac.get("index") == message.current_ac_index:
+                        current_ac_content = ac.get("content", "")
+                        break
+            self._status_panel.update_status(
+                status="running",
+                current_ac=current_ac_content,
+            )
+
+        # Update AC tree with flat list converted to tree format
+        if self._ac_tree is not None and message.acceptance_criteria:
+            tree_data = self._convert_ac_list_to_tree(
+                message.acceptance_criteria,
+                message.current_ac_index,
+            )
+            self._ac_tree.update_tree(tree_data)
+
+    def _convert_ac_list_to_tree(
+        self,
+        acceptance_criteria: list[dict[str, Any]],
+        current_ac_index: int | None,
+    ) -> dict[str, Any]:
+        """Convert flat AC list to tree format for ACTreeWidget.
+
+        Creates a simple tree with root node containing all ACs as children.
+
+        Args:
+            acceptance_criteria: List of AC dicts with index, content, status.
+            current_ac_index: Index of current AC being worked on.
+
+        Returns:
+            Tree data dict with root_id and nodes.
+        """
+        nodes = {}
+        child_ids = []
+
+        # Create root node
+        root_id = "root"
+
+        # Create child nodes for each AC
+        for ac in acceptance_criteria:
+            ac_index = ac.get("index", 0)
+            ac_id = f"ac_{ac_index}"
+            child_ids.append(ac_id)
+
+            # Map status from workflow to tree status
+            status = ac.get("status", "pending")
+            if status == "in_progress":
+                status = "executing"
+            elif status == "completed":
+                status = "completed"
+            else:
+                status = "pending"
+
+            # Check if this is the current AC
+            is_current = ac_index == current_ac_index
+
+            nodes[ac_id] = {
+                "id": ac_id,
+                "content": ac.get("content", ""),
+                "status": status,
+                "depth": 1,
+                "is_atomic": True,  # Flat list = all atomic
+                "children_ids": [],
+            }
+
+        # Create root node
+        nodes[root_id] = {
+            "id": root_id,
+            "content": "Acceptance Criteria",
+            "status": "executing" if current_ac_index else "pending",
+            "depth": 0,
+            "is_atomic": False,
+            "children_ids": child_ids,
+        }
+
+        return {
+            "root_id": root_id,
+            "nodes": nodes,
+        }
 
     def action_pause(self) -> None:
         """Handle pause action."""
