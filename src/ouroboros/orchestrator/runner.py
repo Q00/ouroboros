@@ -26,7 +26,6 @@ from uuid import uuid4
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
 from ouroboros.core.errors import OuroborosError
@@ -105,6 +104,8 @@ def build_system_prompt(seed: Seed) -> str:
     Returns:
         System prompt string.
     """
+    from ouroboros.orchestrator.workflow_state import get_ac_tracking_prompt
+
     constraints_text = "\n".join(f"- {c}" for c in seed.constraints) if seed.constraints else "None"
 
     principles_text = (
@@ -112,6 +113,8 @@ def build_system_prompt(seed: Seed) -> str:
         if seed.evaluation_principles
         else "None"
     )
+
+    ac_tracking = get_ac_tracking_prompt()
 
     return f"""You are an autonomous coding agent executing a task for the Ouroboros workflow system.
 
@@ -130,7 +133,7 @@ def build_system_prompt(seed: Seed) -> str:
 - Write clean, well-tested code following project conventions
 - Report progress clearly as you work
 - If you encounter blockers, explain them clearly
-"""
+{ac_tracking}"""
 
 
 def build_task_prompt(seed: Seed) -> str:
@@ -361,19 +364,18 @@ class OrchestratorRunner:
         final_message = ""
         success = False
 
-        try:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                TimeElapsedColumn(),
-                console=self._console,
-                transient=True,
-            ) as progress:
-                task_id = progress.add_task(
-                    "[cyan]Executing via Claude Agent...",
-                    total=None,
-                )
+        # Create workflow state tracker for progress display
+        from ouroboros.cli.formatters.workflow_display import WorkflowDisplay
+        from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
+        state_tracker = WorkflowStateTracker(
+            acceptance_criteria=seed.acceptance_criteria,
+            goal=seed.goal,
+            session_id=tracker.session_id,
+        )
+
+        try:
+            with WorkflowDisplay(state_tracker) as display:
                 async for message in self._adapter.execute_task(
                     prompt=task_prompt,
                     tools=merged_tools,
@@ -387,9 +389,16 @@ class OrchestratorRunner:
                         }
                     )
 
-                    # Update progress display
-                    display_text = self._format_progress_text(message, messages_processed)
-                    progress.update(task_id, description=display_text)
+                    # Update workflow state tracker
+                    state_tracker.process_message(
+                        content=message.content,
+                        message_type=message.type,
+                        tool_name=message.tool_name,
+                        is_input=message.type == "user",
+                    )
+
+                    # Refresh the display
+                    display.refresh()
 
                     # Emit tool called event
                     if message.tool_name:
@@ -582,19 +591,18 @@ Note: This is a resumed session. Please continue from where execution was interr
         final_message = ""
         success = False
 
-        try:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                TimeElapsedColumn(),
-                console=self._console,
-                transient=True,
-            ) as progress:
-                task_id = progress.add_task(
-                    "[cyan]Resuming execution...",
-                    total=None,
-                )
+        # Create workflow state tracker for progress display
+        from ouroboros.cli.formatters.workflow_display import WorkflowDisplay
+        from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
+        state_tracker = WorkflowStateTracker(
+            acceptance_criteria=seed.acceptance_criteria,
+            goal=seed.goal,
+            session_id=session_id,
+        )
+
+        try:
+            with WorkflowDisplay(state_tracker) as display:
                 async for message in self._adapter.execute_task(
                     prompt=resume_prompt,
                     tools=merged_tools,
@@ -603,8 +611,16 @@ Note: This is a resumed session. Please continue from where execution was interr
                 ):
                     messages_processed += 1
 
-                    display_text = self._format_progress_text(message, messages_processed)
-                    progress.update(task_id, description=display_text)
+                    # Update workflow state tracker
+                    state_tracker.process_message(
+                        content=message.content,
+                        message_type=message.type,
+                        tool_name=message.tool_name,
+                        is_input=message.type == "user",
+                    )
+
+                    # Refresh the display
+                    display.refresh()
 
                     if message.tool_name:
                         tool_event = create_tool_called_event(
@@ -683,27 +699,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                     details={"session_id": session_id},
                 )
             )
-
-    def _format_progress_text(self, message: AgentMessage, count: int) -> str:
-        """Format progress text for display.
-
-        Args:
-            message: Current agent message.
-            count: Message count.
-
-        Returns:
-            Formatted progress text.
-        """
-        if message.tool_name:
-            return f"[cyan]({count}) Using {message.tool_name}...[/cyan]"
-        elif message.type == "assistant":
-            preview = message.content[:50].replace("\n", " ")
-            return f"[cyan]({count}) {preview}...[/cyan]"
-        elif message.type == "result":
-            return f"[green]({count}) Finalizing...[/green]"
-        else:
-            return f"[dim]({count}) Processing...[/dim]"
-
 
 __all__ = [
     "OrchestratorError",
