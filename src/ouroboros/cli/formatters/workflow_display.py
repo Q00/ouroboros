@@ -36,12 +36,12 @@ if TYPE_CHECKING:
     )
 
 
-# Status icons for AC display
-AC_STATUS_ICONS = {
-    "pending": "[dim]○[/dim]",
-    "in_progress": "[yellow]⚡[/yellow]",
-    "completed": "[green]✓[/green]",
-    "failed": "[red]✗[/red]",
+# Status icons for AC display (icon, style)
+AC_STATUS_ICONS: dict[str, tuple[str, str]] = {
+    "pending": ("○", "dim"),
+    "in_progress": ("⚡", "yellow"),
+    "completed": ("✓", "green"),
+    "failed": ("✗", "red"),
 }
 
 # Activity type icons
@@ -75,7 +75,7 @@ def _format_ac_line(
     Returns:
         Formatted Rich Text object.
     """
-    icon = AC_STATUS_ICONS.get(status, "○")
+    icon, icon_style = AC_STATUS_ICONS.get(status, ("○", "dim"))
 
     # Truncate content if needed
     if len(content) > max_width:
@@ -83,14 +83,16 @@ def _format_ac_line(
 
     # Build the line
     line = Text()
-    line.append(f" {icon}  ")
+    line.append(" ")
+    line.append(icon, style=icon_style)
+    line.append("  ")
     line.append(f"{index}. ", style="bold" if is_current else "dim")
     line.append(content)
 
     # Add current marker
     if is_current and status == "in_progress":
         line.append("  ", style="dim")
-        line.append("← current", style="yellow italic")
+        line.append("<- current", style="yellow italic")
 
     return line
 
@@ -106,12 +108,11 @@ def _build_progress_bar(completed: int, total: int) -> Progress:
         Rich Progress object.
     """
     progress = Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(bar_width=40),
+        BarColumn(bar_width=None),  # None = expand to fill width
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         console=console,
         transient=True,
-        expand=False,
+        expand=True,
     )
     progress.add_task("", total=total, completed=completed)
     return progress
@@ -166,20 +167,18 @@ def render_workflow_state(state: WorkflowState) -> Panel:
     if state.activity_detail:
         activity_text.append(f" | {state.activity_detail}", style="dim")
 
-    # Build metrics footer
-    metrics = Table.grid(padding=(0, 2))
-    metrics.add_column(justify="left")
-    metrics.add_column(justify="left")
-    metrics.add_column(justify="left")
-    metrics.add_column(justify="left")
-
-    metrics_row = [
-        f"📨 {state.messages_count} msgs",
-        f"🔧 {state.tool_calls_count} tools",
-        f"📊 ~{state.estimated_tokens // 1000}K tokens",
-        f"💰 ~${state.estimated_cost_usd:.2f}",
-    ]
-    metrics.add_row(*metrics_row)
+    # Build metrics footer with individual boxes using Table for even distribution
+    metrics = Table(box=None, expand=True, show_header=False, padding=(0, 1))
+    metrics.add_column(ratio=1)
+    metrics.add_column(ratio=1)
+    metrics.add_column(ratio=1)
+    metrics.add_column(ratio=1)
+    metrics.add_row(
+        Panel(f"📨 {state.messages_count} msgs", box=box.ASCII, padding=(0, 1)),
+        Panel(f"🔧 {state.tool_calls_count} tools", box=box.ASCII, padding=(0, 1)),
+        Panel(f"📊 ~{state.estimated_tokens // 1000}K tokens", box=box.ASCII, padding=(0, 1)),
+        Panel(f"💰 ~${state.estimated_cost_usd:.2f}", box=box.ASCII, padding=(0, 1)),
+    )
 
     # Compose the panel content
     content_parts = [

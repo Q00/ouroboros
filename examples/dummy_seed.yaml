@@ -1,0 +1,26 @@
+# Dummy seed for testing Rich Live Display
+# Run with: ouroboros run workflow --orchestrator examples/dummy_seed.yaml
+
+goal: "Create a simple Python hello world script with tests"
+
+constraints:
+  - "Python 3.14+"
+  - "Use pytest for testing"
+  - "Keep it simple - no external dependencies"
+
+acceptance_criteria:
+  - "Create a hello.py file with a greet() function that returns 'Hello, {name}!'"
+  - "Create test_hello.py with at least 2 test cases"
+  - "All tests must pass when running pytest"
+
+ontology_schema:
+  name: "HelloWorld"
+  description: "Simple hello world domain"
+  fields:
+    - name: "greeting"
+      field_type: "string"
+      description: "The greeting message"
+
+metadata:
+  seed_id: "dummy_test_001"
+  ambiguity_score: 0.1
