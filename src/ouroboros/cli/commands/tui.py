@@ -5,6 +5,8 @@ Launch the interactive TUI monitor for real-time workflow monitoring.
 
 from __future__ import annotations
 
+import asyncio
+import os
 from typing import Annotated
 
 import typer
@@ -70,13 +72,23 @@ def monitor(
     else:
         print_info("Starting TUI monitor...")
 
-    # Create and run the TUI app
-    tui = OuroborosTUI(execution_id=execution_id)
+    # Initialize EventStore with same path as runner
+    from ouroboros.persistence.event_store import EventStore
 
-    if session_id:
-        tui.set_execution(execution_id or "", session_id)
+    db_path = os.path.expanduser("~/.ouroboros/ouroboros.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    tui.run()
+    event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+
+    # Initialize event store before running TUI
+    async def init_and_run() -> None:
+        await event_store.initialize()
+        tui = OuroborosTUI(event_store=event_store, execution_id=execution_id)
+        if session_id:
+            tui.set_execution(execution_id or "", session_id)
+        await tui.run_async()
+
+    asyncio.run(init_and_run())
 
 
 @app.callback(invoke_without_command=True)

@@ -339,7 +339,7 @@ def create_workflow_progress_event(
     """
     return BaseEvent(
         type="workflow.progress.updated",
-        aggregate_type="workflow",
+        aggregate_type="execution",
         aggregate_id=execution_id,
         data={
             "session_id": session_id,
