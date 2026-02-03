@@ -402,7 +402,7 @@ class OrchestratorRunner:
                     display.refresh()
 
                     # Emit workflow progress event for TUI
-                    exec_id = execution_id or tracker.session_id
+                    # Use exec_id defined at start of function (not execution_id param)
                     progress_data = state_tracker.state.to_tui_message_data(
                         execution_id=exec_id
                     )
