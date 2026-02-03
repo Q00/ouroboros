@@ -184,6 +184,46 @@ class EventStore:
                 },
             ) from e
 
+    async def get_recent_events(
+        self, event_type: str | None = None, limit: int = 100
+    ) -> list[BaseEvent]:
+        """Get recent events, optionally filtered by type.
+
+        Args:
+            event_type: Optional event type to filter by.
+            limit: Maximum number of events to return.
+
+        Returns:
+            List of recent events, ordered by timestamp descending.
+
+        Raises:
+            PersistenceError: If the query fails.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="get_recent_events",
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                query = select(events_table).order_by(
+                    events_table.c.timestamp.desc()
+                ).limit(limit)
+
+                if event_type:
+                    query = query.where(events_table.c.event_type == event_type)
+
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                return [BaseEvent.from_db_row(dict(row)) for row in rows]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to get recent events: {e}",
+                operation="select",
+                table="events",
+            ) from e
+
     async def close(self) -> None:
         """Close the database connection."""
         if self._engine is not None:

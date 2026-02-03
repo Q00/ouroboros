@@ -184,6 +184,25 @@ class OuroborosTUI(App[None]):
             try:
                 await asyncio.sleep(poll_interval)
 
+                # Auto-discover execution if not set
+                if not self._execution_id:
+                    recent = await self._event_store.get_recent_events(
+                        event_type="orchestrator.session.started", limit=1
+                    )
+                    if recent:
+                        # Found a recent session, start monitoring it
+                        self._execution_id = recent[0].data.get(
+                            "execution_id", recent[0].aggregate_id
+                        )
+                        self._state.execution_id = self._execution_id
+                        self._state.session_id = recent[0].aggregate_id
+                        self._state.status = "running"
+                        self._state.add_log(
+                            "info",
+                            "tui.subscription",
+                            f"Auto-detected execution: {self._execution_id}",
+                        )
+
                 if self._execution_id:
                     # Replay events for the specific execution
                     events = await self._event_store.replay(
