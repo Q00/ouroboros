@@ -27,8 +27,11 @@ from ouroboros.tui.events import (
     PauseRequested,
     PhaseChanged,
     ResumeRequested,
+    WorkflowProgressUpdated,
 )
 from ouroboros.tui.widgets import (
+    ACProgressItem,
+    ACProgressWidget,
     ACTreeWidget,
     CostTrackerWidget,
     DriftMeterWidget,
@@ -280,6 +283,7 @@ class DashboardScreen(Screen[None]):
         self._drift_meter: DriftMeterWidget | None = None
         self._cost_tracker: CostTrackerWidget | None = None
         self._ac_tree: ACTreeWidget | None = None
+        self._ac_progress: ACProgressWidget | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
@@ -302,6 +306,10 @@ class DashboardScreen(Screen[None]):
                         iteration=self._state.iteration if self._state else 0,
                     )
                     yield self._phase_progress
+
+                    # AC progress list
+                    self._ac_progress = ACProgressWidget()
+                    yield self._ac_progress
 
                     # Cost tracker
                     self._cost_tracker = CostTrackerWidget(
@@ -388,6 +396,38 @@ class DashboardScreen(Screen[None]):
         """
         if self._ac_tree is not None:
             self._ac_tree.update_node_status(message.ac_id, message.status)
+
+    def on_workflow_progress_updated(self, message: WorkflowProgressUpdated) -> None:
+        """Handle workflow progress update message.
+
+        Args:
+            message: Workflow progress update message.
+        """
+        if self._ac_progress is not None:
+            # Convert message data to ACProgressItem list
+            items = [
+                ACProgressItem(
+                    index=ac.get("index", 0),
+                    content=ac.get("content", ""),
+                    status=ac.get("status", "pending"),
+                    elapsed_display=ac.get("elapsed_display", ""),
+                    is_current=ac.get("index") == message.current_ac_index,
+                )
+                for ac in message.acceptance_criteria
+            ]
+            self._ac_progress.update_progress(
+                acceptance_criteria=items,
+                completed_count=message.completed_count,
+                total_count=message.total_count,
+                estimated_remaining=message.estimated_remaining,
+            )
+
+        # Also update status panel with current AC
+        if self._status_panel is not None and message.current_ac_index is not None:
+            for ac in message.acceptance_criteria:
+                if ac.get("index") == message.current_ac_index:
+                    self._status_panel.update_status(current_ac=ac.get("content", ""))
+                    break
 
     def action_pause(self) -> None:
         """Handle pause action."""

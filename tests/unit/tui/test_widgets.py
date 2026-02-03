@@ -2,6 +2,7 @@
 
 import pytest
 
+from ouroboros.tui.widgets.ac_progress import ACProgressItem, ACProgressWidget
 from ouroboros.tui.widgets.ac_tree import ACTreeWidget
 from ouroboros.tui.widgets.cost_tracker import CostTrackerWidget
 from ouroboros.tui.widgets.drift_meter import DriftBar, DriftMeterWidget
@@ -382,3 +383,98 @@ class TestCostTrackerWidget:
 
         widget.total_cost_usd = 15.0
         assert widget._get_cost_class() == "very-high"
+
+
+class TestACProgressItem:
+    """Tests for ACProgressItem dataclass."""
+
+    def test_create_item(self) -> None:
+        """Test creating an AC progress item."""
+        item = ACProgressItem(
+            index=1,
+            content="Create a hello.py file",
+            status="pending",
+        )
+
+        assert item.index == 1
+        assert item.content == "Create a hello.py file"
+        assert item.status == "pending"
+        assert item.elapsed_display == ""
+        assert item.is_current is False
+
+    def test_create_item_with_elapsed(self) -> None:
+        """Test creating item with elapsed time."""
+        item = ACProgressItem(
+            index=2,
+            content="Run tests",
+            status="in_progress",
+            elapsed_display="45s",
+            is_current=True,
+        )
+
+        assert item.index == 2
+        assert item.status == "in_progress"
+        assert item.elapsed_display == "45s"
+        assert item.is_current is True
+
+
+class TestACProgressWidget:
+    """Tests for ACProgressWidget."""
+
+    def test_create_widget_empty(self) -> None:
+        """Test creating an empty progress widget."""
+        widget = ACProgressWidget()
+
+        assert widget.acceptance_criteria == []
+        assert widget.completed_count == 0
+        assert widget.total_count == 0
+
+    def test_create_widget_with_criteria(self) -> None:
+        """Test creating widget with acceptance criteria."""
+        items = [
+            ACProgressItem(index=1, content="AC 1", status="completed"),
+            ACProgressItem(index=2, content="AC 2", status="in_progress"),
+            ACProgressItem(index=3, content="AC 3", status="pending"),
+        ]
+
+        widget = ACProgressWidget(
+            acceptance_criteria=items,
+            completed_count=1,
+            total_count=3,
+        )
+
+        assert len(widget.acceptance_criteria) == 3
+        assert widget.completed_count == 1
+        assert widget.total_count == 3
+
+    def test_update_progress(self) -> None:
+        """Test updating progress."""
+        widget = ACProgressWidget()
+
+        items = [
+            ACProgressItem(index=1, content="AC 1", status="completed"),
+        ]
+
+        widget.update_progress(
+            acceptance_criteria=items,
+            completed_count=1,
+            total_count=2,
+            estimated_remaining="~5m remaining",
+        )
+
+        assert len(widget.acceptance_criteria) == 1
+        assert widget.completed_count == 1
+        assert widget.total_count == 2
+        assert widget.estimated_remaining == "~5m remaining"
+
+    def test_update_progress_partial(self) -> None:
+        """Test partial progress update."""
+        widget = ACProgressWidget(
+            completed_count=0,
+            total_count=3,
+        )
+
+        widget.update_progress(completed_count=1)
+
+        assert widget.completed_count == 1
+        assert widget.total_count == 3  # Unchanged

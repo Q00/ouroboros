@@ -9,6 +9,8 @@ Message Types:
 - DriftUpdated: Drift metrics updated
 - CostUpdated: Cost metrics updated
 - LogMessage: New log entry received
+- ACUpdated: AC tree node status changed
+- WorkflowProgressUpdated: Workflow progress with AC list
 - PauseRequested: User requested pause
 - ResumeRequested: User requested resume
 """
@@ -236,6 +238,61 @@ class ACUpdated(Message):
         self.status = status
         self.depth = depth
         self.is_atomic = is_atomic
+
+
+class WorkflowProgressUpdated(Message):
+    """Message indicating workflow progress was updated.
+
+    Carries AC progress list with status and timing info,
+    matching the WorkflowState from the orchestrator.
+
+    Attributes:
+        execution_id: The execution with updated progress.
+        acceptance_criteria: List of AC dicts with index, content, status, elapsed.
+        completed_count: Number of completed ACs.
+        total_count: Total number of ACs.
+        current_ac_index: Index of current AC being worked on.
+        activity: Current activity type.
+        activity_detail: Activity detail string.
+        estimated_remaining: Estimated remaining time display.
+        elapsed_display: Total elapsed time display.
+    """
+
+    def __init__(
+        self,
+        execution_id: str,
+        acceptance_criteria: list[dict[str, Any]],
+        completed_count: int,
+        total_count: int,
+        current_ac_index: int | None = None,
+        activity: str = "idle",
+        activity_detail: str = "",
+        estimated_remaining: str = "",
+        elapsed_display: str = "",
+    ) -> None:
+        """Initialize WorkflowProgressUpdated message.
+
+        Args:
+            execution_id: The execution with updated progress.
+            acceptance_criteria: List of AC progress dicts.
+            completed_count: Number of completed ACs.
+            total_count: Total number of ACs.
+            current_ac_index: Index of current AC.
+            activity: Current activity type.
+            activity_detail: Activity detail string.
+            estimated_remaining: Estimated remaining time.
+            elapsed_display: Total elapsed time display.
+        """
+        super().__init__()
+        self.execution_id = execution_id
+        self.acceptance_criteria = acceptance_criteria
+        self.completed_count = completed_count
+        self.total_count = total_count
+        self.current_ac_index = current_ac_index
+        self.activity = activity
+        self.activity_detail = activity_detail
+        self.estimated_remaining = estimated_remaining
+        self.elapsed_display = elapsed_display
 
 
 class PauseRequested(Message):

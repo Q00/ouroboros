@@ -251,6 +251,38 @@ class WorkflowState:
             if len(self.recent_outputs) > self.max_recent_outputs:
                 self.recent_outputs = self.recent_outputs[-self.max_recent_outputs :]
 
+    def to_tui_message_data(self, execution_id: str = "") -> dict[str, Any]:
+        """Convert state to TUI message-compatible data.
+
+        Returns a dictionary suitable for creating a WorkflowProgressUpdated
+        message for the TUI.
+
+        Args:
+            execution_id: Execution ID for the message.
+
+        Returns:
+            Dictionary with message data.
+        """
+        return {
+            "execution_id": execution_id or self.session_id,
+            "acceptance_criteria": [
+                {
+                    "index": ac.index,
+                    "content": ac.content,
+                    "status": ac.status.value,
+                    "elapsed_display": ac.elapsed_display,
+                }
+                for ac in self.acceptance_criteria
+            ],
+            "completed_count": self.completed_count,
+            "total_count": self.total_count,
+            "current_ac_index": self.current_ac_index,
+            "activity": self.activity.value,
+            "activity_detail": self.activity_detail,
+            "estimated_remaining": self.estimated_remaining_display,
+            "elapsed_display": self.elapsed_display,
+        }
+
 
 # Claude 3.5 Sonnet pricing (as of 2024)
 CLAUDE_INPUT_PRICE_PER_1M = 3.0  # $3 per 1M input tokens
