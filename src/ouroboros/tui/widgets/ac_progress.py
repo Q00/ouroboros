@@ -100,6 +100,12 @@ class ACProgressWidget(Widget):
         text-style: bold;
     }
 
+    ACProgressWidget > .empty-message {
+        text-align: center;
+        color: $text-muted;
+        padding: 1;
+    }
+
     ACProgressWidget > ProgressBar {
         margin-top: 1;
         width: 100%;
@@ -153,31 +159,38 @@ class ACProgressWidget(Widget):
         """Compose the widget layout."""
         yield Label("Acceptance Criteria", classes="header")
 
-        # Progress summary
-        percent = (
-            int(self.completed_count / self.total_count * 100)
-            if self.total_count > 0
-            else 0
-        )
-        yield Static(
-            f"{self.completed_count}/{self.total_count} complete ({percent}%)",
-            classes="progress-header",
-        )
+        # Show empty state or progress
+        if self.total_count == 0 and not self.acceptance_criteria:
+            yield Static(
+                "[dim]No workflow running[/dim]",
+                classes="empty-message",
+            )
+        else:
+            # Progress summary
+            percent = (
+                int(self.completed_count / self.total_count * 100)
+                if self.total_count > 0
+                else 0
+            )
+            yield Static(
+                f"{self.completed_count}/{self.total_count} complete ({percent}%)",
+                classes="progress-header",
+            )
 
-        # AC list
-        for ac in self.acceptance_criteria:
-            yield self._render_ac_item(ac)
+            # AC list
+            for ac in self.acceptance_criteria:
+                yield self._render_ac_item(ac)
 
-        # Progress bar
-        self._progress_bar = ProgressBar(total=max(self.total_count, 1), show_eta=False)
-        self._progress_bar.advance(self.completed_count)
-        yield self._progress_bar
+            # Progress bar
+            self._progress_bar = ProgressBar(total=max(self.total_count, 1), show_eta=False)
+            self._progress_bar.advance(self.completed_count)
+            yield self._progress_bar
 
-        # Remaining time
-        remaining_text = self.estimated_remaining or (
-            "Calculating..." if self.completed_count == 0 and self.total_count > 0 else ""
-        )
-        yield Static(remaining_text, classes="progress-footer")
+            # Remaining time
+            remaining_text = self.estimated_remaining or (
+                "Calculating..." if self.completed_count == 0 and self.total_count > 0 else ""
+            )
+            yield Static(remaining_text, classes="progress-footer")
 
     def _render_ac_item(self, ac: ACProgressItem) -> Static:
         """Render a single AC item.
