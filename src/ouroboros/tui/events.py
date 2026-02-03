@@ -499,6 +499,19 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             is_atomic=data.get("is_atomic", False),
         )
 
+    elif event_type == "workflow.progress.updated":
+        return WorkflowProgressUpdated(
+            execution_id=data.get("execution_id", event.aggregate_id),
+            acceptance_criteria=data.get("acceptance_criteria", []),
+            completed_count=data.get("completed_count", 0),
+            total_count=data.get("total_count", 0),
+            current_ac_index=data.get("current_ac_index"),
+            activity=data.get("activity", "idle"),
+            activity_detail=data.get("activity_detail", ""),
+            estimated_remaining=data.get("estimated_remaining", ""),
+            elapsed_display=data.get("elapsed_display", ""),
+        )
+
     # Return None for unhandled event types
     return None
 
@@ -513,5 +526,6 @@ __all__ = [
     "PhaseChanged",
     "ResumeRequested",
     "TUIState",
+    "WorkflowProgressUpdated",
     "create_message_from_event",
 ]

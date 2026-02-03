@@ -305,6 +305,57 @@ def create_mcp_tools_loaded_event(
     )
 
 
+def create_workflow_progress_event(
+    execution_id: str,
+    session_id: str,
+    acceptance_criteria: list[dict[str, Any]],
+    completed_count: int,
+    total_count: int,
+    current_ac_index: int | None = None,
+    activity: str = "idle",
+    activity_detail: str = "",
+    elapsed_display: str = "",
+    estimated_remaining: str = "",
+) -> BaseEvent:
+    """Create workflow progress event.
+
+    Emitted when WorkflowStateTracker updates with new progress.
+    Used by TUI to update ACProgressWidget.
+
+    Args:
+        execution_id: Current execution ID.
+        session_id: Current session ID.
+        acceptance_criteria: List of AC dicts with index, content, status, elapsed.
+        completed_count: Number of completed ACs.
+        total_count: Total number of ACs.
+        current_ac_index: Index of AC currently being worked on.
+        activity: Current activity type.
+        activity_detail: Activity detail string.
+        elapsed_display: Total elapsed time display.
+        estimated_remaining: Estimated remaining time display.
+
+    Returns:
+        BaseEvent for workflow progress update.
+    """
+    return BaseEvent(
+        type="workflow.progress.updated",
+        aggregate_type="workflow",
+        aggregate_id=execution_id,
+        data={
+            "session_id": session_id,
+            "acceptance_criteria": acceptance_criteria,
+            "completed_count": completed_count,
+            "total_count": total_count,
+            "current_ac_index": current_ac_index,
+            "activity": activity,
+            "activity_detail": activity_detail,
+            "elapsed_display": elapsed_display,
+            "estimated_remaining": estimated_remaining,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 __all__ = [
     "create_mcp_tools_loaded_event",
     "create_progress_event",
@@ -315,4 +366,5 @@ __all__ = [
     "create_task_completed_event",
     "create_task_started_event",
     "create_tool_called_event",
+    "create_workflow_progress_event",
 ]

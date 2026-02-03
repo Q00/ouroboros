@@ -39,6 +39,7 @@ from ouroboros.orchestrator.events import (
     create_session_failed_event,
     create_session_started_event,
     create_tool_called_event,
+    create_workflow_progress_event,
 )
 from ouroboros.orchestrator.mcp_tools import MCPToolProvider
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
@@ -400,6 +401,25 @@ class OrchestratorRunner:
                     # Refresh the display
                     display.refresh()
 
+                    # Emit workflow progress event for TUI
+                    exec_id = execution_id or tracker.session_id
+                    progress_data = state_tracker.state.to_tui_message_data(
+                        execution_id=exec_id
+                    )
+                    workflow_event = create_workflow_progress_event(
+                        execution_id=exec_id,
+                        session_id=tracker.session_id,
+                        acceptance_criteria=progress_data["acceptance_criteria"],
+                        completed_count=progress_data["completed_count"],
+                        total_count=progress_data["total_count"],
+                        current_ac_index=progress_data["current_ac_index"],
+                        activity=progress_data["activity"],
+                        activity_detail=progress_data["activity_detail"],
+                        elapsed_display=progress_data["elapsed_display"],
+                        estimated_remaining=progress_data["estimated_remaining"],
+                    )
+                    await self._event_store.append(workflow_event)
+
                     # Emit tool called event
                     if message.tool_name:
                         tool_event = create_tool_called_event(
@@ -621,6 +641,24 @@ Note: This is a resumed session. Please continue from where execution was interr
 
                     # Refresh the display
                     display.refresh()
+
+                    # Emit workflow progress event for TUI
+                    progress_data = state_tracker.state.to_tui_message_data(
+                        execution_id=session_id  # Use session_id as execution_id for resume
+                    )
+                    workflow_event = create_workflow_progress_event(
+                        execution_id=session_id,
+                        session_id=session_id,
+                        acceptance_criteria=progress_data["acceptance_criteria"],
+                        completed_count=progress_data["completed_count"],
+                        total_count=progress_data["total_count"],
+                        current_ac_index=progress_data["current_ac_index"],
+                        activity=progress_data["activity"],
+                        activity_detail=progress_data["activity_detail"],
+                        elapsed_display=progress_data["elapsed_display"],
+                        estimated_remaining=progress_data["estimated_remaining"],
+                    )
+                    await self._event_store.append(workflow_event)
 
                     if message.tool_name:
                         tool_event = create_tool_called_event(
