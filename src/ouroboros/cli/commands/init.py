@@ -84,6 +84,10 @@ async def _multiline_prompt_async(prompt_text: str) -> str:
 
     Returns:
         The user's input (may contain newlines from paste).
+
+    Raises:
+        EOFError: If end-of-file is reached (e.g., stdin closed).
+        KeyboardInterrupt: If user presses Ctrl+C.
     """
     bindings = KeyBindings()
 
@@ -513,7 +517,7 @@ def start(
         )
         console.print()
 
-        context = Prompt.ask("[bold]What would you like to build?[/]")
+        context = asyncio.run(_multiline_prompt_async("What would you like to build?"))
 
     if not resume and not context:
         print_error("Initial context is required when not resuming.")
