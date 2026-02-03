@@ -102,19 +102,29 @@ def _format_ac_line(
     return line
 
 
-def _build_progress_bar(completed: int, total: int) -> Progress:
+def _build_progress_bar(
+    completed: int, total: int, remaining_display: str = ""
+) -> Progress:
     """Build a progress bar for AC completion.
 
     Args:
         completed: Number of completed ACs.
         total: Total number of ACs.
+        remaining_display: Estimated remaining time string.
 
     Returns:
         Rich Progress object.
     """
-    progress = Progress(
+    # Build columns - add remaining time if available
+    columns = [
         BarColumn(bar_width=None),  # None = expand to fill width
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+    ]
+    if remaining_display:
+        columns.append(TextColumn(f"[dim italic]  {remaining_display}[/dim italic]"))
+
+    progress = Progress(
+        *columns,
         console=console,
         transient=True,
         expand=True,
@@ -189,13 +199,16 @@ def render_workflow_state(state: WorkflowState) -> Panel:
         )
         ac_lines.append(line)
 
-    # Build progress bar with estimated remaining time
-    progress_bar = _build_progress_bar(state.completed_count, state.total_count)
-
-    # Build estimated remaining time text
-    remaining_text = Text()
-    if state.estimated_remaining_display:
-        remaining_text.append(f"  {state.estimated_remaining_display}", style="dim italic")
+    # Build progress bar with estimated remaining time on the same line
+    # Show "Calculating..." if no estimate yet but work has started
+    remaining_text = state.estimated_remaining_display
+    if not remaining_text and state.completed_count == 0 and state.total_count > 0:
+        remaining_text = "Calculating..."
+    progress_bar = _build_progress_bar(
+        state.completed_count,
+        state.total_count,
+        remaining_display=remaining_text,
+    )
 
     # Build activity section
     activity_icon = ACTIVITY_ICONS.get(state.activity.value, "💻")
@@ -239,7 +252,6 @@ def render_workflow_state(state: WorkflowState) -> Panel:
         *ac_lines,
         Text(""),
         progress_bar,
-        remaining_text,
         Text(""),
         activity_text,
         *output_lines,
