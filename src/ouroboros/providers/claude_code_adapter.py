@@ -26,6 +26,7 @@ Custom CLI Path:
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -42,6 +43,17 @@ from ouroboros.providers.base import (
 )
 
 log = structlog.get_logger(__name__)
+
+# Retry configuration for transient API errors
+_MAX_RETRIES = 3
+_INITIAL_BACKOFF_SECONDS = 1.0
+_RETRYABLE_ERROR_PATTERNS = (
+    "concurrency",
+    "rate",
+    "timeout",
+    "overloaded",
+    "temporarily",
+)
 
 
 class ClaudeCodeAdapter:
@@ -139,12 +151,27 @@ class ClaudeCodeAdapter:
         )
         return resolved
 
+    def _is_retryable_error(self, error_msg: str) -> bool:
+        """Check if an error message indicates a transient/retryable error.
+
+        Args:
+            error_msg: The error message to check.
+
+        Returns:
+            True if the error is likely transient and worth retrying.
+        """
+        error_lower = error_msg.lower()
+        return any(pattern in error_lower for pattern in _RETRYABLE_ERROR_PATTERNS)
+
     async def complete(
         self,
         messages: list[Message],
         config: CompletionConfig,
     ) -> Result[CompletionResponse, ProviderError]:
-        """Make a completion request via Claude Agent SDK.
+        """Make a completion request via Claude Agent SDK with retry logic.
+
+        Implements exponential backoff for transient errors like API concurrency
+        conflicts that can occur when running inside an active Claude Code session.
 
         Args:
             messages: The conversation messages to send.
@@ -174,87 +201,168 @@ class ClaudeCodeAdapter:
             message_count=len(messages),
         )
 
-        try:
-            # Build options - no tools needed for interview (just conversation)
-            # Type ignore needed because SDK uses Literal type but we store as str
-            options = ClaudeAgentOptions(
-                allowed_tools=[],  # No tools - pure conversation
-                permission_mode=self._permission_mode,  # type: ignore[arg-type]
-                cwd=os.getcwd(),
-                cli_path=self._cli_path,
-            )
+        last_error: ProviderError | None = None
 
-            # Collect the response
-            content = ""
-            session_id = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                result = await self._execute_single_request(prompt, config)
 
-            async for sdk_message in query(prompt=prompt, options=options):
-                class_name = type(sdk_message).__name__
-
-                if class_name == "SystemMessage":
-                    # Capture session ID from init
-                    msg_data = getattr(sdk_message, "data", {})
-                    session_id = msg_data.get("session_id")
-
-                elif class_name == "AssistantMessage":
-                    # Extract text content
-                    content_blocks = getattr(sdk_message, "content", [])
-                    for block in content_blocks:
-                        if type(block).__name__ == "TextBlock":
-                            content += getattr(block, "text", "")
-
-                elif class_name == "ResultMessage":
-                    # Final result - use result content if we don't have content yet
-                    if not content:
-                        content = getattr(sdk_message, "result", "") or ""
-
-                    # Check for errors
-                    is_error = getattr(sdk_message, "is_error", False)
-                    if is_error:
-                        error_msg = content or "Unknown error from Claude Agent SDK"
-                        log.warning(
-                            "claude_code_adapter.sdk_error",
-                            error=error_msg,
+                if result.is_ok:
+                    if attempt > 0:
+                        log.info(
+                            "claude_code_adapter.retry_succeeded",
+                            attempts=attempt + 1,
                         )
-                        return Result.err(
-                            ProviderError(
-                                message=error_msg,
-                                details={"session_id": session_id},
-                            )
-                        )
+                    return result
 
-            log.info(
-                "claude_code_adapter.request_completed",
-                content_length=len(content),
-                session_id=session_id,
-            )
+                # Check if error is retryable
+                error_msg = result.error.message
+                if self._is_retryable_error(error_msg) and attempt < _MAX_RETRIES - 1:
+                    backoff = _INITIAL_BACKOFF_SECONDS * (2**attempt)
+                    log.warning(
+                        "claude_code_adapter.retryable_error",
+                        error=error_msg,
+                        attempt=attempt + 1,
+                        max_retries=_MAX_RETRIES,
+                        backoff_seconds=backoff,
+                    )
+                    last_error = result.error
+                    await asyncio.sleep(backoff)
+                    continue
 
-            # Build response
-            response = CompletionResponse(
-                content=content,
-                model=config.model,
-                usage=UsageInfo(
-                    prompt_tokens=0,  # SDK doesn't expose token counts
-                    completion_tokens=0,
-                    total_tokens=0,
-                ),
-                finish_reason="stop",
-                raw_response={"session_id": session_id},
-            )
+                # Non-retryable error
+                return result
 
-            return Result.ok(response)
+            except Exception as e:
+                error_str = str(e)
+                if self._is_retryable_error(error_str) and attempt < _MAX_RETRIES - 1:
+                    backoff = _INITIAL_BACKOFF_SECONDS * (2**attempt)
+                    log.warning(
+                        "claude_code_adapter.retryable_exception",
+                        error=error_str,
+                        attempt=attempt + 1,
+                        max_retries=_MAX_RETRIES,
+                        backoff_seconds=backoff,
+                    )
+                    last_error = ProviderError(
+                        message=f"Claude Agent SDK request failed: {e}",
+                        details={"error_type": type(e).__name__, "attempt": attempt + 1},
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
 
-        except Exception as e:
-            log.exception(
-                "claude_code_adapter.request_failed",
-                error=str(e),
-            )
-            return Result.err(
-                ProviderError(
-                    message=f"Claude Agent SDK request failed: {e}",
-                    details={"error_type": type(e).__name__},
+                log.exception(
+                    "claude_code_adapter.request_failed",
+                    error=error_str,
                 )
-            )
+                return Result.err(
+                    ProviderError(
+                        message=f"Claude Agent SDK request failed: {e}",
+                        details={"error_type": type(e).__name__},
+                    )
+                )
+
+        # All retries exhausted
+        log.error(
+            "claude_code_adapter.max_retries_exceeded",
+            max_retries=_MAX_RETRIES,
+        )
+        return Result.err(last_error or ProviderError(message="Max retries exceeded"))
+
+    async def _execute_single_request(
+        self,
+        prompt: str,
+        config: CompletionConfig,
+    ) -> Result[CompletionResponse, ProviderError]:
+        """Execute a single SDK request without retry logic.
+
+        Separated to avoid break statements in async generator loops,
+        which can cause anyio cancel scope issues.
+
+        Args:
+            prompt: The formatted prompt string.
+            config: Configuration for the completion request.
+
+        Returns:
+            Result containing either the completion response or a ProviderError.
+        """
+        from claude_agent_sdk import ClaudeAgentOptions, query
+
+        # Build options - no tools needed for interview (just conversation)
+        # Type ignore needed because SDK uses Literal type but we store as str
+        # max_turns=1 ensures single response without tool use attempts
+        options = ClaudeAgentOptions(
+            allowed_tools=[],  # No tools - pure conversation
+            disallowed_tools=["Read", "Write", "Edit", "Bash", "WebFetch", "WebSearch", "Glob", "Grep"],
+            max_turns=1,  # Single turn - no tool use loop
+            setting_sources=[],  # CRITICAL: Isolate from parent session state (~/.claude/)
+            permission_mode=self._permission_mode,  # type: ignore[arg-type]
+            cwd=os.getcwd(),
+            cli_path=self._cli_path,
+        )
+
+        # Collect the response - let the generator run to completion
+        content = ""
+        session_id = None
+        error_result: ProviderError | None = None
+
+        async for sdk_message in query(prompt=prompt, options=options):
+            class_name = type(sdk_message).__name__
+
+            if class_name == "SystemMessage":
+                # Capture session ID from init
+                msg_data = getattr(sdk_message, "data", {})
+                session_id = msg_data.get("session_id")
+
+            elif class_name == "AssistantMessage":
+                # Extract text content
+                content_blocks = getattr(sdk_message, "content", [])
+                for block in content_blocks:
+                    if type(block).__name__ == "TextBlock":
+                        content += getattr(block, "text", "")
+
+            elif class_name == "ResultMessage":
+                # Final result - use result content if we don't have content yet
+                if not content:
+                    content = getattr(sdk_message, "result", "") or ""
+
+                # Check for errors - don't break, just record
+                is_error = getattr(sdk_message, "is_error", False)
+                if is_error:
+                    error_msg = content or "Unknown error from Claude Agent SDK"
+                    log.warning(
+                        "claude_code_adapter.sdk_error",
+                        error=error_msg,
+                    )
+                    error_result = ProviderError(
+                        message=error_msg,
+                        details={"session_id": session_id},
+                    )
+
+        # After generator completes naturally, check for errors
+        if error_result:
+            return Result.err(error_result)
+
+        log.info(
+            "claude_code_adapter.request_completed",
+            content_length=len(content),
+            session_id=session_id,
+        )
+
+        # Build response
+        response = CompletionResponse(
+            content=content,
+            model=config.model,
+            usage=UsageInfo(
+                prompt_tokens=0,  # SDK doesn't expose token counts
+                completion_tokens=0,
+                total_tokens=0,
+            ),
+            finish_reason="stop",
+            raw_response={"session_id": session_id},
+        )
+
+        return Result.ok(response)
 
     def _build_prompt(self, messages: list[Message]) -> str:
         """Build a single prompt string from messages.

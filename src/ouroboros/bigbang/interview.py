@@ -443,6 +443,12 @@ This is {round_info}. Your goal is to reduce ambiguity and gather concrete detai
 
 Initial context: {state.initial_context}
 
+CRITICAL RULES:
+- DO NOT use any tools (Read, WebFetch, WebSearch, Bash, etc.)
+- DO NOT request file access or permissions
+- ONLY respond with plain text questions
+- This is a pure conversation - no tool use allowed
+
 Guidelines:
 - Ask ONE focused question per round
 - Target the biggest source of ambiguity
