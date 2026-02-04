@@ -78,19 +78,21 @@ class OuroborosTUI(App[None]):
 
     def __init__(
         self,
-        event_store: EventStore,
+        event_store: EventStore | None = None,
         *,
+        execution_id: str | None = None,
         driver_class: type | None = None,
     ) -> None:
         """Initialize OuroborosTUI.
 
         Args:
-            event_store: EventStore for live updates.
+            event_store: EventStore for live updates (optional for offline mode).
+            execution_id: Optional execution ID to monitor initially.
             driver_class: Optional Textual driver class for testing.
         """
         super().__init__(driver_class=driver_class)
         self._event_store = event_store
-        self._execution_id: str | None = None
+        self._execution_id: str | None = execution_id
         self._state = TUIState()
         self._subscription_task: asyncio.Task[None] | None = None
         self._is_paused = False
@@ -104,14 +106,21 @@ class OuroborosTUI(App[None]):
 
     def on_mount(self) -> None:
         """Handle application mount."""
-        self.install_screen(
-            SessionSelectorScreen(self._event_store), name="session_selector"
-        )
+        # Install screens - session selector only if event_store is available
+        if self._event_store is not None:
+            self.install_screen(
+                SessionSelectorScreen(self._event_store), name="session_selector"
+            )
         self.install_screen(DashboardScreen(self._state), name="dashboard")
         self.install_screen(ExecutionScreen(self._state), name="execution")
         self.install_screen(LogsScreen(self._state), name="logs")
         self.install_screen(DebugScreen(self._state), name="debug")
-        self.push_screen("session_selector")
+
+        # Start with session selector if available, otherwise dashboard
+        if self._event_store is not None:
+            self.push_screen("session_selector")
+        else:
+            self.push_screen("dashboard")
 
     async def on_session_selector_screen_session_selected(
         self, message: SessionSelectorScreen.SessionSelected
@@ -122,6 +131,13 @@ class OuroborosTUI(App[None]):
 
     def _start_event_subscription(self) -> None:
         """Start background task for event subscription."""
+        # Skip if no event loop (e.g., during testing) or no event store
+        if self._event_store is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # No event loop running
         if self._subscription_task is not None:
             self._subscription_task.cancel()
         self._subscription_task = asyncio.create_task(self._subscribe_to_events())

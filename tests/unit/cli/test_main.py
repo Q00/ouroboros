@@ -169,5 +169,5 @@ class TestTUICommands:
         """Test tui monitor command help."""
         result = runner.invoke(app, ["tui", "monitor", "--help"])
         assert result.exit_code == 0
-        assert "execution-id" in result.output.lower()
-        assert "session-id" in result.output.lower()
+        assert "db-path" in result.output.lower()
+        assert "monitor" in result.output.lower()

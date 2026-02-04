@@ -189,15 +189,16 @@ class TestOuroborosTUIMessageHandlers:
         """Test handling PauseRequested message."""
         app = OuroborosTUI()
         app.set_execution("exec_123")
+        initial_log_count = len(app.state.logs)
         msg = PauseRequested(execution_id="exec_123")
 
         app.on_pause_requested(msg)
 
         assert app.state.is_paused is True
         assert app.state.status == "paused"
-        # Check log was added
-        assert len(app.state.logs) == 1
-        assert "Pause requested" in app.state.logs[0]["message"]
+        # Check log was added (one more than before)
+        assert len(app.state.logs) == initial_log_count + 1
+        assert "Pause requested" in app.state.logs[-1]["message"]
 
     def test_on_resume_requested(self) -> None:
         """Test handling ResumeRequested message."""
@@ -205,15 +206,16 @@ class TestOuroborosTUIMessageHandlers:
         app.set_execution("exec_123")
         app._state.is_paused = True
         app._state.status = "paused"
+        initial_log_count = len(app.state.logs)
         msg = ResumeRequested(execution_id="exec_123")
 
         app.on_resume_requested(msg)
 
         assert app.state.is_paused is False
         assert app.state.status == "running"
-        # Check log was added
-        assert len(app.state.logs) == 1
-        assert "Resume requested" in app.state.logs[0]["message"]
+        # Check log was added (one more than before)
+        assert len(app.state.logs) == initial_log_count + 1
+        assert "Resume requested" in app.state.logs[-1]["message"]
 
 
 class TestOuroborosTUIActions:
