@@ -35,6 +35,8 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `run` | Execute Ouroboros workflows |
 | `config` | Manage Ouroboros configuration |
 | `status` | Check Ouroboros system status |
+| `tui` | Interactive TUI monitor for real-time workflow monitoring |
+| `mcp` | MCP server commands for Claude Desktop integration |
 
 ---
 
@@ -307,6 +309,125 @@ ouroboros status execution exec_abc123
 # Show execution with events
 ouroboros status execution --events exec_abc123
 ```
+
+---
+
+## `ouroboros tui`
+
+Interactive TUI monitor for real-time workflow monitoring.
+
+### `tui monitor`
+
+Launch the interactive TUI monitor to observe workflow execution in real-time.
+
+```bash
+ouroboros tui monitor [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-e, --execution-id TEXT` | Monitor a specific execution |
+| `-s, --session-id TEXT` | Monitor a specific session |
+
+**Examples:**
+
+```bash
+# Launch TUI monitor
+ouroboros tui monitor
+
+# Monitor specific execution
+ouroboros tui monitor --execution-id exec_abc123
+
+# Monitor specific session
+ouroboros tui monitor --session-id sess_xyz789
+```
+
+**TUI Screens:**
+
+| Key | Screen | Description |
+|-----|--------|-------------|
+| `1` | Dashboard | Overview with phase progress, drift meter, cost tracker |
+| `2` | Logs | Filterable log viewer with level filtering |
+| `3` | Execution | Execution details, timeline, phase outputs |
+| `4` | Debug | State inspector, raw events, configuration |
+
+**Keyboard Shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `1-4` | Switch screens |
+| `q` | Quit |
+| `p` | Pause execution |
+| `r` | Resume execution |
+| `↑/↓` | Scroll |
+
+---
+
+## `ouroboros mcp`
+
+MCP (Model Context Protocol) server commands for Claude Desktop integration.
+
+### `mcp serve`
+
+Start the MCP server to expose Ouroboros tools to Claude Desktop or other MCP clients.
+
+```bash
+ouroboros mcp serve [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `-h, --host TEXT` | Host to bind to (default: localhost) |
+| `-p, --port INTEGER` | Port to bind to (default: 8080) |
+| `-t, --transport TEXT` | Transport type: `stdio` or `sse` (default: stdio) |
+
+**Examples:**
+
+```bash
+# Start with stdio transport (for Claude Desktop)
+ouroboros mcp serve
+
+# Start with SSE transport on custom port
+ouroboros mcp serve --transport sse --port 9000
+
+# Start on specific host
+ouroboros mcp serve --host 0.0.0.0 --port 8080 --transport sse
+```
+
+**Claude Desktop Integration:**
+
+Add to `~/.config/claude/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "ouroboros": {
+      "command": "ouroboros",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+### `mcp info`
+
+Show MCP server information and available tools.
+
+```bash
+ouroboros mcp info
+```
+
+**Available Tools:**
+
+| Tool | Description |
+|------|-------------|
+| `ouroboros_execute_seed` | Execute a seed specification |
+| `ouroboros_session_status` | Get the status of a session |
+| `ouroboros_query_events` | Query event history |
 
 ---
 

@@ -20,6 +20,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.0",
     "stamina>=25.1.0",
     "structlog>=24.0.0",
+    "textual>=1.0.0",
     "typer>=0.12.0",
 ]
 

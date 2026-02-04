@@ -154,3 +154,20 @@ class TestMCPCommands:
         assert result.exit_code == 0
         assert "ouroboros-mcp" in result.output
         assert "ouroboros_execute_seed" in result.output
+
+
+class TestTUICommands:
+    """Tests for tui command group."""
+
+    def test_tui_command_group_registered(self) -> None:
+        """Test that tui command group is registered."""
+        result = runner.invoke(app, ["tui", "--help"])
+        assert result.exit_code == 0
+        assert "Interactive TUI monitor" in result.output
+
+    def test_tui_monitor_help(self) -> None:
+        """Test tui monitor command help."""
+        result = runner.invoke(app, ["tui", "monitor", "--help"])
+        assert result.exit_code == 0
+        assert "execution-id" in result.output.lower()
+        assert "session-id" in result.output.lower()
