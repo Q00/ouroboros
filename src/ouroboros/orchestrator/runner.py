@@ -26,20 +26,22 @@ from uuid import uuid4
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.types import Result
+from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import DEFAULT_TOOLS, AgentMessage, ClaudeAgentAdapter
 from ouroboros.orchestrator.events import (
+    create_drift_measured_event,
     create_mcp_tools_loaded_event,
     create_progress_event,
     create_session_completed_event,
     create_session_failed_event,
     create_session_started_event,
     create_tool_called_event,
+    create_workflow_progress_event,
 )
 from ouroboros.orchestrator.mcp_tools import MCPToolProvider
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
@@ -105,6 +107,8 @@ def build_system_prompt(seed: Seed) -> str:
     Returns:
         System prompt string.
     """
+    from ouroboros.orchestrator.workflow_state import get_ac_tracking_prompt
+
     constraints_text = "\n".join(f"- {c}" for c in seed.constraints) if seed.constraints else "None"
 
     principles_text = (
@@ -112,6 +116,8 @@ def build_system_prompt(seed: Seed) -> str:
         if seed.evaluation_principles
         else "None"
     )
+
+    ac_tracking = get_ac_tracking_prompt()
 
     return f"""You are an autonomous coding agent executing a task for the Ouroboros workflow system.
 
@@ -130,7 +136,7 @@ def build_system_prompt(seed: Seed) -> str:
 - Write clean, well-tested code following project conventions
 - Report progress clearly as you work
 - If you encounter blockers, explain them clearly
-"""
+{ac_tracking}"""
 
 
 def build_task_prompt(seed: Seed) -> str:
@@ -361,19 +367,18 @@ class OrchestratorRunner:
         final_message = ""
         success = False
 
-        try:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                TimeElapsedColumn(),
-                console=self._console,
-                transient=True,
-            ) as progress:
-                task_id = progress.add_task(
-                    "[cyan]Executing via Claude Agent...",
-                    total=None,
-                )
+        # Create workflow state tracker for progress display
+        from ouroboros.cli.formatters.workflow_display import WorkflowDisplay
+        from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
+        state_tracker = WorkflowStateTracker(
+            acceptance_criteria=seed.acceptance_criteria,
+            goal=seed.goal,
+            session_id=tracker.session_id,
+        )
+
+        try:
+            with WorkflowDisplay(state_tracker) as display:
                 async for message in self._adapter.execute_task(
                     prompt=task_prompt,
                     tools=merged_tools,
@@ -387,9 +392,40 @@ class OrchestratorRunner:
                         }
                     )
 
-                    # Update progress display
-                    display_text = self._format_progress_text(message, messages_processed)
-                    progress.update(task_id, description=display_text)
+                    # Update workflow state tracker
+                    state_tracker.process_message(
+                        content=message.content,
+                        message_type=message.type,
+                        tool_name=message.tool_name,
+                        is_input=message.type == "user",
+                    )
+
+                    # Refresh the display
+                    display.refresh()
+
+                    # Emit workflow progress event for TUI
+                    # Use exec_id defined at start of function (not execution_id param)
+                    progress_data = state_tracker.state.to_tui_message_data(
+                        execution_id=exec_id
+                    )
+                    workflow_event = create_workflow_progress_event(
+                        execution_id=exec_id,
+                        session_id=tracker.session_id,
+                        acceptance_criteria=progress_data["acceptance_criteria"],
+                        completed_count=progress_data["completed_count"],
+                        total_count=progress_data["total_count"],
+                        current_ac_index=progress_data["current_ac_index"],
+                        current_phase=progress_data["current_phase"],
+                        activity=progress_data["activity"],
+                        activity_detail=progress_data["activity_detail"],
+                        elapsed_display=progress_data["elapsed_display"],
+                        estimated_remaining=progress_data["estimated_remaining"],
+                        messages_count=progress_data["messages_count"],
+                        tool_calls_count=progress_data["tool_calls_count"],
+                        estimated_tokens=progress_data["estimated_tokens"],
+                        estimated_cost_usd=progress_data["estimated_cost_usd"],
+                    )
+                    await self._event_store.append(workflow_event)
 
                     # Emit tool called event
                     if message.tool_name:
@@ -409,6 +445,24 @@ class OrchestratorRunner:
                             tool_name=message.tool_name,
                         )
                         await self._event_store.append(progress_event)
+
+                        # Measure and emit drift
+                        drift_measurement = DriftMeasurement()
+                        drift_metrics = drift_measurement.measure(
+                            current_output=message.content,
+                            constraint_violations=[],  # TODO: track violations
+                            current_concepts=[],  # TODO: extract concepts
+                            seed=seed,
+                        )
+                        drift_event = create_drift_measured_event(
+                            execution_id=exec_id,
+                            goal_drift=drift_metrics.goal_drift,
+                            constraint_drift=drift_metrics.constraint_drift,
+                            ontology_drift=drift_metrics.ontology_drift,
+                            combined_drift=drift_metrics.combined_drift,
+                            is_acceptable=drift_metrics.is_acceptable,
+                        )
+                        await self._event_store.append(drift_event)
 
                     # Handle final message
                     if message.is_final:
@@ -582,19 +636,18 @@ Note: This is a resumed session. Please continue from where execution was interr
         final_message = ""
         success = False
 
-        try:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                TimeElapsedColumn(),
-                console=self._console,
-                transient=True,
-            ) as progress:
-                task_id = progress.add_task(
-                    "[cyan]Resuming execution...",
-                    total=None,
-                )
+        # Create workflow state tracker for progress display
+        from ouroboros.cli.formatters.workflow_display import WorkflowDisplay
+        from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
+        state_tracker = WorkflowStateTracker(
+            acceptance_criteria=seed.acceptance_criteria,
+            goal=seed.goal,
+            session_id=session_id,
+        )
+
+        try:
+            with WorkflowDisplay(state_tracker) as display:
                 async for message in self._adapter.execute_task(
                     prompt=resume_prompt,
                     tools=merged_tools,
@@ -603,8 +656,39 @@ Note: This is a resumed session. Please continue from where execution was interr
                 ):
                     messages_processed += 1
 
-                    display_text = self._format_progress_text(message, messages_processed)
-                    progress.update(task_id, description=display_text)
+                    # Update workflow state tracker
+                    state_tracker.process_message(
+                        content=message.content,
+                        message_type=message.type,
+                        tool_name=message.tool_name,
+                        is_input=message.type == "user",
+                    )
+
+                    # Refresh the display
+                    display.refresh()
+
+                    # Emit workflow progress event for TUI
+                    progress_data = state_tracker.state.to_tui_message_data(
+                        execution_id=session_id  # Use session_id as execution_id for resume
+                    )
+                    workflow_event = create_workflow_progress_event(
+                        execution_id=session_id,
+                        session_id=session_id,
+                        acceptance_criteria=progress_data["acceptance_criteria"],
+                        completed_count=progress_data["completed_count"],
+                        total_count=progress_data["total_count"],
+                        current_ac_index=progress_data["current_ac_index"],
+                        current_phase=progress_data["current_phase"],
+                        activity=progress_data["activity"],
+                        activity_detail=progress_data["activity_detail"],
+                        elapsed_display=progress_data["elapsed_display"],
+                        estimated_remaining=progress_data["estimated_remaining"],
+                        messages_count=progress_data["messages_count"],
+                        tool_calls_count=progress_data["tool_calls_count"],
+                        estimated_tokens=progress_data["estimated_tokens"],
+                        estimated_cost_usd=progress_data["estimated_cost_usd"],
+                    )
+                    await self._event_store.append(workflow_event)
 
                     if message.tool_name:
                         tool_event = create_tool_called_event(
@@ -683,27 +767,6 @@ Note: This is a resumed session. Please continue from where execution was interr
                     details={"session_id": session_id},
                 )
             )
-
-    def _format_progress_text(self, message: AgentMessage, count: int) -> str:
-        """Format progress text for display.
-
-        Args:
-            message: Current agent message.
-            count: Message count.
-
-        Returns:
-            Formatted progress text.
-        """
-        if message.tool_name:
-            return f"[cyan]({count}) Using {message.tool_name}...[/cyan]"
-        elif message.type == "assistant":
-            preview = message.content[:50].replace("\n", " ")
-            return f"[cyan]({count}) {preview}...[/cyan]"
-        elif message.type == "result":
-            return f"[green]({count}) Finalizing...[/green]"
-        else:
-            return f"[dim]({count}) Processing...[/dim]"
-
 
 __all__ = [
     "OrchestratorError",

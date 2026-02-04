@@ -282,30 +282,6 @@ class TestOrchestratorRunner:
         assert result.is_err
         assert "session" in str(result.error).lower()
 
-    def test_format_progress_text_assistant(self, runner: OrchestratorRunner) -> None:
-        """Test formatting assistant message."""
-        msg = AgentMessage(type="assistant", content="I am analyzing the code for bugs")
-        text = runner._format_progress_text(msg, 5)
-
-        assert "(5)" in text
-        assert "analyzing" in text.lower()
-
-    def test_format_progress_text_tool(self, runner: OrchestratorRunner) -> None:
-        """Test formatting tool call message."""
-        msg = AgentMessage(type="tool", content="Reading file", tool_name="Read")
-        text = runner._format_progress_text(msg, 10)
-
-        assert "(10)" in text
-        assert "Read" in text
-
-    def test_format_progress_text_result(self, runner: OrchestratorRunner) -> None:
-        """Test formatting result message."""
-        msg = AgentMessage(type="result", content="Done")
-        text = runner._format_progress_text(msg, 20)
-
-        assert "(20)" in text
-        assert "Finalizing" in text
-
     @pytest.mark.asyncio
     async def test_resume_session_already_completed(
         self,
