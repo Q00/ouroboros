@@ -46,6 +46,38 @@ export OPENAI_API_KEY="your-api-key"
 # For other providers, see LiteLLM documentation
 ```
 
+You can also create a `.env` file (copy from `.env.example`):
+
+```bash
+cp .env.example .env
+# or for global settings:
+cp .env.example ~/.ouroboros/.env
+```
+
+### Custom CLI Path (Optional)
+
+If you use a custom Claude CLI wrapper (e.g., for OTEL instrumentation):
+
+**Option 1: Environment Variable**
+```bash
+export OUROBOROS_CLI_PATH=/path/to/your/custom-claude
+```
+
+**Option 2: `.env` file**
+```bash
+# In .env or ~/.ouroboros/.env
+OUROBOROS_CLI_PATH=/path/to/your/custom-claude
+```
+
+**Option 3: Config File**
+```yaml
+# In ~/.ouroboros/config.yaml
+orchestrator:
+  cli_path: /path/to/your/custom-claude
+```
+
+Priority: Environment Variable > `.env` > `config.yaml`
+
 ### Configuration File
 
 Ouroboros uses a configuration file at `~/.ouroboros/config.yaml`:
@@ -66,6 +98,11 @@ database:
 logging:
   level: INFO
   format: json
+
+# Orchestrator settings (optional)
+orchestrator:
+  cli_path: null  # Use SDK default, or set to custom path
+  default_max_turns: 10
 ```
 
 Initialize the configuration:

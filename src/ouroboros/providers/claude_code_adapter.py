@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import structlog
@@ -46,13 +47,16 @@ log = structlog.get_logger(__name__)
 
 # Retry configuration for transient API errors
 _MAX_RETRIES = 3
-_INITIAL_BACKOFF_SECONDS = 1.0
+_INITIAL_BACKOFF_SECONDS = 2.0  # Increased for custom CLI startup
 _RETRYABLE_ERROR_PATTERNS = (
     "concurrency",
     "rate",
     "timeout",
     "overloaded",
     "temporarily",
+    "empty response",  # custom CLI startup delay
+    "need retry",  # explicit retry request
+    "startup",
 )
 
 
@@ -84,6 +88,9 @@ class ClaudeCodeAdapter:
         self,
         permission_mode: str = "default",
         cli_path: str | Path | None = None,
+        allowed_tools: list[str] | None = None,
+        max_turns: int = 1,
+        on_message: Callable[[str, str], None] | None = None,
     ) -> None:
         """Initialize Claude Code adapter.
 
@@ -94,9 +101,19 @@ class ClaudeCodeAdapter:
             cli_path: Path to the Claude CLI binary. If not provided,
                 checks OUROBOROS_CLI_PATH env var, then falls back to
                 SDK's bundled CLI.
+            allowed_tools: List of tools to allow. None means no tools.
+                For interview mode with codebase access, use ["Read", "Glob", "Grep"].
+            max_turns: Maximum turns for the conversation. Default 1 for single response.
+                Increase for tool use scenarios.
+            on_message: Callback for streaming messages. Called with (type, content):
+                - ("thinking", "content") for agent reasoning
+                - ("tool", "tool_name") for tool usage
         """
         self._permission_mode: str = permission_mode
         self._cli_path: Path | None = self._resolve_cli_path(cli_path)
+        self._allowed_tools: list[str] = allowed_tools or []
+        self._max_turns: int = max_turns
+        self._on_message: Callable[[str, str], None] | None = on_message
         log.info(
             "claude_code_adapter.initialized",
             permission_mode=permission_mode,
@@ -104,7 +121,13 @@ class ClaudeCodeAdapter:
         )
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> Path | None:
-        """Resolve the CLI path from parameter or environment variable.
+        """Resolve the CLI path from parameter, config, or environment variable.
+
+        Priority:
+            1. Explicit cli_path parameter
+            2. OUROBOROS_CLI_PATH environment variable
+            3. config.yaml orchestrator.cli_path
+            4. None (SDK default)
 
         Args:
             cli_path: Explicit CLI path from constructor.
@@ -112,8 +135,14 @@ class ClaudeCodeAdapter:
         Returns:
             Resolved Path if set and exists, None otherwise (falls back to SDK default).
         """
-        # Priority: explicit parameter > environment variable > None (SDK default)
-        path_str = str(cli_path) if cli_path else os.environ.get("OUROBOROS_CLI_PATH", "")
+        # Priority: explicit parameter > env var / config > SDK default
+        if cli_path:
+            path_str = str(cli_path)
+        else:
+            # Use config helper (checks env var then config.yaml)
+            from ouroboros.config import get_cli_path
+
+            path_str = get_cli_path() or ""
         path_str = path_str.strip()
 
         if not path_str:
@@ -288,14 +317,29 @@ class ClaudeCodeAdapter:
         """
         from claude_agent_sdk import ClaudeAgentOptions, query
 
-        # Build options - no tools needed for interview (just conversation)
+        # Build options based on configured tool permissions
         # Type ignore needed because SDK uses Literal type but we store as str
-        # max_turns=1 ensures single response without tool use attempts
+        #
+        # Strategy: Block dangerous tools explicitly, allow everything else
+        # This enables MCP tools (mcp__*) and read-only built-in tools
+        dangerous_tools = ["Write", "Edit", "Bash", "Task", "NotebookEdit"]
+
+        # If allowed_tools is specified, compute disallowed from it (strict mode)
+        # Otherwise, only block dangerous tools (permissive mode for MCP)
+        if self._allowed_tools:
+            all_tools = [
+                "Read", "Write", "Edit", "Bash", "WebFetch", "WebSearch", "Glob", "Grep",
+                "Task", "NotebookEdit", "TodoRead", "TodoWrite", "LS",
+            ]
+            disallowed = [t for t in all_tools if t not in self._allowed_tools]
+        else:
+            disallowed = dangerous_tools
+
         options = ClaudeAgentOptions(
-            allowed_tools=[],  # No tools - pure conversation
-            disallowed_tools=["Read", "Write", "Edit", "Bash", "WebFetch", "WebSearch", "Glob", "Grep"],
-            max_turns=1,  # Single turn - no tool use loop
-            setting_sources=[],  # CRITICAL: Isolate from parent session state (~/.claude/)
+            allowed_tools=self._allowed_tools if self._allowed_tools else [],
+            disallowed_tools=disallowed,
+            max_turns=self._max_turns,
+            # Allow MCP and other ~/.claude/ settings to be inherited
             permission_mode=self._permission_mode,  # type: ignore[arg-type]
             cwd=os.getcwd(),
             cli_path=self._cli_path,
@@ -315,11 +359,24 @@ class ClaudeCodeAdapter:
                 session_id = msg_data.get("session_id")
 
             elif class_name == "AssistantMessage":
-                # Extract text content
+                # Extract text content and tool use
                 content_blocks = getattr(sdk_message, "content", [])
                 for block in content_blocks:
-                    if type(block).__name__ == "TextBlock":
-                        content += getattr(block, "text", "")
+                    block_type = type(block).__name__
+                    if block_type == "TextBlock":
+                        text = getattr(block, "text", "")
+                        content += text
+                        # Callback for thinking/reasoning
+                        if self._on_message and text.strip():
+                            self._on_message("thinking", text.strip())
+                    elif block_type == "ToolUseBlock":
+                        tool_name = getattr(block, "name", "unknown")
+                        tool_input = getattr(block, "input", {})
+                        # Format tool info with key details
+                        tool_info = self._format_tool_info(tool_name, tool_input)
+                        # Callback for tool usage
+                        if self._on_message:
+                            self._on_message("tool", tool_info)
 
             elif class_name == "ResultMessage":
                 # Final result - use result content if we don't have content yet
@@ -343,6 +400,22 @@ class ClaudeCodeAdapter:
         if error_result:
             return Result.err(error_result)
 
+        # Check for empty response (custom CLI startup delay, etc.)
+        # Return retriable error so retry logic can handle it
+        if not content and not session_id:
+            log.warning(
+                "claude_code_adapter.empty_response",
+                content_length=0,
+                session_id=session_id,
+                hint="CLI may still be starting (custom CLI sync, etc.)",
+            )
+            return Result.err(
+                ProviderError(
+                    message="Empty response from CLI - may need retry (timeout/startup)",
+                    details={"session_id": session_id, "content_length": 0},
+                )
+            )
+
         log.info(
             "claude_code_adapter.request_completed",
             content_length=len(content),
@@ -363,6 +436,42 @@ class ClaudeCodeAdapter:
         )
 
         return Result.ok(response)
+
+    def _format_tool_info(self, tool_name: str, tool_input: dict) -> str:
+        """Format tool name and input for display.
+
+        Args:
+            tool_name: Name of the tool being used.
+            tool_input: Input parameters for the tool.
+
+        Returns:
+            Formatted string like "Read: /path/to/file" or "Glob: **/*.py"
+        """
+        # Extract key info based on tool type
+        detail = ""
+        if tool_name == "Read":
+            detail = tool_input.get("file_path", "")
+        elif tool_name == "Glob":
+            detail = tool_input.get("pattern", "")
+        elif tool_name == "Grep":
+            detail = tool_input.get("pattern", "")
+        elif tool_name == "WebFetch":
+            detail = tool_input.get("url", "")
+        elif tool_name == "WebSearch":
+            detail = tool_input.get("query", "")
+        elif tool_name.startswith("mcp__"):
+            # MCP tools - show first non-empty input value
+            for v in tool_input.values():
+                if v:
+                    detail = str(v)[:50]
+                    break
+
+        if detail:
+            # Truncate long details
+            if len(detail) > 60:
+                detail = detail[:57] + "..."
+            return f"{tool_name}: {detail}"
+        return tool_name
 
     def _build_prompt(self, messages: list[Message]) -> str:
         """Build a single prompt string from messages.

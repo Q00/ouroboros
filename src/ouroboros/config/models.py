@@ -225,6 +225,29 @@ class LoggingConfig(BaseModel, frozen=True):
     include_reasoning: bool = True
 
 
+class OrchestratorConfig(BaseModel, frozen=True):
+    """Orchestrator configuration for Claude Agent SDK.
+
+    Attributes:
+        cli_path: Path to Claude CLI binary. Supports:
+            - Absolute path: /path/to/my-claude-wrapper
+            - ~ expansion: ~/.my-claude-wrapper/bin/my-claude-wrapper
+            - None: Use SDK bundled CLI
+        default_max_turns: Default max turns for agent execution
+    """
+
+    cli_path: str | None = None
+    default_max_turns: int = Field(default=10, ge=1)
+
+    @field_validator("cli_path")
+    @classmethod
+    def expand_cli_path(cls, v: str | None) -> str | None:
+        """Expand ~ in cli_path."""
+        if v is None:
+            return None
+        return str(Path(v).expanduser())
+
+
 class OuroborosConfig(BaseModel, frozen=True):
     """Top-level Ouroboros configuration.
 
@@ -252,6 +275,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     persistence: PersistenceConfig = Field(default_factory=PersistenceConfig)
     drift: DriftConfig = Field(default_factory=DriftConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
 
 
 def get_default_config() -> OuroborosConfig:

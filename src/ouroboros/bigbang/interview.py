@@ -435,28 +435,46 @@ class InterviewEngine:
         Returns:
             The system prompt.
         """
+        import os
+
         round_info = f"Round {state.current_round_number}"
 
-        return f"""You are an expert requirements engineer conducting an interview to refine vague ideas into clear, executable requirements.
+        # Optional: preferred web search tool from env
+        preferred_web_tool = os.environ.get("OUROBOROS_WEB_SEARCH_TOOL", "").strip()
+        if preferred_web_tool:
+            web_search_hint = f"\n- PREFERRED: Use {preferred_web_tool} for web search"
+        else:
+            web_search_hint = ""
 
-This is {round_info}. Your goal is to reduce ambiguity and gather concrete details.
+        return f"""You are an expert requirements engineer conducting an interview.
+
+This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.
 
 Initial context: {state.initial_context}
 
-CRITICAL RULES:
-- DO NOT use any tools (Read, WebFetch, WebSearch, Bash, etc.)
-- DO NOT request file access or permissions
-- ONLY respond with plain text questions
-- This is a pure conversation - no tool use allowed
+CRITICAL ROLE BOUNDARIES:
+- You are ONLY an interviewer. You gather information through questions.
+- NEVER say "I will implement X", "Let me build", "I'll create" - you gather requirements only
+- NEVER promise to build demos, write code, or execute anything
+- Another agent will handle implementation AFTER you finish gathering requirements
 
-Guidelines:
-- Ask ONE focused question per round
+TOOL USAGE:
+- You CAN use: Read, Glob, Grep, WebFetch, and MCP tools
+- You CANNOT use: Write, Edit, Bash, Task (these are blocked)
+- Use tools to explore codebase and fetch web content
+- After using tools, always ask a clarifying question
+{web_search_hint}
+
+RESPONSE FORMAT:
+- You MUST always end with a question - never end without asking something
+- Keep questions focused (1-2 sentences)
+- No preambles like "Great question!" or "I understand"
+- If tools fail or return nothing, still ask a question based on what you know
+
+QUESTIONING STRATEGY:
 - Target the biggest source of ambiguity
 - Build on previous responses
-- Be specific and actionable
-- Keep questions concise and clear
-
-Generate the next question to reduce ambiguity."""
+- Be specific and actionable"""
 
     def _build_conversation_history(
         self, state: InterviewState

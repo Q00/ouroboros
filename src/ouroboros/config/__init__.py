@@ -28,6 +28,7 @@ from ouroboros.config.loader import (
     create_default_config,
     credentials_file_secure,
     ensure_config_dir,
+    get_cli_path,
     load_config,
     load_credentials,
 )
@@ -41,6 +42,7 @@ from ouroboros.config.models import (
     ExecutionConfig,
     LoggingConfig,
     ModelConfig,
+    OrchestratorConfig,
     OuroborosConfig,
     PersistenceConfig,
     ProviderCredentials,
@@ -67,6 +69,7 @@ __all__ = [
     "PersistenceConfig",
     "DriftConfig",
     "LoggingConfig",
+    "OrchestratorConfig",
     # Loader functions
     "load_config",
     "load_credentials",
@@ -74,6 +77,7 @@ __all__ = [
     "ensure_config_dir",
     "config_exists",
     "credentials_file_secure",
+    "get_cli_path",
     # Model helpers
     "get_config_dir",
     "get_default_config",
