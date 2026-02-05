@@ -8,6 +8,7 @@ Functions:
     load_credentials: Load credentials from ~/.ouroboros/credentials.yaml
     create_default_config: Create default configuration files
     ensure_config_dir: Ensure ~/.ouroboros/ directory exists
+    get_cli_path: Get CLI path from env var or config
 """
 
 import os
@@ -15,8 +16,13 @@ from pathlib import Path
 import stat
 from typing import Any
 
+from dotenv import load_dotenv
 from pydantic import ValidationError as PydanticValidationError
 import yaml
+
+# Load .env file from current directory and ~/.ouroboros/
+load_dotenv()  # Current directory .env
+load_dotenv(Path.home() / ".ouroboros" / ".env")  # Global .env
 
 from ouroboros.config.models import (
     CredentialsConfig,
@@ -290,3 +296,32 @@ def credentials_file_secure(credentials_path: Path | None = None) -> bool:
     file_mode = credentials_path.stat().st_mode
     # Check that only owner has read/write permissions
     return (file_mode & 0o777) == 0o600
+
+
+def get_cli_path() -> str | None:
+    """Get CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_CLI_PATH environment variable
+        2. config.yaml orchestrator.cli_path
+        3. None (use SDK default)
+
+    Returns:
+        Path to CLI binary or None to use SDK default.
+    """
+    # 1. Check environment variable (highest priority)
+    env_path = os.environ.get("OUROBOROS_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    # 2. Check config file
+    try:
+        config = load_config()
+        if config.orchestrator.cli_path:
+            return config.orchestrator.cli_path
+    except ConfigError:
+        # Config doesn't exist or is invalid - fall back to default
+        pass
+
+    # 3. Default: None (SDK uses bundled CLI)
+    return None

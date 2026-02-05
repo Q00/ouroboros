@@ -23,6 +23,7 @@ from ouroboros.bigbang.interview import (
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.observability import LoggingConfig, configure_logging
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
@@ -42,11 +43,43 @@ app = typer.Typer(
 )
 
 
-def _get_adapter(use_orchestrator: bool) -> LLMAdapter:
+def _make_message_callback(debug: bool):
+    """Create message callback for streaming output.
+
+    Args:
+        debug: If True, show thinking and tool use.
+
+    Returns:
+        Callback function or None.
+    """
+    if not debug:
+        return None
+
+    def callback(msg_type: str, content: str) -> None:
+        if msg_type == "thinking":
+            # Take first line only, truncate if needed
+            first_line = content.split("\n")[0].strip()
+            display = first_line[:100] + "..." if len(first_line) > 100 else first_line
+            if display:
+                console.print(f"  [dim]💭 {display}[/dim]")
+        elif msg_type == "tool":
+            # Tool info now includes details like "Read: /path/to/file"
+            console.print(f"  [yellow]🔧 {content}[/yellow]")
+
+    return callback
+
+
+def _get_adapter(
+    use_orchestrator: bool,
+    for_interview: bool = False,
+    debug: bool = False,
+) -> LLMAdapter:
     """Get the appropriate LLM adapter.
 
     Args:
         use_orchestrator: If True, use Claude Code (Max Plan). Otherwise LiteLLM.
+        for_interview: If True, enable Read/Glob/Grep tools for codebase exploration.
+        debug: If True, show streaming messages (thinking, tool use).
 
     Returns:
         LLM adapter instance.
@@ -54,6 +87,15 @@ def _get_adapter(use_orchestrator: bool) -> LLMAdapter:
     if use_orchestrator:
         from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 
+        if for_interview:
+            # Interview mode: permissive - allow MCP, read tools, etc.
+            # Only dangerous tools (Write, Edit, Bash, Task) are blocked
+            return ClaudeCodeAdapter(
+                permission_mode="bypassPermissions",  # Auto-approve tool use
+                allowed_tools=None,  # Permissive mode: MCP + read-only tools
+                max_turns=5,  # Allow more turns for MCP tool use
+                on_message=_make_message_callback(debug),
+            )
         return ClaudeCodeAdapter()
     else:
         return LiteLLMAdapter()
@@ -149,6 +191,7 @@ async def _run_interview(
     resume_id: str | None = None,
     state_dir: Path | None = None,
     use_orchestrator: bool = False,
+    debug: bool = False,
 ) -> None:
     """Run the interview process.
 
@@ -159,7 +202,7 @@ async def _run_interview(
         use_orchestrator: If True, use Claude Code (Max Plan) instead of LiteLLM.
     """
     # Initialize components
-    llm_adapter = _get_adapter(use_orchestrator)
+    llm_adapter = _get_adapter(use_orchestrator, for_interview=True, debug=debug)
     engine = InterviewEngine(
         llm_adapter=llm_adapter,
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",
@@ -396,6 +439,14 @@ def start(
             help="Use Claude Code (Max Plan) instead of LiteLLM. No API key required.",
         ),
     ] = False,
+    debug: Annotated[
+        bool,
+        typer.Option(
+            "--debug",
+            "-d",
+            help="Show verbose logs including debug messages.",
+        ),
+    ] = False,
 ) -> None:
     """Start an interactive interview to refine your requirements.
 
@@ -429,6 +480,11 @@ def start(
         print_error("Initial context is required when not resuming.")
         raise typer.Exit(code=1)
 
+    # Configure logging based on debug flag
+    if debug:
+        configure_logging(LoggingConfig(log_level="DEBUG"))
+        print_info("Debug mode enabled - showing verbose logs")
+
     # Show mode info
     if orchestrator:
         print_info("Using Claude Code (Max Plan) - no API key required")
@@ -437,7 +493,7 @@ def start(
 
     # Run interview
     try:
-        asyncio.run(_run_interview(context or "", resume, state_dir, orchestrator))
+        asyncio.run(_run_interview(context or "", resume, state_dir, orchestrator, debug))
     except KeyboardInterrupt:
         console.print()
         print_info("Interview interrupted. Progress has been saved.")

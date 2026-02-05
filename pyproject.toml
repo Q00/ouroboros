@@ -15,6 +15,7 @@ dependencies = [
     "litellm>=1.80.0",
     "mcp>=1.26.0",
     "pydantic>=2.0.0",
+    "python-dotenv>=1.2.1",
     "pyyaml>=6.0.0",
     "rich>=13.0.0",
     "sqlalchemy[asyncio]>=2.0.0",
@@ -22,6 +23,13 @@ dependencies = [
     "structlog>=24.0.0",
     "textual>=1.0.0",
     "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+dashboard = [
+    "streamlit>=1.40.0",
+    "plotly>=5.24.0",
+    "pandas>=2.2.0",
 ]
 
 [project.scripts]
