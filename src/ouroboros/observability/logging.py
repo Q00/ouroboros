@@ -300,6 +300,29 @@ def _get_file_processors() -> list[Any]:
     return processors
 
 
+# Global flag to control console log output
+_console_logging_enabled: bool = True
+
+
+def set_console_logging(enabled: bool) -> None:
+    """Enable or disable console log output.
+
+    Args:
+        enabled: True to enable console logging, False to disable.
+    """
+    global _console_logging_enabled
+    _console_logging_enabled = enabled
+
+
+def is_console_logging_enabled() -> bool:
+    """Check if console logging is enabled.
+
+    Returns:
+        True if console logging is enabled.
+    """
+    return _console_logging_enabled
+
+
 class _FileWritingPrintLogger:
     """Print logger that also writes to a file handler.
 
@@ -322,8 +345,10 @@ class _FileWritingPrintLogger:
             message: The message to log.
             level: The log level (e.g., logging.DEBUG, logging.INFO).
         """
-        # Print to console
-        print(message)
+        import sys
+        # Print to stderr only if console logging is enabled
+        if _console_logging_enabled:
+            print(message, file=sys.stderr)
 
         # Write to file if handler exists
         if self._file_handler:

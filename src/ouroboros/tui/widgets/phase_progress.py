@@ -37,22 +37,26 @@ class PhaseIndicator(Static):
 
     DEFAULT_CSS = """
     PhaseIndicator {
-        width: auto;
+        width: 7;
         height: 3;
-        padding: 0 1;
+        padding: 0;
         text-align: center;
-        border: solid $surface;
+        content-align: center middle;
+        border: solid $surface-darken-1;
+        background: $surface-darken-1;
     }
 
     PhaseIndicator.active {
         background: $primary;
         border: solid $primary;
         text-style: bold;
+        color: $text;
     }
 
     PhaseIndicator.completed {
-        background: $success;
-        border: solid $success;
+        background: $success-darken-2;
+        border: solid $success-darken-1;
+        color: $text;
     }
 
     PhaseIndicator.diverge {
@@ -60,13 +64,10 @@ class PhaseIndicator(Static):
     }
 
     PhaseIndicator.converge {
-        color: $accent;
+        color: $warning;
     }
 
-    PhaseIndicator.diverge.active {
-        color: $text;
-    }
-
+    PhaseIndicator.diverge.active,
     PhaseIndicator.converge.active {
         color: $text;
     }
@@ -141,8 +142,7 @@ class PhaseProgressWidget(Widget):
     PhaseProgressWidget {
         height: auto;
         width: 100%;
-        padding: 1;
-        border: solid $surface;
+        padding: 0;
     }
 
     PhaseProgressWidget > Horizontal {
@@ -152,29 +152,28 @@ class PhaseProgressWidget(Widget):
     }
 
     PhaseProgressWidget > .header {
-        text-align: center;
         text-style: bold;
-        margin-bottom: 1;
+        color: $text;
+        margin-bottom: 0;
     }
 
     PhaseProgressWidget > .iteration-info {
-        text-align: center;
-        margin-top: 1;
+        margin-top: 0;
         color: $text-muted;
     }
 
     PhaseProgressWidget .arrow {
-        width: 3;
+        width: 2;
         height: 3;
         content-align: center middle;
         color: $text-muted;
     }
 
     PhaseProgressWidget .diamond-symbol {
-        width: 3;
+        width: 2;
         height: 3;
         content-align: center middle;
-        color: $primary;
+        color: $warning;
         text-style: bold;
     }
     """

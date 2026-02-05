@@ -30,9 +30,8 @@ from ouroboros.tui.events import (
     WorkflowProgressUpdated,
 )
 from ouroboros.tui.widgets import (
-    ACProgressItem,
-    ACProgressWidget,
     ACTreeWidget,
+    AgentActivityWidget,
     CostTrackerWidget,
     DriftMeterWidget,
     PhaseProgressWidget,
@@ -43,49 +42,64 @@ if TYPE_CHECKING:
 
 
 class StatusPanel(Static):
-    """Panel showing current execution status."""
+    """Panel showing current execution status.
+
+    Uses incremental updates instead of full recompose for better performance.
+    """
 
     DEFAULT_CSS = """
     StatusPanel {
         height: auto;
         width: 100%;
-        padding: 1;
-        border: solid $surface;
+        padding: 0 1;
+        border: round $primary-darken-2;
+        background: $surface;
     }
 
     StatusPanel > .header {
-        text-align: center;
         text-style: bold;
-        margin-bottom: 1;
+        color: $text;
+        margin-bottom: 0;
     }
 
     StatusPanel > .status-line {
         height: 1;
         width: 100%;
+        margin: 0 0;
     }
 
     StatusPanel > .status-line > Label {
-        width: 15;
+        width: 14;
+        color: $text-muted;
     }
 
     StatusPanel > .status-line > .value {
         width: 1fr;
+        color: $text;
     }
 
-    StatusPanel > .status.running {
+    StatusPanel .status.idle {
+        color: $text-muted;
+    }
+
+    StatusPanel .status.running {
         color: $success;
+        text-style: bold;
     }
 
-    StatusPanel > .status.paused {
+    StatusPanel .status.paused {
         color: $warning;
+        text-style: bold;
     }
 
-    StatusPanel > .status.failed {
+    StatusPanel .status.failed {
         color: $error;
+        text-style: bold;
     }
 
-    StatusPanel > .status.completed {
+    StatusPanel .status.completed {
         color: $primary;
+        text-style: bold;
     }
     """
 
@@ -93,6 +107,7 @@ class StatusPanel(Static):
     session_id: reactive[str] = reactive("")
     status: reactive[str] = reactive("idle")
     current_ac: reactive[str] = reactive("")
+    activity: reactive[str] = reactive("")
 
     def __init__(
         self,
@@ -100,6 +115,7 @@ class StatusPanel(Static):
         session_id: str = "",
         status: str = "idle",
         current_ac: str = "",
+        activity: str = "",
         *,
         name: str | None = None,
         id: str | None = None,
@@ -112,6 +128,7 @@ class StatusPanel(Static):
             session_id: Current session ID.
             status: Current status.
             current_ac: Current acceptance criterion.
+            activity: Current agent activity description.
             name: Widget name.
             id: Widget ID.
             classes: CSS classes.
@@ -121,6 +138,7 @@ class StatusPanel(Static):
         self.session_id = session_id
         self.status = status
         self.current_ac = current_ac
+        self.activity = activity
 
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
@@ -135,19 +153,11 @@ class StatusPanel(Static):
             )
 
         with Horizontal(classes="status-line"):
-            yield Label("Execution:")
+            yield Label("Activity:")
             yield Static(
-                self.execution_id or "[dim]None[/dim]",
-                classes="value",
-                id="execution-value",
-            )
-
-        with Horizontal(classes="status-line"):
-            yield Label("Session:")
-            yield Static(
-                self.session_id or "[dim]None[/dim]",
-                classes="value",
-                id="session-value",
+                self.activity or "[dim]Idle[/dim]",
+                classes="value activity-value",
+                id="activity-value",
             )
 
         with Horizontal(classes="status-line"):
@@ -181,26 +191,53 @@ class StatusPanel(Static):
         session_id: str | None = None,
         status: str | None = None,
         current_ac: str | None = None,
+        activity: str | None = None,
     ) -> None:
-        """Update status values.
+        """Update status values incrementally without full recompose.
+
+        Uses direct element updates for better performance.
 
         Args:
             execution_id: New execution ID.
             session_id: New session ID.
             status: New status.
             current_ac: New current AC.
+            activity: New activity description.
         """
+        # Update only changed values and their corresponding UI elements
         if execution_id is not None:
             self.execution_id = execution_id
+
         if session_id is not None:
             self.session_id = session_id
-        if status is not None:
-            self.status = status
-        if current_ac is not None:
-            self.current_ac = current_ac
 
-        # Force refresh
-        self.refresh(recompose=True)
+        if status is not None and status != self.status:
+            old_status = self.status
+            self.status = status
+            try:
+                elem = self.query_one("#status-value", Static)
+                elem.update(self._format_status(status))
+                # Update CSS class for color
+                elem.remove_class(old_status)
+                elem.add_class(status)
+            except Exception:
+                pass
+
+        if current_ac is not None and current_ac != self.current_ac:
+            self.current_ac = current_ac
+            try:
+                elem = self.query_one("#ac-value", Static)
+                elem.update(self._truncate_ac(current_ac) or "[dim]None[/dim]")
+            except Exception:
+                pass
+
+        if activity is not None and activity != self.activity:
+            self.activity = activity
+            try:
+                elem = self.query_one("#activity-value", Static)
+                elem.update(activity or "[dim]Idle[/dim]")
+            except Exception:
+                pass
 
 
 class DashboardScreen(Screen[None]):
@@ -228,12 +265,13 @@ class DashboardScreen(Screen[None]):
     DEFAULT_CSS = """
     DashboardScreen {
         layout: vertical;
+        background: $background;
     }
 
     DashboardScreen > Container {
         height: 1fr;
         width: 100%;
-        padding: 1;
+        padding: 0 1;
     }
 
     DashboardScreen .main-content {
@@ -244,19 +282,58 @@ class DashboardScreen(Screen[None]):
     DashboardScreen .left-panel {
         width: 1fr;
         min-width: 40;
+        max-width: 50;
         padding-right: 1;
     }
 
+    DashboardScreen .left-panel > * {
+        margin-bottom: 0;
+    }
+
     DashboardScreen .right-panel {
-        width: 1fr;
-        min-width: 40;
+        width: 2fr;
+        min-width: 50;
         padding-left: 1;
     }
 
-    DashboardScreen .bottom-panel {
+    DashboardScreen .right-panel > * {
+        margin-bottom: 0;
+    }
+
+    /* Widget styling improvements */
+    DashboardScreen PhaseProgressWidget {
+        border: round $primary-darken-2;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    DashboardScreen DriftMeterWidget {
         height: auto;
-        max-height: 15;
-        margin-top: 1;
+        padding: 0;
+    }
+
+    DashboardScreen CostTrackerWidget {
+        border: round $primary-darken-2;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    DashboardScreen ACProgressWidget {
+        border: round $primary-darken-2;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    DashboardScreen ACTreeWidget {
+        border: round $primary-darken-2;
+        background: $surface;
+        padding: 0;
+    }
+
+    DashboardScreen AgentActivityWidget {
+        border: round $primary-darken-2;
+        background: $surface;
+        padding: 0 1;
     }
     """
 
@@ -279,11 +356,11 @@ class DashboardScreen(Screen[None]):
         super().__init__(name=name, id=id, classes=classes)
         self._state = state
         self._status_panel: StatusPanel | None = None
+        self._agent_activity: AgentActivityWidget | None = None
         self._phase_progress: PhaseProgressWidget | None = None
         self._drift_meter: DriftMeterWidget | None = None
         self._cost_tracker: CostTrackerWidget | None = None
         self._ac_tree: ACTreeWidget | None = None
-        self._ac_progress: ACProgressWidget | None = None
 
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
@@ -307,10 +384,6 @@ class DashboardScreen(Screen[None]):
                     )
                     yield self._phase_progress
 
-                    # AC progress list
-                    self._ac_progress = ACProgressWidget()
-                    yield self._ac_progress
-
                     # Cost tracker
                     self._cost_tracker = CostTrackerWidget(
                         total_tokens=self._state.total_tokens if self._state else 0,
@@ -332,6 +405,10 @@ class DashboardScreen(Screen[None]):
                         tree_data=self._state.ac_tree if self._state else {},
                     )
                     yield self._ac_tree
+
+                    # Agent activity (for tool/file/thinking display)
+                    self._agent_activity = AgentActivityWidget()
+                    yield self._agent_activity
 
         yield Footer()
 
@@ -403,25 +480,6 @@ class DashboardScreen(Screen[None]):
         Args:
             message: Workflow progress update message.
         """
-        # Update AC progress list
-        if self._ac_progress is not None:
-            items = [
-                ACProgressItem(
-                    index=ac.get("index", 0),
-                    content=ac.get("content", ""),
-                    status=ac.get("status", "pending"),
-                    elapsed_display=ac.get("elapsed_display", ""),
-                    is_current=ac.get("index") == message.current_ac_index,
-                )
-                for ac in message.acceptance_criteria
-            ]
-            self._ac_progress.update_progress(
-                acceptance_criteria=items,
-                completed_count=message.completed_count,
-                total_count=message.total_count,
-                estimated_remaining=message.estimated_remaining,
-            )
-
         # Update phase progress
         if self._phase_progress is not None:
             # Map phase name to lowercase (widget expects lowercase)
@@ -436,7 +494,7 @@ class DashboardScreen(Screen[None]):
                 total_cost_usd=message.estimated_cost_usd,
             )
 
-        # Update status panel with current AC and status
+        # Update status panel with current AC and activity
         if self._status_panel is not None:
             current_ac_content = ""
             if message.current_ac_index is not None:
@@ -444,9 +502,20 @@ class DashboardScreen(Screen[None]):
                     if ac.get("index") == message.current_ac_index:
                         current_ac_content = ac.get("content", "")
                         break
+            # Format activity with detail
+            activity_display = message.activity or "Idle"
+            if message.activity_detail:
+                activity_display = f"{message.activity}: {message.activity_detail}"
+            # Check if all ACs are completed
+            if message.total_count > 0 and message.completed_count >= message.total_count:
+                current_status = "completed"
+                activity_display = "Done"
+            else:
+                current_status = "running"
             self._status_panel.update_status(
-                status="running",
+                status=current_status,
                 current_ac=current_ac_content,
+                activity=activity_display,
             )
 
         # Update AC tree with flat list converted to tree format
@@ -456,6 +525,31 @@ class DashboardScreen(Screen[None]):
                 message.current_ac_index,
             )
             self._ac_tree.update_tree(tree_data)
+
+        # Update agent activity panel
+        if self._agent_activity is not None:
+            # Parse activity_detail for tool and file info
+            tool_name = message.activity or ""
+            file_path = ""
+            thinking = message.activity_detail or ""
+
+            # Try to extract file path from activity_detail
+            if message.activity_detail:
+                detail = message.activity_detail
+                # Check for common file path patterns
+                if "/" in detail or "\\" in detail:
+                    # Might contain a file path
+                    parts = detail.split()
+                    for part in parts:
+                        if "/" in part or part.endswith((".py", ".ts", ".js", ".md")):
+                            file_path = part.strip("'\"")
+                            break
+
+            self._agent_activity.update_activity(
+                current_tool=tool_name,
+                current_file=file_path,
+                thinking=thinking,
+            )
 
     def _convert_ac_list_to_tree(
         self,

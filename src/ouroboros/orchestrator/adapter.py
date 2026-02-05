@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import os
@@ -89,6 +90,25 @@ class TaskResult:
 # Default tools for code execution tasks
 DEFAULT_TOOLS: list[str] = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 
+# Retry configuration for transient SDK errors
+MAX_RETRIES: int = 3
+RETRY_WAIT_INITIAL: float = 1.0  # seconds
+RETRY_WAIT_MAX: float = 10.0  # seconds
+
+# Error patterns that indicate transient failures worth retrying
+TRANSIENT_ERROR_PATTERNS: tuple[str, ...] = (
+    "concurrency",
+    "rate limit",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "timeout",
+    "connection",
+    "exit code 1",  # SDK CLI process failed
+)
+
 
 class ClaudeAgentAdapter:
     """Adapter for Claude Agent SDK with streaming support.
@@ -135,6 +155,18 @@ class ClaudeAgentAdapter:
             permission_mode=permission_mode,
             has_api_key=bool(self._api_key),
         )
+
+    def _is_transient_error(self, error: Exception) -> bool:
+        """Check if an error is transient and worth retrying.
+
+        Args:
+            error: The exception to check.
+
+        Returns:
+            True if the error appears to be transient.
+        """
+        error_str = str(error).lower()
+        return any(pattern in error_str for pattern in TRANSIENT_ERROR_PATTERNS)
 
     async def execute_task(
         self,
@@ -185,59 +217,102 @@ class ClaudeAgentAdapter:
             resume_session_id=resume_session_id,
         )
 
-        try:
-            # Build options
-            import os
-            options_kwargs: dict[str, Any] = {
-                "allowed_tools": effective_tools,
-                "permission_mode": self._permission_mode,
-                "cwd": os.getcwd(),  # Use current working directory
-            }
+        # Retry loop for transient errors
+        attempt = 0
+        last_error: Exception | None = None
+        current_session_id = resume_session_id
 
-            if system_prompt:
-                options_kwargs["system_prompt"] = system_prompt
+        while attempt < MAX_RETRIES:
+            attempt += 1
+            try:
+                # Build options
+                options_kwargs: dict[str, Any] = {
+                    "allowed_tools": effective_tools,
+                    "permission_mode": self._permission_mode,
+                    "cwd": os.getcwd(),  # Use current working directory
+                }
 
-            if resume_session_id:
-                options_kwargs["resume"] = resume_session_id
+                if system_prompt:
+                    options_kwargs["system_prompt"] = system_prompt
 
-            options = ClaudeAgentOptions(**options_kwargs)
+                if current_session_id:
+                    options_kwargs["resume"] = current_session_id
 
-            # Stream messages from SDK
-            session_id: str | None = None
-            async for sdk_message in query(prompt=prompt, options=options):
-                agent_message = self._convert_message(sdk_message)
+                options = ClaudeAgentOptions(**options_kwargs)
 
-                # Capture session ID from init message
-                if hasattr(sdk_message, "session_id"):
-                    session_id = sdk_message.session_id
+                # Stream messages from SDK
+                session_id: str | None = None
+                async for sdk_message in query(prompt=prompt, options=options):
+                    agent_message = self._convert_message(sdk_message)
 
-                # Update data with session_id if available
-                if session_id and agent_message.is_final:
-                    agent_message = AgentMessage(
-                        type=agent_message.type,
-                        content=agent_message.content,
-                        tool_name=agent_message.tool_name,
-                        data={**agent_message.data, "session_id": session_id},
+                    # Capture session ID from init message
+                    if hasattr(sdk_message, "session_id"):
+                        session_id = sdk_message.session_id
+                        current_session_id = session_id  # Save for potential retry
+
+                    # Update data with session_id if available
+                    if session_id and agent_message.is_final:
+                        agent_message = AgentMessage(
+                            type=agent_message.type,
+                            content=agent_message.content,
+                            tool_name=agent_message.tool_name,
+                            data={**agent_message.data, "session_id": session_id},
+                        )
+
+                    yield agent_message
+
+                    if agent_message.is_final:
+                        log.info(
+                            "orchestrator.adapter.task_completed",
+                            success=not agent_message.is_error,
+                            session_id=session_id,
+                        )
+
+                # Success - exit retry loop
+                return
+
+            except Exception as e:
+                last_error = e
+                if self._is_transient_error(e) and attempt < MAX_RETRIES:
+                    wait_time = min(
+                        RETRY_WAIT_INITIAL * (2 ** (attempt - 1)),
+                        RETRY_WAIT_MAX,
                     )
-
-                yield agent_message
-
-                if agent_message.is_final:
-                    log.info(
-                        "orchestrator.adapter.task_completed",
-                        success=not agent_message.is_error,
-                        session_id=session_id,
+                    log.warning(
+                        "orchestrator.adapter.transient_error_retry",
+                        error=str(e),
+                        attempt=attempt,
+                        max_retries=MAX_RETRIES,
+                        wait_seconds=wait_time,
+                        will_resume=bool(current_session_id),
                     )
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Non-transient error or max retries reached
+                    log.exception(
+                        "orchestrator.adapter.task_failed",
+                        error=str(e),
+                        attempts=attempt,
+                    )
+                    yield AgentMessage(
+                        type="result",
+                        content=f"Task execution failed: {e!s}",
+                        data={"subtype": "error", "error_type": type(e).__name__},
+                    )
+                    return
 
-        except Exception as e:
-            log.exception(
-                "orchestrator.adapter.task_failed",
-                error=str(e),
+        # Max retries exhausted (shouldn't normally reach here)
+        if last_error:
+            log.error(
+                "orchestrator.adapter.max_retries_exhausted",
+                error=str(last_error),
+                attempts=MAX_RETRIES,
             )
             yield AgentMessage(
                 type="result",
-                content=f"Task execution failed: {e!s}",
-                data={"subtype": "error", "error_type": type(e).__name__},
+                content=f"Task failed after {MAX_RETRIES} retries: {last_error!s}",
+                data={"subtype": "error", "error_type": type(last_error).__name__},
             )
 
     def _convert_message(self, sdk_message: Any) -> AgentMessage:

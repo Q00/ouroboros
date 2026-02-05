@@ -418,24 +418,19 @@ class TestCheckAtomicity:
         assert result.value.method == "heuristic"
 
     @pytest.mark.asyncio
-    async def test_applies_criteria_to_llm_result(self):
-        """check_atomicity() should apply criteria even when LLM says atomic."""
+    async def test_respects_llm_atomic_decision(self):
+        """check_atomicity() should respect LLM's is_atomic decision."""
         from ouroboros.execution.atomicity import AtomicityCriteria, check_atomicity
 
-        # LLM says atomic but returns high values
+        # LLM says atomic with new format
         adapter = AsyncMock()
         adapter.complete.return_value = Result.ok(
             MagicMock(
-                content='{"is_atomic": true, "complexity_score": 0.9, "tool_count": 5, "estimated_duration": 500, "reasoning": "Test"}'
+                content='{"is_atomic": true, "reasoning": "Simple single task", "if_not_atomic": null}'
             )
         )
 
-        # Strict criteria
-        criteria = AtomicityCriteria(
-            max_complexity=0.5,
-            max_tool_count=2,
-            max_duration_seconds=100,
-        )
+        criteria = AtomicityCriteria()
 
         result = await check_atomicity(
             ac_content="Test AC",
@@ -445,8 +440,9 @@ class TestCheckAtomicity:
         )
 
         assert result.is_ok
-        # Should be non-atomic due to criteria override
-        assert result.value.is_atomic is False
+        # LLM said atomic, so result should be atomic
+        assert result.value.is_atomic is True
+        assert result.value.method == "llm"
 
     @pytest.mark.asyncio
     async def test_rejects_invalid_criteria(self):
@@ -495,4 +491,5 @@ class TestAtomicityPrompts:
 
         assert "{ac_content}" in ATOMICITY_USER_TEMPLATE
         assert "is_atomic" in ATOMICITY_USER_TEMPLATE
-        assert "complexity_score" in ATOMICITY_USER_TEMPLATE
+        # Prompt now uses qualitative questions instead of complexity_score
+        assert "reasoning" in ATOMICITY_USER_TEMPLATE

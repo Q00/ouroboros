@@ -117,7 +117,7 @@ ouroboros run workflow [OPTIONS] SEED_FILE
 | `-o, --orchestrator` | Use Claude Agent SDK for execution (Epic 8 mode) |
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
 | `-n, --dry-run` | Validate seed without executing |
-| `-v, --verbose` | Enable verbose output |
+| `-d, --debug` | Show logs and agent thinking (verbose output) |
 
 **Examples:**
 
@@ -134,8 +134,8 @@ ouroboros run workflow --dry-run seed.yaml
 # Resume a previous session
 ouroboros run workflow --orchestrator --resume orch_abc123 seed.yaml
 
-# Verbose output
-ouroboros run workflow --orchestrator --verbose seed.yaml
+# Debug output (show logs and agent thinking)
+ouroboros run workflow --orchestrator --debug seed.yaml
 ```
 
 ### `run resume`

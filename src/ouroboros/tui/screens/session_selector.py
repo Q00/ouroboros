@@ -16,11 +16,10 @@ if TYPE_CHECKING:
 
 # Columns for the session table
 SESSION_COLUMNS = {
-    "Session ID": "session_id",
-    "Execution ID": "execution_id",
-    "Timestamp": "timestamp",
-    "Model": "model",
-    "Entrypoint": "entrypoint",
+    "#": "index",
+    "Goal": "seed_goal",
+    "Time": "timestamp",
+    "Status": "status",
 }
 
 
@@ -51,6 +50,7 @@ class SessionSelectorScreen(Screen[None]):
         """
         super().__init__(name=name, id=id)
         self._event_store = event_store
+        self._session_info: dict[str, dict] = {}
 
     def compose(self) -> ComposeResult:
         """Compose the screen layout."""
@@ -83,22 +83,59 @@ class SessionSelectorScreen(Screen[None]):
                 table.add_row("[dim]No sessions found in the database.[/dim]")
                 return
 
-            # Deduplicate sessions by aggregate_id (keep first/most recent)
-            seen_ids: set[str] = set()
+            # Deduplicate and collect session info
+            self._session_info = {}
             for event in sessions:
-                if event.aggregate_id in seen_ids:
-                    continue
-                seen_ids.add(event.aggregate_id)
+                agg_id = event.aggregate_id
+                if agg_id not in self._session_info:
+                    self._session_info[agg_id] = {
+                        "session_id": agg_id,
+                        "execution_id": event.data.get("execution_id", ""),
+                        "seed_goal": event.data.get("seed_goal", ""),
+                        "timestamp": event.timestamp,
+                        "status": "started",
+                    }
+                # Update status based on event type
+                if "completed" in event.type:
+                    self._session_info[agg_id]["status"] = "completed"
+                elif "failed" in event.type:
+                    self._session_info[agg_id]["status"] = "failed"
+                elif "paused" in event.type:
+                    self._session_info[agg_id]["status"] = "paused"
 
-                data = event.data
+            # Sort by timestamp (newest first)
+            sorted_sessions = sorted(
+                self._session_info.values(),
+                key=lambda x: x["timestamp"],
+                reverse=True,
+            )
+
+            # Add rows with index
+            for idx, info in enumerate(sorted_sessions, 1):
+                # Format timestamp to be more readable
+                ts = info["timestamp"]
+                time_str = ts.strftime("%m/%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
+
+                # Format goal for display (truncate if too long)
+                goal = info["seed_goal"] or "[No goal]"
+                goal_display = goal[:50] + "..." if len(goal) > 50 else goal
+
+                # Status with color
+                status = info["status"]
+                status_display = {
+                    "started": "[yellow]running[/yellow]",
+                    "completed": "[green]done[/green]",
+                    "failed": "[red]failed[/red]",
+                    "paused": "[cyan]paused[/cyan]",
+                }.get(status, status)
+
                 row_data = [
-                    event.aggregate_id,
-                    data.get("execution_id", "[N/A]"),
-                    str(event.timestamp),
-                    data.get("model_name", "[N/A]"),
-                    data.get("entrypoint_name", "[N/A]"),
+                    str(idx),
+                    goal_display,
+                    time_str,
+                    status_display,
                 ]
-                table.add_row(*row_data, key=event.aggregate_id)
+                table.add_row(*row_data, key=info["session_id"])
 
         except Exception as e:
             self.notify(f"Failed to load sessions: {e}", severity="error")
@@ -109,12 +146,11 @@ class SessionSelectorScreen(Screen[None]):
         if row_key is None:
             return
 
-        table: DataTable[str] = self.query_one(DataTable)
-        row = table.get_row(row_key)
-        if not row:
-            return
+        # row_key is the session_id (set in add_row)
+        session_id = str(row_key.value) if hasattr(row_key, "value") else str(row_key)
 
-        session_id = str(row[0])
-        execution_id = str(row[1]) if row[1] else ""
+        # Lookup execution_id from cached session info
+        info = self._session_info.get(session_id, {})
+        execution_id = info.get("execution_id", "")
 
         self.post_message(self.SessionSelected(session_id, execution_id))

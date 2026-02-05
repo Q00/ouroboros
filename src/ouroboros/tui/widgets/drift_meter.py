@@ -23,11 +23,15 @@ from textual.widgets import Label, ProgressBar, Static
 # Drift threshold from NFR5
 DRIFT_THRESHOLD = 0.3
 
+# Special value indicating drift has not been measured yet
+NOT_MEASURED = -1.0
+
 
 class DriftBar(Widget):
     """Individual drift component display with progress bar.
 
     Shows a labeled progress bar for a single drift component.
+    Use value=-1.0 (NOT_MEASURED) to display "N/A" state.
     """
 
     DEFAULT_CSS = """
@@ -35,38 +39,63 @@ class DriftBar(Widget):
         height: 2;
         width: 100%;
         layout: horizontal;
+        margin: 0 0;
     }
 
     DriftBar > Label {
-        width: 15;
+        width: 12;
         padding-right: 1;
+        color: $text-muted;
     }
 
     DriftBar > ProgressBar {
         width: 1fr;
+        padding: 0;
+    }
+
+    DriftBar > ProgressBar > .bar--bar {
+        color: $primary-darken-2;
+    }
+
+    DriftBar > ProgressBar > .bar--complete {
+        color: $success;
     }
 
     DriftBar > .value {
         width: 8;
         text-align: right;
         padding-left: 1;
+        color: $text;
+    }
+
+    DriftBar.not-measured > .value {
+        color: $text-muted;
     }
 
     DriftBar.warning > ProgressBar > .bar--complete {
         color: $warning;
     }
 
+    DriftBar.warning > .value {
+        color: $warning;
+    }
+
     DriftBar.danger > ProgressBar > .bar--complete {
         color: $error;
     }
+
+    DriftBar.danger > .value {
+        color: $error;
+        text-style: bold;
+    }
     """
 
-    value: reactive[float] = reactive(0.0)
+    value: reactive[float] = reactive(NOT_MEASURED)
 
     def __init__(
         self,
         label: str,
-        value: float = 0.0,
+        value: float = NOT_MEASURED,
         threshold: float = DRIFT_THRESHOLD,
         *,
         name: str | None = None,
@@ -77,7 +106,7 @@ class DriftBar(Widget):
 
         Args:
             label: Display label.
-            value: Initial drift value (0.0-1.0).
+            value: Initial drift value (0.0-1.0), or NOT_MEASURED (-1.0) for N/A state.
             threshold: Warning threshold.
             name: Widget name.
             id: Widget ID.
@@ -92,12 +121,19 @@ class DriftBar(Widget):
         self._label = label
         self.value = value
 
+    @property
+    def is_measured(self) -> bool:
+        """Check if drift has been measured."""
+        return self.value >= 0.0
+
     def compose(self) -> ComposeResult:
         """Compose the widget layout."""
         yield Label(self._label)
         self._progress_bar = ProgressBar(total=100, show_eta=False, show_percentage=False)
         yield self._progress_bar
-        self._value_label = Static(f"{self.value:.1%}", classes="value")
+        # Show N/A for unmeasured values
+        display_value = f"{self.value:.1%}" if self.is_measured else "[dim]--[/dim]"
+        self._value_label = Static(display_value, classes="value")
         yield self._value_label
 
     def on_mount(self) -> None:
@@ -114,6 +150,21 @@ class DriftBar(Widget):
 
     def _update_display(self) -> None:
         """Update the progress bar and styling."""
+        # Clear all state classes first
+        self.remove_class("warning")
+        self.remove_class("danger")
+        self.remove_class("not-measured")
+
+        if not self.is_measured:
+            # Not measured yet - show empty bar and N/A
+            if self._progress_bar is not None:
+                self._progress_bar.progress = 0
+            if self._value_label is not None:
+                self._value_label.update("[dim]--[/dim]")
+            self.add_class("not-measured")
+            return
+
+        # Normal measured value
         if self._progress_bar is not None:
             self._progress_bar.progress = self.value * 100
 
@@ -121,9 +172,6 @@ class DriftBar(Widget):
             self._value_label.update(f"{self.value:.1%}")
 
         # Update styling based on threshold
-        self.remove_class("warning")
-        self.remove_class("danger")
-
         if self.value > self._threshold * 1.5:
             self.add_class("danger")
         elif self.value > self._threshold:
@@ -131,10 +179,9 @@ class DriftBar(Widget):
 
 
 class DriftMeterWidget(Widget):
-    """Widget displaying all drift metrics.
+    """Widget displaying all drift metrics in compact form.
 
-    Shows individual drift components and combined drift
-    with visual indicators and threshold warnings.
+    Shows combined drift with expandable detail on hover/focus.
 
     Attributes:
         goal_drift: Goal drift score (0.0-1.0).
@@ -146,50 +193,47 @@ class DriftMeterWidget(Widget):
     DriftMeterWidget {
         height: auto;
         width: 100%;
-        padding: 1;
-        border: solid $surface;
+        padding: 0 1;
     }
 
-    DriftMeterWidget > .header {
-        text-align: center;
-        text-style: bold;
+    DriftMeterWidget > .compact-header {
+        height: 1;
+        layout: horizontal;
     }
 
-    DriftMeterWidget > .explanation {
-        text-align: center;
-        margin-bottom: 1;
+    DriftMeterWidget > .compact-header > .title {
+        width: auto;
+        color: $text-muted;
     }
 
-    DriftMeterWidget > .combined {
-        margin-top: 1;
-        padding-top: 1;
-        border-top: solid $surface;
+    DriftMeterWidget > .compact-header > .drift-values {
+        width: 1fr;
+        text-align: right;
     }
 
-    DriftMeterWidget > .status {
-        text-align: center;
-        margin-top: 1;
-    }
-
-    DriftMeterWidget > .status.acceptable {
+    DriftMeterWidget > .compact-header > .drift-values.ok {
         color: $success;
     }
 
-    DriftMeterWidget > .status.exceeded {
+    DriftMeterWidget > .compact-header > .drift-values.warning {
+        color: $warning;
+    }
+
+    DriftMeterWidget > .compact-header > .drift-values.danger {
         color: $error;
         text-style: bold;
     }
     """
 
-    goal_drift: reactive[float] = reactive(0.0)
-    constraint_drift: reactive[float] = reactive(0.0)
-    ontology_drift: reactive[float] = reactive(0.0)
+    goal_drift: reactive[float] = reactive(NOT_MEASURED)
+    constraint_drift: reactive[float] = reactive(NOT_MEASURED)
+    ontology_drift: reactive[float] = reactive(NOT_MEASURED)
 
     def __init__(
         self,
-        goal_drift: float = 0.0,
-        constraint_drift: float = 0.0,
-        ontology_drift: float = 0.0,
+        goal_drift: float = NOT_MEASURED,
+        constraint_drift: float = NOT_MEASURED,
+        ontology_drift: float = NOT_MEASURED,
         *,
         name: str | None = None,
         id: str | None = None,
@@ -198,19 +242,15 @@ class DriftMeterWidget(Widget):
         """Initialize drift meter widget.
 
         Args:
-            goal_drift: Initial goal drift.
-            constraint_drift: Initial constraint drift.
-            ontology_drift: Initial ontology drift.
+            goal_drift: Initial goal drift (-1.0 for not measured).
+            constraint_drift: Initial constraint drift (-1.0 for not measured).
+            ontology_drift: Initial ontology drift (-1.0 for not measured).
             name: Widget name.
             id: Widget ID.
             classes: CSS classes.
         """
         # Internal widget references (must be initialized before reactive props)
-        self._goal_bar: DriftBar | None = None
-        self._constraint_bar: DriftBar | None = None
-        self._ontology_bar: DriftBar | None = None
-        self._combined_bar: DriftBar | None = None
-        self._status_label: Static | None = None
+        self._values_label: Static | None = None
 
         super().__init__(name=name, id=id, classes=classes)
         self.goal_drift = goal_drift
@@ -218,99 +258,94 @@ class DriftMeterWidget(Widget):
         self.ontology_drift = ontology_drift
 
     @property
-    def combined_drift(self) -> float:
-        """Calculate combined drift using weighted formula."""
+    def is_measured(self) -> bool:
+        """Check if any drift has been measured."""
         return (
-            self.goal_drift * 0.5
-            + self.constraint_drift * 0.3
-            + self.ontology_drift * 0.2
+            self.goal_drift >= 0.0
+            or self.constraint_drift >= 0.0
+            or self.ontology_drift >= 0.0
         )
+
+    @property
+    def combined_drift(self) -> float:
+        """Calculate combined drift using weighted formula.
+
+        Returns NOT_MEASURED if no drift has been measured yet.
+        """
+        if not self.is_measured:
+            return NOT_MEASURED
+
+        # Use 0.0 for unmeasured components in calculation
+        goal = max(0.0, self.goal_drift)
+        constraint = max(0.0, self.constraint_drift)
+        ontology = max(0.0, self.ontology_drift)
+
+        return goal * 0.5 + constraint * 0.3 + ontology * 0.2
 
     @property
     def is_acceptable(self) -> bool:
         """Check if drift is within acceptable threshold."""
+        if not self.is_measured:
+            return True  # Not measured yet = acceptable
         return self.combined_drift <= DRIFT_THRESHOLD
 
     def compose(self) -> ComposeResult:
-        """Compose the widget layout."""
-        yield Label("Drift Metrics [dim](deviation from goal)[/dim]", classes="header")
+        """Compose the widget layout - compact single line."""
+        from textual.containers import Horizontal
 
-        # Brief explanation
-        yield Static(
-            "[dim]Lower is better (0% = perfect, 30%+ = warning)[/dim]",
-            classes="explanation",
-        )
+        with Horizontal(classes="compact-header"):
+            yield Static("Drift:", classes="title")
+            self._values_label = Static(
+                self._format_compact_values(),
+                classes=f"drift-values {self._get_status_class()}",
+                id="drift-values",
+            )
+            yield self._values_label
 
-        self._goal_bar = DriftBar(
-            "Goal",
-            self.goal_drift,
-            id="goal-drift",
-        )
-        yield self._goal_bar
+    def _format_compact_values(self) -> str:
+        """Format drift values in compact form."""
+        if not self.is_measured:
+            return "[dim]--[/dim]"
 
-        self._constraint_bar = DriftBar(
-            "Constraint",
-            self.constraint_drift,
-            id="constraint-drift",
-        )
-        yield self._constraint_bar
+        # Show combined with breakdown: "12% (G:10 C:15 O:8)"
+        combined = self.combined_drift
+        goal = max(0.0, self.goal_drift)
+        constraint = max(0.0, self.constraint_drift)
+        ontology = max(0.0, self.ontology_drift)
 
-        self._ontology_bar = DriftBar(
-            "Ontology",
-            self.ontology_drift,
-            id="ontology-drift",
-        )
-        yield self._ontology_bar
+        return f"{combined:.0%} [dim](G:{goal:.0%} C:{constraint:.0%} O:{ontology:.0%})[/dim]"
 
-        self._combined_bar = DriftBar(
-            "Combined",
-            self.combined_drift,
-            id="combined-drift",
-            classes="combined",
-        )
-        yield self._combined_bar
+    def _get_status_class(self) -> str:
+        """Get CSS class based on drift status."""
+        if not self.is_measured:
+            return "ok"
+        if self.combined_drift > DRIFT_THRESHOLD * 1.5:
+            return "danger"
+        elif self.combined_drift > DRIFT_THRESHOLD:
+            return "warning"
+        return "ok"
 
-        status_text = self._get_status_text()
-        status_class = "acceptable" if self.is_acceptable else "exceeded"
-        self._status_label = Static(status_text, classes=f"status {status_class}")
-        yield self._status_label
-
-    def _get_status_text(self) -> str:
-        """Get status text based on drift."""
-        if self.is_acceptable:
-            return f"✓ OK (within {DRIFT_THRESHOLD:.0%} threshold)"
-        else:
-            exceeded_by = self.combined_drift - DRIFT_THRESHOLD
-            return f"⚠ Warning: exceeded by {exceeded_by:.1%}"
-
-    def _update_bars(self) -> None:
-        """Update all drift bars."""
-        if self._goal_bar is not None:
-            self._goal_bar.value = self.goal_drift
-        if self._constraint_bar is not None:
-            self._constraint_bar.value = self.constraint_drift
-        if self._ontology_bar is not None:
-            self._ontology_bar.value = self.ontology_drift
-        if self._combined_bar is not None:
-            self._combined_bar.value = self.combined_drift
-        if self._status_label is not None:
-            self._status_label.update(self._get_status_text())
-            self._status_label.remove_class("acceptable")
-            self._status_label.remove_class("exceeded")
-            status_class = "acceptable" if self.is_acceptable else "exceeded"
-            self._status_label.add_class(status_class)
+    def _update_display(self) -> None:
+        """Update the compact display."""
+        if self._values_label is not None:
+            self._values_label.update(self._format_compact_values())
+            # Update CSS class
+            self._values_label.remove_class("ok")
+            self._values_label.remove_class("warning")
+            self._values_label.remove_class("danger")
+            self._values_label.add_class(self._get_status_class())
 
     def watch_goal_drift(self, new_value: float) -> None:
         """React to goal_drift changes."""
-        self._update_bars()
+        self._update_display()
 
     def watch_constraint_drift(self, new_value: float) -> None:
         """React to constraint_drift changes."""
-        self._update_bars()
+        self._update_display()
 
     def watch_ontology_drift(self, new_value: float) -> None:
         """React to ontology_drift changes."""
-        self._update_bars()
+        self._update_display()
 
     def update_drift(
         self,
@@ -333,4 +368,4 @@ class DriftMeterWidget(Widget):
             self.ontology_drift = ontology_drift
 
 
-__all__ = ["DriftBar", "DriftMeterWidget"]
+__all__ = ["DriftBar", "DriftMeterWidget", "NOT_MEASURED"]

@@ -308,7 +308,7 @@ class WorkflowDisplay:
             self._render(),
             console=console,
             refresh_per_second=self._refresh_rate,
-            transient=False,
+            transient=True,
         )
         self._live.start()
 

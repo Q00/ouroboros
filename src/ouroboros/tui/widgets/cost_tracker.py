@@ -29,13 +29,13 @@ class CostTrackerWidget(Widget):
     CostTrackerWidget {
         height: auto;
         width: 100%;
-        padding: 1;
-        border: solid $surface;
+        padding: 1 2;
     }
 
     CostTrackerWidget > .header {
         text-align: center;
         text-style: bold;
+        color: $text;
         margin-bottom: 1;
     }
 
@@ -43,20 +43,24 @@ class CostTrackerWidget(Widget):
         height: 1;
         width: 100%;
         layout: horizontal;
+        margin: 0;
     }
 
     CostTrackerWidget > .metric > Label {
         width: 1fr;
+        color: $text-muted;
     }
 
     CostTrackerWidget > .metric > .value {
         width: auto;
         text-align: right;
-        min-width: 12;
+        min-width: 10;
+        color: $text;
     }
 
     CostTrackerWidget > .metric.total > .value {
         text-style: bold;
+        color: $primary;
     }
 
     CostTrackerWidget > .metric.cost > .value {
@@ -65,15 +69,17 @@ class CostTrackerWidget(Widget):
 
     CostTrackerWidget > .metric.cost.high > .value {
         color: $warning;
+        text-style: bold;
     }
 
     CostTrackerWidget > .metric.cost.very-high > .value {
         color: $error;
+        text-style: bold;
     }
 
     CostTrackerWidget > .separator {
         height: 1;
-        border-top: solid $surface;
+        border-top: dashed $primary-darken-3;
         margin-top: 1;
         margin-bottom: 1;
     }
@@ -125,44 +131,23 @@ class CostTrackerWidget(Widget):
 
         # Total tokens
         with Static(classes="metric total"):
-            yield Label("Total Tokens")
+            yield Label("Tokens")
             self._total_tokens_value = Static(
                 self._format_tokens(self.total_tokens),
                 classes="value",
             )
             yield self._total_tokens_value
 
-        # Phase tokens
-        with Static(classes="metric"):
-            yield Label("This Phase")
-            self._phase_tokens_value = Static(
-                self._format_tokens(self.tokens_this_phase),
-                classes="value",
-            )
-            yield self._phase_tokens_value
-
-        yield Static(classes="separator")
-
         # Estimated cost
         cost_class = self._get_cost_class()
         self._cost_container = Static(classes=f"metric cost {cost_class}")
         with self._cost_container:
-            yield Label("Est. Cost")
+            yield Label("Cost")
             self._cost_value = Static(
                 self._format_cost(self.total_cost_usd),
                 classes="value",
             )
             yield self._cost_value
-
-        # Model name (if provided)
-        if self.model_name:
-            with Static(classes="metric"):
-                yield Label("Model")
-                self._model_value = Static(
-                    self._truncate_model(self.model_name),
-                    classes="value",
-                )
-                yield self._model_value
 
     def _format_tokens(self, tokens: int) -> str:
         """Format token count for display.

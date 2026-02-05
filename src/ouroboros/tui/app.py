@@ -52,14 +52,34 @@ class OuroborosTUI(App[None]):
     Screen {
         background: $background;
     }
+
     Header {
         background: $primary;
+        color: $text;
+        text-style: bold;
+        dock: top;
+        height: 3;
     }
+
     Footer {
         background: $surface;
+        color: $text-muted;
+        dock: bottom;
+        height: 1;
     }
+
     .hidden {
         display: none;
+    }
+
+    /* Global scrollbar styling */
+    *:focus {
+        border: round $accent;
+    }
+
+    /* Ensure smooth transitions */
+    * {
+        transition: background 150ms;
     }
     """
 
@@ -237,6 +257,47 @@ class OuroborosTUI(App[None]):
         elif event_type == "observability.cost.updated":
             self._state.total_tokens = data.get("total_tokens", 0)
             self._state.total_cost_usd = data.get("total_cost_usd", 0.0)
+        elif event_type == "ac.decomposition.completed":
+            # Handle AC decomposition - add children to tree
+            parent_ac_id = event.aggregate_id
+            child_ac_ids = data.get("child_ac_ids", [])
+            child_contents = data.get("child_contents", [])
+            depth = data.get("depth", 0)
+
+            # Update ac_tree with new children
+            nodes = self._state.ac_tree.get("nodes", {})
+            if parent_ac_id in nodes:
+                # Update parent to show decomposed status
+                nodes[parent_ac_id]["status"] = "decomposed"
+                nodes[parent_ac_id]["children_ids"] = child_ac_ids
+
+                # Add child nodes
+                for i, (child_id, child_content) in enumerate(
+                    zip(child_ac_ids, child_contents)
+                ):
+                    nodes[child_id] = {
+                        "id": child_id,
+                        "content": child_content,
+                        "status": "pending",
+                        "depth": depth + 1,
+                        "parent_id": parent_ac_id,
+                        "is_atomic": False,
+                        "children_ids": [],
+                    }
+
+                self._state.ac_tree["nodes"] = nodes
+
+                # Notify dashboard to update tree
+                self._notify_ac_tree_updated()
+        elif event_type == "ac.marked_atomic":
+            # Handle AC marked as atomic
+            ac_id = event.aggregate_id
+            nodes = self._state.ac_tree.get("nodes", {})
+            if ac_id in nodes:
+                nodes[ac_id]["status"] = "atomic"
+                nodes[ac_id]["is_atomic"] = True
+                self._state.ac_tree["nodes"] = nodes
+                self._notify_ac_tree_updated()
 
     def set_execution(self, execution_id: str, session_id: str = "") -> None:
         """Set the execution to monitor."""
@@ -481,10 +542,15 @@ class OuroborosTUI(App[None]):
 
     def update_ac_tree(self, tree_data: dict[str, Any]) -> None:
         self._state.ac_tree = tree_data
+        self._notify_ac_tree_updated()
+
+    def _notify_ac_tree_updated(self) -> None:
+        """Notify dashboard that AC tree has been updated."""
         if self._screen_stack:
             screen = self.screen
             if isinstance(screen, DashboardScreen):
-                screen.update_state(self._state)
+                if hasattr(screen, "_ac_tree") and screen._ac_tree is not None:
+                    screen._ac_tree.update_tree(self._state.ac_tree)
 
     async def on_unmount(self) -> None:
         if self._subscription_task is not None:

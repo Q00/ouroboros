@@ -131,35 +131,40 @@ class AtomicityResult:
 
 
 # LLM prompts for atomicity detection
-ATOMICITY_SYSTEM_PROMPT = """You are an expert at analyzing task complexity and atomicity.
+ATOMICITY_SYSTEM_PROMPT = """You are an expert at determining if a task can be done in ONE focused action or needs to be broken down.
 
-An acceptance criterion (AC) is considered ATOMIC if it can be:
-1. Completed in a single focused session
-2. Executed with minimal tools (< 3)
-3. Clearly verified when done
-4. Estimated at under 300 seconds of execution time
+A task is ATOMIC if ALL of these are true:
+1. Single clear outcome - produces ONE specific result (e.g., "add a button" not "improve UI")
+2. No sequential dependencies - doesn't require "do A, then B, then C"
+3. Localized change - touches 1-2 files at most, not system-wide changes
+4. Self-contained - doesn't require setting up infrastructure, configs, or external services first
 
-Non-atomic ACs typically:
-- Have multiple distinct steps that could be separate tasks
-- Require coordinating several different tools/systems
-- Have complex verification requirements
-- Would benefit from being broken down further
+A task is NON-ATOMIC if ANY of these are true:
+1. Contains "and" connecting different actions (e.g., "add login AND registration")
+2. Requires multiple unrelated file changes (e.g., backend + frontend + database)
+3. Has implicit prerequisites (e.g., "implement feature X" when X needs design first)
+4. Vague or broad scope (e.g., "improve performance", "refactor code")
+5. Involves both implementation AND testing as separate concerns
 
-Analyze the given AC and determine if it's atomic or needs decomposition."""
+Think like a developer: Can you sit down and complete this in ONE coding session without context switching?"""
 
-ATOMICITY_USER_TEMPLATE = """Acceptance Criterion:
+ATOMICITY_USER_TEMPLATE = """Task:
 {ac_content}
 
-Analyze this AC and respond with a JSON object:
+Answer these questions:
+1. Does this task have a SINGLE, specific outcome? (yes/no)
+2. Can it be done WITHOUT doing other tasks first? (yes/no)
+3. Will it touch only 1-2 files? (yes/no/unsure)
+4. Is the scope clear and bounded? (yes/no)
+
+Based on your answers, respond with JSON:
 {{
-    "is_atomic": true/false,
-    "complexity_score": 0.0 to 1.0 (0 = trivial, 1 = very complex),
-    "tool_count": estimated number of tools needed (integer),
-    "estimated_duration": estimated seconds to complete (integer),
-    "reasoning": "brief explanation of your assessment"
+    "is_atomic": true or false,
+    "reasoning": "One sentence explaining why",
+    "if_not_atomic": ["suggested subtask 1", "suggested subtask 2"] or null
 }}
 
-Only respond with the JSON, no other text."""
+Only respond with the JSON."""
 
 
 def _extract_json_from_response(response: str) -> dict[str, Any] | None:
@@ -405,20 +410,20 @@ async def check_atomicity(
         return Result.ok(result)
 
     try:
-        # Extract values with defaults
-        is_atomic_raw = parsed.get("is_atomic", True)
-        complexity_score = float(parsed.get("complexity_score", 0.5))
-        tool_count = int(parsed.get("tool_count", 1))
-        estimated_duration = int(parsed.get("estimated_duration", 60))
+        # Extract values from new format
+        is_atomic = bool(parsed.get("is_atomic", True))
         reasoning = str(parsed.get("reasoning", "LLM analysis"))
+        suggested_subtasks = parsed.get("if_not_atomic")
 
-        # Apply criteria to determine atomicity
-        is_atomic = (
-            is_atomic_raw
-            and complexity_score < criteria.max_complexity
-            and tool_count < criteria.max_tool_count
-            and estimated_duration < criteria.max_duration_seconds
-        )
+        # Add subtask suggestions to reasoning if non-atomic
+        if not is_atomic and suggested_subtasks:
+            subtask_list = ", ".join(suggested_subtasks[:3])
+            reasoning = f"{reasoning} [Suggested: {subtask_list}]"
+
+        # Use simple defaults for legacy fields (still needed for result structure)
+        complexity_score = 0.3 if is_atomic else 0.8
+        tool_count = 1 if is_atomic else 4
+        estimated_duration = 60 if is_atomic else 600
 
         result = AtomicityResult(
             is_atomic=is_atomic,
