@@ -189,6 +189,7 @@ class OrchestratorRunner:
         console: Console | None = None,
         mcp_manager: MCPClientManager | None = None,
         mcp_tool_prefix: str = "",
+        debug: bool = False,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -201,6 +202,7 @@ class OrchestratorRunner:
                         made available to the Claude Agent during execution.
             mcp_tool_prefix: Optional prefix to add to MCP tool names to avoid
                            conflicts (e.g., "mcp_" makes "read" become "mcp_read").
+            debug: Enable verbose logging output. When False, only Live display shown.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -208,6 +210,7 @@ class OrchestratorRunner:
         self._session_repo = SessionRepository(event_store)
         self._mcp_manager: MCPClientManager | None = mcp_manager
         self._mcp_tool_prefix = mcp_tool_prefix
+        self._debug = debug
 
     @property
     def mcp_manager(self) -> MCPClientManager | None:
@@ -320,6 +323,10 @@ class OrchestratorRunner:
         exec_id = execution_id or f"exec_{uuid4().hex[:12]}"
         start_time = datetime.now(UTC)
 
+        # Control console logging based on debug mode
+        from ouroboros.observability.logging import set_console_logging
+        set_console_logging(self._debug)
+
         log.info(
             "orchestrator.runner.execute_started",
             execution_id=exec_id,
@@ -368,7 +375,6 @@ class OrchestratorRunner:
         success = False
 
         # Create workflow state tracker for progress display
-        from ouroboros.cli.formatters.workflow_display import WorkflowDisplay
         from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
         state_tracker = WorkflowStateTracker(
@@ -378,7 +384,17 @@ class OrchestratorRunner:
         )
 
         try:
-            with WorkflowDisplay(state_tracker) as display:
+            # Use simple status spinner with log-style output for changes
+            from rich.status import Status
+
+            last_tool: str | None = None
+            last_completed_count = 0
+
+            with Status(
+                f"[bold cyan]Executing: {seed.goal[:50]}...[/]",
+                console=self._console,
+                spinner="dots",
+            ) as status:
                 async for message in self._adapter.execute_task(
                     prompt=task_prompt,
                     tools=merged_tools,
@@ -400,8 +416,33 @@ class OrchestratorRunner:
                         is_input=message.type == "user",
                     )
 
-                    # Refresh the display
-                    display.refresh()
+                    # Print log-style output for tool calls and agent messages
+                    if message.tool_name and message.tool_name != last_tool:
+                        status.stop()
+                        self._console.print(f"  [yellow]🔧 {message.tool_name}[/yellow]")
+                        status.start()
+                        last_tool = message.tool_name
+                    elif message.type == "assistant" and message.content and not message.tool_name:
+                        # Show agent thinking/reasoning
+                        content = message.content.strip()
+                        status.stop()
+                        self._console.print(f"  [dim]💭 {content}[/dim]")
+                        status.start()
+
+                    # Print when AC is completed
+                    current_completed = state_tracker.state.completed_count
+                    if current_completed > last_completed_count:
+                        status.stop()
+                        self._console.print(
+                            f"  [green]✓ AC {current_completed} completed[/green]"
+                        )
+                        status.start()
+                        last_completed_count = current_completed
+
+                    # Update status with current activity
+                    ac_progress = f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
+                    tool_info = f" | {message.tool_name}" if message.tool_name else ""
+                    status.update(f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]")
 
                     # Emit workflow progress event for TUI
                     # Use exec_id defined at start of function (not execution_id param)
@@ -581,6 +622,10 @@ class OrchestratorRunner:
         Returns:
             Result containing OrchestratorResult on success.
         """
+        # Control console logging based on debug mode
+        from ouroboros.observability.logging import set_console_logging
+        set_console_logging(self._debug)
+
         log.info(
             "orchestrator.runner.resume_started",
             session_id=session_id,
@@ -637,7 +682,6 @@ Note: This is a resumed session. Please continue from where execution was interr
         success = False
 
         # Create workflow state tracker for progress display
-        from ouroboros.cli.formatters.workflow_display import WorkflowDisplay
         from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
         state_tracker = WorkflowStateTracker(
@@ -647,7 +691,17 @@ Note: This is a resumed session. Please continue from where execution was interr
         )
 
         try:
-            with WorkflowDisplay(state_tracker) as display:
+            # Use simple status spinner with log-style output for changes
+            from rich.status import Status
+
+            last_tool: str | None = None
+            last_completed_count = 0
+
+            with Status(
+                f"[bold cyan]Resuming: {seed.goal[:50]}...[/]",
+                console=self._console,
+                spinner="dots",
+            ) as status:
                 async for message in self._adapter.execute_task(
                     prompt=resume_prompt,
                     tools=merged_tools,
@@ -664,8 +718,33 @@ Note: This is a resumed session. Please continue from where execution was interr
                         is_input=message.type == "user",
                     )
 
-                    # Refresh the display
-                    display.refresh()
+                    # Print log-style output for tool calls and agent messages
+                    if message.tool_name and message.tool_name != last_tool:
+                        status.stop()
+                        self._console.print(f"  [yellow]🔧 {message.tool_name}[/yellow]")
+                        status.start()
+                        last_tool = message.tool_name
+                    elif message.type == "assistant" and message.content and not message.tool_name:
+                        # Show agent thinking/reasoning
+                        content = message.content.strip()
+                        status.stop()
+                        self._console.print(f"  [dim]💭 {content}[/dim]")
+                        status.start()
+
+                    # Print when AC is completed
+                    current_completed = state_tracker.state.completed_count
+                    if current_completed > last_completed_count:
+                        status.stop()
+                        self._console.print(
+                            f"  [green]✓ AC {current_completed} completed[/green]"
+                        )
+                        status.start()
+                        last_completed_count = current_completed
+
+                    # Update status with current activity
+                    ac_progress = f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
+                    tool_info = f" | {message.tool_name}" if message.tool_name else ""
+                    status.update(f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]")
 
                     # Emit workflow progress event for TUI
                     progress_data = state_tracker.state.to_tui_message_data(

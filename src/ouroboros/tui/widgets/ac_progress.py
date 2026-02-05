@@ -70,40 +70,40 @@ class ACProgressWidget(Widget):
     DEFAULT_CSS = """
     ACProgressWidget {
         height: auto;
-        min-height: 8;
         width: 100%;
-        padding: 1;
-        border: solid $surface;
+        padding: 0 1;
     }
 
     ACProgressWidget > .header {
-        text-align: center;
         text-style: bold;
-        margin-bottom: 1;
+        color: $text;
+        margin-bottom: 0;
     }
 
     ACProgressWidget > .progress-header {
         height: 1;
-        margin-bottom: 1;
+        margin-bottom: 0;
+        color: $text-muted;
     }
 
     ACProgressWidget > .ac-list {
         height: auto;
-        max-height: 10;
     }
 
     ACProgressWidget > .ac-item {
         height: 1;
+        padding: 0 0;
     }
 
     ACProgressWidget > .ac-item.current {
         text-style: bold;
+        background: $primary-darken-3;
     }
 
     ACProgressWidget > .empty-message {
         text-align: center;
         color: $text-muted;
-        padding: 1;
+        padding: 2;
     }
 
     ACProgressWidget > ProgressBar {
@@ -111,10 +111,19 @@ class ACProgressWidget(Widget):
         width: 100%;
     }
 
+    ACProgressWidget > ProgressBar > .bar--bar {
+        color: $primary-darken-2;
+    }
+
+    ACProgressWidget > ProgressBar > .bar--complete {
+        color: $success;
+    }
+
     ACProgressWidget > .progress-footer {
         height: 1;
         text-align: right;
         color: $text-muted;
+        margin-top: 0;
     }
     """
 

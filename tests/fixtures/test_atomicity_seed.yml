@@ -1,0 +1,47 @@
+# Test seed for atomicity detection
+# Contains mix of atomic and non-atomic ACs
+
+goal: "Create a simple greeting utility"
+
+constraints:
+  - "Python 3.10+"
+  - "No external dependencies"
+  - "Single file implementation"
+
+acceptance_criteria:
+  # This should be NON-ATOMIC (multiple distinct actions with "and")
+  - "Create a greeter module AND add unit tests AND update documentation"
+
+  # This should be NON-ATOMIC (vague scope)
+  - "Improve the overall code quality and performance"
+
+  # This should be ATOMIC (single, specific outcome)
+  - "Add a greet() function that takes a name and returns 'Hello, {name}!'"
+
+  # This should be NON-ATOMIC (multiple file changes implied)
+  - "Implement CLI interface with argument parsing and add integration tests"
+
+  # This should be ATOMIC (localized, clear scope)
+  - "Add type hints to the greet function"
+
+ontology_schema:
+  name: "GreeterUtility"
+  description: "Simple greeting utility schema"
+  fields:
+    - name: "greeting_format"
+      field_type: "string"
+      description: "Format string for greetings"
+      required: true
+
+evaluation_principles:
+  - name: "simplicity"
+    description: "Code should be simple and readable"
+    weight: 1.0
+
+exit_conditions:
+  - name: "all_criteria_met"
+    description: "All acceptance criteria satisfied"
+    evaluation_criteria: "100% of ACs pass verification"
+
+metadata:
+  ambiguity_score: 0.1

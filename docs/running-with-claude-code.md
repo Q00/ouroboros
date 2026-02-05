@@ -155,8 +155,8 @@ uv run ouroboros run workflow --orchestrator seed.yaml
 # Dry run (validate seed without executing)
 uv run ouroboros run workflow --dry-run seed.yaml
 
-# Verbose output
-uv run ouroboros run workflow --orchestrator --verbose seed.yaml
+# Debug output (show logs and agent thinking)
+uv run ouroboros run workflow --orchestrator --debug seed.yaml
 
 # Resume a previous session
 uv run ouroboros run workflow --orchestrator --resume <session_id> seed.yaml

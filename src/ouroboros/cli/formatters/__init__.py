@@ -26,6 +26,6 @@ OUROBOROS_THEME = Theme(
 )
 
 # Shared Console instance for all CLI modules
-console = Console(theme=OUROBOROS_THEME)
+console = Console(theme=OUROBOROS_THEME, force_terminal=True)
 
 __all__ = ["console", "OUROBOROS_THEME"]

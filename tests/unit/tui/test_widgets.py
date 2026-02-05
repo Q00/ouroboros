@@ -221,6 +221,7 @@ class TestACTreeWidget:
 
         assert widget.tree_data == {}
         assert widget.current_ac_id == ""
+        assert widget._node_map == {}
 
     def test_create_widget_with_data(self) -> None:
         """Test creating widget with tree data."""
@@ -253,6 +254,15 @@ class TestACTreeWidget:
         assert widget.tree_data == tree_data
         assert widget.current_ac_id == "ac_456"
 
+    def test_update_tree_force_rebuild(self) -> None:
+        """Test update_tree with force_rebuild clears node map."""
+        widget = ACTreeWidget()
+        widget._node_map = {"ac_old": "dummy"}
+
+        widget.update_tree({}, force_rebuild=True)
+
+        assert widget._node_map == {}
+
     def test_update_node_status(self) -> None:
         """Test updating a node's status."""
         tree_data = {
@@ -273,6 +283,149 @@ class TestACTreeWidget:
         widget.update_node_status("ac_123", "completed")
 
         assert widget.tree_data["nodes"]["ac_123"]["status"] == "completed"
+
+    def test_update_node_status_nonexistent(self) -> None:
+        """Test updating status of nonexistent node does nothing."""
+        tree_data = {
+            "root_id": "ac_123",
+            "nodes": {
+                "ac_123": {"id": "ac_123", "content": "Test", "status": "pending"},
+            },
+        }
+        widget = ACTreeWidget(tree_data=tree_data)
+
+        # Should not raise
+        widget.update_node_status("nonexistent", "completed")
+
+        assert widget.tree_data["nodes"]["ac_123"]["status"] == "pending"
+
+    def test_format_node_label_pending(self) -> None:
+        """Test formatting label for pending node."""
+        widget = ACTreeWidget()
+        node_data = {
+            "status": "pending",
+            "content": "Test content",
+            "is_atomic": False,
+        }
+
+        label = widget._format_node_label(node_data)
+
+        assert "[dim][ ][/dim]" in label
+        assert "Test content" in label
+
+    def test_format_node_label_atomic(self) -> None:
+        """Test formatting label for atomic node."""
+        widget = ACTreeWidget()
+        node_data = {
+            "status": "atomic",
+            "content": "Atomic task",
+            "is_atomic": True,
+        }
+
+        label = widget._format_node_label(node_data)
+
+        assert "[blue][A][/blue]" in label
+
+    def test_format_node_label_current(self) -> None:
+        """Test formatting label for current AC."""
+        widget = ACTreeWidget()
+        node_data = {
+            "status": "executing",
+            "content": "Current task",
+            "is_atomic": False,
+        }
+
+        label = widget._format_node_label(node_data, is_current=True)
+
+        assert "[bold yellow]" in label
+
+    def test_format_node_label_truncation(self) -> None:
+        """Test content truncation in label."""
+        widget = ACTreeWidget()
+        long_content = "A" * 100
+        node_data = {
+            "status": "pending",
+            "content": long_content,
+            "is_atomic": False,
+        }
+
+        label = widget._format_node_label(node_data)
+
+        assert "..." in label
+        assert long_content[:50] in label
+
+    def test_mark_node_atomic(self) -> None:
+        """Test marking a node as atomic."""
+        tree_data = {
+            "root_id": "ac_123",
+            "nodes": {
+                "ac_123": {
+                    "id": "ac_123",
+                    "content": "Test AC",
+                    "depth": 0,
+                    "status": "pending",
+                    "is_atomic": False,
+                },
+            },
+        }
+        widget = ACTreeWidget(tree_data=tree_data)
+
+        widget.mark_node_atomic("ac_123")
+
+        assert widget.tree_data["nodes"]["ac_123"]["is_atomic"] is True
+        assert widget.tree_data["nodes"]["ac_123"]["status"] == "atomic"
+
+    def test_mark_node_atomic_nonexistent(self) -> None:
+        """Test marking nonexistent node does nothing."""
+        tree_data = {
+            "root_id": "ac_123",
+            "nodes": {"ac_123": {"id": "ac_123", "is_atomic": False}},
+        }
+        widget = ACTreeWidget(tree_data=tree_data)
+
+        # Should not raise
+        widget.mark_node_atomic("nonexistent")
+
+        assert widget.tree_data["nodes"]["ac_123"]["is_atomic"] is False
+
+    def test_add_children_no_tree_widget(self) -> None:
+        """Test add_children returns False when tree widget not initialized."""
+        widget = ACTreeWidget()
+        children = [{"id": "child_1", "content": "Child 1"}]
+
+        result = widget.add_children("parent_id", children)
+
+        assert result is False
+
+    def test_add_children_parent_not_found(self) -> None:
+        """Test add_children returns False when parent not in node_map."""
+        widget = ACTreeWidget()
+        widget._tree_widget = "dummy"  # Simulate initialized tree
+        widget._node_map = {"other_id": "node"}
+        children = [{"id": "child_1", "content": "Child 1"}]
+
+        result = widget.add_children("parent_id", children)
+
+        assert result is False
+
+    def test_get_node_by_id_found(self) -> None:
+        """Test getting node by ID when it exists."""
+        widget = ACTreeWidget()
+        mock_node = "mock_tree_node"
+        widget._node_map = {"ac_123": mock_node}
+
+        result = widget.get_node_by_id("ac_123")
+
+        assert result == mock_node
+
+    def test_get_node_by_id_not_found(self) -> None:
+        """Test getting node by ID when it doesn't exist."""
+        widget = ACTreeWidget()
+        widget._node_map = {}
+
+        result = widget.get_node_by_id("nonexistent")
+
+        assert result is None
 
 
 class TestCostTrackerWidget:

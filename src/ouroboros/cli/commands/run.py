@@ -122,6 +122,7 @@ async def _run_orchestrator(
     resume_session: str | None = None,
     mcp_config: Path | None = None,
     mcp_tool_prefix: str = "",
+    debug: bool = False,
 ) -> None:
     """Run workflow via orchestrator mode (Claude Agent SDK).
 
@@ -130,6 +131,7 @@ async def _run_orchestrator(
         resume_session: Optional session ID to resume.
         mcp_config: Optional path to MCP config file.
         mcp_tool_prefix: Prefix for MCP tool names.
+        debug: Show verbose logs and agent thinking.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import ClaudeAgentAdapter, OrchestratorRunner
@@ -144,13 +146,15 @@ async def _run_orchestrator(
         print_error(f"Invalid seed format: {e}")
         raise typer.Exit(1) from e
 
-    print_info(f"Loaded seed: {seed.goal[:80]}...")
-    print_info(f"Acceptance criteria: {len(seed.acceptance_criteria)}")
+    if debug:
+        print_info(f"Loaded seed: {seed.goal[:80]}...")
+        print_info(f"Acceptance criteria: {len(seed.acceptance_criteria)}")
 
     # Initialize MCP manager if config provided
     mcp_manager = None
     if mcp_config:
-        print_info(f"Loading MCP configuration from: {mcp_config}")
+        if debug:
+            print_info(f"Loading MCP configuration from: {mcp_config}")
         mcp_manager = await _initialize_mcp_manager(mcp_config, mcp_tool_prefix)
 
     # Initialize components
@@ -167,15 +171,18 @@ async def _run_orchestrator(
         console,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
+        debug=debug,
     )
 
     # Execute
     try:
         if resume_session:
-            print_info(f"Resuming session: {resume_session}")
+            if debug:
+                print_info(f"Resuming session: {resume_session}")
             result = await runner.resume_session(resume_session, seed)
         else:
-            print_info("Starting new orchestrator execution...")
+            if debug:
+                print_info("Starting new orchestrator execution...")
             result = await runner.execute_seed(seed)
 
         # Handle result
@@ -197,7 +204,8 @@ async def _run_orchestrator(
     finally:
         # Cleanup MCP connections
         if mcp_manager:
-            print_info("Disconnecting MCP servers...")
+            if debug:
+                print_info("Disconnecting MCP servers...")
             await mcp_manager.disconnect_all()
 
 
@@ -247,9 +255,9 @@ def workflow(
         bool,
         typer.Option("--dry-run", "-n", help="Validate seed without executing."),
     ] = False,
-    verbose: Annotated[
+    debug: Annotated[
         bool,
-        typer.Option("--verbose", "-v", help="Enable verbose output."),
+        typer.Option("--debug", "-d", help="Show logs and agent thinking (verbose output)."),
     ] = False,
 ) -> None:
     """Execute a workflow from a seed file.
@@ -313,14 +321,15 @@ def workflow(
             resume_session,
             mcp_config,
             mcp_tool_prefix,
+            debug,
         ))
     else:
         # Standard workflow (placeholder)
         print_info(f"Would execute workflow from: {seed_file}")
         if dry_run:
             console.print("[muted]Dry run mode - no changes will be made[/]")
-        if verbose:
-            console.print("[muted]Verbose mode enabled[/]")
+        if debug:
+            console.print("[muted]Debug mode enabled[/]")
 
 
 @app.command()

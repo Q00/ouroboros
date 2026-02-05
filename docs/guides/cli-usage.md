@@ -141,7 +141,7 @@ ouroboros run workflow SEED_FILE [OPTIONS]
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix PREFIX` | Prefix to add to all MCP tool names (e.g., 'mcp_') |
 | `--dry-run`, `-n` | Validate seed without executing |
-| `--verbose`, `-v` | Enable verbose output |
+| `--debug`, `-d` | Show logs and agent thinking (verbose output) |
 
 #### Examples
 
@@ -164,8 +164,8 @@ ouroboros run workflow --dry-run seed.yaml
 # Resume a previous orchestrator session
 ouroboros run workflow --orchestrator --resume orch_abc123 seed.yaml
 
-# Verbose output
-ouroboros run workflow --orchestrator --verbose seed.yaml
+# Debug output (show logs and agent thinking)
+ouroboros run workflow --orchestrator --debug seed.yaml
 ```
 
 #### Orchestrator Mode
@@ -532,7 +532,10 @@ ouroboros run workflow --orchestrator --resume orch_abc123 seed.yaml
 # Non-interactive execution with dry-run validation
 ouroboros run workflow --dry-run seed.yaml
 
-# Execute with verbose logging
+# Execute with debug output (shows logs and agent thinking)
+ouroboros run workflow --orchestrator --debug seed.yaml
+
+# Execute with full debug logging via environment variable
 OUROBOROS_LOG_LEVEL=DEBUG ouroboros run workflow --orchestrator seed.yaml
 ```
 

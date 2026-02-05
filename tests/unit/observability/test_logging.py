@@ -22,6 +22,7 @@ from ouroboros.observability.logging import (
     get_logger,
     is_configured,
     reset_logging,
+    set_console_logging,
     unbind_context,
 )
 
@@ -30,8 +31,10 @@ from ouroboros.observability.logging import (
 def reset_logging_state() -> Any:
     """Reset logging state before and after each test."""
     reset_logging()
+    set_console_logging(True)  # Ensure console logging is enabled for tests
     yield
     reset_logging()
+    set_console_logging(True)  # Reset after test
 
 
 @pytest.fixture
@@ -201,7 +204,7 @@ class TestGetLogger:
         log = get_logger()
         log.info("test.event.logged")
         captured = capsys.readouterr()
-        assert "test.event.logged" in captured.out
+        assert "test.event.logged" in captured.err
 
 
 class TestBindContext:
@@ -217,8 +220,8 @@ class TestBindContext:
         log.info("test.event")
 
         captured = capsys.readouterr()
-        assert "seed_123" in captured.out
-        assert "ac_456" in captured.out
+        assert "seed_123" in captured.err
+        assert "ac_456" in captured.err
 
     def test_unbind_context_removes_from_logs(self, capsys: Any) -> None:
         """unbind_context removes context from log entries."""
@@ -231,9 +234,9 @@ class TestBindContext:
         log.info("test.event.after.unbind")
 
         captured = capsys.readouterr()
-        assert "seed_123" in captured.out
+        assert "seed_123" in captured.err
         # ac_id should not appear after unbind
-        assert "ac_456" not in captured.out
+        assert "ac_456" not in captured.err
 
     def test_clear_context_removes_all(self, capsys: Any) -> None:
         """clear_context removes all bound context."""
@@ -246,8 +249,8 @@ class TestBindContext:
         log.info("test.event.after.clear")
 
         captured = capsys.readouterr()
-        assert "seed_123" not in captured.out
-        assert "ac_456" not in captured.out
+        assert "seed_123" not in captured.err
+        assert "ac_456" not in captured.err
 
     def test_bind_standard_keys(self, capsys: Any) -> None:
         """Standard log keys can be bound."""
@@ -265,7 +268,7 @@ class TestBindContext:
         log.info("ac.execution.started")
 
         captured = capsys.readouterr()
-        output = captured.out
+        output = captured.err
         assert "seed_001" in output
         assert "ac_001" in output
         assert "depth" in output
@@ -285,7 +288,7 @@ class TestDevModeOutput:
 
         captured = capsys.readouterr()
         # Dev mode should not be JSON (no leading brace)
-        assert not captured.out.strip().startswith("{")
+        assert not captured.err.strip().startswith("{")
 
     def test_dev_mode_includes_log_level(self, capsys: Any) -> None:
         """Dev mode includes log level."""
@@ -296,8 +299,8 @@ class TestDevModeOutput:
         log.warning("test.warning.level")
 
         captured = capsys.readouterr()
-        assert "info" in captured.out.lower()
-        assert "warning" in captured.out.lower()
+        assert "info" in captured.err.lower()
+        assert "warning" in captured.err.lower()
 
 
 class TestProdModeOutput:
@@ -312,7 +315,7 @@ class TestProdModeOutput:
 
         captured = capsys.readouterr()
         # Each line should be valid JSON
-        for line in captured.out.strip().split("\n"):
+        for line in captured.err.strip().split("\n"):
             if line:
                 data = json.loads(line)
                 assert "event" in data
@@ -325,7 +328,7 @@ class TestProdModeOutput:
         log.info("test.timestamp")
 
         captured = capsys.readouterr()
-        data = json.loads(captured.out.strip())
+        data = json.loads(captured.err.strip())
         assert "timestamp" in data
         # ISO 8601 format check (contains T and ends with +00:00 or Z)
         timestamp = data["timestamp"]
@@ -339,7 +342,7 @@ class TestProdModeOutput:
         log.info("test.level")
 
         captured = capsys.readouterr()
-        data = json.loads(captured.out.strip())
+        data = json.loads(captured.err.strip())
         assert "level" in data
         assert data["level"] == "info"
 
@@ -353,7 +356,7 @@ class TestProdModeOutput:
         log.info("test.context")
 
         captured = capsys.readouterr()
-        data = json.loads(captured.out.strip())
+        data = json.loads(captured.err.strip())
         assert data["seed_id"] == "seed_json"
         assert data["depth"] == 7
 
@@ -371,8 +374,8 @@ class TestLogLevels:
         log.info("info.message")
 
         captured = capsys.readouterr()
-        assert "debug.message" not in captured.out
-        assert "info.message" in captured.out
+        assert "debug.message" not in captured.err
+        assert "info.message" in captured.err
 
     def test_debug_level_shows_all(self, capsys: Any) -> None:
         """DEBUG level shows all messages."""
@@ -384,8 +387,8 @@ class TestLogLevels:
         log.info("info.message")
 
         captured = capsys.readouterr()
-        assert "debug.message" in captured.out
-        assert "info.message" in captured.out
+        assert "debug.message" in captured.err
+        assert "info.message" in captured.err
 
     def test_error_level_filters_lower(self, capsys: Any) -> None:
         """ERROR level filters out lower level messages."""
@@ -398,9 +401,9 @@ class TestLogLevels:
         log.error("error.message")
 
         captured = capsys.readouterr()
-        assert "info.message" not in captured.out
-        assert "warning.message" not in captured.out
-        assert "error.message" in captured.out
+        assert "info.message" not in captured.err
+        assert "warning.message" not in captured.err
+        assert "error.message" in captured.err
 
 
 class TestLogRotation:
@@ -475,7 +478,7 @@ class TestResetLogging:
         log.info("after.reset")
 
         captured = capsys.readouterr()
-        assert "test_value" not in captured.out
+        assert "test_value" not in captured.err
 
 
 class TestIsConfigured:
@@ -528,7 +531,7 @@ class TestEventNamingConvention:
         log.info("consensus.voting.completed")
 
         captured = capsys.readouterr()
-        lines = [line for line in captured.out.strip().split("\n") if line]
+        lines = [line for line in captured.err.strip().split("\n") if line]
 
         events = [json.loads(line)["event"] for line in lines]
         assert "ac.execution.started" in events
@@ -551,8 +554,8 @@ class TestExceptionLogging:
             log.exception("error.occurred")
 
         captured = capsys.readouterr()
-        assert "error.occurred" in captured.out
-        assert "ValueError" in captured.out or "test exception" in captured.out
+        assert "error.occurred" in captured.err
+        assert "ValueError" in captured.err or "test exception" in captured.err
 
 
 class TestSensitiveDataMasking:
@@ -567,7 +570,7 @@ class TestSensitiveDataMasking:
         log.info("config.loaded", api_key="sk-1234567890abcdef")
 
         captured = capsys.readouterr()
-        output = captured.out
+        output = captured.err
         # Should not contain the actual key
         assert "1234567890" not in output
         # Should contain redacted marker
@@ -582,7 +585,7 @@ class TestSensitiveDataMasking:
         log.info("auth.attempt", password="super_secret_123")
 
         captured = capsys.readouterr()
-        output = captured.out
+        output = captured.err
         assert "super_secret_123" not in output
         assert "REDACTED" in output
 
@@ -595,7 +598,7 @@ class TestSensitiveDataMasking:
         log.info("request.headers", some_field="sk-ant-1234567890abcdef")
 
         captured = capsys.readouterr()
-        output = captured.out
+        output = captured.err
         # The full key should not appear
         assert "1234567890abcdef" not in output
 
@@ -608,7 +611,7 @@ class TestSensitiveDataMasking:
         log.info("user.action", name="John Doe", email="john@example.com")
 
         captured = capsys.readouterr()
-        data = json.loads(captured.out.strip())
+        data = json.loads(captured.err.strip())
         assert data["name"] == "John Doe"
         assert data["email"] == "john@example.com"
 
@@ -624,6 +627,6 @@ class TestSensitiveDataMasking:
         )
 
         captured = capsys.readouterr()
-        data = json.loads(captured.out.strip())
+        data = json.loads(captured.err.strip())
         assert data["config"]["provider"]["api_key"] == "<REDACTED>"
         assert data["config"]["name"] == "test"

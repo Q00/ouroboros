@@ -22,13 +22,19 @@ class TestMainApp:
         """Test that --version shows version information."""
         result = runner.invoke(app, ["--version"])
         assert result.exit_code == 0
-        assert __version__ in result.output
+        # Strip ANSI codes for comparison (Rich adds color formatting)
+        import re
+        clean_output = re.sub(r'\x1b\[[0-9;]*m', '', result.output)
+        assert __version__ in clean_output
 
     def test_app_version_short_option(self) -> None:
         """Test that -V shows version information."""
         result = runner.invoke(app, ["-V"])
         assert result.exit_code == 0
-        assert __version__ in result.output
+        # Strip ANSI codes for comparison (Rich adds color formatting)
+        import re
+        clean_output = re.sub(r'\x1b\[[0-9;]*m', '', result.output)
+        assert __version__ in clean_output
 
     def test_no_args_shows_help(self) -> None:
         """Test that running without args shows help (exit code 2 for no_args_is_help)."""
