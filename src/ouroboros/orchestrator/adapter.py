@@ -34,6 +34,45 @@ log = get_logger(__name__)
 
 
 # =============================================================================
+# Tool Detail Extraction
+# =============================================================================
+
+_TOOL_DETAIL_EXTRACTORS: dict[str, str] = {
+    "Read": "file_path",
+    "Glob": "pattern",
+    "Grep": "pattern",
+    "Edit": "file_path",
+    "Write": "file_path",
+    "Bash": "command",
+    "WebFetch": "url",
+    "WebSearch": "query",
+    "NotebookEdit": "notebook_path",
+}
+
+
+def _format_tool_detail(tool_name: str, tool_input: dict[str, Any]) -> str:
+    """Format a human-readable tool detail string.
+
+    Args:
+        tool_name: Name of the tool being called.
+        tool_input: Raw input dict from ToolUseBlock.
+
+    Returns:
+        Formatted string like "Read: src/foo.py" or just "ToolName" if no detail.
+    """
+    key = _TOOL_DETAIL_EXTRACTORS.get(tool_name)
+    if key:
+        detail = str(tool_input.get(key, ""))
+    elif tool_name.startswith("mcp__"):
+        detail = next((str(v)[:80] for v in tool_input.values() if v), "")
+    else:
+        detail = ""
+    if detail and len(detail) > 80:
+        detail = detail[:77] + "..."
+    return f"{tool_name}: {detail}" if detail else tool_name
+
+
+# =============================================================================
 # Data Models
 # =============================================================================
 
@@ -341,17 +380,31 @@ class ClaudeAgentAdapter:
 
         if class_name == "AssistantMessage":
             msg_type = "assistant"
-            # Assistant message with content blocks
+            # Assistant message with content blocks -- iterate ALL blocks
             content_blocks = getattr(sdk_message, "content", [])
+            text_parts: list[str] = []
+
             for block in content_blocks:
                 block_type = type(block).__name__
+
                 if block_type == "TextBlock" and hasattr(block, "text"):
-                    content = block.text
-                    break
+                    text_parts.append(block.text)
+
                 elif block_type == "ToolUseBlock" and hasattr(block, "name"):
                     tool_name = block.name
-                    content = f"Calling tool: {tool_name}"
-                    break
+                    tool_input = getattr(block, "input", {}) or {}
+                    data["tool_input"] = tool_input
+                    data["tool_detail"] = _format_tool_detail(tool_name, tool_input)
+
+                elif block_type == "ThinkingBlock":
+                    thinking = getattr(block, "thinking", "") or getattr(block, "text", "")
+                    if thinking:
+                        data["thinking"] = thinking.strip()
+
+            if text_parts:
+                content = "\n".join(text_parts)
+            elif tool_name:
+                content = f"Calling tool: {data.get('tool_detail', tool_name)}"
 
         elif class_name == "ResultMessage":
             msg_type = "result"

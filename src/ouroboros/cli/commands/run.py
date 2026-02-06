@@ -123,6 +123,7 @@ async def _run_orchestrator(
     mcp_config: Path | None = None,
     mcp_tool_prefix: str = "",
     debug: bool = False,
+    parallel: bool = True,
 ) -> None:
     """Run workflow via orchestrator mode (Claude Agent SDK).
 
@@ -132,6 +133,7 @@ async def _run_orchestrator(
         mcp_config: Optional path to MCP config file.
         mcp_tool_prefix: Prefix for MCP tool names.
         debug: Show verbose logs and agent thinking.
+        parallel: Execute independent ACs in parallel. Default: True.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import ClaudeAgentAdapter, OrchestratorRunner
@@ -183,7 +185,11 @@ async def _run_orchestrator(
         else:
             if debug:
                 print_info("Starting new orchestrator execution...")
-            result = await runner.execute_seed(seed)
+            if parallel:
+                print_info("Parallel mode: independent ACs will run concurrently")
+            else:
+                print_info("Sequential mode: ACs will run one at a time")
+            result = await runner.execute_seed(seed, parallel=parallel)
 
         # Handle result
         if result.is_ok:
@@ -259,6 +265,14 @@ def workflow(
         bool,
         typer.Option("--debug", "-d", help="Show logs and agent thinking (verbose output)."),
     ] = False,
+    sequential: Annotated[
+        bool,
+        typer.Option(
+            "--sequential",
+            "-s",
+            help="Execute ACs sequentially instead of in parallel (default: parallel).",
+        ),
+    ] = False,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -322,6 +336,7 @@ def workflow(
             mcp_config,
             mcp_tool_prefix,
             debug,
+            parallel=not sequential,
         ))
     else:
         # Standard workflow (placeholder)

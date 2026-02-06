@@ -1,0 +1,73 @@
+# Sub-AC Test Seed
+# Tests hierarchical AC decomposition with complex acceptance criteria
+# Run with: ouroboros run workflow --orchestrator examples/subac_test_seed.yaml
+
+goal: "Build a CLI todo application with persistent storage and multiple commands"
+
+constraints:
+  - "Python 3.10+"
+  - "Use SQLite for persistence"
+  - "Use Click for CLI"
+  - "Include proper error handling"
+  - "Follow single responsibility principle"
+
+acceptance_criteria:
+  # AC1: Complex - should decompose into sub-ACs for model, repository, database setup
+  - |
+    Implement the data persistence layer:
+    - Create a SQLite database schema for todos (id, title, description, status, created_at, due_date)
+    - Implement a Todo model class with validation
+    - Create a TodoRepository class with CRUD operations
+    - Add database migration/initialization logic
+
+  # AC2: Complex - should decompose into sub-ACs for each command
+  - |
+    Implement CLI commands using Click:
+    - 'add' command to create new todos with title and optional description
+    - 'list' command to show all todos with filtering by status
+    - 'complete' command to mark a todo as done
+    - 'delete' command to remove a todo
+    - 'show' command to display detailed todo info
+
+  # AC3: Simpler - might stay atomic or decompose minimally
+  - |
+    Add input validation and error handling:
+    - Validate todo title is not empty and under 200 chars
+    - Handle database connection errors gracefully
+    - Display user-friendly error messages
+    - Exit with appropriate status codes
+
+  # AC4: Complex - should decompose into sub-ACs
+  - |
+    Write comprehensive tests:
+    - Unit tests for Todo model validation
+    - Unit tests for TodoRepository CRUD operations
+    - Integration tests for CLI commands
+    - Test edge cases and error scenarios
+
+ontology_schema:
+  name: "TodoApp"
+  description: "CLI todo application domain"
+  fields:
+    - name: "todo"
+      field_type: "entity"
+      description: "A todo item with title, status, and metadata"
+    - name: "command"
+      field_type: "action"
+      description: "CLI command that operates on todos"
+    - name: "repository"
+      field_type: "service"
+      description: "Data access layer for todo persistence"
+
+evaluation_principles:
+  - name: "modularity"
+    description: "Code should be organized into small, focused modules"
+  - name: "testability"
+    description: "All business logic should be easily testable"
+  - name: "user_experience"
+    description: "CLI should provide clear feedback and help"
+
+metadata:
+  seed_id: "subac_test_001"
+  ambiguity_score: 0.3
+  expected_decomposition_depth: 2

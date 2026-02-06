@@ -69,6 +69,12 @@ class DecompositionResult:
         child_ac_ids: Tuple of generated child AC IDs.
         reasoning: LLM explanation of decomposition strategy.
         events: Events emitted during decomposition.
+        dependencies: Tuple of dependency tuples. Each tuple contains indices of
+            sibling ACs that must complete before this AC can start.
+            Example: ((),(0,),(0,1)) means:
+            - Child 0: no dependencies
+            - Child 1: depends on child 0
+            - Child 2: depends on child 0 and 1
     """
 
     parent_ac_id: str
@@ -76,6 +82,7 @@ class DecompositionResult:
     child_ac_ids: tuple[str, ...]
     reasoning: str
     events: list[BaseEvent] = field(default_factory=list)
+    dependencies: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
 
 
 class DecompositionError(ValidationError):
@@ -105,14 +112,16 @@ DECOMPOSITION_SYSTEM_PROMPT = """You are an expert at breaking down complex acce
 When decomposing an AC, follow these principles:
 1. MECE (Mutually Exclusive, Collectively Exhaustive) - children should not overlap and should cover the full scope
 2. Each child should be simpler than the parent
-3. Each child should be independently executable
+3. Each child should be independently executable when dependencies are met
 4. Use consistent granularity across children
 5. Maintain clear boundaries between children
+6. Identify dependencies between children - which tasks must complete before others can start
 
 Produce 2-5 child ACs. Each should be:
 - Specific and actionable
 - Independently verifiable
-- Clear about its scope"""
+- Clear about its scope
+- Explicit about dependencies on sibling tasks (if any)"""
 
 DECOMPOSITION_USER_TEMPLATE = """Parent Acceptance Criterion:
 {ac_content}
@@ -123,17 +132,19 @@ Insights from Discovery Phase:
 Current Depth: {depth} / {max_depth}
 
 Decompose this AC into 2-5 smaller, focused child ACs.
+For each child, identify which other children (by zero-based index) must complete before it can start.
 
 Respond with a JSON object:
 {{
     "children": [
-        "Child AC 1: specific, actionable description",
-        "Child AC 2: specific, actionable description",
-        ...
+        {{"content": "Child AC 1: specific, actionable description", "depends_on": []}},
+        {{"content": "Child AC 2: depends on child 1", "depends_on": [0]}},
+        {{"content": "Child AC 3: independent task", "depends_on": []}}
     ],
-    "reasoning": "Brief explanation of your decomposition strategy"
+    "reasoning": "Brief explanation of your decomposition strategy and why certain tasks depend on others"
 }}
 
+Dependencies use zero-based indices. An empty array [] means no dependencies (can run in parallel with others).
 Only respond with the JSON, no other text."""
 
 
@@ -407,13 +418,63 @@ async def decompose_ac(
         return Result.err(error)
 
     try:
-        children = parsed.get("children", [])
+        children_data = parsed.get("children", [])
         reasoning = parsed.get("reasoning", "LLM decomposition")
 
-        # Ensure children is a list of strings
-        if not isinstance(children, list):
+        # Ensure children is a list
+        if not isinstance(children_data, list):
             raise TypeError("children must be a list")
-        children = [str(c) for c in children]
+
+        # Extract content and dependencies from children
+        # Support both old format (list of strings) and new format (list of dicts)
+        children: list[str] = []
+        dependencies: list[tuple[int, ...]] = []
+
+        for i, child_item in enumerate(children_data):
+            if isinstance(child_item, str):
+                # Old format: plain string - no dependencies (backward compatibility)
+                children.append(child_item)
+                dependencies.append(tuple())
+            elif isinstance(child_item, dict):
+                # New format: dict with content and depends_on
+                content = child_item.get("content", "")
+                if not content:
+                    raise ValueError(f"Child {i} has no content")
+                children.append(str(content))
+
+                # Parse depends_on, validating indices
+                deps = child_item.get("depends_on", [])
+                if not isinstance(deps, list):
+                    deps = []
+
+                # Filter and validate dependency indices
+                # Only keep indices that are: int, >= 0, and < current index (no forward/self refs)
+                valid_deps_list: list[int] = []
+                invalid_deps: list[int] = []
+                for d in deps:
+                    if not isinstance(d, int):
+                        continue  # Skip non-integer values silently
+                    if d < 0 or d >= i:
+                        # Forward reference (d >= i) or self-reference or negative index
+                        invalid_deps.append(d)
+                    else:
+                        valid_deps_list.append(d)
+
+                # Log if dependencies were filtered out
+                if invalid_deps:
+                    log.warning(
+                        "decomposition.invalid_dependencies_filtered",
+                        ac_id=ac_id,
+                        child_idx=i,
+                        original_deps=deps,
+                        invalid_deps=invalid_deps,
+                        valid_deps=valid_deps_list,
+                        reason="forward_or_self_reference",
+                    )
+
+                dependencies.append(tuple(valid_deps_list))
+            else:
+                raise TypeError(f"Child {i} must be string or dict, got {type(child_item)}")
 
         # Validate children
         validation_result = _validate_children(children, ac_content, ac_id, depth)
@@ -430,6 +491,17 @@ async def decompose_ac(
         # Generate child IDs
         child_ac_ids = tuple(f"ac_{uuid4().hex[:12]}" for _ in children)
         child_acs = tuple(children)
+        dependencies_tuple = tuple(dependencies)
+
+        # Log dependency structure for observability
+        has_dependencies = any(deps for deps in dependencies_tuple)
+        log.debug(
+            "decomposition.dependencies_parsed",
+            ac_id=ac_id,
+            child_count=len(children),
+            has_dependencies=has_dependencies,
+            dependency_structure=[list(d) for d in dependencies_tuple],
+        )
 
         # Create success event
         decomposed_event = create_ac_decomposed_event(
@@ -447,6 +519,7 @@ async def decompose_ac(
             child_ac_ids=child_ac_ids,
             reasoning=reasoning,
             events=[decomposed_event],
+            dependencies=dependencies_tuple,
         )
 
         log.info(

@@ -1,0 +1,71 @@
+# Parallel Sub-AC Test Seed
+# Tests BOTH parallel execution AND Sub-AC decomposition
+# ACs are designed to be INDEPENDENT (no dependencies) so they run in parallel
+# Each AC is complex enough to trigger decomposition into 2-5 Sub-ACs
+#
+# Expected behavior:
+#   - Dependency analysis: all ACs independent → single level, all parallel
+#   - Each AC decomposed into 2-3 Sub-ACs by Claude
+#   - Sub-ACs within each AC also run in parallel
+#
+# Run with: ouroboros run workflow --parallel examples/parallel_subac_test_seed.yaml
+
+goal: "Create a set of independent Python utility modules in a utils/ directory"
+
+constraints:
+  - "Python 3.10+"
+  - "No external dependencies (stdlib only)"
+  - "Each module must be self-contained and independent"
+  - "Include docstrings for all public functions"
+
+acceptance_criteria:
+  # AC1: Independent - string utilities (complex enough for decomposition)
+  - |
+    Create utils/string_helpers.py with the following functions:
+    - slugify(text: str) -> str: Convert text to URL-friendly slug
+    - truncate(text: str, max_len: int, suffix: str = "...") -> str: Truncate with suffix
+    - camel_to_snake(name: str) -> str: Convert camelCase to snake_case
+    - snake_to_camel(name: str) -> str: Convert snake_case to camelCase
+    Include a test file tests/test_string_helpers.py with at least 3 tests per function
+
+  # AC2: Independent - date utilities (complex enough for decomposition)
+  - |
+    Create utils/date_helpers.py with the following functions:
+    - format_relative(dt: datetime) -> str: "2 hours ago", "3 days ago", etc.
+    - parse_natural(text: str) -> datetime: Parse "yesterday", "last week", etc.
+    - business_days_between(start: date, end: date) -> int: Count weekdays only
+    Include a test file tests/test_date_helpers.py with at least 3 tests per function
+
+  # AC3: Independent - file utilities (complex enough for decomposition)
+  - |
+    Create utils/file_helpers.py with the following functions:
+    - safe_write(path: Path, content: str) -> None: Atomic write with temp file
+    - find_files(directory: Path, pattern: str) -> list[Path]: Recursive glob with filtering
+    - human_readable_size(size_bytes: int) -> str: "1.5 MB", "300 KB", etc.
+    Include a test file tests/test_file_helpers.py with at least 3 tests per function
+
+ontology_schema:
+  name: "PythonUtilModules"
+  description: "Independent Python utility modules"
+  fields:
+    - name: "module"
+      field_type: "entity"
+      description: "A Python module with related utility functions"
+    - name: "function"
+      field_type: "action"
+      description: "A utility function within a module"
+    - name: "test"
+      field_type: "entity"
+      description: "A test case for a utility function"
+
+evaluation_principles:
+  - name: "independence"
+    description: "Each module must work independently without importing other modules"
+    weight: 1.0
+  - name: "testability"
+    description: "All functions must have comprehensive test coverage"
+    weight: 0.9
+
+metadata:
+  seed_id: "parallel_subac_test_001"
+  ambiguity_score: 0.1

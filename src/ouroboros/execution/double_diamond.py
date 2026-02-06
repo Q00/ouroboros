@@ -53,6 +53,97 @@ log = get_logger(__name__)
 
 
 # =============================================================================
+# Topological sort for parallel AC execution
+# =============================================================================
+
+
+def _topological_sort_to_levels(
+    count: int,
+    dependencies: tuple[tuple[int, ...], ...],
+) -> list[list[int]]:
+    """Topologically sort children into execution levels for parallel execution.
+
+    Uses Kahn's algorithm to group children by dependency depth.
+    Children in the same level can be executed in parallel.
+
+    Args:
+        count: Number of children
+        dependencies: For each child, tuple of child indices it depends on.
+            Example: ((),(0,),(0,1)) means:
+            - Child 0: no dependencies
+            - Child 1: depends on child 0
+            - Child 2: depends on child 0 and 1
+
+    Returns:
+        List of levels, where each level is a list of child indices
+        that can be executed in parallel.
+        Example: [[0], [1, 2], [3]] means:
+        - Level 0: execute child 0
+        - Level 1: execute children 1, 2 in parallel
+        - Level 2: execute child 3
+
+    Note:
+        If a cycle is detected (shouldn't happen with valid LLM output),
+        falls back to sequential execution.
+    """
+    if count == 0:
+        return []
+
+    # Validate dependencies length matches count
+    if dependencies and len(dependencies) != count:
+        log.warning(
+            "execution.decomposition.dependency_length_mismatch",
+            count=count,
+            dependencies_length=len(dependencies),
+            falling_back_to_full_parallel=True,
+        )
+        # Fallback to all independent (full parallelism)
+        return [list(range(count))]
+
+    # Handle empty dependencies (all children independent)
+    if not dependencies or all(not deps for deps in dependencies):
+        return [list(range(count))]  # All in one level = full parallelism
+
+    # Build in-degree count and adjacency list
+    in_degree = [0] * count
+    graph: dict[int, list[int]] = {i: [] for i in range(count)}
+
+    for child_idx, deps in enumerate(dependencies):
+        in_degree[child_idx] = len(deps)
+        for dep_idx in deps:
+            if 0 <= dep_idx < count:
+                graph[dep_idx].append(child_idx)
+
+    # Kahn's algorithm: level-order traversal
+    levels: list[list[int]] = []
+    current_level = [i for i in range(count) if in_degree[i] == 0]
+
+    while current_level:
+        levels.append(current_level)
+        next_level: list[int] = []
+        for node in current_level:
+            for neighbor in graph[node]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    next_level.append(neighbor)
+        current_level = next_level
+
+    # Check for cycles (defensive - shouldn't happen with valid dependencies)
+    resolved_count = sum(len(level) for level in levels)
+    if resolved_count < count:
+        log.warning(
+            "execution.decomposition.cycle_detected",
+            count=count,
+            resolved_count=resolved_count,
+            falling_back_to_sequential=True,
+        )
+        # Fallback to sequential execution
+        return [[i] for i in range(count)]
+
+    return levels
+
+
+# =============================================================================
 # Phase-specific prompts (extracted for maintainability)
 # =============================================================================
 
@@ -1138,123 +1229,191 @@ class DoubleDiamond:
                     validate_child_result,
                 )
 
+                # Compute execution levels using topological sort
+                # Children in the same level can be executed in parallel
+                dependencies = decomposition.dependencies or tuple(
+                    tuple() for _ in decomposition.child_acs
+                )
+                execution_levels = _topological_sort_to_levels(
+                    count=len(decomposition.child_acs),
+                    dependencies=dependencies,
+                )
+
+                is_parallel = any(len(level) > 1 for level in execution_levels)
+                log.info(
+                    "execution.decomposition.parallel_schedule",
+                    execution_id=execution_id,
+                    child_count=len(decomposition.child_acs),
+                    level_count=len(execution_levels),
+                    levels=[len(level) for level in execution_levels],
+                    is_parallel=is_parallel,
+                )
+
                 child_results: list[CycleResult] = []
-                for idx, (child_ac, child_id) in enumerate(
-                    zip(decomposition.child_acs, decomposition.child_ac_ids, strict=True)
-                ):
-                    child_exec_id = f"{execution_id}_child_{idx}"
 
-                    # Emit SubAgent started event
-                    subagent_started_event = create_subagent_started_event(
-                        subagent_id=child_exec_id,
-                        parent_execution_id=execution_id,
-                        child_ac=child_ac,
-                        depth=depth + 1,
-                    )
-                    all_events.append(subagent_started_event)
-
+                # Execute children level by level (parallel within each level)
+                for level_idx, level_children in enumerate(execution_levels):
                     log.info(
-                        "execution.subagent.started",
-                        subagent_id=child_exec_id,
-                        parent_execution_id=execution_id,
-                        depth=depth + 1,
+                        "execution.decomposition.level_started",
+                        execution_id=execution_id,
+                        level=level_idx,
+                        child_count=len(level_children),
+                        child_indices=level_children,
                     )
 
-                    # Execute child in isolated context
-                    # Note: FilteredContext is available via create_filtered_context()
-                    # but DoubleDiamond doesn't maintain WorkflowContext state.
-                    # The isolation is achieved by:
-                    # 1. Passing only child_ac (not parent context)
-                    # 2. Using immutable CycleResult
-                    # 3. Validating results before integration
-                    child_result = await self.run_cycle_with_decomposition(
-                        execution_id=child_exec_id,
-                        seed_id=seed_id,
-                        current_ac=child_ac,
-                        iteration=1,
-                        depth=depth + 1,
-                        max_depth=max_depth,
-                        parent_ac=current_ac,
-                    )
+                    # Define coroutine for executing a single child AC
+                    async def _execute_child(
+                        idx: int,
+                    ) -> tuple[int, Result[CycleResult, ExecutionError]]:
+                        """Execute a single child and return (index, result)."""
+                        child_ac = decomposition.child_acs[idx]
+                        child_exec_id = f"{execution_id}_child_{idx}"
 
-                    if child_result.is_ok:
-                        # AC 4: Validate child result before integration
-                        validation_result = validate_child_result(
-                            child_result.value, child_ac
+                        # Emit SubAgent started event
+                        subagent_started_event = create_subagent_started_event(
+                            subagent_id=child_exec_id,
+                            parent_execution_id=execution_id,
+                            child_ac=child_ac,
+                            depth=depth + 1,
+                        )
+                        all_events.append(subagent_started_event)
+
+                        log.info(
+                            "execution.subagent.started",
+                            subagent_id=child_exec_id,
+                            parent_execution_id=execution_id,
+                            depth=depth + 1,
+                            parallel_level=level_idx,
                         )
 
-                        if validation_result.is_ok:
-                            validated_child = validation_result.value
-                            child_results.append(validated_child)
-                            all_events.extend(validated_child.events)
+                        # Execute child in isolated context
+                        result = await self.run_cycle_with_decomposition(
+                            execution_id=child_exec_id,
+                            seed_id=seed_id,
+                            current_ac=child_ac,
+                            iteration=1,
+                            depth=depth + 1,
+                            max_depth=max_depth,
+                            parent_ac=current_ac,
+                        )
 
-                            # Emit validation success event
-                            validated_event = create_subagent_validated_event(
-                                subagent_id=child_exec_id,
+                        return (idx, result)
+
+                    # Execute all children in this level in parallel
+                    level_results = await asyncio.gather(
+                        *[_execute_child(idx) for idx in level_children],
+                        return_exceptions=True,
+                    )
+
+                    # Process results for this level
+                    level_success_count = 0
+                    for result_item in level_results:
+                        # Handle unexpected exceptions during execution
+                        if isinstance(result_item, BaseException):
+                            log.error(
+                                "execution.subagent.unexpected_exception",
                                 parent_execution_id=execution_id,
-                                validation_passed=True,
+                                error=str(result_item),
+                                error_type=type(result_item).__name__,
+                                level=level_idx,
                             )
-                            all_events.append(validated_event)
+                            continue
 
-                            # Emit SubAgent completed event
-                            completed_event = create_subagent_completed_event(
-                                subagent_id=child_exec_id,
-                                parent_execution_id=execution_id,
-                                success=True,
-                                child_count=len(validated_child.child_results),
-                            )
-                            all_events.append(completed_event)
+                        # result_item is tuple[int, Result[...]] after exception check
+                        idx, child_result = result_item
+                        child_exec_id = f"{execution_id}_child_{idx}"
+                        child_ac = decomposition.child_acs[idx]
 
-                            log.info(
-                                "execution.subagent.completed",
-                                subagent_id=child_exec_id,
-                                success=True,
+                        if child_result.is_ok:
+                            # AC 4: Validate child result before integration
+                            validation_result = validate_child_result(
+                                child_result.value, child_ac
                             )
+
+                            if validation_result.is_ok:
+                                validated_child = validation_result.value
+                                child_results.append(validated_child)
+                                all_events.extend(validated_child.events)
+                                level_success_count += 1
+
+                                # Emit validation success event
+                                validated_event = create_subagent_validated_event(
+                                    subagent_id=child_exec_id,
+                                    parent_execution_id=execution_id,
+                                    validation_passed=True,
+                                )
+                                all_events.append(validated_event)
+
+                                # Emit SubAgent completed event
+                                completed_event = create_subagent_completed_event(
+                                    subagent_id=child_exec_id,
+                                    parent_execution_id=execution_id,
+                                    success=True,
+                                    child_count=len(validated_child.child_results),
+                                )
+                                all_events.append(completed_event)
+
+                                log.info(
+                                    "execution.subagent.completed",
+                                    subagent_id=child_exec_id,
+                                    success=True,
+                                    level=level_idx,
+                                )
+                            else:
+                                # Validation failed - log but don't crash (AC 5)
+                                validation_error = validation_result.error
+                                log.warning(
+                                    "execution.subagent.validation_failed",
+                                    subagent_id=child_exec_id,
+                                    error=str(validation_error),
+                                    level=level_idx,
+                                )
+
+                                # Emit validation failure event
+                                validated_event = create_subagent_validated_event(
+                                    subagent_id=child_exec_id,
+                                    parent_execution_id=execution_id,
+                                    validation_passed=False,
+                                    validation_message=str(validation_error),
+                                )
+                                all_events.append(validated_event)
+
+                                # Emit failed event
+                                failed_event = create_subagent_failed_event(
+                                    subagent_id=child_exec_id,
+                                    parent_execution_id=execution_id,
+                                    error_message=f"Validation failed: {validation_error}",
+                                    is_retriable=False,
+                                )
+                                all_events.append(failed_event)
+                                # Continue with other children (resilience - AC 5)
                         else:
-                            # Validation failed - log but don't crash (AC 5)
-                            validation_error = validation_result.error
-                            log.warning(
-                                "execution.subagent.validation_failed",
-                                subagent_id=child_exec_id,
-                                error=str(validation_error),
-                            )
-
-                            # Emit validation failure event
-                            validated_event = create_subagent_validated_event(
-                                subagent_id=child_exec_id,
+                            # AC 5: Failed SubAgent doesn't crash parent
+                            log.error(
+                                "execution.subagent.failed",
                                 parent_execution_id=execution_id,
-                                validation_passed=False,
-                                validation_message=str(validation_error),
+                                child_execution_id=child_exec_id,
+                                error=str(child_result.error),
+                                level=level_idx,
                             )
-                            all_events.append(validated_event)
 
-                            # Emit failed event
+                            # Emit SubAgent failed event
                             failed_event = create_subagent_failed_event(
                                 subagent_id=child_exec_id,
                                 parent_execution_id=execution_id,
-                                error_message=f"Validation failed: {validation_error}",
-                                is_retriable=False,
+                                error_message=str(child_result.error),
+                                is_retriable=getattr(child_result.error, "is_retriable", False),
                             )
                             all_events.append(failed_event)
                             # Continue with other children (resilience - AC 5)
-                    else:
-                        # AC 5: Failed SubAgent doesn't crash parent
-                        log.error(
-                            "execution.subagent.failed",
-                            parent_execution_id=execution_id,
-                            child_execution_id=child_exec_id,
-                            error=str(child_result.error),
-                        )
 
-                        # Emit SubAgent failed event
-                        failed_event = create_subagent_failed_event(
-                            subagent_id=child_exec_id,
-                            parent_execution_id=execution_id,
-                            error_message=str(child_result.error),
-                            is_retriable=getattr(child_result.error, "is_retriable", False),
-                        )
-                        all_events.append(failed_event)
-                        # Continue with other children (resilience - AC 5)
+                    log.info(
+                        "execution.decomposition.level_completed",
+                        execution_id=execution_id,
+                        level=level_idx,
+                        successful=level_success_count,
+                        total=len(level_children),
+                    )
 
                 # Emit cycle completed event (decomposed)
                 cycle_completed_event = self._emit_event(

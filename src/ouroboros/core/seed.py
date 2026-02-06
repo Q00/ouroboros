@@ -158,6 +158,10 @@ class Seed(BaseModel, frozen=True):
 
     # Direction - IMMUTABLE
     goal: str = Field(..., min_length=1, description="Primary objective of the workflow")
+    task_type: str = Field(
+        default="code",
+        description="Type of task execution: 'code', 'research', or 'analysis'",
+    )
     constraints: tuple[str, ...] = Field(
         default_factory=tuple,
         description="Hard constraints that must be satisfied",

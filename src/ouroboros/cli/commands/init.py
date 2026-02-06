@@ -379,12 +379,13 @@ async def _generate_seed_from_interview(
     return seed_path, SeedGenerationResult.SUCCESS
 
 
-async def _start_workflow(seed_path: Path, use_orchestrator: bool = False) -> None:
+async def _start_workflow(seed_path: Path, use_orchestrator: bool = False, parallel: bool = True) -> None:
     """Start workflow from generated seed.
 
     Args:
         seed_path: Path to the seed YAML file.
         use_orchestrator: Whether to use Claude Code orchestrator.
+        parallel: Execute independent ACs in parallel. Default: True.
     """
     console.print()
     console.print("[bold cyan]Starting workflow...[/]")
@@ -394,7 +395,7 @@ async def _start_workflow(seed_path: Path, use_orchestrator: bool = False) -> No
         from ouroboros.cli.commands.run import _run_orchestrator
 
         try:
-            await _run_orchestrator(seed_path, resume_session=None)
+            await _run_orchestrator(seed_path, resume_session=None, parallel=parallel)
         except typer.Exit:
             pass  # Normal exit
         except KeyboardInterrupt:
