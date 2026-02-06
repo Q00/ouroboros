@@ -24,6 +24,7 @@ Usage:
 
 CLI Usage:
     ouroboros run --orchestrator seed.yaml
+    ouroboros run --orchestrator seed.yaml --parallel  # Parallel AC execution
     ouroboros run --orchestrator seed.yaml --resume <session_id>
     ouroboros run --orchestrator seed.yaml --mcp-config mcp.yaml
 """
@@ -69,6 +70,36 @@ from ouroboros.orchestrator.session import (
     SessionStatus,
     SessionTracker,
 )
+from ouroboros.orchestrator.dependency_analyzer import (
+    ACNode,
+    DependencyAnalyzer,
+    DependencyAnalysisError,
+    DependencyGraph,
+)
+from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionResult,
+    ParallelACExecutor,
+    ParallelExecutionResult,
+)
+from ouroboros.orchestrator.level_context import (
+    ACContextSummary,
+    LevelContext,
+    build_context_prompt,
+    extract_level_context,
+)
+from ouroboros.orchestrator.coordinator import (
+    CoordinatorReview,
+    FileConflict,
+    LevelCoordinator,
+)
+from ouroboros.orchestrator.execution_strategy import (
+    AnalysisStrategy,
+    CodeStrategy,
+    ExecutionStrategy,
+    ResearchStrategy,
+    get_strategy,
+    register_strategy,
+)
 
 __all__ = [
     # Adapter
@@ -106,4 +137,28 @@ __all__ = [
     "create_task_completed_event",
     "create_task_started_event",
     "create_tool_called_event",
+    # Parallel Execution
+    "ACNode",
+    "DependencyAnalyzer",
+    "DependencyAnalysisError",
+    "DependencyGraph",
+    "ACExecutionResult",
+    "ParallelACExecutor",
+    "ParallelExecutionResult",
+    # Level Context
+    "ACContextSummary",
+    "LevelContext",
+    "build_context_prompt",
+    "extract_level_context",
+    # Coordinator
+    "CoordinatorReview",
+    "FileConflict",
+    "LevelCoordinator",
+    # Execution Strategy
+    "AnalysisStrategy",
+    "CodeStrategy",
+    "ExecutionStrategy",
+    "ResearchStrategy",
+    "get_strategy",
+    "register_strategy",
 ]

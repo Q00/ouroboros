@@ -213,6 +213,7 @@ class ACUpdated(Message):
         status: New AC status.
         depth: Depth in the AC tree.
         is_atomic: Whether AC is atomic.
+        parallel_level: Execution level for parallel execution (None if not parallel).
     """
 
     def __init__(
@@ -222,6 +223,7 @@ class ACUpdated(Message):
         status: str,
         depth: int,
         is_atomic: bool,
+        parallel_level: int | None = None,
     ) -> None:
         """Initialize ACUpdated message.
 
@@ -231,6 +233,7 @@ class ACUpdated(Message):
             status: New AC status.
             depth: Depth in the AC tree.
             is_atomic: Whether AC is atomic.
+            parallel_level: Execution level for parallel execution.
         """
         super().__init__()
         self.execution_id = execution_id
@@ -238,6 +241,75 @@ class ACUpdated(Message):
         self.status = status
         self.depth = depth
         self.is_atomic = is_atomic
+        self.parallel_level = parallel_level
+
+
+class ParallelBatchStarted(Message):
+    """Message indicating a parallel batch execution started.
+
+    Attributes:
+        execution_id: The parent execution ID.
+        batch_index: Index of the batch (0-based).
+        ac_ids: List of AC IDs in this batch.
+        total_batches: Total number of batches.
+    """
+
+    def __init__(
+        self,
+        execution_id: str,
+        batch_index: int,
+        ac_ids: list[str],
+        total_batches: int,
+    ) -> None:
+        """Initialize ParallelBatchStarted message.
+
+        Args:
+            execution_id: The parent execution ID.
+            batch_index: Index of the batch.
+            ac_ids: List of AC IDs in this batch.
+            total_batches: Total number of batches.
+        """
+        super().__init__()
+        self.execution_id = execution_id
+        self.batch_index = batch_index
+        self.ac_ids = ac_ids
+        self.total_batches = total_batches
+
+
+class ParallelBatchCompleted(Message):
+    """Message indicating a parallel batch execution completed.
+
+    Attributes:
+        execution_id: The parent execution ID.
+        batch_index: Index of the batch (0-based).
+        successful_count: Number of successful ACs in batch.
+        failed_count: Number of failed ACs in batch.
+        total_in_batch: Total ACs in this batch.
+    """
+
+    def __init__(
+        self,
+        execution_id: str,
+        batch_index: int,
+        successful_count: int,
+        failed_count: int,
+        total_in_batch: int,
+    ) -> None:
+        """Initialize ParallelBatchCompleted message.
+
+        Args:
+            execution_id: The parent execution ID.
+            batch_index: Index of the batch.
+            successful_count: Number of successful ACs.
+            failed_count: Number of failed ACs.
+            total_in_batch: Total ACs in batch.
+        """
+        super().__init__()
+        self.execution_id = execution_id
+        self.batch_index = batch_index
+        self.successful_count = successful_count
+        self.failed_count = failed_count
+        self.total_in_batch = total_in_batch
 
 
 class WorkflowProgressUpdated(Message):
@@ -298,6 +370,39 @@ class WorkflowProgressUpdated(Message):
         self.estimated_cost_usd = estimated_cost_usd
 
 
+class SubtaskUpdated(Message):
+    """Message indicating a sub-task was updated.
+
+    Used to show hierarchical AC execution in the tree.
+
+    Attributes:
+        execution_id: The execution with updated sub-task.
+        ac_index: Parent AC index.
+        sub_task_index: Sub-task index within the AC.
+        sub_task_id: Unique sub-task ID.
+        content: Sub-task description.
+        status: Sub-task status (executing, completed, failed).
+    """
+
+    def __init__(
+        self,
+        execution_id: str,
+        ac_index: int,
+        sub_task_index: int,
+        sub_task_id: str,
+        content: str,
+        status: str,
+    ) -> None:
+        """Initialize SubtaskUpdated message."""
+        super().__init__()
+        self.execution_id = execution_id
+        self.ac_index = ac_index
+        self.sub_task_index = sub_task_index
+        self.sub_task_id = sub_task_id
+        self.content = content
+        self.status = status
+
+
 class PauseRequested(Message):
     """Message indicating user requested execution pause.
 
@@ -333,6 +438,65 @@ class ResumeRequested(Message):
         """
         super().__init__()
         self.execution_id = execution_id
+
+
+class ToolCallStarted(Message):
+    """Tool call started during AC execution."""
+
+    def __init__(
+        self,
+        execution_id: str,
+        ac_id: str,
+        tool_name: str,
+        tool_detail: str,
+        tool_input: dict[str, Any] | None = None,
+        call_index: int = 0,
+    ) -> None:
+        super().__init__()
+        self.execution_id = execution_id
+        self.ac_id = ac_id
+        self.tool_name = tool_name
+        self.tool_detail = tool_detail
+        self.tool_input = tool_input or {}
+        self.call_index = call_index
+
+
+class ToolCallCompleted(Message):
+    """Tool call completed during AC execution."""
+
+    def __init__(
+        self,
+        execution_id: str,
+        ac_id: str,
+        tool_name: str,
+        tool_detail: str,
+        call_index: int = 0,
+        duration_seconds: float = 0.0,
+        success: bool = True,
+    ) -> None:
+        super().__init__()
+        self.execution_id = execution_id
+        self.ac_id = ac_id
+        self.tool_name = tool_name
+        self.tool_detail = tool_detail
+        self.call_index = call_index
+        self.duration_seconds = duration_seconds
+        self.success = success
+
+
+class AgentThinkingUpdated(Message):
+    """Agent thinking/reasoning text updated."""
+
+    def __init__(
+        self,
+        execution_id: str,
+        ac_id: str,
+        thinking_text: str,
+    ) -> None:
+        super().__init__()
+        self.execution_id = execution_id
+        self.ac_id = ac_id
+        self.thinking_text = thinking_text
 
 
 # =============================================================================
@@ -378,6 +542,11 @@ class TUIState:
     ac_tree: dict[str, Any] = field(default_factory=dict)
     logs: list[dict[str, Any]] = field(default_factory=list)
     max_logs: int = 100
+
+    # P1: Tool/thinking tracking for dashboard
+    active_tools: dict[str, dict[str, str]] = field(default_factory=dict)
+    tool_history: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    thinking: dict[str, str] = field(default_factory=dict)
 
     def add_log(
         self,
@@ -500,6 +669,57 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             status=status,
             depth=data.get("depth", 0),
             is_atomic=data.get("is_atomic", False),
+            parallel_level=data.get("parallel_level"),
+        )
+
+    elif event_type == "execution.subagent.started":
+        # SubAgent started - extract parallel level if available
+        return ACUpdated(
+            execution_id=event.aggregate_id,
+            ac_id=data.get("subagent_id", ""),
+            status="executing",
+            depth=data.get("depth", 0),
+            is_atomic=False,
+            parallel_level=data.get("parallel_level"),
+        )
+
+    elif event_type == "execution.subagent.completed":
+        return ACUpdated(
+            execution_id=event.aggregate_id,
+            ac_id=data.get("subagent_id", ""),
+            status="completed",
+            depth=data.get("depth", 0),
+            is_atomic=False,
+            parallel_level=data.get("parallel_level"),
+        )
+
+    elif event_type == "execution.subagent.failed":
+        return ACUpdated(
+            execution_id=event.aggregate_id,
+            ac_id=data.get("subagent_id", ""),
+            status="failed",
+            depth=data.get("depth", 0),
+            is_atomic=False,
+            parallel_level=data.get("parallel_level"),
+        )
+
+    elif event_type == "execution.decomposition.level_started":
+        # Parallel batch started
+        return ParallelBatchStarted(
+            execution_id=event.aggregate_id,
+            batch_index=data.get("level", 0),
+            ac_ids=data.get("child_indices", []),
+            total_batches=data.get("total_levels", 1),
+        )
+
+    elif event_type == "execution.decomposition.level_completed":
+        # Parallel batch completed
+        return ParallelBatchCompleted(
+            execution_id=event.aggregate_id,
+            batch_index=data.get("level", 0),
+            successful_count=data.get("successful", 0),
+            failed_count=data.get("total", 0) - data.get("successful", 0),
+            total_in_batch=data.get("total", 0),
         )
 
     elif event_type == "workflow.progress.updated":
@@ -520,20 +740,64 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             estimated_cost_usd=data.get("estimated_cost_usd", 0.0),
         )
 
+    elif event_type == "execution.subtask.updated":
+        return SubtaskUpdated(
+            execution_id=event.aggregate_id,
+            ac_index=data.get("ac_index", 0),
+            sub_task_index=data.get("sub_task_index", 0),
+            sub_task_id=data.get("sub_task_id", ""),
+            content=data.get("content", ""),
+            status=data.get("status", "pending"),
+        )
+
+    elif event_type == "execution.tool.started":
+        return ToolCallStarted(
+            execution_id=event.aggregate_id,
+            ac_id=data.get("ac_id", ""),
+            tool_name=data.get("tool_name", ""),
+            tool_detail=data.get("tool_detail", ""),
+            tool_input=data.get("tool_input"),
+            call_index=data.get("call_index", 0),
+        )
+
+    elif event_type == "execution.tool.completed":
+        return ToolCallCompleted(
+            execution_id=event.aggregate_id,
+            ac_id=data.get("ac_id", ""),
+            tool_name=data.get("tool_name", ""),
+            tool_detail=data.get("tool_detail", ""),
+            call_index=data.get("call_index", 0),
+            duration_seconds=data.get("duration_seconds", 0.0),
+            success=data.get("success", True),
+        )
+
+    elif event_type == "execution.agent.thinking":
+        return AgentThinkingUpdated(
+            execution_id=event.aggregate_id,
+            ac_id=data.get("ac_id", ""),
+            thinking_text=data.get("thinking_text", ""),
+        )
+
     # Return None for unhandled event types
     return None
 
 
 __all__ = [
     "ACUpdated",
+    "AgentThinkingUpdated",
     "CostUpdated",
     "DriftUpdated",
     "ExecutionUpdated",
     "LogMessage",
+    "ParallelBatchCompleted",
+    "ParallelBatchStarted",
     "PauseRequested",
     "PhaseChanged",
     "ResumeRequested",
+    "SubtaskUpdated",
     "TUIState",
+    "ToolCallCompleted",
+    "ToolCallStarted",
     "WorkflowProgressUpdated",
     "create_message_from_event",
 ]

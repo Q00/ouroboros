@@ -33,6 +33,7 @@ from ouroboros.core.types import Result
 from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import DEFAULT_TOOLS, AgentMessage, ClaudeAgentAdapter
+from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.events import (
     create_drift_measured_event,
     create_mcp_tools_loaded_event,
@@ -98,16 +99,24 @@ class OrchestratorError(OuroborosError):
 # =============================================================================
 
 
-def build_system_prompt(seed: Seed) -> str:
+def build_system_prompt(
+    seed: Seed,
+    strategy: ExecutionStrategy | None = None,
+) -> str:
     """Build system prompt from seed specification.
 
     Args:
         seed: Seed to extract system prompt from.
+        strategy: Execution strategy for prompt customization.
+            If None, uses strategy from seed.task_type.
 
     Returns:
         System prompt string.
     """
     from ouroboros.orchestrator.workflow_state import get_ac_tracking_prompt
+
+    if strategy is None:
+        strategy = get_strategy(seed.task_type)
 
     constraints_text = "\n".join(f"- {c}" for c in seed.constraints) if seed.constraints else "None"
 
@@ -118,8 +127,9 @@ def build_system_prompt(seed: Seed) -> str:
     )
 
     ac_tracking = get_ac_tracking_prompt()
+    strategy_fragment = strategy.get_system_prompt_fragment()
 
-    return f"""You are an autonomous coding agent executing a task for the Ouroboros workflow system.
+    return f"""{strategy_fragment}
 
 ## Goal
 {seed.goal}
@@ -130,25 +140,28 @@ def build_system_prompt(seed: Seed) -> str:
 ## Evaluation Principles
 {principles_text}
 
-## Guidelines
-- Execute each acceptance criterion thoroughly
-- Use the available tools (Read, Edit, Bash, Glob, Grep) to accomplish tasks
-- Write clean, well-tested code following project conventions
-- Report progress clearly as you work
-- If you encounter blockers, explain them clearly
 {ac_tracking}"""
 
 
-def build_task_prompt(seed: Seed) -> str:
+def build_task_prompt(
+    seed: Seed,
+    strategy: ExecutionStrategy | None = None,
+) -> str:
     """Build task prompt from seed acceptance criteria.
 
     Args:
         seed: Seed containing acceptance criteria.
+        strategy: Execution strategy for prompt customization.
+            If None, uses strategy from seed.task_type.
 
     Returns:
         Task prompt string.
     """
+    if strategy is None:
+        strategy = get_strategy(seed.task_type)
+
     ac_list = "\n".join(f"{i + 1}. {ac}" for i, ac in enumerate(seed.acceptance_criteria))
+    suffix = strategy.get_task_prompt_suffix()
 
     return f"""Execute the following task according to the acceptance criteria:
 
@@ -158,8 +171,7 @@ def build_task_prompt(seed: Seed) -> str:
 ## Acceptance Criteria
 {ac_list}
 
-Please execute each criterion in order, using the available tools to read, write, and modify code as needed.
-Report your progress and results for each criterion.
+{suffix}
 """
 
 
@@ -190,6 +202,7 @@ class OrchestratorRunner:
         mcp_manager: MCPClientManager | None = None,
         mcp_tool_prefix: str = "",
         debug: bool = False,
+        enable_decomposition: bool = True,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -203,6 +216,7 @@ class OrchestratorRunner:
             mcp_tool_prefix: Optional prefix to add to MCP tool names to avoid
                            conflicts (e.g., "mcp_" makes "read" become "mcp_read").
             debug: Enable verbose logging output. When False, only Live display shown.
+            enable_decomposition: Enable AC decomposition into Sub-ACs.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -211,6 +225,7 @@ class OrchestratorRunner:
         self._mcp_manager: MCPClientManager | None = mcp_manager
         self._mcp_tool_prefix = mcp_tool_prefix
         self._debug = debug
+        self._enable_decomposition = enable_decomposition
 
     @property
     def mcp_manager(self) -> MCPClientManager | None:
@@ -225,21 +240,25 @@ class OrchestratorRunner:
         self,
         session_id: str,
         tool_prefix: str = "",
+        strategy: ExecutionStrategy | None = None,
     ) -> tuple[list[str], MCPToolProvider | None]:
-        """Get merged tool list from DEFAULT_TOOLS and MCP tools.
+        """Get merged tool list from strategy tools and MCP tools.
 
-        If MCP manager is configured, discovers tools from connected servers
-        and merges them with DEFAULT_TOOLS. DEFAULT_TOOLS always take priority.
+        Uses strategy.get_tools() as the base tool set (falls back to
+        DEFAULT_TOOLS when no strategy is provided). If MCP manager is
+        configured, discovers tools from connected servers and merges them.
 
         Args:
             session_id: Current session ID for event emission.
             tool_prefix: Optional prefix for MCP tool names.
+            strategy: Execution strategy providing base tool set.
 
         Returns:
             Tuple of (merged tool names list, MCPToolProvider or None).
         """
-        # Start with default tools
-        merged_tools = list(DEFAULT_TOOLS)
+        # Start with strategy tools (or DEFAULT_TOOLS as fallback)
+        base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
+        merged_tools = list(base_tools)
 
         if self._mcp_manager is None:
             return merged_tools, None
@@ -306,6 +325,7 @@ class OrchestratorRunner:
         self,
         seed: Seed,
         execution_id: str | None = None,
+        parallel: bool = True,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed via Claude Agent.
 
@@ -316,6 +336,8 @@ class OrchestratorRunner:
         Args:
             seed: Seed specification to execute.
             execution_id: Optional execution ID. Generated if not provided.
+            parallel: Enable parallel AC execution. When True, independent ACs
+                     run concurrently. Default: True (parallel execution).
 
         Returns:
             Result containing OrchestratorResult on success.
@@ -359,14 +381,16 @@ class OrchestratorRunner:
         )
         await self._event_store.append(start_event)
 
-        # Build prompts
-        system_prompt = build_system_prompt(seed)
-        task_prompt = build_task_prompt(seed)
+        # Build prompts with strategy
+        strategy = get_strategy(seed.task_type)
+        system_prompt = build_system_prompt(seed, strategy=strategy)
+        task_prompt = build_task_prompt(seed, strategy=strategy)
 
-        # Get merged tools (DEFAULT_TOOLS + MCP tools if configured)
+        # Get merged tools (strategy tools + MCP tools if configured)
         merged_tools, mcp_provider = await self._get_merged_tools(
             session_id=tracker.session_id,
             tool_prefix=self._mcp_tool_prefix,
+            strategy=strategy,
         )
 
         # Execute with progress display
@@ -381,7 +405,19 @@ class OrchestratorRunner:
             acceptance_criteria=seed.acceptance_criteria,
             goal=seed.goal,
             session_id=tracker.session_id,
+            activity_map=strategy.get_activity_map(),
         )
+
+        # Check for parallel execution mode
+        if parallel and len(seed.acceptance_criteria) > 1:
+            return await self._execute_parallel(
+                seed=seed,
+                exec_id=exec_id,
+                tracker=tracker,
+                merged_tools=merged_tools,
+                system_prompt=system_prompt,
+                start_time=start_time,
+            )
 
         try:
             # Use simple status spinner with log-style output for changes
@@ -606,6 +642,186 @@ class OrchestratorRunner:
                 )
             )
 
+    async def _execute_parallel(
+        self,
+        seed: Seed,
+        exec_id: str,
+        tracker: Any,
+        merged_tools: list[str],
+        system_prompt: str,
+        start_time: datetime,
+    ) -> Result[OrchestratorResult, OrchestratorError]:
+        """Execute seed with parallel AC execution.
+
+        Analyzes AC dependencies using LLM, then executes independent ACs
+        in parallel. ACs with dependencies execute after their dependencies complete.
+
+        Args:
+            seed: Seed specification to execute.
+            exec_id: Execution ID.
+            tracker: Session tracker.
+            merged_tools: Available tools.
+            system_prompt: System prompt for agents.
+            start_time: Execution start time.
+
+        Returns:
+            Result containing OrchestratorResult on success.
+        """
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+        from ouroboros.orchestrator.parallel_executor import ParallelACExecutor
+
+        log.info(
+            "orchestrator.runner.parallel_mode_enabled",
+            execution_id=exec_id,
+            session_id=tracker.session_id,
+            ac_count=len(seed.acceptance_criteria),
+        )
+
+        # Analyze dependencies
+        self._console.print(
+            "\n[cyan]Analyzing AC dependencies...[/cyan]"
+        )
+
+        analyzer = DependencyAnalyzer()
+        dep_result = await analyzer.analyze(seed.acceptance_criteria)
+
+        if dep_result.is_err:
+            log.warning(
+                "orchestrator.runner.dependency_analysis_failed",
+                execution_id=exec_id,
+                error=str(dep_result.error),
+            )
+            # Continue with all-parallel fallback (analyzer handles this internally)
+
+        dependency_graph = dep_result.value
+
+        # Log execution plan
+        log.info(
+            "orchestrator.runner.execution_plan",
+            execution_id=exec_id,
+            total_levels=dependency_graph.total_levels,
+            levels=dependency_graph.execution_levels,
+            parallelizable=dependency_graph.is_parallelizable,
+        )
+
+        self._console.print(
+            f"[green]Execution plan: {dependency_graph.total_levels} levels, "
+            f"parallelizable: {dependency_graph.is_parallelizable}[/green]"
+        )
+        for i, level in enumerate(dependency_graph.execution_levels):
+            self._console.print(f"  Level {i + 1}: ACs {[idx + 1 for idx in level]}")
+
+        # Execute in parallel
+        parallel_executor = ParallelACExecutor(
+            adapter=self._adapter,
+            event_store=self._event_store,
+            console=self._console,
+        )
+
+        parallel_result = await parallel_executor.execute_parallel(
+            seed=seed,
+            dependency_graph=dependency_graph,
+            session_id=tracker.session_id,
+            execution_id=exec_id,
+            tools=merged_tools,
+            system_prompt=system_prompt,
+        )
+
+        # Calculate duration
+        duration = (datetime.now(UTC) - start_time).total_seconds()
+
+        # Determine overall success
+        success = parallel_result.all_succeeded
+
+        # Build summary message
+        summary_parts = [
+            f"Parallel Execution Complete",
+            f"Success: {parallel_result.success_count}/{len(seed.acceptance_criteria)}",
+        ]
+        if parallel_result.failure_count > 0:
+            summary_parts.append(f"Failed: {parallel_result.failure_count}")
+        if parallel_result.skipped_count > 0:
+            summary_parts.append(f"Skipped: {parallel_result.skipped_count}")
+
+        final_message = "\n".join(summary_parts)
+
+        # Emit completion event
+        if success:
+            completed_event = create_session_completed_event(
+                session_id=tracker.session_id,
+                summary={
+                    "parallel_execution": True,
+                    "success_count": parallel_result.success_count,
+                    "failure_count": parallel_result.failure_count,
+                    "skipped_count": parallel_result.skipped_count,
+                    "total_levels": dependency_graph.total_levels,
+                },
+                messages_processed=parallel_result.total_messages,
+            )
+            await self._event_store.append(completed_event)
+            await self._session_repo.mark_completed(
+                tracker.session_id,
+                {"messages_processed": parallel_result.total_messages},
+            )
+
+            self._console.print(
+                Panel(
+                    Text(final_message, style="green"),
+                    title="[green]Parallel Execution Completed[/green]",
+                    border_style="green",
+                )
+            )
+        else:
+            failed_event = create_session_failed_event(
+                session_id=tracker.session_id,
+                error_message=f"Partial failure: {parallel_result.failure_count} failed, {parallel_result.skipped_count} skipped",
+                messages_processed=parallel_result.total_messages,
+            )
+            await self._event_store.append(failed_event)
+            await self._session_repo.mark_failed(
+                tracker.session_id,
+                final_message,
+            )
+
+            self._console.print(
+                Panel(
+                    Text(final_message, style="yellow"),
+                    title="[yellow]Partial Success[/yellow]",
+                    border_style="yellow",
+                )
+            )
+
+        log.info(
+            "orchestrator.runner.parallel_completed",
+            execution_id=exec_id,
+            session_id=tracker.session_id,
+            success=success,
+            success_count=parallel_result.success_count,
+            failure_count=parallel_result.failure_count,
+            skipped_count=parallel_result.skipped_count,
+            total_messages=parallel_result.total_messages,
+            duration_seconds=duration,
+        )
+
+        return Result.ok(
+            OrchestratorResult(
+                success=success,
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                summary={
+                    "goal": seed.goal,
+                    "acceptance_criteria_count": len(seed.acceptance_criteria),
+                    "parallel_execution": True,
+                    "success_count": parallel_result.success_count,
+                    "failure_count": parallel_result.failure_count,
+                    "skipped_count": parallel_result.skipped_count,
+                },
+                messages_processed=parallel_result.total_messages,
+                final_message=final_message,
+                duration_seconds=duration,
+            )
+        )
+
     async def resume_session(
         self,
         session_id: str,
@@ -684,10 +900,12 @@ Note: This is a resumed session. Please continue from where execution was interr
         # Create workflow state tracker for progress display
         from ouroboros.orchestrator.workflow_state import WorkflowStateTracker
 
+        resume_strategy = get_strategy(seed.task_type)
         state_tracker = WorkflowStateTracker(
             acceptance_criteria=seed.acceptance_criteria,
             goal=seed.goal,
             session_id=session_id,
+            activity_map=resume_strategy.get_activity_map(),
         )
 
         try:

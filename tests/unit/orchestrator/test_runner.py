@@ -226,7 +226,8 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert result.value.success is True
-        assert result.value.messages_processed == 3
+        # Parallel executor: 3 ACs × 3 messages each = 9 total
+        assert result.value.messages_processed == 9
 
     @pytest.mark.asyncio
     async def test_execute_seed_failure(

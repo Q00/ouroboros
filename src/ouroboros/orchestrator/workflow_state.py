@@ -325,6 +325,7 @@ class WorkflowStateTracker:
         acceptance_criteria: list[str],
         goal: str = "",
         session_id: str = "",
+        activity_map: dict[str, ActivityType] | None = None,
     ) -> None:
         """Initialize tracker with acceptance criteria.
 
@@ -332,6 +333,9 @@ class WorkflowStateTracker:
             acceptance_criteria: List of AC descriptions.
             goal: The workflow goal.
             session_id: Session identifier.
+            activity_map: Optional tool-to-activity mapping override.
+                If provided, used instead of global TOOL_ACTIVITY_MAP.
+                Typically from ExecutionStrategy.get_activity_map().
         """
         self._state = WorkflowState(
             session_id=session_id,
@@ -341,6 +345,7 @@ class WorkflowStateTracker:
                 for i, ac in enumerate(acceptance_criteria)
             ],
         )
+        self._activity_map = activity_map or TOOL_ACTIVITY_MAP
         self._input_chars = 0
         self._output_chars = 0
 
@@ -409,7 +414,7 @@ class WorkflowStateTracker:
             tool_name: Name of the tool being used.
             content: Tool call content/arguments.
         """
-        activity = TOOL_ACTIVITY_MAP.get(tool_name, ActivityType.BUILDING)
+        activity = self._activity_map.get(tool_name, ActivityType.BUILDING)
 
         # Refine activity based on content patterns
         content_lower = content.lower()

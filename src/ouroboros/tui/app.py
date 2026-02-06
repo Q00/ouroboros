@@ -18,6 +18,7 @@ from textual.binding import Binding
 
 from ouroboros.tui.events import (
     ACUpdated,
+    AgentThinkingUpdated,
     CostUpdated,
     DriftUpdated,
     ExecutionUpdated,
@@ -25,12 +26,16 @@ from ouroboros.tui.events import (
     PauseRequested,
     PhaseChanged,
     ResumeRequested,
+    SubtaskUpdated,
     TUIState,
+    ToolCallCompleted,
+    ToolCallStarted,
     WorkflowProgressUpdated,
     create_message_from_event,
 )
 from ouroboros.tui.screens import (
     DashboardScreen,
+    DashboardScreenV3,
     DebugScreen,
     ExecutionScreen,
     LogsScreen,
@@ -131,7 +136,7 @@ class OuroborosTUI(App[None]):
             self.install_screen(
                 SessionSelectorScreen(self._event_store), name="session_selector"
             )
-        self.install_screen(DashboardScreen(self._state), name="dashboard")
+        self.install_screen(DashboardScreenV3(self._state), name="dashboard")
         self.install_screen(ExecutionScreen(self._state), name="execution")
         self.install_screen(LogsScreen(self._state), name="logs")
         self.install_screen(DebugScreen(self._state), name="debug")
@@ -368,10 +373,84 @@ class OuroborosTUI(App[None]):
             if hasattr(screen, "on_ac_updated"):
                 screen.on_ac_updated(message)
 
+    def on_subtask_updated(self, message: SubtaskUpdated) -> None:
+        """Handle sub-task updates and add to AC tree (SSOT)."""
+        nodes = self._state.ac_tree.get("nodes", {})
+        parent_ac_id = f"ac_{message.ac_index}"
+        sub_task_id = message.sub_task_id
+
+        # Add or update subtask node
+        nodes[sub_task_id] = {
+            "id": sub_task_id,
+            "content": message.content,
+            "status": message.status,
+            "depth": 2,
+            "is_atomic": True,
+            "children_ids": [],
+        }
+
+        # Update parent's children_ids (add if not present)
+        if parent_ac_id in nodes:
+            parent = nodes[parent_ac_id]
+            children = parent.get("children_ids", [])
+            if sub_task_id not in children:
+                children.append(sub_task_id)
+                parent["children_ids"] = children
+            parent["is_atomic"] = False
+
+        self._state.ac_tree["nodes"] = nodes
+        self._notify_ac_tree_updated()
+
+        # Forward to current screen
+        if self._screen_stack:
+            screen = self.screen
+            if hasattr(screen, "on_subtask_updated"):
+                screen.on_subtask_updated(message)
+
+    def on_tool_call_started(self, message: ToolCallStarted) -> None:
+        """Handle tool call started - track active tools."""
+        self._state.active_tools[message.ac_id] = {
+            "tool_name": message.tool_name,
+            "tool_detail": message.tool_detail,
+            "call_index": str(message.call_index),
+        }
+        self._notify_ac_tree_updated()
+        if self._screen_stack:
+            screen = self.screen
+            if hasattr(screen, "on_tool_call_started"):
+                screen.on_tool_call_started(message)
+
+    def on_tool_call_completed(self, message: ToolCallCompleted) -> None:
+        """Handle tool call completed - move to history."""
+        self._state.active_tools.pop(message.ac_id, None)
+        history = self._state.tool_history.setdefault(message.ac_id, [])
+        history.append({
+            "tool_name": message.tool_name,
+            "tool_detail": message.tool_detail,
+            "call_index": message.call_index,
+            "duration_seconds": message.duration_seconds,
+            "success": message.success,
+        })
+        # Keep last 20 entries per AC
+        if len(history) > 20:
+            self._state.tool_history[message.ac_id] = history[-20:]
+        if self._screen_stack:
+            screen = self.screen
+            if hasattr(screen, "on_tool_call_completed"):
+                screen.on_tool_call_completed(message)
+
+    def on_agent_thinking_updated(self, message: AgentThinkingUpdated) -> None:
+        """Handle agent thinking update."""
+        self._state.thinking[message.ac_id] = message.thinking_text
+        if self._screen_stack:
+            screen = self.screen
+            if hasattr(screen, "on_agent_thinking_updated"):
+                screen.on_agent_thinking_updated(message)
+
     def on_workflow_progress_updated(self, message: WorkflowProgressUpdated) -> None:
-        # Update state with AC tree from workflow progress
+        # Update state with AC tree from workflow progress (smart merge)
         if message.acceptance_criteria:
-            self._state.ac_tree = self._convert_ac_list_to_tree(
+            self._merge_ac_progress(
                 message.acceptance_criteria,
                 message.current_ac_index,
             )
@@ -467,6 +546,78 @@ class OuroborosTUI(App[None]):
             "nodes": nodes,
         }
 
+    def _merge_ac_progress(
+        self,
+        acceptance_criteria: list[dict[str, Any]],
+        current_ac_index: int | None,
+    ) -> None:
+        """Merge AC progress into existing tree, preserving subtree children.
+
+        Unlike _convert_ac_list_to_tree which rebuilds from scratch,
+        this method updates status of existing nodes while preserving
+        children_ids and subtask nodes added by decomposition events.
+
+        Args:
+            acceptance_criteria: List of AC dicts with index, content, status.
+            current_ac_index: Index of current AC being worked on.
+        """
+        existing_nodes = self._state.ac_tree.get("nodes", {})
+
+        if not existing_nodes:
+            # No existing tree - build from scratch
+            self._state.ac_tree = self._convert_ac_list_to_tree(
+                acceptance_criteria,
+                current_ac_index,
+            )
+            self._notify_ac_tree_updated()
+            return
+
+        # Smart merge: update status/content but preserve children
+        for ac in acceptance_criteria:
+            ac_index = ac.get("index", 0)
+            ac_id = f"ac_{ac_index}"
+
+            status = ac.get("status", "pending")
+            if status == "in_progress":
+                status = "executing"
+            elif status not in ("completed", "failed", "executing"):
+                status = "pending"
+
+            if ac_id in existing_nodes:
+                # Update existing node - preserve children_ids and is_atomic
+                existing_nodes[ac_id]["status"] = status
+                existing_nodes[ac_id]["content"] = ac.get("content", "")
+            else:
+                # New AC node - add it
+                existing_nodes[ac_id] = {
+                    "id": ac_id,
+                    "content": ac.get("content", ""),
+                    "status": status,
+                    "depth": 1,
+                    "is_atomic": True,
+                    "children_ids": [],
+                }
+
+        # Ensure root exists and update its status
+        root_id = self._state.ac_tree.get("root_id", "root")
+        if root_id not in existing_nodes:
+            child_ids = [f"ac_{ac.get('index', 0)}" for ac in acceptance_criteria]
+            existing_nodes[root_id] = {
+                "id": root_id,
+                "content": "Acceptance Criteria",
+                "status": "executing" if current_ac_index is not None else "pending",
+                "depth": 0,
+                "is_atomic": False,
+                "children_ids": child_ids,
+            }
+        else:
+            existing_nodes[root_id]["status"] = (
+                "executing" if current_ac_index is not None else "pending"
+            )
+
+        self._state.ac_tree["nodes"] = existing_nodes
+        self._notify_ac_tree_updated()
+
     def on_log_message(self, message: LogMessage) -> None:
         self._state.add_log(message.level, message.source, message.message, message.data)
         try:
@@ -548,7 +699,10 @@ class OuroborosTUI(App[None]):
         """Notify dashboard that AC tree has been updated."""
         if self._screen_stack:
             screen = self.screen
-            if isinstance(screen, DashboardScreen):
+            if isinstance(screen, DashboardScreenV3):
+                if hasattr(screen, "_tree") and screen._tree is not None:
+                    screen._tree.update_tree(self._state.ac_tree)
+            elif isinstance(screen, DashboardScreen):
                 if hasattr(screen, "_ac_tree") and screen._ac_tree is not None:
                     screen._ac_tree.update_tree(self._state.ac_tree)
 
