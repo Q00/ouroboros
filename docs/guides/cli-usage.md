@@ -38,7 +38,21 @@ ouroboros [OPTIONS] COMMAND [ARGS]
 | `ouroboros config` | Manage configuration |
 | `ouroboros status` | Check system status |
 | `ouroboros tui` | Interactive TUI monitor |
+| `ouroboros monitor` | Shorthand for `tui monitor` |
 | `ouroboros mcp` | MCP server commands |
+
+### Shortcuts (v0.8.0+)
+
+Common operations have shorter forms:
+
+```bash
+# These pairs are equivalent:
+ouroboros run seed.yaml          # = ouroboros run workflow seed.yaml
+ouroboros init "Build an API"    # = ouroboros init start "Build an API"
+ouroboros monitor                # = ouroboros tui monitor
+```
+
+Orchestrator mode (Claude Agent SDK) is now the default for `run workflow`.
 
 ---
 
@@ -122,12 +136,13 @@ interview_20260124_090000 in_progress (3 rounds)
 
 The `run` command group executes workflows.
 
-### `ouroboros run workflow`
+### `ouroboros run [workflow]`
 
-Execute a workflow from a seed file.
+Execute a workflow from a seed file. The `workflow` subcommand is optional --
+`ouroboros run seed.yaml` is equivalent to `ouroboros run workflow seed.yaml`.
 
 ```bash
-ouroboros run workflow SEED_FILE [OPTIONS]
+ouroboros run [workflow] SEED_FILE [OPTIONS]
 ```
 
 | Argument | Description |
@@ -136,41 +151,45 @@ ouroboros run workflow SEED_FILE [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--orchestrator`, `-o` | Use Claude Agent SDK for execution |
+| `--orchestrator/--no-orchestrator` | Use Claude Agent SDK (default: enabled) |
 | `--resume`, `-r ID` | Resume a previous orchestrator session |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix PREFIX` | Prefix to add to all MCP tool names (e.g., 'mcp_') |
+| `--sequential`, `-s` | Execute ACs sequentially instead of in parallel |
 | `--dry-run`, `-n` | Validate seed without executing |
 | `--debug`, `-d` | Show logs and agent thinking (verbose output) |
 
 #### Examples
 
 ```bash
-# Standard workflow execution (placeholder)
+# Run a workflow (shorthand, recommended)
+ouroboros run seed.yaml
+
+# Explicit subcommand (equivalent)
 ouroboros run workflow seed.yaml
 
-# Orchestrator mode (Claude Agent SDK)
-ouroboros run workflow --orchestrator seed.yaml
+# Legacy standard mode (placeholder)
+ouroboros run seed.yaml --no-orchestrator
 
-# Orchestrator with external MCP tools
-ouroboros run workflow --orchestrator --mcp-config mcp.yaml seed.yaml
+# With external MCP tools
+ouroboros run seed.yaml --mcp-config mcp.yaml
 
 # With MCP tool prefix to avoid conflicts
-ouroboros run workflow -o --mcp-config mcp.yaml --mcp-tool-prefix "ext_" seed.yaml
+ouroboros run seed.yaml --mcp-config mcp.yaml --mcp-tool-prefix "ext_"
 
 # Dry run to validate seed
-ouroboros run workflow --dry-run seed.yaml
+ouroboros run seed.yaml --dry-run --no-orchestrator
 
 # Resume a previous orchestrator session
-ouroboros run workflow --orchestrator --resume orch_abc123 seed.yaml
+ouroboros run seed.yaml --resume orch_abc123
 
 # Debug output (show logs and agent thinking)
-ouroboros run workflow --orchestrator --debug seed.yaml
+ouroboros run seed.yaml --debug
 ```
 
 #### Orchestrator Mode
 
-When using `--orchestrator`, the workflow is executed via Claude Agent SDK:
+Orchestrator mode is now the default. The workflow is executed via Claude Agent SDK:
 
 1. Seed is loaded and validated
 2. ClaudeAgentAdapter initialized
@@ -504,11 +523,11 @@ ouroboros init "Build a Python library for parsing markdown"
 
 # 5. (Answer questions interactively)
 
-# 6. Execute the generated seed
-ouroboros run workflow --orchestrator ~/.ouroboros/seeds/latest.yaml
+# 6. Execute the generated seed (orchestrator is default)
+ouroboros run ~/.ouroboros/seeds/latest.yaml
 
 # 7. Monitor progress
-ouroboros status executions
+ouroboros monitor
 
 # 8. Check specific execution
 ouroboros status execution exec_abc123 --events
@@ -519,24 +538,24 @@ ouroboros status execution exec_abc123 --events
 ```bash
 # Resume interrupted interview
 ouroboros init list
-ouroboros init --resume interview_20260125_120000
+ouroboros init start --resume interview_20260125_120000
 
 # Resume interrupted orchestrator session
 ouroboros status executions
-ouroboros run workflow --orchestrator --resume orch_abc123 seed.yaml
+ouroboros run seed.yaml --resume orch_abc123
 ```
 
 ### CI/CD Usage
 
 ```bash
 # Non-interactive execution with dry-run validation
-ouroboros run workflow --dry-run seed.yaml
+ouroboros run seed.yaml --dry-run --no-orchestrator
 
 # Execute with debug output (shows logs and agent thinking)
-ouroboros run workflow --orchestrator --debug seed.yaml
+ouroboros run seed.yaml --debug
 
 # Execute with full debug logging via environment variable
-OUROBOROS_LOG_LEVEL=DEBUG ouroboros run workflow --orchestrator seed.yaml
+OUROBOROS_LOG_LEVEL=DEBUG ouroboros run seed.yaml
 ```
 
 ---
@@ -555,8 +574,7 @@ ouroboros tui monitor [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--execution-id`, `-e ID` | Monitor a specific execution |
-| `--session-id`, `-s ID` | Monitor a specific session |
+| `--db-path PATH` | Path to the Ouroboros database file (default: `~/.ouroboros/ouroboros.db`) |
 
 #### Examples
 
@@ -564,38 +582,34 @@ ouroboros tui monitor [OPTIONS]
 # Launch TUI monitor
 ouroboros tui monitor
 
-# Monitor specific execution
-ouroboros tui monitor --execution-id exec_abc123
-
-# Monitor specific session
-ouroboros tui monitor --session-id sess_xyz789
+# Monitor with a specific database file
+ouroboros tui monitor --db-path ~/.ouroboros/ouroboros.db
 ```
 
 #### TUI Screens
 
-The TUI provides 5 screens, accessible via number keys:
+The TUI provides 4 screens, accessible via number keys:
 
 | Key | Screen | Description |
 |-----|--------|-------------|
 | `1` | Dashboard | Overview with phase progress, drift meter, cost tracker |
-| `2` | Logs | Filterable log viewer with level filtering |
-| `3` | Execution | Execution details, timeline, phase outputs |
+| `2` | Execution | Execution details, timeline, phase outputs |
+| `3` | Logs | Filterable log viewer with level filtering |
 | `4` | Debug | State inspector, raw events, configuration |
-| `5` | Help | Keyboard shortcuts and help |
 
 #### Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `1-5` | Switch screens |
+| `1-4` | Switch screens |
 | `q` | Quit |
-| `r` | Refresh |
+| `r` | Resume |
 | `↑/↓` | Scroll |
 | `Tab` | Next widget |
 
 #### Dashboard Widgets
 
-- **Phase Progress**: Double Diamond visualization of 6 phases
+- **Phase Progress**: Double Diamond visualization of 4 sub-phases (Discover, Define, Design, Deliver)
 - **Drift Meter**: Shows drift score with weighted formula
 - **Cost Tracker**: Token usage and cost in USD
 - **AC Tree**: Acceptance criteria hierarchy
@@ -831,7 +845,7 @@ Tool call timed out after 3 retries: file_read
 Enable verbose logging to see MCP communication:
 
 ```bash
-OUROBOROS_LOG_LEVEL=DEBUG ouroboros run workflow -o --mcp-config mcp.yaml seed.yaml
+OUROBOROS_LOG_LEVEL=DEBUG ouroboros run seed.yaml --mcp-config mcp.yaml
 ```
 
 This will show:

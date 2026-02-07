@@ -22,7 +22,23 @@ Ouroboros is a self-improving AI workflow system that transforms ambiguous human
 
 ### Guides
 
+- [Quick Start](./guides/quick-start.md) - Get running in under 10 minutes
+- [Seed Authoring Guide](./guides/seed-authoring.md) - YAML structure, field reference, examples
+- [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
 - [CLI Usage Guide](./guides/cli-usage.md) - Command-line interface reference
+- [Common Workflows](./guides/common-workflows.md) - Recipes for typical scenarios
+
+### Contributing
+
+- [Contributing Guide](../CONTRIBUTING.md) - How to set up, code, test, and submit PRs
+- [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
+- [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
+- [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
+
+### Design Documents
+
+- [Evaluation Pipeline Flexibility](./design/evaluation-pipeline-flexibility.md) - Supporting non-code workflows
+- [CLI UX Redesign](./design/cli-ux-redesign.md) - v0.8.0 CLI shorthand and orchestrator defaults
 
 ## Key Concepts
 

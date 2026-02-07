@@ -27,6 +27,21 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 
 ---
 
+## Quick Start
+
+```bash
+# Start an interview to create a seed specification
+ouroboros init "Build a REST API for task management"
+
+# Execute the generated seed
+ouroboros run seed.yaml
+
+# Monitor execution in real-time
+ouroboros monitor
+```
+
+---
+
 ## Commands Overview
 
 | Command | Description |
@@ -36,6 +51,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `config` | Manage Ouroboros configuration |
 | `status` | Check Ouroboros system status |
 | `tui` | Interactive TUI monitor for real-time workflow monitoring |
+| `monitor` | Shorthand for `tui monitor` |
 | `mcp` | MCP server commands for Claude Desktop integration |
 
 ---
@@ -44,12 +60,15 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 
 Start interactive interview to refine requirements (Big Bang phase).
 
+**Shorthand:** `ouroboros init "context"` is equivalent to `ouroboros init start "context"`.
+When the first argument is not a known subcommand (`start`, `list`), it is treated as the context for `init start`.
+
 ### `init start`
 
 Start an interactive interview to transform vague ideas into clear, executable requirements.
 
 ```bash
-ouroboros init start [OPTIONS] [CONTEXT]
+ouroboros init [start] [OPTIONS] [CONTEXT]
 ```
 
 **Arguments:**
@@ -65,21 +84,25 @@ ouroboros init start [OPTIONS] [CONTEXT]
 | `-r, --resume TEXT` | Resume an existing interview by ID |
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code (Max Plan) instead of LiteLLM. No API key required |
+| `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
 
 ```bash
-# Start with initial idea (LiteLLM - requires API key)
+# Shorthand (recommended) -- 'start' subcommand is implied
+ouroboros init "I want to build a task management CLI tool"
+
+# Explicit subcommand (equivalent)
 ouroboros init start "I want to build a task management CLI tool"
 
 # Start with Claude Code (no API key needed)
-ouroboros init start --orchestrator "Build a REST API"
+ouroboros init --orchestrator "Build a REST API"
 
 # Resume an interrupted interview
 ouroboros init start --resume interview_20260116_120000
 
 # Interactive mode (prompts for input)
-ouroboros init start
+ouroboros init
 ```
 
 ### `init list`
@@ -96,12 +119,17 @@ ouroboros init list
 
 Execute Ouroboros workflows.
 
+**Shorthand:** `ouroboros run seed.yaml` is equivalent to `ouroboros run workflow seed.yaml`.
+When the first argument is not a known subcommand (`workflow`, `resume`), it is treated as the seed file for `run workflow`.
+
+**Default mode:** Orchestrator mode (Claude Agent SDK) is now the default. Use `--no-orchestrator` for legacy standard mode.
+
 ### `run workflow`
 
 Execute a workflow from a seed file.
 
 ```bash
-ouroboros run workflow [OPTIONS] SEED_FILE
+ouroboros run [workflow] [OPTIONS] SEED_FILE
 ```
 
 **Arguments:**
@@ -114,28 +142,37 @@ ouroboros run workflow [OPTIONS] SEED_FILE
 
 | Option | Description |
 |--------|-------------|
-| `-o, --orchestrator` | Use Claude Agent SDK for execution (Epic 8 mode) |
+| `--orchestrator/--no-orchestrator` | Use Claude Agent SDK for execution (default: enabled) |
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
+| `--mcp-config PATH` | Path to MCP client configuration YAML file |
+| `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
+| `-s, --sequential` | Execute ACs sequentially instead of in parallel |
 | `-n, --dry-run` | Validate seed without executing |
 | `-d, --debug` | Show logs and agent thinking (verbose output) |
 
 **Examples:**
 
 ```bash
-# Standard workflow execution
+# Run a workflow (shorthand, recommended)
+ouroboros run seed.yaml
+
+# Explicit subcommand (equivalent)
 ouroboros run workflow seed.yaml
 
-# Orchestrator mode (Claude Agent SDK)
-ouroboros run workflow --orchestrator seed.yaml
+# Legacy standard mode (placeholder)
+ouroboros run seed.yaml --no-orchestrator
 
-# Dry run (validate only)
-ouroboros run workflow --dry-run seed.yaml
+# With MCP server integration
+ouroboros run seed.yaml --mcp-config mcp.yaml
 
 # Resume a previous session
-ouroboros run workflow --orchestrator --resume orch_abc123 seed.yaml
+ouroboros run seed.yaml --resume orch_abc123
 
-# Debug output (show logs and agent thinking)
-ouroboros run workflow --orchestrator --debug seed.yaml
+# Debug output
+ouroboros run seed.yaml --debug
+
+# Sequential execution (one AC at a time)
+ouroboros run seed.yaml --sequential
 ```
 
 ### `run resume`
@@ -152,9 +189,9 @@ ouroboros run resume [EXECUTION_ID]
 |----------|-------------|
 | `EXECUTION_ID` | Execution ID to resume (uses latest if not specified) |
 
-> **Note:** For orchestrator sessions, use:
+> **Note:** For orchestrator sessions, you can also use:
 > ```bash
-> ouroboros run workflow --orchestrator --resume <session_id> seed.yaml
+> ouroboros run seed.yaml --resume <session_id>
 > ```
 
 ---
@@ -328,8 +365,7 @@ ouroboros tui monitor [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-e, --execution-id TEXT` | Monitor a specific execution |
-| `-s, --session-id TEXT` | Monitor a specific session |
+| `--db-path PATH` | Path to the Ouroboros database file (default: `~/.ouroboros/ouroboros.db`) |
 
 **Examples:**
 
@@ -337,11 +373,8 @@ ouroboros tui monitor [OPTIONS]
 # Launch TUI monitor
 ouroboros tui monitor
 
-# Monitor specific execution
-ouroboros tui monitor --execution-id exec_abc123
-
-# Monitor specific session
-ouroboros tui monitor --session-id sess_xyz789
+# Monitor with a specific database file
+ouroboros tui monitor --db-path ~/.ouroboros/ouroboros.db
 ```
 
 **TUI Screens:**
@@ -349,8 +382,8 @@ ouroboros tui monitor --session-id sess_xyz789
 | Key | Screen | Description |
 |-----|--------|-------------|
 | `1` | Dashboard | Overview with phase progress, drift meter, cost tracker |
-| `2` | Logs | Filterable log viewer with level filtering |
-| `3` | Execution | Execution details, timeline, phase outputs |
+| `2` | Execution | Execution details, timeline, phase outputs |
+| `3` | Logs | Filterable log viewer with level filtering |
 | `4` | Debug | State inspector, raw events, configuration |
 
 **Keyboard Shortcuts:**
@@ -442,10 +475,13 @@ No API key required - uses your Claude Code Max Plan subscription.
 ouroboros status health
 
 # 2. Start interview to create seed
-ouroboros init start --orchestrator "Build a user authentication system"
+ouroboros init --orchestrator "Build a user authentication system"
 
-# 3. Execute the generated seed
-ouroboros run workflow --orchestrator seed.yaml
+# 3. Execute the generated seed (orchestrator mode is now default)
+ouroboros run seed.yaml
+
+# 4. Monitor in real-time
+ouroboros monitor
 ```
 
 ### Using LiteLLM (External API)
@@ -460,10 +496,10 @@ ouroboros config init
 ouroboros config set providers.openrouter.api_key $OPENROUTER_API_KEY
 
 # 3. Start interview
-ouroboros init start "Build a REST API for task management"
+ouroboros init "Build a REST API for task management"
 
-# 4. Execute workflow
-ouroboros run workflow seed.yaml
+# 4. Execute workflow (use --no-orchestrator for LiteLLM path)
+ouroboros run seed.yaml --no-orchestrator
 ```
 
 ---
@@ -496,5 +532,3 @@ Ouroboros stores configuration in `~/.ouroboros/`:
 |------|-------------|
 | `0` | Success |
 | `1` | General error |
-| `2` | Configuration error |
-| `3` | Validation error |
