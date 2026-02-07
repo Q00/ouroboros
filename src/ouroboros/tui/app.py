@@ -598,22 +598,29 @@ class OuroborosTUI(App[None]):
                     "children_ids": [],
                 }
 
-        # Ensure root exists and update its status
+        # Ensure root exists and keep its children_ids in sync
         root_id = self._state.ac_tree.get("root_id", "root")
+        expected_child_ids = [f"ac_{ac.get('index', 0)}" for ac in acceptance_criteria]
+
         if root_id not in existing_nodes:
-            child_ids = [f"ac_{ac.get('index', 0)}" for ac in acceptance_criteria]
             existing_nodes[root_id] = {
                 "id": root_id,
                 "content": "Acceptance Criteria",
                 "status": "executing" if current_ac_index is not None else "pending",
                 "depth": 0,
                 "is_atomic": False,
-                "children_ids": child_ids,
+                "children_ids": expected_child_ids,
             }
         else:
             existing_nodes[root_id]["status"] = (
                 "executing" if current_ac_index is not None else "pending"
             )
+            # Sync children_ids: add any new ACs not already present
+            current_children = existing_nodes[root_id].get("children_ids", [])
+            for child_id in expected_child_ids:
+                if child_id not in current_children:
+                    current_children.append(child_id)
+            existing_nodes[root_id]["children_ids"] = current_children
 
         self._state.ac_tree["nodes"] = existing_nodes
         self._notify_ac_tree_updated()
