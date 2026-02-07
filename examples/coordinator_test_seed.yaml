@@ -1,0 +1,110 @@
+# Coordinator Agent Test Seed
+#
+# Designed to trigger file conflict detection between parallel ACs.
+#
+# Expected dependency levels:
+#   Level 1: AC1 (foundation - shared config + models)
+#   Level 2: AC2 + AC3 in PARALLEL (both modify shared config → CONFLICT)
+#   Level 3: AC4 (integration - depends on AC2 + AC3)
+#
+# The Coordinator should:
+#   1. Detect that AC2 and AC3 both modified playground/src/config.py
+#   2. Start a Claude session to review and resolve the conflict
+#   3. Inject warnings into Level 3's context prompt
+#
+# Run with:
+#   ouroboros run workflow --orchestrator --debug examples/coordinator_test_seed.yaml
+#
+# For sequential comparison (no coordinator needed):
+#   ouroboros run workflow --orchestrator --sequential examples/coordinator_test_seed.yaml
+
+goal: >
+  Build a simple Python microservice skeleton in playground/ directory
+  with shared configuration, authentication, logging, and an app entry point.
+  All files must be created under the playground/ directory.
+
+task_type: code
+
+constraints:
+  - "Python 3.10+ with stdlib only (no pip packages)"
+  - "ALL files must be created under playground/ directory"
+  - "playground/src/config.py is the single shared configuration module"
+  - "Each module must import config values from playground/src/config.py"
+
+acceptance_criteria:
+  # AC1: Foundation — creates shared files that others depend on
+  - >
+    Create the foundation modules:
+    1. playground/src/__init__.py (empty)
+    2. playground/src/config.py with a Config class containing:
+       - APP_NAME: str = "microservice"
+       - DEBUG: bool = False
+       - VERSION: str = "0.1.0"
+    3. playground/src/models.py with a simple User dataclass:
+       - id: int
+       - username: str
+       - email: str
+
+  # AC2: Auth feature — DEPENDS on AC1, modifies shared config.py
+  - >
+    Add authentication support (depends on AC1's config and models):
+    1. Add to playground/src/config.py Config class:
+       - AUTH_SECRET: str = "change-me"
+       - TOKEN_EXPIRY_SECONDS: int = 3600
+    2. Create playground/src/auth.py with:
+       - generate_token(user: User) -> str (returns a simple base64-encoded token)
+       - validate_token(token: str) -> bool (basic validation)
+    3. Create playground/tests/test_auth.py with at least 3 tests
+
+  # AC3: Logging feature — DEPENDS on AC1, ALSO modifies shared config.py
+  - >
+    Add structured logging support (depends on AC1's config):
+    1. Add to playground/src/config.py Config class:
+       - LOG_LEVEL: str = "INFO"
+       - LOG_FORMAT: str = "json"
+    2. Create playground/src/logger.py with:
+       - setup_logger(name: str) -> logging.Logger (configured per Config)
+       - log_request(method: str, path: str, status: int) -> None
+    3. Create playground/tests/test_logger.py with at least 3 tests
+
+  # AC4: Integration — DEPENDS on AC2 + AC3
+  - >
+    Create the application entry point that integrates all modules
+    (depends on auth and logging being complete):
+    1. Create playground/src/app.py with:
+       - A main() function that:
+         a. Sets up logging via logger.setup_logger()
+         b. Creates a test User from models
+         c. Generates an auth token for the user
+         d. Logs the request using log_request()
+         e. Prints a summary of all Config values
+    2. Create playground/tests/test_app.py that tests main() runs without error
+
+ontology_schema:
+  name: "MicroserviceSkeleton"
+  description: "Modular microservice with shared config, auth, logging, and app"
+  fields:
+    - name: "module"
+      field_type: "entity"
+      description: "A Python source module"
+    - name: "config"
+      field_type: "entity"
+      description: "Shared configuration values"
+    - name: "test"
+      field_type: "entity"
+      description: "Test file for a module"
+
+evaluation_principles:
+  - name: "shared_config"
+    description: "All modules must import from the single config.py — no duplicated config"
+    weight: 1.0
+  - name: "integration"
+    description: "The app.py entry point must successfully use all modules together"
+    weight: 0.9
+  - name: "testability"
+    description: "Each feature module has corresponding tests"
+    weight: 0.8
+
+metadata:
+  seed_id: "coordinator_test_001"
+  ambiguity_score: 0.1
