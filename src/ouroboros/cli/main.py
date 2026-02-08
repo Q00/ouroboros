@@ -2,6 +2,11 @@
 
 This module defines the main Typer application and registers
 all command groups for the Ouroboros CLI.
+
+Command shortcuts (v0.8.0+):
+    ouroboros run seed.yaml          # shorthand for: ouroboros run workflow seed.yaml
+    ouroboros init "Build an API"    # shorthand for: ouroboros init start "Build an API"
+    ouroboros monitor                # shorthand for: ouroboros tui monitor
 """
 
 from typing import Annotated
@@ -29,6 +34,13 @@ app.add_typer(mcp.app, name="mcp")
 app.add_typer(tui.app, name="tui")
 
 
+# Top-level convenience aliases
+@app.command(hidden=True)
+def monitor() -> None:
+    """Launch the TUI monitor (shorthand for 'ouroboros tui monitor')."""
+    tui.monitor_command()
+
+
 def version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
@@ -53,6 +65,12 @@ def main(
 
     A self-improving AI workflow system with 6 phases:
     Big Bang, PAL Router, Execution, Resilience, Evaluation, and Consensus.
+
+    [bold]Quick Start:[/]
+
+        ouroboros init "Build a REST API"     Start interview
+        ouroboros run seed.yaml               Execute workflow
+        ouroboros monitor                     Launch TUI monitor
 
     Use [bold cyan]ouroboros COMMAND --help[/] for command-specific help.
     """

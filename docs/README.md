@@ -37,6 +37,8 @@ Ouroboros is a self-improving AI workflow system that transforms ambiguous human
 
 ### Design Documents
 
+- [Execution Deep Dive](./design/execution-deep-dive.md) - Recursive decomposition, atomicity, parallel execution
+- [Evaluation Pipeline Deep Dive](./design/evaluation-pipeline-deep-dive.md) - Three stages, trigger matrix, deliberative consensus
 - [Evaluation Pipeline Flexibility](./design/evaluation-pipeline-flexibility.md) - Supporting non-code workflows
 - [CLI UX Redesign](./design/cli-ux-redesign.md) - v0.8.0 CLI shorthand and orchestrator defaults
 
