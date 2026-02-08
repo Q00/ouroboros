@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ouroboros Neural Observatory</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Ambient Background -->
+    <div class="ambient-bg">
+        <div class="grid-overlay"></div>
+        <div class="glow glow-1"></div>
+        <div class="glow glow-2"></div>
+        <div class="glow glow-3"></div>
+    </div>
+
+    <!-- Main Container -->
+    <div class="dashboard">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo-section">
+                <div class="logo">
+                    <svg class="ouroboros-icon" viewBox="0 0 48 48" fill="none">
+                        <circle cx="24" cy="24" r="20" stroke="url(#gradient)" stroke-width="2" fill="none" stroke-dasharray="4 2"/>
+                        <path d="M24 8 C32 8 40 16 40 24 C40 32 32 40 24 40 C16 40 8 32 8 24 C8 16 16 8 24 8"
+                              stroke="url(#gradient)" stroke-width="2.5" fill="none" class="snake-path"/>
+                        <circle cx="32" cy="16" r="3" fill="#00f0ff" class="pulse-dot"/>
+                        <defs>
+                            <linearGradient id="gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                <stop offset="0%" stop-color="#00f0ff"/>
+                                <stop offset="100%" stop-color="#7b61ff"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                    <div class="logo-text">
+                        <span class="logo-title">OUROBOROS</span>
+                        <span class="logo-subtitle">Neural Observatory</span>
+                    </div>
+                </div>
+            </div>
+            <div class="header-controls">
+                <div class="iteration-control">
+                    <label>Iterations</label>
+                    <input type="range" id="iteration-slider" min="10" max="200" value="100">
+                    <span id="iteration-count">100</span>
+                </div>
+                <button class="btn btn-primary" id="analyze-btn">
+                    <span class="btn-icon">◉</span>
+                    Run Analysis
+                </button>
+                <div class="status-indicator" id="status">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Ready</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Metrics Bar -->
+        <section class="metrics-bar">
+            <div class="metric-card">
+                <div class="metric-icon">⟲</div>
+                <div class="metric-content">
+                    <span class="metric-value" id="total-iterations">0</span>
+                    <span class="metric-label">Total Iterations</span>
+                </div>
+                <div class="metric-trend up">+15%</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-icon">◈</div>
+                <div class="metric-content">
+                    <span class="metric-value" id="token-usage">0%</span>
+                    <span class="metric-label">Context Used</span>
+                </div>
+                <div class="metric-bar">
+                    <div class="metric-bar-fill" id="token-bar" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-icon">◎</div>
+                <div class="metric-content">
+                    <span class="metric-value" id="satisfaction">0%</span>
+                    <span class="metric-label">Satisfaction</span>
+                </div>
+                <div class="metric-ring">
+                    <svg viewBox="0 0 36 36">
+                        <path class="ring-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                        <path class="ring-fill" id="satisfaction-ring" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"/>
+                    </svg>
+                </div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-icon">◇</div>
+                <div class="metric-content">
+                    <span class="metric-value" id="patterns-found">0</span>
+                    <span class="metric-label">Patterns Found</span>
+                </div>
+                <div class="pattern-badges" id="pattern-badges"></div>
+            </div>
+            <div class="metric-card convergence-card">
+                <div class="metric-icon">↗</div>
+                <div class="metric-content">
+                    <span class="metric-value" id="convergence-rate">0%</span>
+                    <span class="metric-label">Convergence</span>
+                </div>
+                <div class="convergence-indicator" id="convergence-status">
+                    <span class="convergence-text">Analyzing...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Grid -->
+        <main class="main-grid">
+            <!-- Left Column: Timeline & Convergence -->
+            <div class="column column-left">
+                <!-- Convergence Chart -->
+                <div class="panel convergence-panel">
+                    <div class="panel-header">
+                        <h2>Convergence Trajectory</h2>
+                        <div class="panel-tabs">
+                            <button class="tab active" data-tab="convergence">Curve</button>
+                            <button class="tab" data-tab="phases">Phases</button>
+                            <button class="tab" data-tab="metrics">Metrics</button>
+                        </div>
+                    </div>
+                    <div class="panel-content">
+                        <div class="chart-container" id="convergence-chart">
+                            <canvas id="convergence-canvas"></canvas>
+                            <div class="chart-annotations" id="chart-annotations"></div>
+                        </div>
+                        <div class="phase-legend">
+                            <div class="phase-item discover"><span></span>Discover</div>
+                            <div class="phase-item define"><span></span>Define</div>
+                            <div class="phase-item develop"><span></span>Develop</div>
+                            <div class="phase-item deliver"><span></span>Deliver</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Timeline -->
+                <div class="panel timeline-panel">
+                    <div class="panel-header">
+                        <h2>Iteration Timeline</h2>
+                        <div class="timeline-controls">
+                            <button class="icon-btn" id="timeline-zoom-out">−</button>
+                            <button class="icon-btn" id="timeline-zoom-in">+</button>
+                        </div>
+                    </div>
+                    <div class="panel-content">
+                        <div class="timeline-container" id="timeline">
+                            <div class="timeline-track">
+                                <div class="timeline-markers" id="timeline-markers"></div>
+                                <div class="timeline-items" id="timeline-items"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Center Column: Pattern Network -->
+            <div class="column column-center">
+                <div class="panel network-panel">
+                    <div class="panel-header">
+                        <h2>Pattern Network</h2>
+                        <div class="network-legend">
+                            <span class="legend-item pattern">● Pattern</span>
+                            <span class="legend-item ac">● AC</span>
+                        </div>
+                    </div>
+                    <div class="panel-content">
+                        <div class="network-container" id="network">
+                            <canvas id="network-canvas"></canvas>
+                            <div class="network-tooltip" id="network-tooltip"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Patterns & Devil's Advocate -->
+            <div class="column column-right">
+                <!-- Pattern Analysis -->
+                <div class="panel patterns-panel">
+                    <div class="panel-header">
+                        <h2>Pattern Analysis</h2>
+                        <div class="severity-filter">
+                            <button class="filter-btn active" data-severity="all">All</button>
+                            <button class="filter-btn critical" data-severity="critical">Critical</button>
+                            <button class="filter-btn high" data-severity="high">High</button>
+                        </div>
+                    </div>
+                    <div class="panel-content">
+                        <div class="patterns-list" id="patterns-list">
+                            <!-- Patterns will be injected here -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Devil's Advocate -->
+                <div class="panel devils-panel">
+                    <div class="panel-header">
+                        <h2>Devil's Advocate</h2>
+                        <div class="intensity-indicator" id="intensity">
+                            <span class="intensity-dot"></span>
+                            <span class="intensity-text">Moderate</span>
+                        </div>
+                    </div>
+                    <div class="panel-content">
+                        <div class="challenge-card" id="challenge-card">
+                            <div class="challenge-icon">⚡</div>
+                            <div class="challenge-content">
+                                <p class="challenge-text">Click "Run Analysis" to receive critical challenges about your approach.</p>
+                            </div>
+                        </div>
+                        <div class="socratic-questions" id="socratic-questions">
+                            <!-- Questions will be injected here -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Bottom Panel: API Activity Log -->
+        <section class="api-log-section">
+            <div class="panel api-panel">
+                <div class="panel-header">
+                    <h2>Gemini API Activity</h2>
+                    <div class="api-stats">
+                        <span class="api-stat"><span class="stat-value" id="api-calls">0</span> calls</span>
+                        <span class="api-stat"><span class="stat-value" id="total-tokens">0</span> tokens</span>
+                        <span class="api-stat"><span class="stat-value" id="avg-latency">0</span>ms avg</span>
+                    </div>
+                </div>
+                <div class="panel-content">
+                    <div class="api-log" id="api-log">
+                        <div class="log-entry placeholder">
+                            <span class="log-icon">◌</span>
+                            <span class="log-text">Waiting for API activity...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Iteration Detail Modal -->
+        <div class="modal" id="iteration-modal">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>Iteration <span id="modal-iteration-id">#0</span></h3>
+                    <button class="modal-close" id="modal-close">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <label>Phase</label>
+                            <span id="modal-phase" class="phase-badge">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Outcome</label>
+                            <span id="modal-outcome" class="outcome-badge">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <label>Action</label>
+                            <p id="modal-action">-</p>
+                        </div>
+                        <div class="detail-item">
+                            <label>Result</label>
+                            <p id="modal-result">-</p>
+                        </div>
+                        <div class="detail-item full-width">
+                            <label>Reasoning</label>
+                            <p id="modal-reasoning" class="reasoning-text">-</p>
+                        </div>
+                        <div class="detail-item full-width">
+                            <label>State</label>
+                            <pre id="modal-state" class="state-json">{}</pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="dashboard.js"></script>
+</body>
+</html>
