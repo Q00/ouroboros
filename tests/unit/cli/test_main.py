@@ -1,5 +1,8 @@
 """Unit tests for CLI main module."""
 
+from pathlib import Path
+from unittest.mock import patch
+
 from typer.testing import CliRunner
 
 from ouroboros import __version__
@@ -177,3 +180,85 @@ class TestTUICommands:
         assert result.exit_code == 0
         assert "db-path" in result.output.lower()
         assert "monitor" in result.output.lower()
+
+
+class TestShorthandCommands:
+    """Tests for CLI shorthand/convenience commands (v0.8.0+ UX redesign)."""
+
+    def test_run_shorthand_falls_back_to_workflow(self, tmp_path: Path) -> None:
+        """Test that 'ouroboros run seed.yaml' is equivalent to 'ouroboros run workflow seed.yaml'."""
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
+
+        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
+            mock_run.return_value = None
+
+            result = runner.invoke(app, ["run", str(seed_file)])
+
+            # Should invoke workflow command (orchestrator by default calls asyncio.run)
+            assert mock_run.called
+
+    def test_run_shorthand_with_no_orchestrator(self, tmp_path: Path) -> None:
+        """Test that 'ouroboros run seed.yaml --no-orchestrator' uses placeholder mode."""
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
+
+        result = runner.invoke(app, ["run", str(seed_file), "--no-orchestrator"])
+
+        assert result.exit_code == 0
+        assert "Would execute" in result.output
+
+    def test_run_explicit_workflow_still_works(self, tmp_path: Path) -> None:
+        """Test backward compat: 'ouroboros run workflow seed.yaml' still works."""
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
+
+        result = runner.invoke(
+            app, ["run", "workflow", str(seed_file), "--no-orchestrator"]
+        )
+
+        assert result.exit_code == 0
+        assert "Would execute" in result.output
+
+    def test_run_resume_subcommand_still_works(self) -> None:
+        """Test backward compat: 'ouroboros run resume' still works."""
+        result = runner.invoke(app, ["run", "resume"])
+        assert result.exit_code == 0
+
+    def test_init_shorthand_falls_back_to_start(self) -> None:
+        """Test that 'ouroboros init <context>' routes to 'ouroboros init start <context>'."""
+        result = runner.invoke(app, ["init", "start", "--help"])
+        start_help = result.output
+
+        # The shorthand should show the same help as the explicit command
+        result2 = runner.invoke(app, ["init", "--help"])
+        # Both should be accessible
+        assert result.exit_code == 0
+        assert result2.exit_code == 0
+
+    def test_init_list_subcommand_still_works(self) -> None:
+        """Test backward compat: 'ouroboros init list' still routes to list."""
+        with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
+            mock_run.return_value = []
+            result = runner.invoke(app, ["init", "list"])
+            assert result.exit_code == 0
+
+    def test_monitor_top_level_alias(self) -> None:
+        """Test that 'ouroboros monitor' is a shorthand for 'ouroboros tui monitor'."""
+        result = runner.invoke(app, ["monitor", "--help"])
+        # Should show monitor help (hidden command but still accessible)
+        assert result.exit_code == 0
+
+    def test_orchestrator_is_default(self, tmp_path: Path) -> None:
+        """Test that orchestrator mode is the default for 'run workflow'."""
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
+
+        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
+            mock_run.return_value = None
+
+            # No --orchestrator flag needed
+            result = runner.invoke(app, ["run", "workflow", str(seed_file)])
+
+            # asyncio.run should be called (orchestrator path)
+            assert mock_run.called

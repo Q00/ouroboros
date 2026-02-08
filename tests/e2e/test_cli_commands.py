@@ -156,7 +156,7 @@ class TestRunWorkflowCommand:
         """Test run workflow with a seed file (non-orchestrator mode)."""
         result = runner.invoke(
             app,
-            ["run", "workflow", str(temp_seed_file)],
+            ["run", "workflow", str(temp_seed_file), "--no-orchestrator"],
         )
 
         assert result.exit_code == 0
@@ -178,7 +178,7 @@ class TestRunWorkflowCommand:
         """Test run workflow with --dry-run flag."""
         result = runner.invoke(
             app,
-            ["run", "workflow", str(temp_seed_file), "--dry-run"],
+            ["run", "workflow", str(temp_seed_file), "--dry-run", "--no-orchestrator"],
         )
 
         assert result.exit_code == 0

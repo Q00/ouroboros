@@ -9,6 +9,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Annotated
 
+import click
 from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from rich.prompt import Confirm, Prompt
@@ -38,10 +39,26 @@ class SeedGenerationResult(Enum):
     CONTINUE_INTERVIEW = auto()
 
 
+class _DefaultStartGroup(typer.core.TyperGroup):
+    """TyperGroup that falls back to 'start' when no subcommand matches.
+
+    This enables the shorthand `ouroboros init "Build a REST API"` which is
+    equivalent to `ouroboros init start "Build a REST API"`.
+    """
+
+    default_cmd_name: str = "start"
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            args = [self.default_cmd_name, *args]
+        return super().parse_args(ctx, args)
+
+
 app = typer.Typer(
     name="init",
     help="Start interactive interview to refine requirements.",
     no_args_is_help=False,
+    cls=_DefaultStartGroup,
 )
 
 

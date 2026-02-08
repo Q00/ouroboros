@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
+import click
 import typer
 import yaml
 
@@ -20,10 +21,26 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.core.security import InputValidator
 
+class _DefaultWorkflowGroup(typer.core.TyperGroup):
+    """TyperGroup that falls back to 'workflow' when no subcommand matches.
+
+    This enables the shorthand `ouroboros run seed.yaml` which is equivalent
+    to `ouroboros run workflow seed.yaml`.
+    """
+
+    default_cmd_name: str = "workflow"
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            args = [self.default_cmd_name, *args]
+        return super().parse_args(ctx, args)
+
+
 app = typer.Typer(
     name="run",
     help="Execute Ouroboros workflows.",
     no_args_is_help=True,
+    cls=_DefaultWorkflowGroup,
 )
 
 
@@ -230,11 +247,11 @@ def workflow(
     orchestrator: Annotated[
         bool,
         typer.Option(
-            "--orchestrator",
-            "-o",
-            help="Use Claude Agent SDK for execution (Epic 8 mode).",
+            "--orchestrator/--no-orchestrator",
+            "-o/-O",
+            help="Use Claude Agent SDK for execution. Enabled by default.",
         ),
-    ] = False,
+    ] = True,
     resume_session: Annotated[
         str | None,
         typer.Option(
@@ -277,44 +294,31 @@ def workflow(
     """Execute a workflow from a seed file.
 
     Reads the seed YAML configuration and runs the Ouroboros workflow.
+    Orchestrator mode (Claude Agent SDK) is enabled by default.
 
-    Use --orchestrator to execute via Claude Agent SDK (Epic 8).
-    Use --resume with --orchestrator to continue a previous session.
+    Use --no-orchestrator for legacy standard workflow mode.
+    Use --resume to continue a previous session.
     Use --mcp-config to connect to external MCP servers for additional tools.
-
-    MCP Configuration File Format (YAML):
-
-        mcp_servers:
-          - name: "filesystem"
-            transport: "stdio"
-            command: "npx"
-            args: ["-y", "@anthropic/mcp-server-filesystem", "/workspace"]
-          - name: "github"
-            transport: "stdio"
-            command: "npx"
-            args: ["-y", "@anthropic/mcp-server-github"]
-            env:
-              GITHUB_TOKEN: "${GITHUB_TOKEN}"
-        connection:
-          timeout_seconds: 30
-          retry_attempts: 3
 
     Examples:
 
-        # Standard workflow execution (placeholder)
+        # Run a workflow (shorthand -- orchestrator mode by default)
+        ouroboros run seed.yaml
+
+        # Explicit subcommand (equivalent)
         ouroboros run workflow seed.yaml
 
-        # Orchestrator mode (Claude Agent SDK)
-        ouroboros run workflow --orchestrator seed.yaml
+        # Legacy standard workflow mode
+        ouroboros run seed.yaml --no-orchestrator
 
         # With MCP server integration
-        ouroboros run workflow --orchestrator --mcp-config mcp.yaml seed.yaml
+        ouroboros run seed.yaml --mcp-config mcp.yaml
 
-        # With MCP tool prefix
-        ouroboros run workflow -o --mcp-config mcp.yaml --mcp-tool-prefix "ext_" seed.yaml
+        # Resume a previous session
+        ouroboros run seed.yaml --resume orch_abc123
 
-        # Resume a previous orchestrator session
-        ouroboros run workflow --orchestrator --resume orch_abc123 seed.yaml
+        # Debug output
+        ouroboros run seed.yaml --debug
     """
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
