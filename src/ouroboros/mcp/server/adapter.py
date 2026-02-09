@@ -380,21 +380,134 @@ def create_ouroboros_server(
     version: str = "1.0.0",
     auth_config: AuthConfig | None = None,
     rate_limit_config: RateLimitConfig | None = None,
+    event_store: Any | None = None,
+    state_dir: Any | None = None,
 ) -> MCPServerAdapter:
-    """Create an Ouroboros MCP server with default handlers.
+    """Create an Ouroboros MCP server with all tools and dependencies wired.
 
-    This is a convenience function that creates a server with all
-    standard Ouroboros tools and resources pre-registered.
+    This is a composition root that creates all service instances and performs
+    dependency injection to tool handlers.
+
+    Services created:
+    - LiteLLMAdapter: LLM provider adapter
+    - EventStore: Event persistence (optional, defaults to SQLite)
+    - InterviewEngine: Interactive interview for requirements
+    - SeedGenerator: Converts interviews to immutable Seeds
+    - EvaluationPipeline: Three-stage evaluation (mechanical, semantic, consensus)
+    - LateralThinker: Alternative thinking approaches for stagnation
 
     Args:
         name: Server name.
         version: Server version.
         auth_config: Optional authentication configuration.
         rate_limit_config: Optional rate limiting configuration.
+        event_store: Optional EventStore instance. If not provided, creates default.
+        state_dir: Optional pathlib.Path for interview state directory.
+                   If not provided, uses ~/.ouroboros/data.
 
     Returns:
-        Configured MCPServerAdapter ready to serve.
+        Configured MCPServerAdapter with all 8 tools registered.
+
+    Raises:
+        ImportError: If MCP SDK is not installed.
     """
+    # Import tool definitions
+    from ouroboros.mcp.tools.definitions import (
+        OUROBOROS_TOOLS,
+        EvaluateHandler,
+        ExecuteSeedHandler,
+        GenerateSeedHandler,
+        InterviewHandler,
+        LateralThinkHandler,
+        MeasureDriftHandler,
+        QueryEventsHandler,
+        SessionStatusHandler,
+    )
+    from ouroboros.mcp.tools.registry import ToolRegistry
+
+    # Import service dependencies
+    from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
+    from ouroboros.bigbang.interview import InterviewEngine
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.evaluation import (
+        EvaluationContext,
+        EvaluationPipeline,
+        PipelineConfig,
+    )
+    from ouroboros.observability.drift import DriftMetrics, DRIFT_THRESHOLD
+    from ouroboros.orchestrator.runner import (
+        OrchestratorRunner,
+        build_system_prompt,
+        build_task_prompt,
+    )
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    from ouroboros.resilience.lateral import LateralThinker
+    from pathlib import Path
+
+    # Create LLM adapter (shared across services)
+    llm_adapter = LiteLLMAdapter()
+
+    # Create or use provided EventStore
+    if event_store is None:
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore()
+
+    # Create state directory for interviews
+    if state_dir is None:
+        state_dir = Path.home() / ".ouroboros" / "data"
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create core service instances
+    interview_engine = InterviewEngine(
+        llm_adapter=llm_adapter,
+        state_dir=state_dir,
+    )
+
+    seed_generator = SeedGenerator(llm_adapter=llm_adapter)
+
+    evaluation_config = PipelineConfig()
+    evaluation_pipeline = EvaluationPipeline(
+        llm_adapter=llm_adapter,
+        config=evaluation_config,
+    )
+
+    lateral_thinker = LateralThinker()
+
+    # Create tool registry for dependency injection
+    registry = ToolRegistry()
+
+    # Create and register tool handlers with injected dependencies
+    tool_handlers = [
+        ExecuteSeedHandler(
+            event_store=event_store,
+            llm_adapter=llm_adapter,
+        ),
+        SessionStatusHandler(
+            event_store=event_store,
+        ),
+        QueryEventsHandler(
+            event_store=event_store,
+        ),
+        GenerateSeedHandler(
+            interview_engine=interview_engine,
+            seed_generator=seed_generator,
+            llm_adapter=llm_adapter,
+        ),
+        MeasureDriftHandler(
+            event_store=event_store,
+        ),
+        InterviewHandler(
+            interview_engine=interview_engine,
+        ),
+        EvaluateHandler(
+            event_store=event_store,
+            llm_adapter=llm_adapter,
+        ),
+        LateralThinkHandler(),
+    ]
+
+    # Create server adapter
     server = MCPServerAdapter(
         name=name,
         version=version,
@@ -402,7 +515,17 @@ def create_ouroboros_server(
         rate_limit_config=rate_limit_config,
     )
 
-    # Tools and resources will be registered separately
-    # to avoid circular imports
+    # Register all tools with the server
+    for handler in tool_handlers:
+        server.register_tool(handler)
+        registry.register(handler, category="ouroboros")
+
+    log.info(
+        "mcp.server.composition_root_complete",
+        name=name,
+        version=version,
+        tools_registered=len(tool_handlers),
+        tool_names=[h.definition.name for h in tool_handlers],
+    )
 
     return server

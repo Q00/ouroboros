@@ -265,6 +265,63 @@ class EventStore:
                 details={"event_type": "orchestrator.session.started"},
             ) from e
 
+    async def query_events(
+        self,
+        aggregate_id: str | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[BaseEvent]:
+        """Query events with optional filters.
+
+        Args:
+            aggregate_id: Optional aggregate ID to filter by (e.g., session_id).
+            event_type: Optional event type to filter by.
+            limit: Maximum number of events to return.
+            offset: Number of events to skip for pagination.
+
+        Returns:
+            List of events matching the criteria, ordered by timestamp descending.
+
+        Raises:
+            PersistenceError: If the query fails.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="query_events",
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                query = select(events_table).order_by(
+                    events_table.c.timestamp.desc()
+                )
+
+                if aggregate_id:
+                    query = query.where(events_table.c.aggregate_id == aggregate_id)
+
+                if event_type:
+                    query = query.where(events_table.c.event_type == event_type)
+
+                query = query.limit(limit).offset(offset)
+
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                return [BaseEvent.from_db_row(dict(row)) for row in rows]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to query events: {e}",
+                operation="select",
+                table="events",
+                details={
+                    "aggregate_id": aggregate_id,
+                    "event_type": event_type,
+                    "limit": limit,
+                    "offset": offset,
+                },
+            ) from e
+
     async def close(self) -> None:
         """Close the database connection."""
         if self._engine is not None:
