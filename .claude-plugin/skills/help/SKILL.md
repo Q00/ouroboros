@@ -14,22 +14,22 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 
 1. **Socratic Interview** - Exposes hidden assumptions
 2. **Seed Generation** - Creates immutable specifications
-3. **PAL Routing** - Auto-escalates/descends model complexity (Phase 2)
-4. **Lateral Thinking** - 5 personas to break stagnation (Phase 3)
-5. **3-Stage Evaluation** - Mechanical → Semantic → Consensus (Phase 2)
+3. **PAL Routing** - Auto-escalates/descends model complexity
+4. **Lateral Thinking** - 5 personas to break stagnation
+5. **3-Stage Evaluation** - Mechanical → Semantic → Consensus
 
 ## Available Skills
 
-| Skill | Purpose | Phase |
-|-------|---------|-------|
-| `/ouroboros:interview` | Socratic requirement clarification | 1 ✅ |
-| `/ouroboros:seed` | Generate validated seed spec | 1 ✅ |
-| `/ouroboros:run` | Execute seed workflow | 2 🔜 |
-| `/ouroboros:evaluate` | 3-stage verification | 2 🔜 |
-| `/ouroboros:unstuck` | 5 lateral thinking personas | 3 🔜 |
-| `/ouroboros:status` | Drift measurement check | 2 🔜 |
-| `/ouroboros:setup` | Installation wizard | 3 🔜 |
-| `/ouroboros:help` | This guide | 1 ✅ |
+| Skill | Purpose | Status |
+|-------|---------|--------|
+| `/ouroboros:interview` | Socratic requirement clarification | ✅ |
+| `/ouroboros:seed` | Generate validated seed spec | ✅ |
+| `/ouroboros:run` | Execute seed workflow (MCP) | ✅ |
+| `/ouroboros:evaluate` | 3-stage verification (MCP) | ✅ |
+| `/ouroboros:unstuck` | 5 lateral thinking personas | ✅ |
+| `/ouroboros:status` | Session status + drift check (MCP) | ✅ |
+| `/ouroboros:setup` | Installation wizard | ✅ |
+| `/ouroboros:help` | This guide | ✅ |
 
 ## Available Agents
 
@@ -38,6 +38,10 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ouroboros:socratic-interviewer` | Exposes hidden assumptions through questioning |
 | `ouroboros:ontologist` | Finds root problems vs symptoms |
 | `ouroboros:seed-architect` | Crystallizes requirements into seed specs |
+| `ouroboros:evaluator` | Three-stage verification |
+| `ouroboros:contrarian` | "Are we solving the wrong problem?" |
+| `ouroboros:hacker` | "Make it work first, elegance later" |
+| `ouroboros:simplifier` | "Cut scope to absolute minimum" |
 
 ## Magic Keywords
 
@@ -52,13 +56,15 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 ## Quick Start Example
 
 ```
-1. /ouroboros:interview "Build a REST API"
-2. [Answer clarifying questions...]
-3. /ouroboros:seed
-4. /ouroboros:run  (Phase 2 - requires MCP server)
+1. /ouroboros:setup                        (first time only)
+2. /ouroboros:interview "Build a REST API"
+3. [Answer clarifying questions...]
+4. /ouroboros:seed
+5. /ouroboros:run
+6. /ouroboros:evaluate <session_id>
 ```
 
 ## Plugin Modes
 
-- **Plugin-Only**: Skills + Agents work without Python (current)
-- **Full Mode**: MCP server connects to Python core (Phase 2)
+- **Plugin-Only**: Skills + Agents work without Python (install only plugin)
+- **Full Mode**: MCP server connects to Python core (run `/ouroboros:setup`)
