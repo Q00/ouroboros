@@ -1,0 +1,17 @@
+{
+  "name": "ouroboros",
+  "version": "0.8.0",
+  "description": "Self-improving AI workflow system. Crystallize requirements before execution with Socratic interview, ambiguity scoring, and 3-stage evaluation.",
+  "author": {
+    "name": "Q00",
+    "email": "jqyu.lee@gmail.com"
+  },
+  "repository": "https://github.com/Q00/ouroboros",
+  "homepage": "https://github.com/Q00/ouroboros",
+  "license": "MIT",
+  "keywords": ["workflow", "requirements", "socratic", "interview", "seed", "evaluation", "self-improving", "drift-detection"],
+  "skills": "./skills/",
+  "agents": "./agents/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}
