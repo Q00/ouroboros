@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Plugin System - Agent Orchestration Framework (Phase 1)
+
+**Agent System (`ouroboros.plugin.agents`)**
+- `AgentRegistry` - Dynamic agent discovery with custom `.md` file support from `.claude-plugin/agents/`
+- `AgentPool` - Reusable agent pool with load balancing, auto-scaling, and health monitoring
+- `AgentRole` enum - Type-safe role categorization (ANALYSIS, PLANNING, EXECUTION, REVIEW, DOMAIN, PRODUCT, COORDINATION)
+- `AgentSpec` - Frozen dataclass for agent specifications with tools, capabilities, and model preferences
+- 4 builtin agents: `executor`, `planner`, `verifier`, `analyst`
+
+**Skill System (`ouroboros.plugin.skills`)**
+- `SkillRegistry` - Hot-reloadable skill discovery from `.claude-plugin/skills/`
+- `MagicKeywordDetector` - "ooo:" prefix and trigger keyword routing
+- `SkillExecutor` - Context-aware skill execution with history tracking
+- `SkillDocumentation` - Auto-generated documentation from SKILL.md files
+- 9 new execution mode skills:
+  - `autopilot` - Autonomous execution from idea to working code
+  - `ultrawork` - Maximum parallelism with parallel agent orchestration
+  - `ralph` - Self-referential loop with verifier verification (includes ultrawork)
+  - `ultrapilot` - Parallel autopilot with file ownership partitioning
+  - `ecomode` - Token-efficient execution using haiku and sonnet
+  - `swarm` - N coordinated agents using Claude Code native teams
+  - `pipeline` - Sequential agent chaining with data passing
+  - `tutorial` - Interactive guided tour for new users
+  - `swarm` - Team coordination mode
+
+**Orchestration (`ouroboros.plugin.orchestration`)**
+- `ModelRouter` - PAL (Progressive Auto-escalation) routing with tier selection
+- `Scheduler` - Parallel task execution with dependency resolution via `TaskGraph`
+- `RoutingContext` - Complexity-aware routing with learning from history
+- `ScheduledTask` - Task wrapper with priority, dependencies, and timeout support
+
+**State Management (`ouroboros.plugin.state`)**
+- `StateStore` - Atomic JSON file storage with schema migrations
+- `StateManager` - Session persistence with checkpoint/recovery
+- `RecoveryManager` - Auto-resume hooks after interruptions
+- `StateCompression` - Smart context compression when approaching limits
+- Support for multiple modes: AUTOPILOT, RALPH, ULTRAWORK, ULTRAPILOT, ECOMODE, SWARM, PIPELINE
+
+**TUI HUD Components (`ouroboros.tui.components`)**
+- `AgentsPanel` - Real-time agent pool status visualization
+- `TokenTracker` - Per-agent token usage with cost estimation
+- `ProgressBar` - Multi-phase progress with animated spinners
+- `EventLog` - Scrolling event history with color-coded severity
+- `HUDDashboard` - Unified HUD screen integrating all components
+
+**Documentation**
+- `docs/compare-alternatives.md` - Comparison with other AI agents and frameworks
+- `docs/onboarding-metrics.md` - User onboarding metrics and optimization strategies
+- `docs/marketing/` - Marketing assets (social media templates, star campaign, why ouroboros)
+- `docs/screenshots/` - Screenshot capture guides and production scripts
+- `docs/videos/` - Video production guides and demo scripts
+- Updated `CONTRIBUTING.md` - Full development setup and contribution guide
+- Updated `docs/architecture.md` - Plugin system architecture documentation
+- Updated `docs/getting-started.md` - Enhanced onboarding experience
+
+**Developer Experience**
+- GitHub workflows: `.github/workflows/lint.yml`, `test.yml`, `release.yml`
+- `playground/` directory with example models and configurations
+- 161 new passing tests (149 unit + 12 integration)
+
+**Skill Files Updated**
+- Updated `help`, `setup`, `welcome` skills with progressive disclosure
+- Added 8 new skill SKILL.md files (autopilot, ultrawork, ralph, ultrapilot, ecomode, swarm, pipeline, tutorial)
+
+### Changed
+- Updated CLI onboarding flow to reference new plugin system
+- Enhanced skill discovery with automatic trigger keyword indexing
+- Improved state persistence across /clear and session restarts
+
+### Tests
+- 161 new tests for plugin system (149 unit + 12 integration)
+- All existing TUI and tree tests continue to pass (190 tests)
+- Total test count: 1731 passing tests
+
 ## [0.3.0] - 2026-01-28
 
 ### Added
