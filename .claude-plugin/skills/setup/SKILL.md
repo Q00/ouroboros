@@ -1,17 +1,21 @@
 # /ouroboros:setup
 
-Setup wizard for installing and configuring Ouroboros.
+Setup wizard for installing and configuring Ouroboros MCP server.
 
 ## Usage
 
 ```
+ooo setup
 /ouroboros:setup
 /ouroboros:setup --uninstall
 ```
 
+> **Note**: `ooo interview` and `ooo seed` work immediately without setup.
+> Run setup only when you need MCP features (`ooo run`, `ooo evaluate`, `ooo status`).
+
 ## Setup Steps
 
-When the user invokes this skill, run the following 5-step wizard:
+When the user invokes this skill, run the following 4-step wizard:
 
 ### Step 1: Environment Detection
 
@@ -66,7 +70,7 @@ Ask the user:
 
 ```
 Add Ouroboros quick-reference to CLAUDE.md?
-This adds ~40 lines with skill triggers and agent descriptions.
+This adds ~30 lines with ooo commands and agent descriptions.
 A backup will be created at CLAUDE.md.bak.
 
 [Yes / No / Show preview first]
@@ -82,13 +86,16 @@ If "Show preview", display the block below. If "Yes":
 <!-- OUROBOROS:VERSION:0.9.0 -->
 # Ouroboros - Requirement Crystallization Engine
 
-## Skills
-- "interview me" or /ouroboros:interview - Socratic requirement clarification
-- "crystallize" or /ouroboros:seed - Generate validated seed specification
-- "ouroboros run" or /ouroboros:run - Execute seed workflow
-- "evaluate this" or /ouroboros:evaluate - Three-stage verification
-- "think sideways" or /ouroboros:unstuck - Lateral thinking (5 personas)
-- "am I drifting?" or /ouroboros:status - Session status and drift check
+## Commands (ooo prefix)
+- `ooo` - Welcome + quick start
+- `ooo interview` - Socratic requirement clarification (Plugin)
+- `ooo seed` - Generate validated seed specification (Plugin)
+- `ooo run` - Execute seed workflow (MCP)
+- `ooo evaluate` - Three-stage verification (MCP)
+- `ooo unstuck` - Lateral thinking, 5 personas (Plugin)
+- `ooo status` - Session status and drift check (MCP)
+- `ooo setup` - Installation wizard (Plugin)
+- `ooo help` - Full reference guide (Plugin)
 
 ## Agents
 - ouroboros:socratic-interviewer - Exposes hidden assumptions
@@ -98,30 +105,12 @@ If "Show preview", display the block below. If "Yes":
 - ouroboros:contrarian - "Are we solving the wrong problem?"
 - ouroboros:hacker - "Make it work first"
 - ouroboros:simplifier - "Cut scope to MVP"
+- ouroboros:researcher - "Stop coding, start investigating"
+- ouroboros:architect - "Redesign if the structure is wrong"
 <!-- OUROBOROS:END -->
 ```
 
-### Step 4: Star Solicitation (Optional)
-
-Check `~/.ouroboros/prefs.json` for `star_asked`. If not already asked:
-
-```
-Ouroboros setup complete!
-
-If this project is helpful, a GitHub star supports continued development.
-
-  [1] Yes, star the project
-  [2] No thanks
-  [3] Remind me after my first interview
-```
-
-- Option 1: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `star_asked: true`
-- Option 2: Save `star_asked: true` (permanent opt-out, never ask again)
-- Option 3: Save `star_remind_after_interview: true`
-
-Store preferences in `~/.ouroboros/prefs.json`.
-
-### Step 5: Verification
+### Step 4: Verification
 
 Run a quick verification:
 
@@ -133,12 +122,12 @@ Run a quick verification:
 Ouroboros Setup Complete
 ========================
 Mode: Full (Python 3.14 + MCP)
-Skills: 8 registered
-Agents: 7 available
+Skills: 9 registered
+Agents: 9 available
 MCP Server: Registered
 CLAUDE.md: Updated
 
-Quick start: /ouroboros:interview "your project idea"
+Quick start: ooo interview "your project idea"
 ```
 
 ## Uninstall

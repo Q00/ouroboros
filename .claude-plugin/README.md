@@ -8,9 +8,9 @@ Ouroboros transforms vague ideas into validated, executable specifications throu
 
 1. **Big Bang Interview** - Socratic questioning exposes hidden assumptions
 2. **Seed Generation** - Immutable specification with ontology schema
-3. **PAL Routing** - Complexity-based model escalation (Phase 2)
-4. **Lateral Thinking** - 5 personas break stagnation (Phase 3)
-5. **3-Stage Evaluation** - Mechanical → Semantic → Consensus (Phase 2)
+3. **PAL Routing** - Complexity-based model escalation
+4. **Lateral Thinking** - 5 personas break stagnation
+5. **3-Stage Evaluation** - Mechanical → Semantic → Consensus
 
 ## Installation
 
@@ -24,47 +24,24 @@ cp -r .claude-plugin ~/.claude/plugins/ouroboros
 
 ## Quick Start
 
-### Phase 1 (MVP - Available Now)
-
-```bash
-# 1. Start an interview
-/ouroboros:interview "Build a CLI task manager"
-
-# 2. Answer clarifying questions
-# The interviewer will ask about constraints, features, data structures...
-
-# 3. Generate the seed spec
-/ouroboros:seed
-
-# Output: Validated Seed YAML with ontology schema
+```
+ooo interview "Build a CLI task manager"
 ```
 
-### Phase 2 (MCP Bridge - Planned)
+Answer the clarifying questions, then:
 
-Requires Python 3.14+ and MCP server:
-
-```bash
-# 4. Execute the workflow
-/ouroboros:run seed.yaml
-
-# Features:
-# - PAL Router: Auto-selects model by complexity
-# - Double Diamond: Discover → Define → Design → Deliver
-# - Event Sourcing: SQLite immutable event store
-# - Session Recovery: Resume interrupted workflows
+```
+ooo seed
 ```
 
-### Phase 3 (Growth - Planned)
+That's it — you have a validated Seed specification.
 
-```bash
-# Setup wizard with environment detection
-/ouroboros:setup
+For execution, evaluation, and drift tracking (requires Python 3.14+):
 
-# Lateral thinking when stuck
-/ouroboros:unstuck
-
-# Drift measurement
-/ouroboros:status
+```
+ooo setup
+ooo run
+ooo evaluate
 ```
 
 ## Architecture
@@ -75,7 +52,7 @@ Requires Python 3.14+ and MCP server:
 │                                                               │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │   Skills    │  │   Agents    │  │      Hooks          │  │
-│  │  (8 SKILL)  │  │  (7 .md)    │  │  (keyword detection) │  │
+│  │  (9 SKILL)  │  │  (7 .md)    │  │  (keyword detection) │  │
 │  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
 └─────────┼────────────────┼────────────────────┼─────────────┘
           │                │                    │
@@ -99,41 +76,22 @@ Requires Python 3.14+ and MCP server:
 
 | Mode | Requirements | Features |
 |------|-------------|----------|
-| **Plugin-Only** | None | Skills + Agents (prompt-based) |
-| **Full Mode** | Python 3.14+ | + MCP server + Python core |
-
-## Features
-
-### ✅ Phase 1: MVP (Current)
-- Socratic interview for requirement clarification
-- Seed generation with ontology schema
-- Agent-based prompts (no Python required)
-
-### 🔜 Phase 2: MCP Bridge (Planned)
-- MCP server (`uvx ouroboros-ai mcp serve`)
-- Seed execution with PAL Router
-- 3-stage evaluation pipeline
-- Drift measurement
-- Session recovery
-
-### 🔜 Phase 3: Growth (Planned)
-- Setup wizard with environment detection
-- 5 lateral thinking personas
-- Magic keyword hooks
-- Star solicitation (Hybrid Option D)
+| **Plugin Mode** | None | Skills + Agents (prompt-based) |
+| **Full Mode (MCP)** | Python 3.14+ | + MCP server + Python core |
 
 ## Skills Reference
 
-| Skill | Description | Phase |
-|-------|-------------|-------|
-| `/ouroboros:interview` | Socratic Q&A for requirements | 1 ✅ |
-| `/ouroboros:seed` | Generate Seed YAML | 1 ✅ |
-| `/ouroboros:run` | Execute workflow | 2 🔜 |
-| `/ouroboros:evaluate` | 3-stage verification | 2 🔜 |
-| `/ouroboros:unstuck` | Lateral thinking personas | 3 🔜 |
-| `/ouroboros:status` | Drift measurement | 2 🔜 |
-| `/ouroboros:setup` | Installation wizard | 3 🔜 |
-| `/ouroboros:help` | Show this guide | 1 ✅ |
+| Skill | Description | Mode |
+|-------|-------------|------|
+| `/ouroboros:welcome` | First-touch welcome experience | Plugin |
+| `/ouroboros:interview` | Socratic Q&A for requirements | Plugin |
+| `/ouroboros:seed` | Generate Seed YAML | Plugin |
+| `/ouroboros:run` | Execute workflow | MCP |
+| `/ouroboros:evaluate` | 3-stage verification | MCP |
+| `/ouroboros:unstuck` | Lateral thinking personas | Plugin |
+| `/ouroboros:status` | Drift measurement | MCP |
+| `/ouroboros:setup` | Installation wizard | Plugin |
+| `/ouroboros:help` | Full reference guide | Plugin |
 
 ## Agents Reference
 
@@ -146,14 +104,22 @@ Requires Python 3.14+ and MCP server:
 | `ouroboros:contrarian` | "Wrong problem?" persona |
 | `ouroboros:hacker` | "Make it work" persona |
 | `ouroboros:simplifier` | "Cut scope" persona |
+| `ouroboros:researcher` | "Stop coding, investigate" persona |
+| `ouroboros:architect` | "Redesign the structure" persona |
 
 ## Magic Keywords
 
-- `"interview me"` → Start interview
-- `"crystallize"` → Generate seed
-- `"think sideways"` → Lateral thinking
-- `"am I drifting?"` → Drift check
-- `"evaluate this"` → 3-stage evaluation
+All commands use the `ooo` prefix:
+
+| Command | Natural Language Alternatives |
+|---------|------------------------------|
+| `ooo` | Welcome + quick start |
+| `ooo interview` | "interview me", "clarify requirements" |
+| `ooo seed` | "crystallize", "generate seed" |
+| `ooo run` | "ouroboros run", "execute seed" |
+| `ooo evaluate` | "evaluate this", "3-stage check" |
+| `ooo unstuck` | "think sideways", "i'm stuck" |
+| `ooo status` | "am I drifting?", "drift check" |
 
 ## License
 

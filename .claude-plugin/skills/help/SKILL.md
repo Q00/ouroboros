@@ -1,10 +1,11 @@
 # /ouroboros:help
 
-Display Ouroboros usage guide and available features.
+Full reference guide for Ouroboros power users.
 
 ## Usage
 
 ```
+ooo help
 /ouroboros:help
 ```
 
@@ -16,20 +17,50 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 2. **Seed Generation** - Creates immutable specifications
 3. **PAL Routing** - Auto-escalates/descends model complexity
 4. **Lateral Thinking** - 5 personas to break stagnation
-5. **3-Stage Evaluation** - Mechanical → Semantic → Consensus
+5. **3-Stage Evaluation** - Mechanical > Semantic > Consensus
+
+## All Commands
+
+| Command | Purpose | Mode |
+|---------|---------|------|
+| `ooo` | Welcome + quick start | Plugin |
+| `ooo interview` | Socratic requirement clarification | Plugin |
+| `ooo seed` | Generate validated seed spec | Plugin |
+| `ooo run` | Execute seed workflow | MCP |
+| `ooo evaluate` | 3-stage verification | MCP |
+| `ooo unstuck` | 5 lateral thinking personas | Plugin |
+| `ooo status` | Session status + drift check | MCP |
+| `ooo setup` | Installation wizard | Plugin |
+| `ooo welcome` | First-touch welcome guide | Plugin |
+| `ooo help` | This reference guide | Plugin |
+
+**Plugin** = Works immediately, no setup needed.
+**MCP** = Requires Python 3.14+ and `ooo setup` for MCP server registration.
+
+## Natural Language Triggers
+
+| Phrase | Triggers |
+|--------|----------|
+| "interview me", "clarify requirements", "socratic interview" | `ooo interview` |
+| "crystallize", "generate seed", "create seed", "freeze requirements" | `ooo seed` |
+| "ouroboros run", "execute seed", "run seed", "run workflow" | `ooo run` |
+| "evaluate this", "3-stage check", "verify execution" | `ooo evaluate` |
+| "think sideways", "i'm stuck", "break through", "lateral thinking" | `ooo unstuck` |
+| "am I drifting?", "drift check", "session status" | `ooo status` |
 
 ## Available Skills
 
-| Skill | Purpose | Status |
-|-------|---------|--------|
-| `/ouroboros:interview` | Socratic requirement clarification | ✅ |
-| `/ouroboros:seed` | Generate validated seed spec | ✅ |
-| `/ouroboros:run` | Execute seed workflow (MCP) | ✅ |
-| `/ouroboros:evaluate` | 3-stage verification (MCP) | ✅ |
-| `/ouroboros:unstuck` | 5 lateral thinking personas | ✅ |
-| `/ouroboros:status` | Session status + drift check (MCP) | ✅ |
-| `/ouroboros:setup` | Installation wizard | ✅ |
-| `/ouroboros:help` | This guide | ✅ |
+| Skill | Purpose | Mode |
+|-------|---------|------|
+| `/ouroboros:welcome` | First-touch welcome experience | Plugin |
+| `/ouroboros:interview` | Socratic requirement clarification | Plugin |
+| `/ouroboros:seed` | Generate validated seed spec | Plugin |
+| `/ouroboros:run` | Execute seed workflow | MCP |
+| `/ouroboros:evaluate` | 3-stage verification | MCP |
+| `/ouroboros:unstuck` | 5 lateral thinking personas | Plugin |
+| `/ouroboros:status` | Session status + drift check | MCP |
+| `/ouroboros:setup` | Installation wizard | Plugin |
+| `/ouroboros:help` | This guide | Plugin |
 
 ## Available Agents
 
@@ -42,29 +73,10 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ouroboros:contrarian` | "Are we solving the wrong problem?" |
 | `ouroboros:hacker` | "Make it work first, elegance later" |
 | `ouroboros:simplifier` | "Cut scope to absolute minimum" |
-
-## Magic Keywords
-
-| Keyword | Triggers |
-|---------|----------|
-| "interview me" | Start `/ouroboros:interview` |
-| "crystallize" | Generate `/ouroboros:seed` |
-| "think sideways" | Lateral thinking personas |
-| "am I drifting?" | Drift measurement check |
-| "evaluate this" | 3-stage evaluation |
-
-## Quick Start Example
-
-```
-1. /ouroboros:setup                        (first time only)
-2. /ouroboros:interview "Build a REST API"
-3. [Answer clarifying questions...]
-4. /ouroboros:seed
-5. /ouroboros:run
-6. /ouroboros:evaluate <session_id>
-```
+| `ouroboros:researcher` | "Stop coding, start investigating" |
+| `ouroboros:architect` | "Question the foundation, redesign if needed" |
 
 ## Plugin Modes
 
-- **Plugin-Only**: Skills + Agents work without Python (install only plugin)
-- **Full Mode**: MCP server connects to Python core (run `/ouroboros:setup`)
+- **Plugin Mode**: Skills + Agents work without Python (install only plugin)
+- **Full Mode (MCP)**: MCP server connects to Python core (run `ooo setup`)

@@ -5,6 +5,7 @@ Socratic interview to crystallize vague requirements into clear specifications.
 ## Usage
 
 ```
+ooo interview [topic]
 /ouroboros:interview [topic]
 ```
 

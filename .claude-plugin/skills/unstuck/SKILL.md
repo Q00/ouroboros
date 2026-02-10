@@ -59,6 +59,8 @@ If the MCP server is not available, delegate to the matching agent:
 - `ouroboros:contrarian` - "What if we're solving the wrong problem?"
 - `ouroboros:hacker` - "Make it work, elegance comes later"
 - `ouroboros:simplifier` - "Cut scope to the absolute minimum"
+- `ouroboros:researcher` - "Stop coding. Read the docs."
+- `ouroboros:architect` - "Question the foundation. Rebuild if needed."
 
 These agents use prompt-based lateral thinking without numerical analysis.
 

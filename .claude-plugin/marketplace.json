@@ -1,0 +1,27 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ouroboros",
+  "description": "Requirement crystallization engine — Socratic interviews, seed generation, and 3-stage evaluation",
+  "owner": {
+    "name": "Q00",
+    "email": "jqyu.lee@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "ouroboros",
+      "description": "Transform vague ideas into validated seed specifications through Socratic questioning and ontological analysis",
+      "version": "0.9.0",
+      "author": {
+        "name": "Q00",
+        "email": "jqyu.lee@gmail.com"
+      },
+      "source": "./",
+      "category": "development",
+      "homepage": "https://github.com/Q00/ouroboros",
+      "repository": "https://github.com/Q00/ouroboros",
+      "license": "MIT",
+      "keywords": ["workflow", "requirements", "socratic", "interview", "seed", "evaluation"],
+      "tags": ["requirement-engineering", "self-improving", "crystallization"]
+    }
+  ]
+}

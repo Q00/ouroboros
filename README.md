@@ -440,45 +440,44 @@ uv pip install ouroboros-ai
 
 <br/>
 
-### Using Claude Code Max Plan (Recommended)
+### Claude Code Plugin (Recommended)
 
-No API key required — uses your Claude Code subscription directly.
+Works inside Claude Code — no API key, no Python required.
 
-```bash
-# Begin the Big Bang (interactive interview)
-ouroboros init start --orchestrator "I want to build a task management CLI"
-
-# Execute via Claude Agent SDK
-ouroboros run workflow --orchestrator seed.yaml
+```
+ooo interview "I want to build a task management CLI"
 ```
 
-### From Source (Development)
+Answer the Socratic questions, then:
+
+```
+ooo seed
+```
+
+That's it. You now have a validated Seed specification ready for execution.
+
+### Full Mode (MCP)
+
+For seed execution, evaluation, and drift tracking — requires Python 3.14+:
+
+```
+ooo setup
+ooo run
+ooo evaluate
+```
+
+### CLI (Direct)
 
 ```bash
-# Clone
-git clone https://github.com/Q00/ouroboros
-cd ouroboros
-
 # Install
-uv sync
+pip install ouroboros-ai
 
-# Begin the Big Bang (interactive interview)
-uv run ouroboros init start --orchestrator "I want to build a task management CLI"
+# Orchestrator mode (Claude Code Max Plan)
+ouroboros init start --orchestrator "I want to build a task management CLI"
+ouroboros run workflow --orchestrator seed.yaml
 
-# Execute via Claude Agent SDK
-uv run ouroboros run workflow --orchestrator seed.yaml
-```
-
-### Using External LLM (LiteLLM)
-
-Requires API key (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, etc.)
-
-```bash
-# Begin the Big Bang
-uv run ouroboros init start "I want to build a task management CLI"
-
-# Check status
-uv run ouroboros status health
+# LiteLLM mode (external API key)
+ouroboros init start "I want to build a task management CLI"
 ```
 
 > 📖 **[Full Guide: Running with Claude Code](docs/running-with-claude-code.md)** | **[CLI Reference](docs/cli-reference.md)**
@@ -583,6 +582,51 @@ Contributions are welcome! Please see:
 
 <br/>
 
+## ◈ Features
+
+<br/>
+
+### Works Immediately (Plugin Mode)
+
+No Python, no setup — just install the Claude Code plugin.
+
+| Feature | Command | Description |
+|---------|---------|-------------|
+| Socratic Interview | `ooo interview` | Expose hidden assumptions |
+| Seed Generation | `ooo seed` | Crystallize requirements into spec |
+| Lateral Thinking | `ooo unstuck` | 5 personas to break stagnation |
+| Welcome | `ooo` | Quick start guide |
+| Help | `ooo help` | Full reference |
+
+### Full Mode (MCP)
+
+Requires Python 3.14+ and `ooo setup`.
+
+| Feature | Command | Description |
+|---------|---------|-------------|
+| Seed Execution | `ooo run` | Execute via Double Diamond |
+| 3-Stage Evaluation | `ooo evaluate` | Mechanical → Semantic → Consensus |
+| Drift Detection | `ooo status` | Session tracking + drift measurement |
+
+### Magic Keywords
+
+All commands use the `ooo` prefix. Natural language triggers also work:
+
+| Command | Natural Language Alternatives |
+|---------|------------------------------|
+| `ooo interview` | "interview me", "clarify requirements", "socratic interview" |
+| `ooo seed` | "crystallize", "generate seed", "freeze requirements" |
+| `ooo run` | "ouroboros run", "execute seed", "run workflow" |
+| `ooo evaluate` | "evaluate this", "3-stage check", "verify execution" |
+| `ooo unstuck` | "think sideways", "i'm stuck", "lateral thinking" |
+| `ooo status` | "am I drifting?", "drift check", "session status" |
+
+<br/>
+
+---
+
+<br/>
+
 ## ◈ Roadmap
 
 <br/>
@@ -601,6 +645,9 @@ Contributions are welcome! Please see:
 [■■■■■■■■■■] Epic 8  Orchestrator        ✓
 [■■■■■■■■■■] Epic 9  MCP Integration     ✓
 [■■■■■■■■■■] Epic 10 TUI Mode            ✓
+[■■■■■■■■■■] Epic 11 Claude Code Plugin  ✓
+[■■■■■■■■■■] Epic 12 MCP Bridge (Phase 2) ✓
+[■■■■■■■■■■] Epic 13 Full Skills (Phase 3) ✓
 ```
 
 ### Upcoming
@@ -608,9 +655,6 @@ Contributions are welcome! Please see:
 | Feature | Description | Status |
 |---------|-------------|--------|
 | **Worker MCP** | MCP server for distributed task execution | Planned |
-| **TUI Enhancement** | Rich terminal UI with real-time progress | Planned |
-| **AC Tree Visualization** | Interactive acceptance criteria graph | Planned |
-| **Plugin System** | Custom evaluators and personas | Planned |
 | **Web Dashboard** | Execution monitoring and analytics | Planned |
 
 <br/>
