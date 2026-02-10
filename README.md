@@ -1,24 +1,17 @@
 <p align="center">
   <br/>
-  <br/>
+  ◯ ─────────── ◯
+  <br/><br/>
+  <strong>O U R O B O R O S</strong>
+  <br/><br/>
+  ◯ ─────────── ◯
   <br/>
 </p>
 
-<h1 align="center">
-  <br/>
-  ◯ ─────────── ◯
-  <br/>
-  <br/>
-  O U R O B O R O S
-  <br/>
-  <br/>
-  ◯ ─────────── ◯
-  <br/>
-  <br/>
-</h1>
-
 <p align="center">
-  <em>The serpent that devours itself to be reborn anew.</em>
+  <strong>Stop prompting. Start specifying.</strong>
+  <br/>
+  <sub>A Claude Code plugin that turns vague ideas into validated specs — before AI writes a single line of code.</sub>
 </p>
 
 <p align="center">
@@ -28,714 +21,168 @@
 </p>
 
 <p align="center">
-  <a href="#-philosophy">Philosophy</a> •
-  <a href="#-the-six-phases">Phases</a> •
-  <a href="#-architecture">Architecture</a> •
-  <a href="#-prerequisites">Prerequisites</a> •
-  <a href="#-quick-start">Start</a> •
-  <a href="#-roadmap">Roadmap</a> •
+  <a href="#-quick-start">Quick Start</a> •
+  <a href="#-why-ouroboros">Why?</a> •
+  <a href="#-commands">Commands</a> •
+  <a href="#-how-it-works">How It Works</a> •
   <a href="#-contributing">Contributing</a>
 </p>
 
-<br/>
-
-<p align="center">
-  <code>75 modules</code> · <code>1,341 tests</code> · <code>97%+ coverage</code>
-</p>
-
-<br/>
-
 ---
-
-<br/>
-
-## ◈ The Premise
-
-<br/>
-
-<table>
-<tr>
-<td width="100%">
-
-```
-╔════════════════════════════════════════════════════════╗
-║                                                        ║
-║              「 HUMANS ARE NOT RATIONAL 」                ║
-║                                                        ║
-╚════════════════════════════════════════════════════════╝
-```
-
-</td>
-</tr>
-</table>
-
-Human requirements arrive **ambiguous**, **incomplete**, **contradictory**, and **surface-level**.
-
-If AI executes such input directly → `GIGO` (Garbage In, Garbage Out).
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Philosophy
-
-<br/>
-
-### The Two Ancient Methods
-
-To transmute irrational input into executable truth, we invoke:
-
-<br/>
-
-<table>
-<tr>
-<td width="50%" valign="top">
-
-#### ⌬ SOCRATIC QUESTIONING
-
-```
-"Why do you want this?"
-
-"What if you don't get it?"
-
-"Is that truly necessary?"
-
-"What are you assuming?"
-```
-
-↳ *Reveals hidden assumptions* <br/>
-↳ *Exposes contradictions* <br/>
-↳ *Challenges the obvious* <br/>
-
-</td>
-<td width="50%" valign="top">
-
-#### ⌬ ONTOLOGICAL ANALYSIS
-
-```
-"What IS this, really?"
-
-"Symptom or root cause?"
-
-"What's the essence?"
-
-"What must exist first?"
-```
-
-↳ *Finds the root problem* <br/>
-↳ *Separates essential from accidental* <br/>
-↳ *Maps the structure of being* <br/>
-
-</td>
-</tr>
-</table>
-
-<br/>
-
-These iterate until a **Seed** crystallizes—a specification with `Ambiguity ≤ 0.2`.
-
-*Only then does execution begin. Only then can it succeed.*
-
-<br/>
-
----
-
-<br/>
-
-### The Governing Principle
-
-<br/>
-
-<table>
-<tr>
-<td width="100%">
-
-```
-
-╭────────────────────────────────────────────────────────────╮
-│                                                            │
-│                                                            │
-│         「 FRUGAL BY DEFAULT, RIGOROUS IN VERIFICATION 」     │
-│                                                            │
-│                                                            │
-╰────────────────────────────────────────────────────────────╯
-
-
-```
-
-</td>
-</tr>
-</table>
-
-<br/>
-
-| Paradox | Problem | Ouroboros Solution |
-|---------|---------|-------------------|
-| Power without Wisdom | Frontier models cost 30x | Start at 1x, escalate only when needed |
-| Speed without Judgment | Fast models miss nuance | 3-stage evaluation catches errors |
-| Iteration without Direction | Infinite loops | Drift detection + Retrospective |
-
-<br/>
-
----
-
-<br/>
-
-## ◈ The Six Phases
-
-<br/>
-
-```
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃                                                                                ┃
-┃                                                                                ┃
-┃      ┌─────────┐                                                               ┃
-┃      │ PHASE 0 │  B I G   B A N G                                              ┃
-┃      └────┬────┘                                                               ┃
-┃           │      Socratic + Ontological questioning                            ┃
-┃           │      From irrational chaos → crystallized Seed                     ┃
-┃           │      Gate: Ambiguity ≤ 0.2                                         ┃
-┃           ▼                                                                    ┃
-┃      ┌─────────┐                                                               ┃
-┃      │ PHASE 1 │  P A L   R O U T E R                                          ┃
-┃      └────┬────┘                                                               ┃
-┃           │      Progressive Adaptive LLM selection                            ┃
-┃           │      1x (Frugal) → 10x (Standard) → 30x (Frontier)                 ┃
-┃           │      "Choose your weapon wisely"                                   ┃
-┃           ▼                                                                    ┃
-┃      ┌─────────┐                                                               ┃
-┃      │ PHASE 2 │  D O U B L E   D I A M O N D                                  ┃
-┃      └────┬────┘                                                               ┃
-┃           │      Discover → Define → Design → Deliver                          ┃
-┃           │      Diverge to explore, converge to execute                       ┃
-┃           │      Recursive decomposition until atomic                          ┃
-┃           ▼                                                                    ┃
-┃      ┌─────────┐                                                               ┃
-┃      │ PHASE 3 │  R E S I L I E N C E                                          ┃
-┃      └────┬────┘                                                               ┃
-┃           │      Stagnation detection (4 patterns)                             ┃
-┃           │      Lateral thinking via persona rotation                         ┃
-┃           │      "When stuck, think sideways"                                  ┃
-┃           ▼                                                                    ┃
-┃      ┌─────────┐                                                               ┃
-┃      │ PHASE 4 │  E V A L U A T I O N                                          ┃
-┃      └────┬────┘                                                               ┃
-┃           │      Stage 1: Mechanical ($0) — lint, build, test                  ┃
-┃           │      Stage 2: Semantic ($$) — AC compliance, drift                 ┃
-┃           │      Stage 3: Consensus ($$$$) — Advocate/Devil/Judge debate       ┃
-┃           ▼                                                                    ┃
-┃      ┌─────────┐                                                               ┃
-┃      │ PHASE 5 │  S E C O N D A R Y   L O O P                                  ┃
-┃      └────┬────┘                                                               ┃
-┃           │      TODO Registry: defer the trivial                              ┃
-┃           │      Batch processing after primary goal                           ┃
-┃           │      "Pursue the essential"                                        ┃
-┃           │                                                                    ┃
-┃           ╰─────────────────────────── ↺ ──────────────────────────────────────┃
-┃                                                                                ┃
-┃                                                                                ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-```
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Economic Model
-
-<br/>
-
-> *Intelligence has a cost. Ouroboros optimizes it.*
-
-<br/>
-
-| Tier | Cost | When | Philosophy |
-|:----:|:----:|------|------------|
-| `FRUGAL` | **1x** | complexity < 0.4 | *"Most problems are simpler than they appear"* |
-| `STANDARD` | **10x** | complexity < 0.7 | *"Pay for quality when it matters"* |
-| `FRONTIER` | **30x** | critical decisions | *"Some choices cannot be undone"* |
-
-<br/>
-
-```python
-def select_approach(task):
-    if task.complexity < 0.4:
-        return Tier.FRUGAL       # Start humble
-
-    if task.reversible:
-        return Tier.STANDARD     # Move fast
-
-    if task.affects_direction:
-        return Tier.FRONTIER     # Think deeply
-
-    return Tier.STANDARD
-```
-
-<br/>
-
-**Result**: `~85% cost reduction` compared to "always use the best model"
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Architecture
-
-<br/>
-
-```
-src/ouroboros/
-│
-├── core/           ◆ The essence: types, errors, seed, ontology
-│
-├── bigbang/        ◇ Phase 0: Interview → Ontology → Ambiguity → Seed
-│
-├── routing/        ◇ Phase 1: PAL router, complexity, tiers
-│
-├── execution/      ◇ Phase 2: Double Diamond, decomposition
-│
-├── resilience/     ◇ Phase 3: Stagnation, lateral thinking
-│
-├── evaluation/     ◇ Phase 4: Mechanical, semantic, consensus
-│
-├── secondary/      ◇ Phase 5: TODO registry, batch scheduler
-│
-├── orchestrator/   ★ Claude Agent SDK integration
-│
-├── observability/  ○ Drift control, retrospective, logging
-│
-├── persistence/    ○ Event sourcing, checkpoints, recovery
-│
-├── providers/      ○ LiteLLM adapter (100+ models)
-│
-└── cli/            ○ Command-line interface
-```
-
-<br/>
-
----
-
-<br/>
-
-## ◈ The Personas (Lateral Thinking Agents)
-
-<br/>
-
-> *When stuck, the system doesn't retry harder. It switches persona and thinks differently.*
-
-<br/>
-
-| Persona | Strategy | Trigger | Behavior |
-|:--------|:---------|:--------|:---------|
-| **THE HACKER** | *"Elegance be damned. Make it work."* | Quick fix needed | Hardcode, skip abstractions, brute force |
-| **THE RESEARCHER** | *"Stop coding. Read the docs."* | Knowledge gap detected | Search, read documentation, find examples |
-| **THE SIMPLIFIER** | *"Cut scope in half. Return to MVP."* | Overengineering detected | Remove features, reduce complexity |
-| **THE ARCHITECT** | *"Question the foundation. Rebuild if needed."* | Structural issues | Redesign, refactor core assumptions |
-| **THE CONTRARIAN** | *"What if we're solving the wrong problem?"* | Root cause unclear | Challenge assumptions using ontological questions |
-
-<br/>
-
-**How it works**: Stagnation Detection (4 patterns) → Persona Rotation → Retry with fresh perspective
-
-<br/>
-
----
-
-<br/>
-
-## ◈ The Eternal Cycle
-
-<br/>
-
-```
-                              ┌─────────────────────────┐
-                              │                         │
-                              ▼                         │
-                    ┌───────────────────┐              │
-                    │                   │              │
-                    │   S E E D         │              │
-                    │   Ambiguity ≤ 0.2 │              │
-                    │                   │              │
-                    └─────────┬─────────┘              │
-                              │                         │
-                              ▼                         │
-                    ┌───────────────────┐              │
-                    │                   │              │
-                    │   E X E C U T E   │              │
-                    │   PAL → Diamond   │              │
-                    │                   │              │
-                    └─────────┬─────────┘              │
-                              │                         │
-                              ▼                         │
-                    ┌───────────────────┐              │
-                    │                   │              │
-                    │  RETROSPECTIVE    │              │
-                    │  Every 3 cycles   │              │
-                    │                   │              │
-                    └─────────┬─────────┘              │
-                              │                         │
-                      ┌───────┴───────┐                │
-                      ▼               ▼                │
-                                                       │
-                 Drift OK        Drift High            │
-                    │                 │                │
-                    ▼                 │                │
-                 Continue             ╰────────────────┘
-                                  Re-examine Seed
-```
-
-<br/>
-
-The system doesn't blindly loop.
-It **questions its own direction**.
-
-When drift exceeds threshold, it returns to the beginning—
-not to restart, but to **re-crystallize** with new understanding.
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Prerequisites
-
-<br/>
-
-| Requirement | Description |
-|-------------|-------------|
-| **Python 3.14+** | Required (uses latest language features) |
-| **Claude Code Max Plan** | For orchestrator mode (no API key needed) |
-| **OR API Key** | OpenRouter, Anthropic, or OpenAI for LiteLLM mode |
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Installation
-
-<br/>
-
-```bash
-pip install ouroboros-ai
-# or
-uv pip install ouroboros-ai
-```
-
-<br/>
-
----
-
-<br/>
 
 ## ◈ Quick Start
 
-<br/>
-
-### Claude Code Plugin (Recommended)
-
-Works inside Claude Code — no API key, no Python required.
-
+```bash
+# Install (2 commands, no Python needed)
+claude /plugin marketplace add github:Q00/ouroboros
+claude /plugin install ouroboros@ouroboros
 ```
+
+```bash
+# Use (2 commands, that's it)
 ooo interview "I want to build a task management CLI"
-```
-
-Answer the Socratic questions, then:
-
-```
 ooo seed
 ```
 
-That's it. You now have a validated Seed specification ready for execution.
+**Done.** You now have a validated spec with ambiguity scored below 0.2 — ready for AI to execute.
 
-### Full Mode (MCP)
+<details>
+<summary><strong>What just happened?</strong></summary>
 
-For seed execution, evaluation, and drift tracking — requires Python 3.14+:
+1. `ooo interview` — Socratic questioning exposed your hidden assumptions and contradictions
+2. `ooo seed` — Crystallized answers into an immutable specification (the "Seed")
+3. The Seed is what you hand to AI — no more "build me X" and hoping for the best
 
-```
-ooo setup
-ooo run
-ooo evaluate
-```
+</details>
 
-### CLI (Direct)
+### Want more? Enable Full Mode
 
-```bash
-# Install
-pip install ouroboros-ai
-
-# Orchestrator mode (Claude Code Max Plan)
-ouroboros init start --orchestrator "I want to build a task management CLI"
-ouroboros run workflow --orchestrator seed.yaml
-
-# LiteLLM mode (external API key)
-ouroboros init start "I want to build a task management CLI"
-```
-
-> 📖 **[Full Guide: Running with Claude Code](docs/running-with-claude-code.md)** | **[CLI Reference](docs/cli-reference.md)**
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Anti-Patterns
-
-<br/>
-
-> *What we explicitly reject:*
-
-<br/>
-
-| ✗ Anti-Pattern | Problem | ✓ Our Solution |
-|----------------|---------|----------------|
-| Consensus Everywhere | Cost explosion | Gate-only consensus |
-| Frontier First | Wasteful | Frugal first, escalate |
-| Infinite Retry | Stagnation | Lateral thinking |
-| Immediate Optimization | Yak shaving | TODO registry (defer) |
-| Vague Seeds | GIGO | Ambiguity ≤ 0.2 |
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Security
-
-<br/>
-
-Ouroboros includes built-in security features:
-
-| Feature | Description |
-|---------|-------------|
-| **API Key Masking** | Keys are automatically masked in logs (`sk-...xxxx`) |
-| **Log Sanitization** | Sensitive fields (password, token, secret) are redacted |
-| **Input Validation** | Size limits prevent DoS attacks (50KB context, 1MB seed files) |
-| **Credentials Protection** | `credentials.yaml` uses chmod 600 permissions |
-
-```python
-from ouroboros.core import mask_api_key, sanitize_for_logging
-
-# Mask API keys for display
-masked = mask_api_key("sk-1234567890abcdef")  # "sk-...cdef"
-
-# Sanitize dicts before logging
-safe_data = sanitize_for_logging({"api_key": "sk-secret", "name": "test"})
-# {"api_key": "<REDACTED>", "name": "test"}
-```
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Development
-
-<br/>
+Full Mode adds execution, evaluation, and drift tracking. Requires Python 3.14+:
 
 ```bash
-# Install all dependencies
-uv sync --all-groups
-
-# Run tests
-uv run pytest
-
-# Type checking
-uv run mypy src/
-
-# Lint
-uv run ruff check src/
-
-# Format
-uv run ruff format src/
+ooo setup       # register MCP server
+ooo run         # execute via Double Diamond decomposition
+ooo evaluate    # 3-stage verification (Mechanical → Semantic → Consensus)
 ```
 
-<br/>
+> **[Full Guide](docs/running-with-claude-code.md)** | **[CLI Reference](docs/cli-reference.md)**
 
 ---
 
-<br/>
+## ◈ Why Ouroboros?
+
+> *"I can already prompt Claude directly. Why do I need this?"*
+
+**Before** — You say "build me a task management CLI":
+```
+Claude builds something. You realize it's wrong.
+You rewrite the prompt. Claude rebuilds. Still wrong.
+3 hours later, you're debugging requirements, not code.
+```
+
+**After** — Ouroboros interviews you first:
+```
+Q: "Should completed tasks be deletable or archived?"
+Q: "What happens when two tasks have the same priority?"
+Q: "Is this for teams or solo use?"
+→ 12 hidden assumptions exposed. Seed generated. Ambiguity: 0.15
+→ Claude builds exactly what you specified. First try.
+```
+
+| Problem | How Ouroboros Solves It |
+|---------|----------------------|
+| Vague requirements → wrong output | Socratic interview exposes hidden assumptions |
+| Most expensive model for everything | PAL Router: **85% cost reduction** via automatic tier selection |
+| No idea if you're still on track | Drift detection flags when execution diverges from spec |
+| Stuck → retry the same approach harder | 5 lateral thinking personas offer fresh angles |
+
+---
+
+## ◈ Commands
+
+| Command | Description | Mode |
+|---------|-------------|:----:|
+| `ooo interview` | Socratic questioning → expose hidden assumptions | Plugin |
+| `ooo seed` | Crystallize answers into immutable spec | Plugin |
+| `ooo unstuck` | 5 lateral thinking personas when you're stuck | Plugin |
+| `ooo run` | Execute seed via Double Diamond decomposition | Full |
+| `ooo evaluate` | 3-stage verification (Mechanical → Semantic → Consensus) | Full |
+| `ooo status` | Drift detection + session tracking | Full |
+| `ooo help` | Full command reference | Plugin |
+
+Natural language also works — say "i'm stuck" instead of `ooo unstuck`, or "clarify requirements" instead of `ooo interview`.
+
+---
+
+## ◈ How It Works
+
+Human requirements arrive **ambiguous**, **incomplete**, and **contradictory**. If AI executes them directly — Garbage In, Garbage Out.
+
+Ouroboros applies two ancient methods to fix this:
+
+- **Socratic Questioning** — *"Why do you want this? Is that truly necessary?"* → reveals hidden assumptions
+- **Ontological Analysis** — *"What IS this, really? Symptom or root cause?"* → finds the essential problem
+
+These iterate until a **Seed** crystallizes — a spec with `Ambiguity ≤ 0.2`. Only then does execution begin.
+
+### The Pipeline
+
+```
+  Interview → Seed → Route → Execute → Evaluate → Adapt
+  (Phase 0)   (0)    (1)     (2)        (4)       (3,5)
+```
+
+| Phase | What It Does |
+|:-----:|-------------|
+| **0 — Big Bang** | Socratic + Ontological questioning → crystallized Seed |
+| **1 — PAL Router** | Auto-selects model tier: 1x / 10x / 30x → **~85% cost savings** |
+| **2 — Double Diamond** | Discover → Define → Design → Deliver |
+| **3 — Resilience** | Stagnation? Switch to one of 5 lateral thinking personas |
+| **4 — Evaluation** | Mechanical ($0) → Semantic ($$) → Consensus ($$$$) |
+| **5 — Secondary Loop** | TODO registry: defer the trivial, pursue the essential |
+
+---
+
+## ◈ Architecture
+
+<details>
+<summary><code>75 modules</code> · <code>1,341 tests</code> · <code>97%+ coverage</code></summary>
+
+```
+src/ouroboros/
+├── core/           ◆ Types, errors, seed, ontology
+├── bigbang/        ◇ Phase 0: Interview → Seed
+├── routing/        ◇ Phase 1: PAL router, tiers
+├── execution/      ◇ Phase 2: Double Diamond
+├── resilience/     ◇ Phase 3: Lateral thinking
+├── evaluation/     ◇ Phase 4: 3-stage evaluation
+├── secondary/      ◇ Phase 5: TODO registry
+├── orchestrator/   ★ Claude Agent SDK integration
+├── observability/  ○ Drift control, retrospective
+├── persistence/    ○ Event sourcing, checkpoints
+├── providers/      ○ LiteLLM adapter (100+ models)
+└── cli/            ○ Command-line interface
+```
+
+</details>
+
+---
 
 ## ◈ Contributing
 
-<br/>
+```bash
+uv sync --all-groups && uv run pytest   # Setup + test
+```
 
-Contributions are welcome! Please see:
-
-- **Issues**: [GitHub Issues](https://github.com/Q00/ouroboros/issues) for bugs and feature requests
-- **Discussions**: [GitHub Discussions](https://github.com/Q00/ouroboros/discussions) for questions and ideas
-
-<br/>
+- **Issues**: [GitHub Issues](https://github.com/Q00/ouroboros/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Q00/ouroboros/discussions)
 
 ---
-
-<br/>
-
-## ◈ Features
-
-<br/>
-
-### Works Immediately (Plugin Mode)
-
-No Python, no setup — just install the Claude Code plugin.
-
-| Feature | Command | Description |
-|---------|---------|-------------|
-| Socratic Interview | `ooo interview` | Expose hidden assumptions |
-| Seed Generation | `ooo seed` | Crystallize requirements into spec |
-| Lateral Thinking | `ooo unstuck` | 5 personas to break stagnation |
-| Welcome | `ooo` | Quick start guide |
-| Help | `ooo help` | Full reference |
-
-### Full Mode (MCP)
-
-Requires Python 3.14+ and `ooo setup`.
-
-| Feature | Command | Description |
-|---------|---------|-------------|
-| Seed Execution | `ooo run` | Execute via Double Diamond |
-| 3-Stage Evaluation | `ooo evaluate` | Mechanical → Semantic → Consensus |
-| Drift Detection | `ooo status` | Session tracking + drift measurement |
-
-### Magic Keywords
-
-All commands use the `ooo` prefix. Natural language triggers also work:
-
-| Command | Natural Language Alternatives |
-|---------|------------------------------|
-| `ooo interview` | "interview me", "clarify requirements", "socratic interview" |
-| `ooo seed` | "crystallize", "generate seed", "freeze requirements" |
-| `ooo run` | "ouroboros run", "execute seed", "run workflow" |
-| `ooo evaluate` | "evaluate this", "3-stage check", "verify execution" |
-| `ooo unstuck` | "think sideways", "i'm stuck", "lateral thinking" |
-| `ooo status` | "am I drifting?", "drift check", "session status" |
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Roadmap
-
-<br/>
-
-### Completed
-
-```
-[■■■■■■■■■■] Epic 0  Foundation          ✓
-[■■■■■■■■■■] Epic 1  Big Bang            ✓
-[■■■■■■■■■■] Epic 2  PAL Router          ✓
-[■■■■■■■■■■] Epic 3  Double Diamond      ✓
-[■■■■■■■■■■] Epic 4  Resilience          ✓
-[■■■■■■■■■■] Epic 5  Evaluation          ✓
-[■■■■■■■■■■] Epic 6  Drift Control       ✓
-[■■■■■■■■■■] Epic 7  Secondary Loop      ✓
-[■■■■■■■■■■] Epic 8  Orchestrator        ✓
-[■■■■■■■■■■] Epic 9  MCP Integration     ✓
-[■■■■■■■■■■] Epic 10 TUI Mode            ✓
-[■■■■■■■■■■] Epic 11 Claude Code Plugin  ✓
-[■■■■■■■■■■] Epic 12 MCP Bridge (Phase 2) ✓
-[■■■■■■■■■■] Epic 13 Full Skills (Phase 3) ✓
-```
-
-### Upcoming
-
-| Feature | Description | Status |
-|---------|-------------|--------|
-| **Worker MCP** | MCP server for distributed task execution | Planned |
-| **Web Dashboard** | Execution monitoring and analytics | Planned |
-
-<br/>
-
----
-
-<br/>
-
-## ◈ Why "Ouroboros"?
-
-<br/>
-
-<table>
-<tr>
-<td width="100%">
-
-```
-
-                                    ╭──────────╮
-                                ╭───╯          ╰───╮
-                              ╭─╯                  ╰─╮
-                             ╭╯        ◯ ← ◯        ╰╮
-                             │       ↗       ↘       │
-                             │      ◯    ⚬    ◯      │
-                             │       ↖       ↙       │
-                             ╰╮        ◯ → ◯        ╭╯
-                              ╰─╮                  ╭─╯
-                                ╰───╮          ╭───╯
-                                    ╰──────────╯
-
-                     The serpent that devours itself to be reborn.
-
-
-```
-
-</td>
-</tr>
-</table>
-
-<br/>
-
-The ouroboros has symbolized eternal cycles of renewal for millennia.
-
-Software development is no different:
-
-```
-Write → Test → Fail → Learn → Rewrite → Test → ...
-```
-
-The question is not *whether* to iterate, but *how to iterate wisely*.
-
-<br/>
-
-**Ouroboros answers:**
-
-1. **Start with truth** — Socratic questioning extracts essence
-2. **Be frugal in execution** — Don't waste intelligence on simple problems
-3. **Be rigorous in verification** — Critical decisions need consensus
-4. **Trust the cycle** — Let the serpent eat its tail and be reborn
-
-<br/>
-
----
-
-<br/>
 
 <p align="center">
-  <br/>
-  <br/>
   <em>"The beginning is the end, and the end is the beginning."</em>
-  <br/>
-  <br/>
-  <br/>
-</p>
-
----
-
-<br/>
-
-<p align="center">
+  <br/><br/>
+  <a href="docs/getting-started.md">Getting Started</a> · <a href="docs/cli-reference.md">CLI Reference</a>
+  <br/><br/>
   <code>MIT License</code>
 </p>
-
-<br/>
