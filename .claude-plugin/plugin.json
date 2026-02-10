@@ -1,6 +1,6 @@
 {
   "name": "ouroboros",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Self-improving AI workflow system. Crystallize requirements before execution with Socratic interview, ambiguity scoring, and 3-stage evaluation.",
   "author": {
     "name": "Q00",

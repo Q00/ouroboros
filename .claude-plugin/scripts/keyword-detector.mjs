@@ -23,6 +23,7 @@ const KEYWORD_MAP = [
   { patterns: ["ooo eval", "ooo evaluate"], skill: "/ouroboros:evaluate" },
   { patterns: ["ooo stuck", "ooo unstuck", "ooo lateral"], skill: "/ouroboros:unstuck" },
   { patterns: ["ooo status", "ooo drift"], skill: "/ouroboros:status" },
+  { patterns: ["ooo welcome"], skill: "/ouroboros:welcome" },
   { patterns: ["ooo setup"], skill: "/ouroboros:setup" },
   { patterns: ["ooo help"], skill: "/ouroboros:help" },
   // Natural language triggers
@@ -51,12 +52,12 @@ function detectKeywords(text) {
     }
   }
 
-  // Bare "ooo" (with no subcommand) → help
+  // Bare "ooo" (with no subcommand) → welcome (first-touch experience)
   if (lower === "ooo" || lower === "ooo?") {
     return {
       detected: true,
       keyword: "ooo",
-      suggested_skill: "/ouroboros:help",
+      suggested_skill: "/ouroboros:welcome",
     };
   }
 

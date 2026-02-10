@@ -5,6 +5,7 @@ Generate validated Seed specifications from interview results.
 ## Usage
 
 ```
+ooo seed
 /ouroboros:seed
 ```
 
@@ -53,6 +54,44 @@ ontology_schema:
       description: Task title
 ```
 
-## Next Steps
+## After Seed Generation
 
-After seed generation, use `/ouroboros:run` (Phase 2) to execute the workflow.
+On successful seed generation, first announce:
+
+```
+Your seed has been crystallized!
+```
+
+Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not set to `true`, use the **AskUserQuestion tool** with this single question:
+
+```json
+{
+  "questions": [{
+    "question": "If Ouroboros helped clarify your thinking, a GitHub star supports continued development. Ready to unlock Full Mode?",
+    "header": "Next step",
+    "options": [
+      {
+        "label": "\u2b50 Star & Setup",
+        "description": "Star on GitHub + run ooo setup to enable run, evaluate, status"
+      },
+      {
+        "label": "Just Setup",
+        "description": "Skip star, go straight to ooo setup for Full Mode"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+- **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `.claude-plugin/skills/setup/SKILL.md`
+- **Just Setup**: Save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `.claude-plugin/skills/setup/SKILL.md`
+- **Other** (user provides custom text): Save `{"star_asked": true}`, skip setup
+
+Create `~/.ouroboros/` directory if it doesn't exist.
+
+If `star_asked` is already `true`, skip the question and just announce:
+
+```
+Your seed has been crystallized! Run `ooo run` to execute (requires `ooo setup` first).
+```
