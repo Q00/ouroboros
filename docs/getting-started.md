@@ -1,240 +1,465 @@
 # Getting Started with Ouroboros
 
-This guide will help you install Ouroboros and run your first self-improving AI workflow.
+Transform your vague ideas into validated specifications and execute them with confidence.
 
-## Prerequisites
+## Quick Start: 3 Commands in 60 Seconds
 
-- Python 3.14 or higher
-- [uv](https://github.com/astral-sh/uv) package manager (recommended)
-- An LLM API key (OpenAI, Anthropic, or other supported providers)
-
-## Installation
-
-### Using uv (Recommended)
-
+### Plugin Mode (No Python Required)
 ```bash
-# Clone the repository
+# Install (2 commands)
+claude /plugin marketplace add github:Q00/ouroboros
+claude /plugin install ouroboros@ouroboros
+
+# Your first workflow (2 commands)
+ooo interview "Build a task management CLI"
+ooo seed
+```
+
+**Done!** You now have a validated specification ready for execution.
+
+### Full Mode (Python 3.14+ Required)
+```bash
+# Setup
+git clone https://github.com/Q00/ouroboros
+cd ouroboros
+uv sync
+
+# Configure
+export ANTHROPIC_API_KEY="your-key"
+ouroboros setup
+
+# Execute
+ouroboros run --seed ~/.ouroboros/seeds/latest.yaml
+```
+
+---
+
+## Installation Guide
+
+### Prerequisites
+- **Claude Code** (for Plugin Mode)
+- **Python 3.14+** (for Full Mode)
+- **API Key** from OpenAI, Anthropic, or compatible provider
+
+### Option 1: Plugin Mode (Recommended for Beginners)
+```bash
+# Install via Claude Code marketplace
+claude /plugin marketplace add github:Q00/ouroboros
+claude /plugin install ouroboros@ouroboros
+
+# Verify installation
+ooo help
+```
+
+### Option 2: Full Mode (For Developers)
+```bash
+# Clone repository
 git clone https://github.com/Q00/ouroboros
 cd ouroboros
 
 # Install dependencies
 uv sync
 
-# Verify installation
-uv run ouroboros --version
+# Or using pip
+pip install -e .
+
+# Verify CLI
+ouroboros --version
 ```
 
-### Using pip
-
+### Option 3: Standalone Binary
 ```bash
-pip install ouroboros
+# Download from GitHub Releases
+# macOS: brew install ouroboros
+# Linux: snap install ouroboros
+
+# Verify
+ouroboros --version
 ```
+
+---
 
 ## Configuration
 
-### Environment Variables
-
-Set up your LLM provider credentials:
-
+### API Keys
 ```bash
-# For Anthropic Claude
-export ANTHROPIC_API_KEY="your-api-key"
+# Set environment variables
+export ANTHROPIC_API_KEY="your-anthropic-key"
+# OR
+export OPENAI_API_KEY="your-openai-key"
 
-# For OpenAI
-export OPENAI_API_KEY="your-api-key"
-
-# For other providers, see LiteLLM documentation
+# Verify setup
+ouroboros status health
 ```
-
-You can also create a `.env` file (copy from `.env.example`):
-
-```bash
-cp .env.example .env
-# or for global settings:
-cp .env.example ~/.ouroboros/.env
-```
-
-### Custom CLI Path (Optional)
-
-If you use a custom Claude CLI wrapper (e.g., for OTEL instrumentation):
-
-**Option 1: Environment Variable**
-```bash
-export OUROBOROS_CLI_PATH=/path/to/your/custom-claude
-```
-
-**Option 2: `.env` file**
-```bash
-# In .env or ~/.ouroboros/.env
-OUROBOROS_CLI_PATH=/path/to/your/custom-claude
-```
-
-**Option 3: Config File**
-```yaml
-# In ~/.ouroboros/config.yaml
-orchestrator:
-  cli_path: /path/to/your/custom-claude
-```
-
-Priority: Environment Variable > `.env` > `config.yaml`
 
 ### Configuration File
-
-Ouroboros uses a configuration file at `~/.ouroboros/config.yaml`:
-
+Create `~/.ouroboros/config.yaml`:
 ```yaml
-# Default LLM provider settings
+# Model preferences
 providers:
   default: anthropic/claude-3-5-sonnet
   frugal: anthropic/claude-3-haiku
   standard: anthropic/claude-3-5-sonnet
   frontier: anthropic/claude-3-opus
 
-# Database settings
-database:
-  path: ~/.ouroboros/ouroboros.db
+# TUI settings
+tui:
+  theme: dark
+  refresh_rate: 100ms
+  show_metrics: true
 
-# Logging
-logging:
-  level: INFO
-  format: json
-
-# Orchestrator settings (optional)
-orchestrator:
-  cli_path: null  # Use SDK default, or set to custom path
-  default_max_turns: 10
+# Execution settings
+execution:
+  max_parallel_tasks: 5
+  default_mode: autopilot
+  auto_save: true
 ```
 
-Initialize the configuration:
-
+### Environment Variables
 ```bash
-uv run ouroboros config init
+# Terminal customization
+export TERM=xterm-256color
+export OUROBOROS_THEME=dark
+
+# MCP settings
+export OUROBOROS_MCP_HOST=localhost
+export OUROBOROS_MCP_PORT=8000
 ```
 
-## Quick Start
+---
 
-### Step 1: Start an Interview (Big Bang Phase)
+## Your First Workflow: Complete Tutorial
 
-The Big Bang phase transforms your vague idea into a clear specification through Socratic questioning:
-
+### Step 1: Start with an Idea
 ```bash
-uv run ouroboros init "I want to build a task management CLI tool"
+# Launch the Socratic interview
+ooo interview "I want to build a personal finance tracker"
 ```
 
-This starts an interactive interview session where Ouroboros will ask clarifying questions to:
-- Reveal hidden assumptions
-- Expose contradictions
-- Find the root problem
-- Define acceptance criteria
+### Step 2: Answer Clarifying Questions
+The interview will ask questions like:
+- "What platforms do you want to track?" (Bank accounts, credit cards, investments)
+- "Do you need budgeting features?" (Yes, with category tracking)
+- "Mobile app or web-based?" (Desktop-only with web export)
+- "Data storage preference?" (SQLite, local file)
 
-The interview continues until the ambiguity score drops to 0.2 or below.
+Continue until the ambiguity score drops below 0.2.
 
-### Step 2: Review the Generated Seed
+### Step 3: Generate the Seed
+```bash
+# Create immutable specification
+ooo seed
+```
 
-After the interview completes, Ouroboros generates a **Seed** - an immutable specification that serves as the "constitution" for your workflow:
-
+This generates a `seed.yaml` file like:
 ```yaml
-# seed.yaml
-goal: "Build a CLI task management tool with SQLite storage"
+goal: "Build a personal finance tracker with SQLite storage"
 constraints:
-  - "Python 3.14+"
-  - "No external database dependencies"
-  - "Must work offline"
+  - "Desktop application only"
+  - "Category-based budgeting"
+  - "Export to CSV/Excel"
 acceptance_criteria:
-  - "Users can create tasks with title and due date"
-  - "Users can list all tasks"
-  - "Users can mark tasks as complete"
-  - "Users can delete tasks"
+  - "Track income and expenses"
+  - "Categorize transactions automatically"
+  - "Generate monthly reports"
+  - "Set and monitor budgets"
 ontology_schema:
-  name: "TaskManager"
-  description: "Task management domain model"
+  name: "FinanceTracker"
   fields:
-    - name: "tasks"
-      field_type: "array"
-      description: "List of task objects"
+    - name: "transactions"
+      type: "array"
+      description: "All financial transactions"
 metadata:
   ambiguity_score: 0.15
   seed_id: "seed_abc123"
 ```
 
-### Step 3: Execute the Workflow
-
-Run the workflow using the orchestrator mode (Claude Agent SDK):
-
+### Step 4: Execute with TUI
 ```bash
-uv run ouroboros run workflow --orchestrator seed.yaml
+# Launch visual execution
+ouroboros run --seed finance-tracker.yaml --ui tui
 ```
 
-This executes the full Ouroboros pipeline:
-1. **PAL Router** selects the appropriate model tier based on task complexity
-2. **Double Diamond** decomposes and executes tasks
-3. **Resilience** handles stagnation with lateral thinking
-4. **Evaluation** verifies outputs at each stage
+### Step 5: Monitor Progress
+Watch the TUI dashboard show:
+- Double Diamond phases (Discover → Define → Design → Deliver)
+- Task decomposition tree
+- Parallel execution batches
+- Real-time metrics (tokens, cost, drift)
 
-### Step 4: Check Status
-
-Monitor execution progress:
-
+### Step 6: Evaluate Results
 ```bash
-uv run ouroboros status health
-uv run ouroboros status executions
+# Run 3-stage evaluation
+ooo evaluate
 ```
 
-## Example: Complete Workflow
+The evaluation checks:
+1. **Mechanical** - Code compiles, tests pass, linting clean
+2. **Semantic** - Meets acceptance criteria, aligned with goals
+3. **Consensus** - Multi-model validation for critical decisions
 
-Here's a complete example from start to finish:
+---
 
+## Common Workflows
+
+### Workflow 1: New Project from Scratch
 ```bash
-# 1. Initialize configuration
-uv run ouroboros config init
+# 1. Clarify requirements
+ooo interview "Build a REST API for a blog"
 
-# 2. Start interview
-uv run ouroboros init "Build a REST API for a todo application"
+# 2. Generate specification
+ooo seed
 
-# 3. (Interactive: Answer questions until ambiguity <= 0.2)
+# 3. Execute with visualization
+ouroboros run --seed blog-api.yaml --ui tui
 
-# 4. Execute the generated seed
-uv run ouroboros run workflow --orchestrator ~/.ouroboros/seeds/latest.yaml
+# 4. Evaluate results
+ooo evaluate
 
-# 5. Monitor progress
-uv run ouroboros status executions --limit 1
+# 5. Monitor drift
+ouroboros status drift
 ```
 
-## Resuming Sessions
-
-If an interview or execution is interrupted, you can resume:
-
+### Workflow 2: Bug Fixing
 ```bash
-# Resume an interview
-uv run ouroboros init --resume interview_20260125_120000
+# 1. Analyze the problem
+ooo analyze "User registration fails with email validation"
 
-# Resume an orchestrator session
-uv run ouroboros run workflow --orchestrator --resume orch_abc123 seed.yaml
+# 2. Generate fix seed
+ooo seed
+
+# 3. Execute with ultrawork (parallel)
+ouroboros run --seed bugfix-email.yaml --mode ultrawork
+
+# 4. Verify fix
+ooo evaluate
 ```
 
-## Next Steps
+### Workflow 3: Feature Enhancement
+```bash
+# 1. Plan the enhancement
+ooo plan "Add real-time notifications to the chat app"
 
-- Read the [Architecture Overview](./architecture.md) to understand the six phases
-- Explore the [CLI Usage Guide](./guides/cli-usage.md) for all commands
-- Check the [API Reference](./api/README.md) for programmatic usage
+# 2. Break into tasks
+ooo seed
+
+# 3. Execute with team coordination
+ouroboros run --seed notifications.yaml --mode swarm
+
+# 4. Review implementation
+ooo review "notifications feature"
+```
+
+---
+
+## Understanding the TUI Dashboard
+
+The TUI provides real-time visibility into your workflow:
+
+### Main Dashboard View
+```
+┌──────────────────────────────────────────────────────┐
+│  🎯 OUROBOROS DASHBOARD                              │
+├──────────────────────────────────────────────────────┤
+│  Phase: 🟢 DESIGN                                    │
+│  Progress: 65% [████████████░░░░░░░░░░░]              │
+│  Cost: $2.34 (85% saved)                             │
+│  Drift: 0.12 ✅                                      │
+├──────────────────────────────────────────────────────┤
+│  Task Tree                                          │
+│  ├─ 🟢 Define API endpoints (100%)                    │
+│  ├─ 🟡 Implement auth service (75%)                 │
+│  └─ ○ Create database schema (0%)                    │
+├──────────────────────────────────────────────────────┤
+│  Active Agents: 3/5                                  │
+│  ├── executor [Building auth service]                │
+│  ├── researcher [Analyzing best practices]           │
+│  └── verifier [Waiting results]                      │
+└──────────────────────────────────────────────────────┘
+```
+
+### Key Components
+1. **Phase Indicator** - Shows current Double Diamond phase
+2. **Progress Bar** - Overall completion percentage
+3. **Metrics Panel** - Cost, drift, and agent status
+4. **Task Tree** - Hierarchical view of all tasks
+5. **Agent Activity** - Live status of working agents
+
+### Interactive Features
+- **Click** on tasks to see details
+- **Press Space** to pause/resume execution
+- **Press D** to view drift analysis
+- **Press C** to see cost breakdown
+
+---
 
 ## Troubleshooting
 
-### Common Issues
+### Installation Issues
 
-**"No API key found"**
-- Ensure your LLM provider API key is set in environment variables
-- Check that the key has the correct permissions
+#### Plugin not recognized
+```bash
+# Check plugin is installed
+claude /plugin list
 
-**"Ambiguity score not decreasing"**
-- Provide more specific answers to interview questions
-- Consider breaking down your idea into smaller components
+# Reinstall if needed
+claude /plugin install ouroboros@ouroboros --force
 
-**"Execution stalled"**
-- Ouroboros will automatically detect stagnation and switch personas
-- If it persists, check the logs: `uv run ouroboros status execution <id> --events`
+# Restart Claude Code
+```
 
-### Getting Help
+#### Python dependency errors
+```bash
+# Check Python version
+python --version  # Must be 3.14+
 
-- Check [GitHub Issues](https://github.com/Q00/ouroboros/issues)
-- Review the [API documentation](./api/README.md)
+# Reinstall with uv
+uv sync --all-groups
+
+# Or with pip
+pip install --force-reinstall ouroboros-ai
+```
+
+### Configuration Issues
+
+#### API key not found
+```bash
+# Set environment variable
+export ANTHROPIC_API_KEY="your-key"
+
+# Or use .env file
+echo 'ANTHROPIC_API_KEY=your-key' > ~/.ouroboros/.env
+
+# Verify
+ouroboros status health
+```
+
+#### MCP server issues
+```bash
+# Re-register MCP server
+ouroboros mcp register
+
+# Check server status
+ouroboros mcp status
+```
+
+### Execution Issues
+
+#### TUI not displaying
+```bash
+# Check terminal capabilities
+echo $TERM
+
+# Set proper TERM
+export TERM=xterm-256color
+
+# Try CLI mode
+ouroboros run --seed project.yaml --ui cli
+```
+
+#### High costs
+```bash
+# Use ecomode
+ouroboros run --seed project.yaml --mode ecomode
+
+# Check predictions
+ouroboros predict --seed project.yaml
+
+# Review cost breakdown
+ouroboros cost breakdown
+```
+
+#### Stuck execution
+```bash
+# Check status
+ouroboros status --events
+
+# Use unstuck mode
+ooo unstuck
+
+# Or restart from checkpoint
+ouroboros run --seed project.yaml --resume
+```
+
+### Performance Issues
+
+#### Slow startup
+```bash
+# Clear cache
+rm -rf ~/.ouroboros/cache/
+
+# Check resource usage
+ps aux | grep ouroboros
+
+# Reduce parallel tasks
+export OUROBOROS_MAX_PARALLEL=2
+```
+
+#### Memory issues
+```bash
+# Enable compression
+export OUROBOROS_COMPRESS=true
+
+# Check memory limits
+ouroboros config get limits
+```
+
+---
+
+## Best Practices
+
+### For Better Interviews
+1. **Be specific** - Instead of "build a social app" say "build a Twitter clone with real-time messaging"
+2. **Consider constraints** - Think about budget, timeline, and technical limitations
+3. **Define success** - Clear acceptance criteria help generate better specs
+
+### For Effective Seeds
+1. **Include non-functional requirements** - Performance, security, scalability
+2. **Define boundaries** - What's in scope and what's not
+3. **Specify integrations** - APIs, databases, third-party services
+
+### For Successful Execution
+1. **Choose the right mode** - Use ultrawork for independent tasks, autopilot for complex workflows
+2. **Monitor drift** - Check status regularly to catch deviations early
+3. **Use evaluation** - Always run evaluation to ensure quality
+
+### For Cost Optimization
+1. **Use ecomode** - Automatically saves 85% on suitable tasks
+2. **Batch small tasks** - Group related work to maximize parallel execution
+3. **Monitor costs** - Use the cost dashboard to track spending
+
+---
+
+## Next Steps
+
+### After Your First Project
+1. **Explore Modes** - Try different execution modes for various scenarios
+2. **Custom Skills** - Create your own skills for repetitive workflows
+3. **Team Work** - Use swarm mode for team-based development
+
+### Advanced Topics
+1. **Custom Agents** - Define specialized agents for your domain
+2. **MCP Integration** - Connect to external tools and services
+3. **Event Analysis** - Use replay to learn from past executions
+
+### Community
+- 📚 [Documentation](https://github.com/Q00/ouroboros/docs)
+- 💬 [Discord Community](https://discord.gg/ouroboros)
+- 🐛 [GitHub Issues](https://github.com/Q00/ouroboros/issues)
+- 💡 [Feature Requests](https://github.com/Q00/ouroboros/discussions)
+
+---
+
+## Troubleshooting Reference
+
+| Issue | Solution | Command |
+|-------|----------|---------|
+| Plugin not loaded | Reinstall plugin | `claude /plugin install ouroboros@ouroboros` |
+| CLI not found | Install Python package | `pip install ouroboros-ai` |
+| API errors | Check API key | `export ANTHROPIC_API_KEY=...` |
+| TUI blank | Check terminal | `export TERM=xterm-256color` |
+| High costs | Use ecomode | `ouroboros run --mode ecomode` |
+| Execution stuck | Use unstuck | `ooo unstuck` |
+| Drift detected | Review spec | `ouroboros status drift` |
+
+Need more help? Check our [FAQ](docs/faq.md) or join our [Discord](https://discord.gg/ouroboros).
