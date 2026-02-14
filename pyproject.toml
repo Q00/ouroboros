@@ -1,6 +1,6 @@
 [project]
 name = "ouroboros-ai"
-version = "0.9.0"
+version = "0.10.0"
 description = "Self-Improving AI Workflow System"
 readme = "README.md"
 authors = [
@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "aiosqlite>=0.20.0",
+    "anthropic>=0.52.0",
     "cachetools>=5.0.0",
     "claude-agent-sdk>=0.1.0",
     "httpx>=0.27.0",

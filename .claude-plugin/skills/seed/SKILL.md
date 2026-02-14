@@ -5,18 +5,46 @@ Generate validated Seed specifications from interview results.
 ## Usage
 
 ```
-ooo seed
-/ouroboros:seed
+ooo seed [session_id]
+/ouroboros:seed [session_id]
 ```
 
 **Trigger keywords:** "crystallize", "generate seed"
 
-## How It Works
+## Instructions
 
-1. **Input**: Takes the interview Q&A history (from current conversation)
-2. **Extraction**: The seed-architect agent extracts structured requirements
-3. **Generation**: Creates a Seed YAML specification
-4. **Output**: Valid Seed ready for execution
+When the user invokes this skill, choose the execution path:
+
+### Path A: MCP Mode (Preferred)
+
+If the `ouroboros_generate_seed` MCP tool is available:
+
+1. Determine the interview session:
+   - If `session_id` provided: Use it directly
+   - If no session_id: Check conversation for a recent `ouroboros_interview` session ID
+   - If none found: Ask the user
+
+2. Call the MCP tool:
+   ```
+   Tool: ouroboros_generate_seed
+   Arguments:
+     session_id: <interview session ID>
+   ```
+
+3. The tool extracts requirements from the interview, calculates ambiguity score, and generates the Seed YAML.
+
+4. Present the generated seed to the user.
+
+**Advantages of MCP mode**: Automated ambiguity scoring (must be <= 0.2), structured extraction from persisted interview state, reproducible.
+
+### Path B: Plugin Fallback (No MCP Server)
+
+If the MCP tool is NOT available, fall back to agent-based generation:
+
+1. Read `.claude-plugin/agents/seed-architect.md` and adopt that role
+2. Extract structured requirements from the interview Q&A in conversation history
+3. Generate a Seed YAML specification
+4. Present the seed to the user
 
 ## Seed Components
 
