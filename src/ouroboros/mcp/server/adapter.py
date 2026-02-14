@@ -319,6 +319,11 @@ class MCPServerAdapter:
                 h: ToolHandler,
             ) -> Any:
                 async def tool_wrapper(**kwargs: Any) -> Any:
+                    # Unwrap nested kwargs from FastMCP schema inference.
+                    # FastMCP infers a single "kwargs" param from **kwargs signature,
+                    # so clients send {"kwargs": {actual params}} instead of flat params.
+                    if "kwargs" in kwargs and len(kwargs) == 1 and isinstance(kwargs["kwargs"], dict):
+                        kwargs = kwargs["kwargs"]
                     result = await h.handle(kwargs)
                     if result.is_ok:
                         # Convert MCPToolResult to FastMCP format
@@ -440,12 +445,13 @@ def create_ouroboros_server(
         build_system_prompt,
         build_task_prompt,
     )
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
     from ouroboros.resilience.lateral import LateralThinker
     from pathlib import Path
 
     # Create LLM adapter (shared across services)
-    llm_adapter = LiteLLMAdapter()
+    # Default to ClaudeCodeAdapter — uses Max Plan auth, no API key needed.
+    llm_adapter = ClaudeCodeAdapter(max_turns=1)
 
     # Create or use provided EventStore
     if event_store is None:

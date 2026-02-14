@@ -6,11 +6,16 @@ Start and manage the MCP (Model Context Protocol) server.
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import Annotated
 
 import typer
+from rich.console import Console
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+
+# Separate stderr console for stdio transport (stdout is JSON-RPC channel)
+_stderr_console = Console(stderr=True)
 
 app = typer.Typer(
     name="mcp",
@@ -44,13 +49,16 @@ async def _run_mcp_server(
     for tool in OUROBOROS_TOOLS:
         server.register_tool(tool)
 
-    print_success(f"MCP Server starting on {transport}...")
-    print_info(f"Registered {len(OUROBOROS_TOOLS)} tools")
-
     if transport == "stdio":
-        print_info("Reading from stdin, writing to stdout")
-        print_info("Press Ctrl+C to stop")
+        # In stdio mode, stdout is the JSON-RPC channel.
+        # All human-readable output must go to stderr.
+        _stderr_console.print(f"[green]MCP Server starting on {transport}...[/green]")
+        _stderr_console.print(f"[blue]Registered {len(OUROBOROS_TOOLS)} tools[/blue]")
+        _stderr_console.print("[blue]Reading from stdin, writing to stdout[/blue]")
+        _stderr_console.print("[blue]Press Ctrl+C to stop[/blue]")
     else:
+        print_success(f"MCP Server starting on {transport}...")
+        print_info(f"Registered {len(OUROBOROS_TOOLS)} tools")
         print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
 
