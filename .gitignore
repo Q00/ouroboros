@@ -99,3 +99,6 @@ Thumbs.db
 _bmad/
 .claude/commands/bmad/
 .omc/
+
+# Local dev MCP config (plugin users get their own via .claude-plugin/.mcp.json)
+.mcp.json

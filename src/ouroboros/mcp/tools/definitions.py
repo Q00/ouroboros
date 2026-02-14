@@ -43,7 +43,7 @@ from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from rich.console import Console
 
 log = structlog.get_logger(__name__)
@@ -58,7 +58,7 @@ class ExecuteSeedHandler:
     """
 
     event_store: EventStore | None = field(default=None, repr=False)
-    llm_adapter: LiteLLMAdapter | None = field(default=None, repr=False)
+    llm_adapter: ClaudeCodeAdapter | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -155,7 +155,7 @@ class ExecuteSeedHandler:
 
         # Use injected or create orchestrator dependencies
         try:
-            llm_adapter = self.llm_adapter or LiteLLMAdapter()
+            llm_adapter = self.llm_adapter or ClaudeCodeAdapter(max_turns=1)
             agent_adapter = ClaudeAgentAdapter(llm_adapter=llm_adapter)
             event_store = self.event_store or EventStore()
             console = Console()
@@ -565,7 +565,7 @@ class GenerateSeedHandler:
 
     interview_engine: InterviewEngine | None = field(default=None, repr=False)
     seed_generator: SeedGenerator | None = field(default=None, repr=False)
-    llm_adapter: LiteLLMAdapter | None = field(default=None, repr=False)
+    llm_adapter: ClaudeCodeAdapter | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -627,7 +627,7 @@ class GenerateSeedHandler:
 
         try:
             # Use injected or create services
-            llm_adapter = self.llm_adapter or LiteLLMAdapter()
+            llm_adapter = self.llm_adapter or ClaudeCodeAdapter(max_turns=1)
             interview_engine = self.interview_engine or InterviewEngine(
                 llm_adapter=llm_adapter,
             )
@@ -1003,7 +1003,7 @@ class InterviewHandler:
 
         # Use injected or create interview engine
         engine = self.interview_engine or InterviewEngine(
-            llm_adapter=LiteLLMAdapter(),
+            llm_adapter=ClaudeCodeAdapter(max_turns=1),
             state_dir=Path.home() / ".ouroboros" / "data",
         )
 
@@ -1030,6 +1030,23 @@ class InterviewHandler:
                     )
 
                 question = question_result.value
+
+                # Record the question as an unanswered round so resume can find it
+                from ouroboros.bigbang.interview import InterviewRound
+                state.rounds.append(InterviewRound(
+                    round_number=1,
+                    question=question,
+                    user_response=None,
+                ))
+                state.mark_updated()
+
+                # Persist state to disk so subsequent calls can resume
+                save_result = await engine.save_state(state)
+                if save_result.is_err:
+                    log.warning(
+                        "mcp.tool.interview.save_failed_on_start",
+                        error=str(save_result.error),
+                    )
 
                 log.info(
                     "mcp.tool.interview.started",
@@ -1073,6 +1090,12 @@ class InterviewHandler:
                         )
 
                     last_question = state.rounds[-1].question
+
+                    # Pop the unanswered round so record_response can re-create it
+                    # with the correct round_number (len(rounds) + 1)
+                    if state.rounds[-1].user_response is None:
+                        state.rounds.pop()
+
                     record_result = await engine.record_response(state, answer, last_question)
                     if record_result.is_err:
                         return Result.err(
@@ -1083,35 +1106,12 @@ class InterviewHandler:
                         )
                     state = record_result.value
 
-                    # Save state after recording response
-                    save_result = await engine.save_state(state)
-                    if save_result.is_err:
-                        log.warning(
-                            "mcp.tool.interview.save_failed",
-                            error=str(save_result.error),
-                        )
-
                     log.info(
                         "mcp.tool.interview.response_recorded",
                         session_id=session_id,
                     )
 
-                    # Return confirmation without asking next question
-                    return Result.ok(
-                        MCPToolResult(
-                            content=(
-                                MCPContentItem(
-                                    type=ContentType.TEXT,
-                                    text=f"Response recorded for session {session_id}. "
-                                    f"Call again with session_id to get next question.",
-                                ),
-                            ),
-                            is_error=False,
-                            meta={"session_id": session_id},
-                        )
-                    )
-
-                # Ask next question
+                # Generate next question (whether resuming or after recording answer)
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     return Result.err(
@@ -1122,6 +1122,22 @@ class InterviewHandler:
                     )
 
                 question = question_result.value
+
+                # Save pending question as unanswered round for next resume
+                from ouroboros.bigbang.interview import InterviewRound
+                state.rounds.append(InterviewRound(
+                    round_number=state.current_round_number,
+                    question=question,
+                    user_response=None,
+                ))
+                state.mark_updated()
+
+                save_result = await engine.save_state(state)
+                if save_result.is_err:
+                    log.warning(
+                        "mcp.tool.interview.save_failed",
+                        error=str(save_result.error),
+                    )
 
                 log.info(
                     "mcp.tool.interview.question_asked",
@@ -1170,7 +1186,7 @@ class EvaluateHandler:
     """
 
     event_store: EventStore | None = field(default=None, repr=False)
-    llm_adapter: LiteLLMAdapter | None = field(default=None, repr=False)
+    llm_adapter: ClaudeCodeAdapter | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -1318,7 +1334,7 @@ class EvaluateHandler:
             )
 
             # Use injected or create services
-            llm_adapter = self.llm_adapter or LiteLLMAdapter()
+            llm_adapter = self.llm_adapter or ClaudeCodeAdapter(max_turns=1)
             config = PipelineConfig()
             pipeline = EvaluationPipeline(llm_adapter, config)
             result = await pipeline.evaluate(context)
