@@ -18,6 +18,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo seed` | Read `.claude-plugin/skills/seed/SKILL.md` and follow it |
 | `ooo run` | Read `.claude-plugin/skills/run/SKILL.md` and follow it |
 | `ooo evaluate` or `ooo eval` | Read `.claude-plugin/skills/evaluate/SKILL.md` and follow it |
+| `ooo evolve ...` | Read `.claude-plugin/skills/evolve/SKILL.md` and follow it |
 | `ooo unstuck` or `ooo stuck` or `ooo lateral` | Read `.claude-plugin/skills/unstuck/SKILL.md` and follow it |
 | `ooo status` or `ooo drift` | Read `.claude-plugin/skills/status/SKILL.md` and follow it |
 | `ooo setup` | Read `.claude-plugin/skills/setup/SKILL.md` and follow it |

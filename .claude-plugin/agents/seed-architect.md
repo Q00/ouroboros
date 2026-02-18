@@ -28,7 +28,7 @@ The data structure/domain model for this work:
 - **ONTOLOGY_DESCRIPTION**: What the ontology represents
 - **ONTOLOGY_FIELDS**: Key fields in format: name:type:description (pipe-separated)
 
-Field types: string, number, boolean, array, object
+Field types should be one of: string, number, boolean, array, object
 
 ### 5. EVALUATION_PRINCIPLES
 Principles for evaluating output quality.
@@ -52,5 +52,8 @@ ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
 EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
 EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
 ```
+
+Field types should be one of: string, number, boolean, array, object
+Weights should be between 0.0 and 1.0
 
 Be specific and concrete. Extract actual requirements from the conversation, not generic placeholders.
