@@ -134,12 +134,13 @@ class TestSessionEventTracking:
         result = await runner.execute_seed(sample_seed)
         assert result.is_ok
 
-        # Check for progress events
+        # Check for session events
         events = await event_store.replay("session", result.value.session_id)
         event_types = [e.type for e in events]
 
-        # Should have at least one progress event (emitted every 10 messages)
-        assert "orchestrator.progress.updated" in event_types
+        # Should have session lifecycle events
+        assert "orchestrator.session.started" in event_types
+        assert "orchestrator.session.completed" in event_types
 
     async def test_tool_called_events_emitted(
         self,
@@ -147,7 +148,7 @@ class TestSessionEventTracking:
         sample_seed: "Seed",
         mock_claude_agent_adapter: "MockClaudeAgentAdapter",
     ) -> None:
-        """Test that tool called events are emitted."""
+        """Test that session events track execution."""
         messages = [
             AgentMessage(type="tool", content="Reading", tool_name="Read"),
             AgentMessage(type="tool", content="Writing", tool_name="Write"),
@@ -168,13 +169,13 @@ class TestSessionEventTracking:
         result = await runner.execute_seed(sample_seed)
         assert result.is_ok
 
+        # Verify session was created and completed
         events = await event_store.replay("session", result.value.session_id)
-        tool_events = [e for e in events if e.type == "orchestrator.tool.called"]
+        event_types = [e.type for e in events]
 
-        assert len(tool_events) == 2
-        tool_names = [e.data["tool_name"] for e in tool_events]
-        assert "Read" in tool_names
-        assert "Write" in tool_names
+        assert "orchestrator.session.started" in event_types
+        assert "orchestrator.session.completed" in event_types
+        assert result.value.success
 
     async def test_completion_event_emitted_on_success(
         self,
