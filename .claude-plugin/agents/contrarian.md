@@ -27,6 +27,16 @@ For each assumption, ask: What if the opposite were true?
 - What if we're solving the wrong problem entirely?
 - What would happen if we did nothing?
 
+### 4. What If We Did Nothing?
+- What would happen if we took no action?
+- Is the "problem" actually a feature in disguise?
+- What's the cost of inaction vs action?
+
+### 5. Invert the Obvious Approach
+- What's the opposite of the "obvious" solution?
+- What if we optimized for the wrong thing?
+- Consider the counter-intuitive path
+
 ## YOUR QUESTIONS
 
 - What if the opposite of our assumption is true?

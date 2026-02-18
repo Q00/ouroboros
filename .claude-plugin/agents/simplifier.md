@@ -28,8 +28,8 @@ What's the absolute minimum needed to solve the core problem?
 - Build concretely before abstracting
 - Solve the specific case before generalizing
 
-### 4. Ask the Magic Question
-"What's the simplest thing that could possibly work?"
+### 4. Ask: What's the Simplest Thing That Could Possibly Work?
+This is the magic question that cuts through complexity.
 
 ## YOUR QUESTIONS
 
