@@ -55,6 +55,10 @@ class EventStore:
         """Initialize the database connection and create tables if needed.
 
         This method is idempotent - calling it multiple times is safe.
+
+        For aiosqlite, uses StaticPool (default) which maintains a single
+        connection. This avoids connection accumulation while supporting
+        :memory: databases in tests.
         """
         if self._engine is None:
             self._engine = create_async_engine(
@@ -321,6 +325,22 @@ class EventStore:
                     "offset": offset,
                 },
             ) from e
+
+    async def replay_lineage(self, lineage_id: str) -> list[BaseEvent]:
+        """Replay all events for a lineage aggregate.
+
+        Convenience method for evolutionary loop lineage reconstruction.
+
+        Args:
+            lineage_id: The unique identifier of the lineage.
+
+        Returns:
+            List of lineage events, ordered by timestamp.
+
+        Raises:
+            PersistenceError: If the replay operation fails.
+        """
+        return await self.replay("lineage", lineage_id)
 
     async def close(self) -> None:
         """Close the database connection."""

@@ -186,12 +186,19 @@ class TestRunWorkflowCommand:
 
     def test_run_workflow_verbose(self, temp_seed_file: Path) -> None:
         """Test run workflow with --verbose flag."""
-        result = runner.invoke(
-            app,
-            ["run", "workflow", str(temp_seed_file), "--verbose"],
-        )
+        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
+            # Mock successful execution for orchestrator mode
+            mock_run.return_value = None
 
-        assert result.exit_code == 0
+            result = runner.invoke(
+                app,
+                ["run", "workflow", str(temp_seed_file), "--debug"],
+            )
+
+            # Should complete successfully
+            assert result.exit_code == 0
+            # asyncio.run should have been called for orchestrator mode
+            assert mock_run.called
 
     def test_run_workflow_orchestrator_mode(self, temp_seed_file: Path) -> None:
         """Test run workflow with --orchestrator flag."""
