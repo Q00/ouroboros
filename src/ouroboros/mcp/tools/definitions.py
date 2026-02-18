@@ -1616,6 +1616,289 @@ class LateralThinkHandler:
             )
 
 
+@dataclass
+class EvolveStepHandler:
+    """Handler for the ouroboros_evolve_step tool.
+
+    Runs exactly ONE generation of the evolutionary loop.
+    Designed for Ralph integration: stateless between calls,
+    all state reconstructed from events.
+    """
+
+    evolutionary_loop: Any | None = field(default=None, repr=False)
+
+    TIMEOUT_SECONDS: int = 600  # Override MCP adapter's default 30s
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        """Return the tool definition."""
+        return MCPToolDefinition(
+            name="ouroboros_evolve_step",
+            description=(
+                "Run exactly ONE generation of the evolutionary loop. "
+                "For Gen 1: provide lineage_id and seed_content (YAML). "
+                "For Gen 2+: provide lineage_id only (state reconstructed from events). "
+                "Returns generation result, convergence signal, and next action "
+                "(continue/converged/stagnated/exhausted/failed)."
+            ),
+            parameters=(
+                MCPToolParameter(
+                    name="lineage_id",
+                    type=ToolInputType.STRING,
+                    description="Lineage ID to continue or new ID for Gen 1",
+                    required=True,
+                ),
+                MCPToolParameter(
+                    name="seed_content",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Seed YAML content for Gen 1. "
+                        "Omit for Gen 2+ (seed reconstructed from events)."
+                    ),
+                    required=False,
+                ),
+            ),
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle an evolve_step request."""
+        lineage_id = arguments.get("lineage_id")
+        if not lineage_id:
+            return Result.err(
+                MCPToolError(
+                    "lineage_id is required",
+                    tool_name="ouroboros_evolve_step",
+                )
+            )
+
+        if self.evolutionary_loop is None:
+            return Result.err(
+                MCPToolError(
+                    "EvolutionaryLoop not configured",
+                    tool_name="ouroboros_evolve_step",
+                )
+            )
+
+        # Parse seed if provided (Gen 1)
+        initial_seed = None
+        seed_content = arguments.get("seed_content")
+        if seed_content:
+            try:
+                seed_dict = yaml.safe_load(seed_content)
+                initial_seed = Seed.from_dict(seed_dict)
+            except Exception as e:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to parse seed_content: {e}",
+                        tool_name="ouroboros_evolve_step",
+                    )
+                )
+
+        try:
+            result = await self.evolutionary_loop.evolve_step(
+                lineage_id, initial_seed
+            )
+        except Exception as e:
+            log.error("mcp.tool.evolve_step.error", error=str(e))
+            return Result.err(
+                MCPToolError(
+                    f"evolve_step failed: {e}",
+                    tool_name="ouroboros_evolve_step",
+                )
+            )
+
+        if result.is_err:
+            return Result.err(
+                MCPToolError(
+                    str(result.error),
+                    tool_name="ouroboros_evolve_step",
+                )
+            )
+
+        step = result.value
+        gen = step.generation_result
+        sig = step.convergence_signal
+
+        # Format output
+        text_lines = [
+            f"## Generation {gen.generation_number}",
+            f"",
+            f"**Action**: {step.action.value}",
+            f"**Phase**: {gen.phase.value}",
+            f"**Convergence similarity**: {sig.ontology_similarity:.2%}",
+            f"**Reason**: {sig.reason}",
+            f"**Lineage**: {step.lineage.lineage_id} ({step.lineage.current_generation} generations)",
+            f"**Next generation**: {step.next_generation}",
+        ]
+
+        if gen.wonder_output:
+            text_lines.append(f"")
+            text_lines.append(f"### Wonder questions")
+            for q in gen.wonder_output.questions:
+                text_lines.append(f"- {q}")
+
+        if gen.ontology_delta:
+            text_lines.append(f"")
+            text_lines.append(f"### Ontology delta (similarity: {gen.ontology_delta.similarity:.2%})")
+            for af in gen.ontology_delta.added_fields:
+                text_lines.append(f"- **Added**: {af.name} ({af.field_type})")
+            for rf in gen.ontology_delta.removed_fields:
+                text_lines.append(f"- **Removed**: {rf}")
+            for mf in gen.ontology_delta.modified_fields:
+                text_lines.append(f"- **Modified**: {mf.field_name}: {mf.old_type} → {mf.new_type}")
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),
+                ),
+                is_error=False,
+                meta={
+                    "lineage_id": step.lineage.lineage_id,
+                    "generation": gen.generation_number,
+                    "action": step.action.value,
+                    "similarity": sig.ontology_similarity,
+                    "converged": sig.converged,
+                    "next_generation": step.next_generation,
+                },
+            )
+        )
+
+
+@dataclass
+class LineageStatusHandler:
+    """Handler for the ouroboros_lineage_status tool.
+
+    Queries the current state of an evolutionary lineage
+    without running a generation.
+    """
+
+    event_store: EventStore | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Initialize event store."""
+        self._event_store = self.event_store or EventStore()
+        self._initialized = False
+
+    async def _ensure_initialized(self) -> None:
+        """Ensure the event store is initialized."""
+        if not self._initialized:
+            await self._event_store.initialize()
+            self._initialized = True
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        """Return the tool definition."""
+        return MCPToolDefinition(
+            name="ouroboros_lineage_status",
+            description=(
+                "Query the current state of an evolutionary lineage. "
+                "Returns generation count, status, ontology evolution, "
+                "and convergence progress."
+            ),
+            parameters=(
+                MCPToolParameter(
+                    name="lineage_id",
+                    type=ToolInputType.STRING,
+                    description="ID of the lineage to query",
+                    required=True,
+                ),
+            ),
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle a lineage status request."""
+        lineage_id = arguments.get("lineage_id")
+        if not lineage_id:
+            return Result.err(
+                MCPToolError(
+                    "lineage_id is required",
+                    tool_name="ouroboros_lineage_status",
+                )
+            )
+
+        await self._ensure_initialized()
+
+        try:
+            events = await self._event_store.replay_lineage(lineage_id)
+        except Exception as e:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to query events: {e}",
+                    tool_name="ouroboros_lineage_status",
+                )
+            )
+
+        if not events:
+            return Result.err(
+                MCPToolError(
+                    f"No lineage found with ID: {lineage_id}",
+                    tool_name="ouroboros_lineage_status",
+                )
+            )
+
+        from ouroboros.evolution.projector import LineageProjector
+
+        projector = LineageProjector()
+        lineage = projector.project(events)
+
+        if lineage is None:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to project lineage from events: {lineage_id}",
+                    tool_name="ouroboros_lineage_status",
+                )
+            )
+
+        text_lines = [
+            f"## Lineage: {lineage.lineage_id}",
+            f"",
+            f"**Status**: {lineage.status.value}",
+            f"**Goal**: {lineage.goal}",
+            f"**Generations**: {lineage.current_generation}",
+            f"**Created**: {lineage.created_at.isoformat()}",
+        ]
+
+        # Ontology summary
+        if lineage.current_ontology:
+            text_lines.append(f"")
+            text_lines.append(f"### Current Ontology: {lineage.current_ontology.name}")
+            for f in lineage.current_ontology.fields:
+                required = " (required)" if f.required else ""
+                text_lines.append(f"- **{f.name}**: {f.field_type}{required}")
+
+        # Generation history
+        if lineage.generations:
+            text_lines.append(f"")
+            text_lines.append(f"### Generation History")
+            for gen in lineage.generations:
+                status = "passed" if gen.evaluation_summary and gen.evaluation_summary.final_approved else "pending"
+                text_lines.append(
+                    f"- Gen {gen.generation_number}: {gen.phase.value} | {status}"
+                )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),
+                ),
+                is_error=False,
+                meta={
+                    "lineage_id": lineage.lineage_id,
+                    "status": lineage.status.value,
+                    "generations": lineage.current_generation,
+                    "goal": lineage.goal,
+                },
+            )
+        )
+
+
 # Convenience functions for handler access
 def execute_seed_handler() -> ExecuteSeedHandler:
     """Create an ExecuteSeedHandler instance."""
@@ -1657,6 +1940,16 @@ def evaluate_handler() -> EvaluateHandler:
     return EvaluateHandler()
 
 
+def evolve_step_handler() -> EvolveStepHandler:
+    """Create an EvolveStepHandler instance."""
+    return EvolveStepHandler()
+
+
+def lineage_status_handler() -> LineageStatusHandler:
+    """Create a LineageStatusHandler instance."""
+    return LineageStatusHandler()
+
+
 # List of all Ouroboros tools for registration
 OUROBOROS_TOOLS: tuple[
     ExecuteSeedHandler
@@ -1666,7 +1959,9 @@ OUROBOROS_TOOLS: tuple[
     | MeasureDriftHandler
     | InterviewHandler
     | EvaluateHandler
-    | LateralThinkHandler,
+    | LateralThinkHandler
+    | EvolveStepHandler
+    | LineageStatusHandler,
     ...
 ] = (
     ExecuteSeedHandler(),
@@ -1677,4 +1972,6 @@ OUROBOROS_TOOLS: tuple[
     InterviewHandler(),
     EvaluateHandler(),
     LateralThinkHandler(),
+    EvolveStepHandler(),
+    LineageStatusHandler(),
 )

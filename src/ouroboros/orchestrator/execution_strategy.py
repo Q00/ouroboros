@@ -53,17 +53,9 @@ class CodeStrategy:
         return ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
 
     def get_system_prompt_fragment(self) -> str:
-        return (
-            "You are an autonomous coding agent executing a task "
-            "for the Ouroboros workflow system.\n\n"
-            "## Guidelines\n"
-            "- Execute each acceptance criterion thoroughly\n"
-            "- Use the available tools (Read, Edit, Bash, Glob, Grep) "
-            "to accomplish tasks\n"
-            "- Write clean, well-tested code following project conventions\n"
-            "- Report progress clearly as you work\n"
-            "- If you encounter blockers, explain them clearly"
-        )
+        from ouroboros.agents.loader import load_agent_prompt
+
+        return load_agent_prompt("code-executor")
 
     def get_task_prompt_suffix(self) -> str:
         return (
@@ -96,18 +88,9 @@ class ResearchStrategy:
         return ["Read", "Write", "Bash", "Glob", "Grep"]
 
     def get_system_prompt_fragment(self) -> str:
-        return (
-            "You are an autonomous research agent conducting systematic "
-            "information gathering and analysis.\n\n"
-            "## Guidelines\n"
-            "- Gather information from available sources thoroughly\n"
-            "- Cross-reference multiple sources for accuracy\n"
-            "- Synthesize findings into clear, structured markdown documents\n"
-            "- Save research outputs as .md files in the docs/ or output/ directory\n"
-            "- Cite sources and provide references where applicable\n"
-            "- Report progress and key findings as you work\n"
-            "- If you encounter blockers, explain them clearly"
-        )
+        from ouroboros.agents.loader import load_agent_prompt
+
+        return load_agent_prompt("research-agent")
 
     def get_task_prompt_suffix(self) -> str:
         return (
@@ -137,18 +120,9 @@ class AnalysisStrategy:
         return ["Read", "Write", "Bash", "Glob", "Grep"]
 
     def get_system_prompt_fragment(self) -> str:
-        return (
-            "You are an autonomous analytical agent performing "
-            "structured analysis and reasoning.\n\n"
-            "## Guidelines\n"
-            "- Read and understand the subject matter thoroughly\n"
-            "- Apply structured analytical frameworks\n"
-            "- Consider multiple perspectives and trade-offs\n"
-            "- Document your analytical process clearly\n"
-            "- Present findings with supporting evidence in markdown\n"
-            "- Save analysis outputs as .md files\n"
-            "- Report progress as you work"
-        )
+        from ouroboros.agents.loader import load_agent_prompt
+
+        return load_agent_prompt("analysis-agent")
 
     def get_task_prompt_suffix(self) -> str:
         return (

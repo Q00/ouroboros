@@ -98,6 +98,7 @@ class SeedMetadata(BaseModel, frozen=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ambiguity_score: float = Field(..., ge=0.0, le=1.0)
     interview_id: str | None = Field(default=None)
+    parent_seed_id: str | None = Field(default=None)
 
 
 class Seed(BaseModel, frozen=True):

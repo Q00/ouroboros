@@ -437,44 +437,30 @@ class InterviewEngine:
         """
         import os
 
+        from ouroboros.agents.loader import load_agent_prompt
+
         round_info = f"Round {state.current_round_number}"
-
-        # Optional: preferred web search tool from env
         preferred_web_tool = os.environ.get("OUROBOROS_WEB_SEARCH_TOOL", "").strip()
-        if preferred_web_tool:
-            web_search_hint = f"\n- PREFERRED: Use {preferred_web_tool} for web search"
-        else:
-            web_search_hint = ""
+        web_search_hint = (
+            f"\n- PREFERRED: Use {preferred_web_tool} for web search"
+            if preferred_web_tool
+            else ""
+        )
 
-        return f"""You are an expert requirements engineer conducting an interview.
+        base_prompt = load_agent_prompt("socratic-interviewer")
 
-This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.
+        dynamic_header = (
+            f"You are an expert requirements engineer conducting an interview.\n\n"
+            f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+            f"Initial context: {state.initial_context}\n"
+        )
 
-Initial context: {state.initial_context}
+        if web_search_hint:
+            base_prompt = base_prompt.replace(
+                "## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n"
+            )
 
-CRITICAL ROLE BOUNDARIES:
-- You are ONLY an interviewer. You gather information through questions.
-- NEVER say "I will implement X", "Let me build", "I'll create" - you gather requirements only
-- NEVER promise to build demos, write code, or execute anything
-- Another agent will handle implementation AFTER you finish gathering requirements
-
-TOOL USAGE:
-- You CAN use: Read, Glob, Grep, WebFetch, and MCP tools
-- You CANNOT use: Write, Edit, Bash, Task (these are blocked)
-- Use tools to explore codebase and fetch web content
-- After using tools, always ask a clarifying question
-{web_search_hint}
-
-RESPONSE FORMAT:
-- You MUST always end with a question - never end without asking something
-- Keep questions focused (1-2 sentences)
-- No preambles like "Great question!" or "I understand"
-- If tools fail or return nothing, still ask a question based on what you know
-
-QUESTIONING STRATEGY:
-- Target the biggest source of ambiguity
-- Build on previous responses
-- Be specific and actionable"""
+        return f"{dynamic_header}\n{base_prompt}"
 
     def _build_conversation_history(
         self, state: InterviewState

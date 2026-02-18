@@ -81,18 +81,29 @@ class SeedGenerator:
         self,
         state: InterviewState,
         ambiguity_score: AmbiguityScore,
+        parent_seed: "Seed | None" = None,
+        reflect_output: Any | None = None,
     ) -> Result[Seed, ValidationError | ProviderError]:
-        """Generate an immutable Seed from interview state.
+        """Generate an immutable Seed from interview state or reflect output.
 
-        Gates on ambiguity score - generation fails if score > 0.2.
+        Two modes:
+        - Gen 1 (reflect_output=None): Extract from interview, gate on ambiguity.
+        - Gen 2+ (reflect_output provided): Use refined ACs and ontology mutations
+          from ReflectEngine. Skip ambiguity gating.
 
         Args:
             state: Completed interview state.
             ambiguity_score: The ambiguity score for the interview.
+            parent_seed: Optional parent seed for evolutionary lineage.
+            reflect_output: Optional ReflectOutput for Gen 2+ evolution.
 
         Returns:
             Result containing the generated Seed or error.
         """
+        # Gen 2+ path: use reflect output directly
+        if reflect_output is not None and parent_seed is not None:
+            return self.generate_from_reflect(parent_seed, reflect_output)
+
         log.info(
             "seed.generation.started",
             interview_id=state.interview_id,
@@ -132,6 +143,7 @@ class SeedGenerator:
         metadata = SeedMetadata(
             ambiguity_score=ambiguity_score.overall_score,
             interview_id=state.interview_id,
+            parent_seed_id=parent_seed.metadata.seed_id if parent_seed else None,
         )
 
         # Build the seed
@@ -161,6 +173,114 @@ class SeedGenerator:
                     details={"interview_id": state.interview_id},
                 )
             )
+
+    def generate_from_reflect(
+        self, parent_seed: Seed, reflect_output: Any,
+    ) -> Result[Seed, ValidationError | ProviderError]:
+        """Generate a new Seed from ReflectOutput (Gen 2+ path).
+
+        Applies ontology mutations to parent's schema and uses refined
+        ACs from the reflect phase. No ambiguity gating needed.
+
+        Args:
+            parent_seed: The parent seed to evolve from.
+            reflect_output: ReflectOutput with refined goal/constraints/ACs/mutations.
+
+        Returns:
+            Result containing the evolved Seed.
+        """
+        log.info(
+            "seed.generation.from_reflect",
+            parent_seed_id=parent_seed.metadata.seed_id,
+            mutation_count=len(reflect_output.ontology_mutations),
+        )
+
+        try:
+            # Apply ontology mutations to parent's schema
+            new_ontology = self._apply_mutations(
+                parent_seed.ontology_schema,
+                reflect_output.ontology_mutations,
+            )
+
+            metadata = SeedMetadata(
+                ambiguity_score=parent_seed.metadata.ambiguity_score,
+                interview_id=parent_seed.metadata.interview_id,
+                parent_seed_id=parent_seed.metadata.seed_id,
+            )
+
+            seed = Seed(
+                goal=reflect_output.refined_goal,
+                task_type=parent_seed.task_type,
+                constraints=reflect_output.refined_constraints,
+                acceptance_criteria=reflect_output.refined_acs,
+                ontology_schema=new_ontology,
+                evaluation_principles=parent_seed.evaluation_principles,
+                exit_conditions=parent_seed.exit_conditions,
+                metadata=metadata,
+            )
+
+            log.info(
+                "seed.generation.from_reflect.completed",
+                seed_id=seed.metadata.seed_id,
+                parent_seed_id=parent_seed.metadata.seed_id,
+                field_count=len(new_ontology.fields),
+            )
+
+            return Result.ok(seed)
+
+        except Exception as e:
+            log.exception(
+                "seed.generation.from_reflect.failed",
+                parent_seed_id=parent_seed.metadata.seed_id,
+                error=str(e),
+            )
+            return Result.err(
+                ValidationError(
+                    f"Failed to generate seed from reflect: {e}",
+                    details={"parent_seed_id": parent_seed.metadata.seed_id},
+                )
+            )
+
+    def _apply_mutations(
+        self,
+        schema: OntologySchema,
+        mutations: tuple,
+    ) -> OntologySchema:
+        """Apply ontology mutations to produce a new schema.
+
+        Args:
+            schema: The parent ontology schema.
+            mutations: Tuple of OntologyMutation instances.
+
+        Returns:
+            New OntologySchema with mutations applied.
+        """
+        fields_by_name = {f.name: f for f in schema.fields}
+
+        for mutation in mutations:
+            action = str(mutation.action)
+            if action == "add" and mutation.field_name not in fields_by_name:
+                fields_by_name[mutation.field_name] = OntologyField(
+                    name=mutation.field_name,
+                    field_type=mutation.field_type or "string",
+                    description=mutation.description or mutation.reason,
+                )
+            elif action == "modify" and mutation.field_name in fields_by_name:
+                old = fields_by_name[mutation.field_name]
+                fields_by_name[mutation.field_name] = OntologyField(
+                    name=mutation.field_name,
+                    field_type=mutation.field_type or old.field_type,
+                    description=mutation.description or old.description,
+                    required=old.required,
+                )
+            elif action == "remove" and mutation.field_name in fields_by_name:
+                del fields_by_name[mutation.field_name]
+
+        return OntologySchema(
+            name=schema.name,
+            description=schema.description,
+            fields=tuple(fields_by_name.values()),
+        )
 
     async def _extract_requirements(
         self, state: InterviewState
@@ -240,34 +360,9 @@ class SeedGenerator:
         Returns:
             System prompt string.
         """
-        return """You are an expert requirements engineer extracting structured requirements from an interview conversation.
+        from ouroboros.agents.loader import load_agent_prompt
 
-Your task is to extract the following components from the conversation:
-
-1. GOAL: A clear, specific statement of the primary objective.
-2. CONSTRAINTS: Hard limitations or requirements that must be satisfied.
-3. ACCEPTANCE_CRITERIA: Specific, measurable criteria for success.
-4. ONTOLOGY_NAME: A name for the domain model/data structure.
-5. ONTOLOGY_DESCRIPTION: Description of what the ontology represents.
-6. ONTOLOGY_FIELDS: Key fields/attributes in the domain model.
-7. EVALUATION_PRINCIPLES: Principles for evaluating the output quality.
-8. EXIT_CONDITIONS: Conditions that indicate the workflow should terminate.
-
-Respond in this exact format (each field on its own line):
-
-GOAL: <goal statement>
-CONSTRAINTS: <constraint 1> | <constraint 2> | ...
-ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
-ONTOLOGY_NAME: <name>
-ONTOLOGY_DESCRIPTION: <description>
-ONTOLOGY_FIELDS: <name>:<type>:<description> | <name>:<type>:<description> | ...
-EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
-EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
-
-Field types should be one of: string, number, boolean, array, object
-Weights should be between 0.0 and 1.0
-
-Be specific and concrete. Extract actual requirements from the conversation, not generic placeholders."""
+        return load_agent_prompt("seed-architect")
 
     def _build_extraction_user_prompt(self, context: str) -> str:
         """Build user prompt with interview context.
