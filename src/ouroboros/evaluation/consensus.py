@@ -70,23 +70,10 @@ class ConsensusConfig:
     diversity_required: bool = True
 
 
-CONSENSUS_SYSTEM_PROMPT = """You are a senior code reviewer participating in a consensus evaluation. Your vote will be combined with other reviewers to reach a decision.
-
-You must respond ONLY with a valid JSON object in the following exact format:
-{
-    "approved": <boolean>,
-    "confidence": <float between 0.0 and 1.0>,
-    "reasoning": "<string explaining your vote>"
-}
-
-Evaluation criteria for approval:
-- The artifact correctly implements the acceptance criterion
-- The implementation aligns with the stated goal
-- No significant issues or concerns
-- Code quality is acceptable
-
-Be honest and thorough. If you have concerns, vote against approval with clear reasoning.
-Confidence should reflect how certain you are about your decision."""
+def _get_consensus_system_prompt() -> str:
+    """Lazy-load consensus system prompt to avoid import-time I/O."""
+    from ouroboros.agents.loader import load_agent_prompt
+    return load_agent_prompt("consensus-reviewer")
 
 
 def build_consensus_prompt(context: EvaluationContext) -> str:
@@ -279,7 +266,7 @@ class ConsensusEvaluator:
 
         # Build messages
         messages = [
-            Message(role=MessageRole.SYSTEM, content=CONSENSUS_SYSTEM_PROMPT),
+            Message(role=MessageRole.SYSTEM, content=_get_consensus_system_prompt()),
             Message(role=MessageRole.USER, content=build_consensus_prompt(context)),
         ]
 
@@ -378,52 +365,16 @@ class ConsensusEvaluator:
 
 
 # Role-based system prompts for deliberative consensus
-ADVOCATE_SYSTEM_PROMPT = """You are the ADVOCATE in a deliberative review.
-
-Your role is to find and articulate the STRENGTHS of this solution:
-- Does it correctly implement the acceptance criterion?
-- Does it align with the stated goal?
-- What are its positive aspects and well-designed elements?
-- Is the approach sound and maintainable?
-
-You must respond ONLY with a valid JSON object:
-{
-    "approved": true,
-    "confidence": <float between 0.0 and 1.0>,
-    "reasoning": "<string explaining the strengths you found>"
-}
-
-Be thorough but honest. If you find genuine strengths, articulate them clearly.
-If you cannot find enough strengths to advocate for approval, you may vote against,
-but this should be rare for your role."""
+def _get_advocate_system_prompt() -> str:
+    """Lazy-load advocate system prompt to avoid import-time I/O."""
+    from ouroboros.agents.loader import load_agent_prompt
+    return load_agent_prompt("advocate")
 
 
-JUDGE_SYSTEM_PROMPT = """You are the JUDGE in a deliberative review.
-
-You will receive:
-1. ADVOCATE's position (strengths of the solution)
-2. DEVIL'S ADVOCATE's position (ontological critique - root cause vs symptom)
-
-Your task:
-- Weigh both arguments fairly and impartially
-- Consider whether the solution addresses the ROOT CAUSE or just treats symptoms
-- Make a final verdict: APPROVED, REJECTED, or CONDITIONAL
-
-You must respond ONLY with a valid JSON object:
-{
-    "verdict": "<one of: approved, rejected, conditional>",
-    "confidence": <float between 0.0 and 1.0>,
-    "reasoning": "<string explaining your judgment>",
-    "conditions": ["<condition 1>", "<condition 2>"] or null
-}
-
-Guidelines:
-- APPROVED: Solution is sound and addresses the root problem
-- CONDITIONAL: Solution has merit but requires specific changes
-- REJECTED: Solution treats symptoms rather than root cause, or has fundamental issues
-
-Be thorough and fair. The best solutions deserve recognition.
-Symptomatic treatments deserve honest critique."""
+def _get_judge_system_prompt() -> str:
+    """Lazy-load judge system prompt to avoid import-time I/O."""
+    from ouroboros.agents.loader import load_agent_prompt
+    return load_agent_prompt("judge")
 
 
 @dataclass(frozen=True, slots=True)
@@ -695,7 +646,7 @@ class DeliberativeConsensus:
         """
         if role == VoterRole.ADVOCATE:
             # Advocate uses direct LLM call with role-specific prompt
-            system_prompt = ADVOCATE_SYSTEM_PROMPT
+            system_prompt = _get_advocate_system_prompt()
             model = self._config.advocate_model
 
             messages = [
@@ -841,7 +792,7 @@ Reasoning: {devil_vote.reasoning}
 Based on both positions above, make your final judgment."""
 
         messages = [
-            Message(role=MessageRole.SYSTEM, content=JUDGE_SYSTEM_PROMPT),
+            Message(role=MessageRole.SYSTEM, content=_get_judge_system_prompt()),
             Message(role=MessageRole.USER, content=user_prompt),
         ]
 

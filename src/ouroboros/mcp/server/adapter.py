@@ -199,13 +199,14 @@ class MCPServerAdapter:
             return Result.err(security_result.error)
 
         try:
-            result = await asyncio.wait_for(handler.handle(arguments), timeout=30.0)
+            timeout = getattr(handler, 'TIMEOUT_SECONDS', 30.0)
+            result = await asyncio.wait_for(handler.handle(arguments), timeout=timeout)
             return result
         except asyncio.TimeoutError:
             log.error("mcp.server.tool_timeout", tool=name)
             return Result.err(
                 MCPToolError(
-                    f"Tool execution timed out after 30s: {name}",
+                    f"Tool execution timed out after {timeout}s: {name}",
                     server_name=self._name,
                     tool_name=name,
                 )
@@ -411,7 +412,7 @@ def create_ouroboros_server(
                    If not provided, uses ~/.ouroboros/data.
 
     Returns:
-        Configured MCPServerAdapter with all 8 tools registered.
+        Configured MCPServerAdapter with all 10 tools registered.
 
     Raises:
         ImportError: If MCP SDK is not installed.
@@ -420,10 +421,12 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.definitions import (
         OUROBOROS_TOOLS,
         EvaluateHandler,
+        EvolveStepHandler,
         ExecuteSeedHandler,
         GenerateSeedHandler,
         InterviewHandler,
         LateralThinkHandler,
+        LineageStatusHandler,
         MeasureDriftHandler,
         QueryEventsHandler,
         SessionStatusHandler,
@@ -480,6 +483,24 @@ def create_ouroboros_server(
 
     lateral_thinker = LateralThinker()
 
+    # Create evolution engines for evolve_step
+    from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
+    from ouroboros.evolution.wonder import WonderEngine
+    from ouroboros.evolution.reflect import ReflectEngine
+
+    wonder_engine = WonderEngine(llm_adapter=llm_adapter, model="default")
+    reflect_engine = ReflectEngine(llm_adapter=llm_adapter, model="default")
+
+    evolutionary_loop = EvolutionaryLoop(
+        event_store=event_store,
+        config=EvolutionaryLoopConfig(),
+        wonder_engine=wonder_engine,
+        reflect_engine=reflect_engine,
+        seed_generator=seed_generator,
+        executor=None,
+        evaluator=None,
+    )
+
     # Create tool registry for dependency injection
     registry = ToolRegistry()
 
@@ -511,6 +532,12 @@ def create_ouroboros_server(
             llm_adapter=llm_adapter,
         ),
         LateralThinkHandler(),
+        EvolveStepHandler(
+            evolutionary_loop=evolutionary_loop,
+        ),
+        LineageStatusHandler(
+            event_store=event_store,
+        ),
     ]
 
     # Create server adapter

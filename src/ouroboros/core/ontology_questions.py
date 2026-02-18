@@ -255,25 +255,10 @@ def get_question(question_type: OntologicalQuestionType) -> OntologicalQuestion:
 # - SYMPTOM treatment indicators: "surface", "temporary", "workaround"
 # ============================================================================
 
-ONTOLOGY_ANALYSIS_SYSTEM_PROMPT = """You are an ontological analyst. Your task is to apply philosophical inquiry to determine whether a solution addresses the ROOT CAUSE or merely treats SYMPTOMS.
-
-You must respond ONLY with a valid JSON object:
-{
-    "essence": "<string: what IS this, fundamentally>",
-    "is_root_problem": <boolean: true if addresses root cause, false if symptom treatment>,
-    "prerequisites": ["<string: what must exist first>", ...],
-    "hidden_assumptions": ["<string: implicit belief>", ...],
-    "confidence": <float: 0.0-1.0>,
-    "reasoning": "<string: your analysis process>"
-}
-
-Guidelines:
-- ESSENCE: Strip away accidental properties. What remains?
-- ROOT vs SYMPTOM: If we solve this, does the underlying issue remain?
-- PREREQUISITES: What foundations are being assumed?
-- ASSUMPTIONS: What beliefs might be wrong?
-- Be honest. High confidence (>0.8) requires strong evidence.
-"""
+def _get_ontology_analysis_system_prompt() -> str:
+    """Lazy-load ontology analysis system prompt to avoid import-time I/O."""
+    from ouroboros.agents.loader import load_agent_prompt
+    return load_agent_prompt("ontology-analyst")
 
 
 def _build_analysis_prompt(
@@ -413,7 +398,7 @@ async def analyze_ontologically(
     from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 
     messages = [
-        Message(role=MessageRole.SYSTEM, content=ONTOLOGY_ANALYSIS_SYSTEM_PROMPT),
+        Message(role=MessageRole.SYSTEM, content=_get_ontology_analysis_system_prompt()),
         Message(
             role=MessageRole.USER,
             content=_build_analysis_prompt(context, question_types),
@@ -458,5 +443,4 @@ __all__ = [
     "get_question",
     # Centralized Analysis (high-level)
     "analyze_ontologically",
-    "ONTOLOGY_ANALYSIS_SYSTEM_PROMPT",
 ]
