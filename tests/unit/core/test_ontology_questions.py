@@ -7,7 +7,6 @@ import pytest
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_questions import (
     ONTOLOGICAL_QUESTIONS,
-    ONTOLOGY_ANALYSIS_SYSTEM_PROMPT,
     OntologicalInsight,
     OntologicalQuestion,
     OntologicalQuestionType,
@@ -327,22 +326,27 @@ class TestAnalyzeOntologically:
 
 
 class TestOntologyAnalysisSystemPrompt:
-    """Tests for ONTOLOGY_ANALYSIS_SYSTEM_PROMPT constant."""
+    """Tests for ontology analysis system prompt lazy loader."""
 
     def test_prompt_exists(self) -> None:
         """System prompt exists and is non-empty."""
-        assert ONTOLOGY_ANALYSIS_SYSTEM_PROMPT
-        assert len(ONTOLOGY_ANALYSIS_SYSTEM_PROMPT) > 100
+        from ouroboros.core.ontology_questions import _get_ontology_analysis_system_prompt
+        prompt = _get_ontology_analysis_system_prompt()
+        assert prompt
+        assert len(prompt) > 100
 
     def test_prompt_mentions_json(self) -> None:
         """System prompt mentions JSON format."""
-        assert "JSON" in ONTOLOGY_ANALYSIS_SYSTEM_PROMPT
+        from ouroboros.core.ontology_questions import _get_ontology_analysis_system_prompt
+        assert "JSON" in _get_ontology_analysis_system_prompt()
 
     def test_prompt_mentions_all_fields(self) -> None:
         """System prompt mentions all expected output fields."""
-        assert "essence" in ONTOLOGY_ANALYSIS_SYSTEM_PROMPT.lower()
-        assert "is_root_problem" in ONTOLOGY_ANALYSIS_SYSTEM_PROMPT
-        assert "prerequisites" in ONTOLOGY_ANALYSIS_SYSTEM_PROMPT.lower()
-        assert "hidden_assumptions" in ONTOLOGY_ANALYSIS_SYSTEM_PROMPT
-        assert "confidence" in ONTOLOGY_ANALYSIS_SYSTEM_PROMPT.lower()
-        assert "reasoning" in ONTOLOGY_ANALYSIS_SYSTEM_PROMPT.lower()
+        from ouroboros.core.ontology_questions import _get_ontology_analysis_system_prompt
+        prompt = _get_ontology_analysis_system_prompt()
+        assert "essence" in prompt.lower()
+        assert "is_root_problem" in prompt
+        assert "prerequisites" in prompt.lower()
+        assert "hidden_assumptions" in prompt
+        assert "confidence" in prompt.lower()
+        assert "reasoning" in prompt.lower()
