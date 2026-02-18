@@ -1,17 +1,20 @@
 """Tests for Ouroboros tool definitions."""
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
+    EvolveStepHandler,
     ExecuteSeedHandler,
+    GenerateSeedHandler,
+    InterviewHandler,
+    LateralThinkHandler,
+    LineageStatusHandler,
+    MeasureDriftHandler,
     QueryEventsHandler,
     SessionStatusHandler,
-    GenerateSeedHandler,
-    MeasureDriftHandler,
-    InterviewHandler,
     EvaluateHandler,
-    LateralThinkHandler,
 )
 from ouroboros.mcp.types import ToolInputType
 
@@ -178,7 +181,7 @@ class TestOuroborosTools:
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
         """OUROBOROS_TOOLS contains all standard handlers."""
-        assert len(OUROBOROS_TOOLS) == 8
+        assert len(OUROBOROS_TOOLS) == 10
 
         handler_types = {type(h) for h in OUROBOROS_TOOLS}
         assert ExecuteSeedHandler in handler_types
@@ -189,6 +192,8 @@ class TestOuroborosTools:
         assert InterviewHandler in handler_types
         assert EvaluateHandler in handler_types
         assert LateralThinkHandler in handler_types
+        assert EvolveStepHandler in handler_types
+        assert LineageStatusHandler in handler_types
 
     def test_all_tools_have_unique_names(self) -> None:
         """All tools have unique names."""
@@ -368,12 +373,64 @@ class TestEvaluateHandler:
 
     async def test_handle_success(self) -> None:
         """handle returns success with valid session_id and artifact."""
-        handler = EvaluateHandler()
-        result = await handler.handle({
-            "session_id": "test-session",
-            "artifact": "def hello(): return 'world'",
-            "trigger_consensus": False,
-        })
+        from ouroboros.evaluation.models import (
+            EvaluationResult,
+            MechanicalResult,
+            SemanticResult,
+            CheckResult,
+            CheckType,
+        )
+
+        # Create mock results with all required attributes
+        mock_check = CheckResult(
+            check_type=CheckType.TEST,
+            passed=True,
+            message="All tests passed",
+        )
+        mock_stage1 = MechanicalResult(
+            passed=True,
+            checks=(mock_check,),
+            coverage_score=0.85,
+        )
+        mock_stage2 = SemanticResult(
+            score=0.9,
+            ac_compliance=True,
+            goal_alignment=0.95,
+            drift_score=0.1,
+            uncertainty=0.2,
+            reasoning="Artifact meets all acceptance criteria and aligns with goals.",
+        )
+
+        mock_eval_result = EvaluationResult(
+            execution_id="test-session",
+            stage1_result=mock_stage1,
+            stage2_result=mock_stage2,
+            stage3_result=None,
+            final_approved=True,
+        )
+
+        # Create mock pipeline result
+        mock_pipeline_result = MagicMock()
+        mock_pipeline_result.is_err = False
+        mock_pipeline_result.is_ok = True
+        mock_pipeline_result.value = mock_eval_result
+
+        # Mock EventStore to avoid real I/O
+        mock_store = AsyncMock()
+        mock_store.initialize = AsyncMock()
+
+        with patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline, \
+             patch("ouroboros.persistence.event_store.EventStore", return_value=mock_store):
+            mock_pipeline_instance = AsyncMock()
+            mock_pipeline_instance.evaluate = AsyncMock(return_value=mock_pipeline_result)
+            MockPipeline.return_value = mock_pipeline_instance
+
+            handler = EvaluateHandler()
+            result = await handler.handle({
+                "session_id": "test-session",
+                "artifact": "def hello(): return 'world'",
+                "trigger_consensus": False,
+            })
 
         assert result.is_ok
         assert "Evaluation Results" in result.value.text_content
