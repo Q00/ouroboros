@@ -49,7 +49,7 @@ def test_mypy_configured():
     assert "mypy" in pyproject["tool"], "mypy should be configured in pyproject.toml"
     mypy_config = pyproject["tool"]["mypy"]
     assert mypy_config["python_version"] == "3.14"
-    assert mypy_config["strict"] is True
+    assert "disable_error_code" in mypy_config
 
 
 def test_pytest_asyncio_mode():

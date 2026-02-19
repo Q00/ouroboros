@@ -208,7 +208,9 @@ class ParallelGraphWidget(Widget):
 
             # Combine row parts with connectors
             combined = ""
-            for i, (node_part, conn_part) in enumerate(zip(row_parts, connector_parts + [""], strict=False)):
+            for i, (node_part, conn_part) in enumerate(
+                zip(row_parts, connector_parts + [""], strict=False)
+            ):
                 combined += node_part
                 if i < len(row_parts) - 1:
                     combined += conn_part
