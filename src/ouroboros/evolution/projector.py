@@ -75,7 +75,7 @@ class LineageProjector:
             elif event.type == "lineage.generation.failed":
                 data = event.data
                 gen_num = data["generation_number"]
-                phase = GenerationPhase(data.get("phase", "failed"))
+                GenerationPhase(data.get("phase", "failed"))
 
                 if gen_num in generations:
                     # Update existing record to failed

@@ -30,7 +30,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 import logging
-from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from cachetools import TTLCache
 
@@ -216,7 +216,7 @@ E = TypeVar("E", bound=OuroborosError)  # Error type
 
 
 @dataclass
-class OntologicalAspect(Generic[C, T, E]):
+class OntologicalAspect[C, T, E: OuroborosError]:
     """Central AOP Weaver for Ontological Analysis.
 
     Implements the "Around Advice" pattern:

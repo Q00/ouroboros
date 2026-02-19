@@ -229,7 +229,7 @@ class MCPToolProvider:
             "orchestrator.mcp_tools.loaded",
             tool_count=len(self._tool_map),
             conflict_count=len(self._conflicts),
-            servers=list(set(t.server_name for t in self._tool_map.values())),
+            servers=list({t.server_name for t in self._tool_map.values()}),
         )
 
         return tuple(self._tool_map.values())
@@ -459,7 +459,7 @@ def create_mcp_tools_loaded_event(
         Event data dict for inclusion in BaseEvent.
     """
     tools = list(provider._tool_map.values())
-    server_names = tuple(set(t.server_name for t in tools))
+    server_names = tuple({t.server_name for t in tools})
 
     return {
         "session_id": session_id,

@@ -211,7 +211,7 @@ class ClaudeCodeAdapter:
         """
         try:
             # Lazy import to avoid loading SDK at module import time
-            from claude_agent_sdk import ClaudeAgentOptions, query
+            from claude_agent_sdk import ClaudeAgentOptions, query  # noqa: F401
         except ImportError as e:
             log.error("claude_code_adapter.sdk_not_installed", error=str(e))
             return Result.err(

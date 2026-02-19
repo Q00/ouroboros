@@ -769,7 +769,7 @@ class AgentPool:
                 await asyncio.sleep(self._config.health_check_interval)
 
                 idle_count = sum(1 for a in self._agents.values() if a.state == AgentState.IDLE)
-                busy_count = len(self._agents) - idle_count
+                len(self._agents) - idle_count
                 queue_size = self._task_queue.qsize()
 
                 # Scale up if needed

@@ -434,7 +434,7 @@ async def decompose_ac(
             if isinstance(child_item, str):
                 # Old format: plain string - no dependencies (backward compatibility)
                 children.append(child_item)
-                dependencies.append(tuple())
+                dependencies.append(())
             elif isinstance(child_item, dict):
                 # New format: dict with content and depends_on
                 content = child_item.get("content", "")

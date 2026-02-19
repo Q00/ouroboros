@@ -588,7 +588,6 @@ class DashboardScreen(Screen[None]):
                 status = "pending"
 
             # Check if this is the current AC
-            is_current = ac_index == current_ac_index
 
             nodes[ac_id] = {
                 "id": ac_id,

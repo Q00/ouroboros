@@ -1232,7 +1232,7 @@ class DoubleDiamond:
                 # Compute execution levels using topological sort
                 # Children in the same level can be executed in parallel
                 dependencies = decomposition.dependencies or tuple(
-                    tuple() for _ in decomposition.child_acs
+                    () for _ in decomposition.child_acs
                 )
                 execution_levels = _topological_sort_to_levels(
                     count=len(decomposition.child_acs),

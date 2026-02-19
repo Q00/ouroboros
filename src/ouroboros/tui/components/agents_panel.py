@@ -227,11 +227,8 @@ class AgentsPanel(Widget):
             )
 
         # Update utilization class on parent
-        utilization_class = "high-utilization"
-        if metrics.utilization_percent < 50:
-            utilization_class = "low-utilization"
-        elif metrics.utilization_percent < 80:
-            utilization_class = "medium-utilization"
+        if metrics.utilization_percent < 50 or metrics.utilization_percent < 80:
+            pass
 
         # Update table rows
         try:

@@ -198,7 +198,7 @@ class TestShorthandCommands:
         with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
             mock_run.return_value = None
 
-            result = runner.invoke(app, ["run", str(seed_file)])
+            runner.invoke(app, ["run", str(seed_file)])
 
             # Should invoke workflow command (orchestrator by default calls asyncio.run)
             assert mock_run.called
@@ -231,7 +231,6 @@ class TestShorthandCommands:
     def test_init_shorthand_falls_back_to_start(self) -> None:
         """Test that 'ouroboros init <context>' routes to 'ouroboros init start <context>'."""
         result = runner.invoke(app, ["init", "start", "--help"])
-        start_help = result.output
 
         # The shorthand should show the same help as the explicit command
         result2 = runner.invoke(app, ["init", "--help"])
@@ -261,7 +260,7 @@ class TestShorthandCommands:
             mock_run.return_value = None
 
             # No --orchestrator flag needed
-            result = runner.invoke(app, ["run", "workflow", str(seed_file)])
+            runner.invoke(app, ["run", "workflow", str(seed_file)])
 
             # asyncio.run should be called (orchestrator path)
             assert mock_run.called

@@ -369,10 +369,7 @@ class LogsScreen(Screen[None]):
         min_priority = int(LOG_LEVELS.get(self.min_level, {}).get("priority", 0))
 
         # Use state logs if available, otherwise use local logs
-        if self._state:
-            source_logs = self._state.logs
-        else:
-            source_logs = self._logs
+        source_logs = self._state.logs if self._state else self._logs
 
         filtered = []
         for log in source_logs:

@@ -379,7 +379,7 @@ class TestDowngradeManager:
         manager = DowngradeManager()
 
         # Record 5 successes
-        for i in range(5):
+        for _i in range(5):
             result = manager.record_success("pattern_1", Tier.STANDARD)
 
         assert result.is_ok

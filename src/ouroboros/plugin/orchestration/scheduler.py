@@ -418,7 +418,7 @@ class Scheduler:
             )
 
             # Check for failures
-            for task_id, result in zip(level_tasks, level_results):
+            for task_id, result in zip(level_tasks, level_results, strict=False):
                 if isinstance(result, Exception):
                     task = self._tasks[task_id]
                     task.state = TaskState.FAILED

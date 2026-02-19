@@ -357,7 +357,7 @@ class TestTodoRegistry:
         ]
 
         for todo in todos:
-            event = _create_todo_event(todo)
+            _create_todo_event(todo)
             mock_event_store.append.return_value = None
             await registry.register(todo.description, todo.context, todo.priority)
 
@@ -422,10 +422,10 @@ class TestTodoRegistry:
 
         # Create events for each TODO
         pending_event = _create_todo_event(pending)
-        done_creation = _create_todo_event(
+        _create_todo_event(
             Todo.create("Done", "ctx")  # Original creation
         )
-        done_creation = _create_todo_event(done)
+        _create_todo_event(done)
 
         mock_event_store.replay.side_effect = [
             [pending_event],
@@ -456,7 +456,7 @@ class TestTodoRegistryIntegration:
     """Integration tests for TodoRegistry with real EventStore."""
 
     @pytest.fixture
-    async def event_store(self, tmp_path) -> EventStore:
+    async def event_store(self, tmp_path):  # -> EventStore
         """Create real EventStore with temp database."""
         from ouroboros.persistence.event_store import EventStore
 

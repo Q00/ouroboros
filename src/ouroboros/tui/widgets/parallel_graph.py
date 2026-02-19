@@ -208,7 +208,7 @@ class ParallelGraphWidget(Widget):
 
             # Combine row parts with connectors
             combined = ""
-            for i, (node_part, conn_part) in enumerate(zip(row_parts, connector_parts + [""])):
+            for i, (node_part, conn_part) in enumerate(zip(row_parts, connector_parts + [""], strict=False)):
                 combined += node_part
                 if i < len(row_parts) - 1:
                     combined += conn_part
@@ -300,7 +300,7 @@ class ParallelGraphWidget(Widget):
                 idx_to_level[idx] = level
 
         # Create nodes
-        for idx, (content, ac_id) in enumerate(zip(child_acs, child_ac_ids)):
+        for idx, (content, ac_id) in enumerate(zip(child_acs, child_ac_ids, strict=False)):
             deps = dependencies[idx] if idx < len(dependencies) else ()
             dep_ids = [child_ac_ids[d] for d in deps if d < len(child_ac_ids)]
 

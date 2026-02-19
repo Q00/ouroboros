@@ -27,6 +27,7 @@ Layout:
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
@@ -132,10 +133,8 @@ class DoubleDiamondBar(Static):
         if self.progress_text:
             parts.append(f"    {self.progress_text}")
 
-        try:
+        with contextlib.suppress(Exception):
             self.query_one("#phase-display", Static).update("".join(parts))
-        except Exception:
-            pass
 
     def watch_phase(self, _: str) -> None:
         self._update_display()

@@ -476,12 +476,12 @@ def create_ouroboros_server(
     seed_generator = SeedGenerator(llm_adapter=llm_adapter)
 
     evaluation_config = PipelineConfig()
-    evaluation_pipeline = EvaluationPipeline(
+    EvaluationPipeline(
         llm_adapter=llm_adapter,
         config=evaluation_config,
     )
 
-    lateral_thinker = LateralThinker()
+    LateralThinker()
 
     # Create evolution engines for evolve_step
     from ouroboros.core.lineage import EvaluationSummary

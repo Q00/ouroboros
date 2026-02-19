@@ -427,7 +427,7 @@ class TestEscalationIntegration:
         manager.record_failure(pattern, Tier.STANDARD)  # -> Frontier
 
         # Multiple failures at Frontier should consistently return stagnation
-        for i in range(10):
+        for _i in range(10):
             manager.record_failure(pattern, Tier.FRONTIER)
             result = manager.record_failure(pattern, Tier.FRONTIER)
 

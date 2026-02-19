@@ -18,7 +18,7 @@ class TestBaseEventConstruction:
         # Attempting to modify should raise an error
         try:
             event.type = "modified"  # type: ignore[misc]
-            assert False, "Should have raised an error"
+            raise AssertionError("Should have raised an error")
         except Exception:
             pass  # Expected - frozen model
 

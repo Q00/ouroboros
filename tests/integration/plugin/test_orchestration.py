@@ -457,7 +457,7 @@ class TestEndToEndWorkflow:
     async def test_full_plugin_workflow(self) -> None:
         """Test complete plugin workflow end-to-end."""
         # 1. Initialize components
-        registry = AgentRegistry()
+        AgentRegistry()
         router = ModelRouter()
 
         with tempfile.TemporaryDirectory() as tmpdir:

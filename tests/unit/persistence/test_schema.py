@@ -68,7 +68,7 @@ class TestEventsTableIndexes:
             if "aggregate_type" in col_names and "aggregate_id" in col_names:
                 return  # Found composite index
         # If we get here, no composite index found
-        assert False, "No composite index on (aggregate_type, aggregate_id) found"
+        raise AssertionError("No composite index on (aggregate_type, aggregate_id) found")
 
 
 class TestMetadata:

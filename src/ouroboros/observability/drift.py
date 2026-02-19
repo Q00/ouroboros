@@ -156,7 +156,7 @@ def calculate_goal_drift(current_output: str, seed: Seed) -> float:
     return 1.0 - similarity
 
 
-def calculate_constraint_drift(constraint_violations: list[str], seed: Seed) -> float:
+def calculate_constraint_drift(constraint_violations: list[str], seed: Seed) -> float:  # noqa: ARG001
     """Calculate constraint drift based on violations.
 
     Each violation adds 0.1 to drift, capped at 1.0.

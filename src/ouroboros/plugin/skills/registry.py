@@ -267,7 +267,7 @@ class SkillRegistry:
             # Substring match for shorter prefixes
             matches = []
             prefix_lower = prefix.lower()
-            for skill_name, instance in self._skills.items():
+            for _skill_name, instance in self._skills.items():
                 if not instance.is_loaded:
                     continue
                 for magic_prefix in instance.metadata.magic_prefixes:

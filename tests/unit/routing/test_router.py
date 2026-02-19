@@ -445,7 +445,7 @@ class TestPALRouterIntegration:
 
         expected_tiers = [Tier.FRUGAL, Tier.STANDARD, Tier.FRONTIER]
 
-        for context, expected_tier in zip(contexts, expected_tiers):
+        for context, _expected_tier in zip(contexts, expected_tiers, strict=False):
             result = router.route(context)
             assert result.is_ok
             # For boundary cases, we just verify the result is valid

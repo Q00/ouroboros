@@ -351,7 +351,7 @@ class ParallelACExecutor:
             level_success = 0
             level_failed = 0
 
-            for ac_idx, result in zip(executable, level_results):
+            for ac_idx, result in zip(executable, level_results, strict=False):
                 if isinstance(result, BaseException):
                     # Exception during execution
                     error_msg = str(result)
@@ -588,7 +588,7 @@ class ParallelACExecutor:
                     ac_index=ac_index,
                     ac_content=ac_content,
                     success=all_success,
-                    messages=tuple(),
+                    messages=(),
                     final_message=f"Decomposed into {len(sub_acs)} Sub-ACs",
                     duration_seconds=duration,
                     is_decomposed=True,

@@ -10,7 +10,6 @@ jobs:
   ruff:
     name: Ruff Lint
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - name: Checkout code
@@ -41,7 +40,6 @@ jobs:
   mypy:
     name: MyPy Type Check
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - name: Checkout code

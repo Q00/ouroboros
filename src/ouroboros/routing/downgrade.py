@@ -37,7 +37,6 @@ Usage:
 """
 
 from dataclasses import dataclass, field
-from typing import TypeAlias
 
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
@@ -51,7 +50,7 @@ DOWNGRADE_THRESHOLD = 5  # Consecutive successes needed for downgrade
 SIMILARITY_THRESHOLD = 0.80  # Minimum similarity for pattern matching
 
 # Type aliases
-PatternId: TypeAlias = str
+type PatternId = str
 
 
 @dataclass

@@ -876,8 +876,8 @@ class MeasureDriftHandler:
             measurement = DriftMeasurement()
             metrics = measurement.measure(
                 current_output=current_output,
-                constraint_violations=list(str(v) for v in constraint_violations_raw),
-                current_concepts=list(str(c) for c in current_concepts_raw),
+                constraint_violations=[str(v) for v in constraint_violations_raw],
+                current_concepts=[str(c) for c in current_concepts_raw],
                 seed=seed,
             )
 

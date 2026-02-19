@@ -75,7 +75,7 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
 
 async def _initialize_mcp_manager(
     config_path: Path,
-    tool_prefix: str,
+    tool_prefix: str,  # noqa: ARG001
 ) -> MCPClientManager | None:
     """Initialize MCPClientManager from config file.
 

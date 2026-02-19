@@ -275,7 +275,7 @@ class OuroborosTUI(App[None]):
                 nodes[parent_ac_id]["children_ids"] = child_ac_ids
 
                 # Add child nodes
-                for i, (child_id, child_content) in enumerate(zip(child_ac_ids, child_contents)):
+                for _i, (child_id, child_content) in enumerate(zip(child_ac_ids, child_contents, strict=False)):
                     nodes[child_id] = {
                         "id": child_id,
                         "content": child_content,

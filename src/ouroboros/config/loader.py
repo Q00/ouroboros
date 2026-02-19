@@ -24,14 +24,14 @@ import yaml
 load_dotenv()  # Current directory .env
 load_dotenv(Path.home() / ".ouroboros" / ".env")  # Global .env
 
-from ouroboros.config.models import (
+from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
     OuroborosConfig,
     get_config_dir,
     get_default_config,
     get_default_credentials,
 )
-from ouroboros.core.errors import ConfigError
+from ouroboros.core.errors import ConfigError  # noqa: E402
 
 
 def ensure_config_dir() -> Path:

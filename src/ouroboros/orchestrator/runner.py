@@ -301,7 +301,7 @@ class OrchestratorRunner:
             )
 
         # Emit MCP tools loaded event
-        server_names = tuple(set(t.server_name for t in mcp_tools))
+        server_names = tuple({t.server_name for t in mcp_tools})
         mcp_event = create_mcp_tools_loaded_event(
             session_id=session_id,
             tool_count=len(mcp_tools),

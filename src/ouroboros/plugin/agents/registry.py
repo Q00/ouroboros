@@ -470,10 +470,7 @@ class AgentRegistry:
         # Parse role override
         role_override = overrides.get("role")
         if role_override:
-            if isinstance(role_override, str):
-                role = AgentRole(role_override)
-            else:
-                role = role_override
+            role = AgentRole(role_override) if isinstance(role_override, str) else role_override
         else:
             role = base.role
 

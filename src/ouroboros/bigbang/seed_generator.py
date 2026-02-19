@@ -442,14 +442,14 @@ Extract all components and provide them in the specified format."""
             Constructed Seed instance.
         """
         # Parse constraints
-        constraints: tuple[str, ...] = tuple()
+        constraints: tuple[str, ...] = ()
         if "constraints" in requirements and requirements["constraints"]:
             constraints = tuple(
                 c.strip() for c in requirements["constraints"].split("|") if c.strip()
             )
 
         # Parse acceptance criteria
-        acceptance_criteria: tuple[str, ...] = tuple()
+        acceptance_criteria: tuple[str, ...] = ()
         if "acceptance_criteria" in requirements and requirements["acceptance_criteria"]:
             acceptance_criteria = tuple(
                 c.strip() for c in requirements["acceptance_criteria"].split("|") if c.strip()
