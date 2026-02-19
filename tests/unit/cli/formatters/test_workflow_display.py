@@ -8,9 +8,8 @@ from ouroboros.cli.formatters.workflow_display import (
     render_workflow_state,
 )
 from ouroboros.orchestrator.workflow_state import (
-    ACStatus,
     AcceptanceCriterion,
-    ActivityType,
+    ACStatus,
     WorkflowState,
     WorkflowStateTracker,
 )

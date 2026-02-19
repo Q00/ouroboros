@@ -1,7 +1,5 @@
 """Unit tests for ouroboros.persistence.schema module."""
 
-from sqlalchemy import Index, inspect
-
 from ouroboros.persistence.schema import events_table, metadata
 
 

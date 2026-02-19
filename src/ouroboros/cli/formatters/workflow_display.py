@@ -15,14 +15,14 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING
 
 from rich import box
-from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import BarColumn, Progress, TaskID, TextColumn
+from rich.progress import BarColumn, Progress, TextColumn
 from rich.table import Table
 from rich.text import Text
 
@@ -30,7 +30,6 @@ from ouroboros.cli.formatters import console
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.workflow_state import (
-        ACStatus,
         WorkflowState,
         WorkflowStateTracker,
     )
@@ -102,9 +101,7 @@ def _format_ac_line(
     return line
 
 
-def _build_progress_bar(
-    completed: int, total: int, remaining_display: str = ""
-) -> Progress:
+def _build_progress_bar(completed: int, total: int, remaining_display: str = "") -> Progress:
     """Build a progress bar for AC completion.
 
     Args:
@@ -166,7 +163,6 @@ def render_workflow_state(state: WorkflowState) -> Panel:
     Returns:
         Rich Panel containing the formatted display.
     """
-    from ouroboros.orchestrator.workflow_state import ACStatus
 
     # Build phase indicator
     phase_indicator = _build_phase_indicator(state.current_phase.value)
@@ -323,7 +319,7 @@ class WorkflowDisplay:
         if self._live:
             self._live.update(self._render())
 
-    def __enter__(self) -> "WorkflowDisplay":
+    def __enter__(self) -> WorkflowDisplay:
         """Context manager entry."""
         self.start()
         return self

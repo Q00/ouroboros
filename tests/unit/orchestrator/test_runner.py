@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -375,13 +375,15 @@ class TestOrchestratorRunnerWithMCP:
         from ouroboros.mcp.types import MCPToolDefinition
 
         manager = MagicMock()
-        manager.list_all_tools = AsyncMock(return_value=[
-            MCPToolDefinition(
-                name="external_tool",
-                description="An external MCP tool",
-                server_name="test-server",
-            ),
-        ])
+        manager.list_all_tools = AsyncMock(
+            return_value=[
+                MCPToolDefinition(
+                    name="external_tool",
+                    description="An external MCP tool",
+                    server_name="test-server",
+                ),
+            ]
+        )
         return manager
 
     def test_init_with_mcp_manager(
@@ -491,9 +493,7 @@ class TestOrchestratorRunnerWithMCP:
         """Test graceful handling when MCP tool listing fails."""
         from ouroboros.orchestrator.adapter import DEFAULT_TOOLS
 
-        mock_mcp_manager.list_all_tools = AsyncMock(
-            side_effect=Exception("Connection lost")
-        )
+        mock_mcp_manager.list_all_tools = AsyncMock(side_effect=Exception("Connection lost"))
 
         runner = OrchestratorRunner(
             mock_adapter,
@@ -523,7 +523,6 @@ class TestOrchestratorRunnerWithMCP:
     ) -> None:
         """Test seed execution uses merged tools."""
         from ouroboros.core.types import Result
-        from ouroboros.orchestrator.adapter import DEFAULT_TOOLS
 
         async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
             yield AgentMessage(

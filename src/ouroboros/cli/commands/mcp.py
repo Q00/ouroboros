@@ -6,11 +6,10 @@ Start and manage the MCP (Model Context Protocol) server.
 from __future__ import annotations
 
 import asyncio
-import sys
 from typing import Annotated
 
-import typer
 from rich.console import Console
+import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 
@@ -125,10 +124,9 @@ def serve(
 @app.command()
 def info() -> None:
     """Show MCP server information and available tools."""
+    from ouroboros.cli.formatters import console
     from ouroboros.mcp.server.adapter import create_ouroboros_server
     from ouroboros.mcp.tools.definitions import OUROBOROS_TOOLS
-
-    from ouroboros.cli.formatters import console
 
     # Create server
     server = create_ouroboros_server(

@@ -3,8 +3,8 @@
 import pytest
 
 from ouroboros.orchestrator.workflow_state import (
-    ACStatus,
     AcceptanceCriterion,
+    ACStatus,
     ActivityType,
     WorkflowState,
     WorkflowStateTracker,

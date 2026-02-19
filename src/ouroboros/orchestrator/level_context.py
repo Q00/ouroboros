@@ -91,7 +91,7 @@ class LevelContext:
 
         text = "\n".join(lines)
         if len(text) > _MAX_LEVEL_CONTEXT_CHARS:
-            text = text[:_MAX_LEVEL_CONTEXT_CHARS - 3] + "..."
+            text = text[: _MAX_LEVEL_CONTEXT_CHARS - 3] + "..."
         return text
 
 
@@ -119,9 +119,7 @@ def build_context_prompt(level_contexts: list[LevelContext]) -> str:
     result = (
         "\n## Previous Work Context\n"
         "The following ACs have already been completed. "
-        "Use this context to inform your work.\n\n"
-        + "\n\n".join(sections)
-        + "\n"
+        "Use this context to inform your work.\n\n" + "\n\n".join(sections) + "\n"
     )
 
     # Append coordinator review warnings if present

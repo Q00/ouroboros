@@ -1,7 +1,7 @@
 """Unit tests for ouroboros.bigbang.seed_generator module."""
 
-import tempfile
 from pathlib import Path
+import tempfile
 from unittest.mock import AsyncMock
 
 import pytest
@@ -484,9 +484,7 @@ class TestSeedGeneratorErrorHandling:
 
         # Missing required fields
         mock_adapter.complete = AsyncMock(
-            return_value=Result.ok(
-                create_mock_completion_response("INVALID: missing fields")
-            )
+            return_value=Result.ok(create_mock_completion_response("INVALID: missing fields"))
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:

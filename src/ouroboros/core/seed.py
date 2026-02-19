@@ -205,7 +205,7 @@ class Seed(BaseModel, frozen=True):
         return self.model_dump(mode="json")
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Seed":
+    def from_dict(cls, data: dict[str, Any]) -> Seed:
         """Create seed from dictionary.
 
         Args:

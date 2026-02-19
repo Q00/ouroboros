@@ -218,15 +218,11 @@ class TestSecondaryLoopScheduler:
         """Create scheduler with mock registry."""
         return SecondaryLoopScheduler(_registry=mock_registry)
 
-    def test_should_activate_primary_complete(
-        self, scheduler: SecondaryLoopScheduler
-    ) -> None:
+    def test_should_activate_primary_complete(self, scheduler: SecondaryLoopScheduler) -> None:
         """Activate when primary is complete and no skip flag."""
         assert scheduler.should_activate(primary_completed=True, skip_flag=False)
 
-    def test_should_not_activate_skip_flag(
-        self, scheduler: SecondaryLoopScheduler
-    ) -> None:
+    def test_should_not_activate_skip_flag(self, scheduler: SecondaryLoopScheduler) -> None:
         """Don't activate when skip flag is set."""
         assert not scheduler.should_activate(primary_completed=True, skip_flag=True)
 
@@ -410,11 +406,13 @@ class TestSecondaryLoopScheduler:
         mock_registry: MagicMock,
     ) -> None:
         """Get status report."""
-        mock_registry.get_stats.return_value = Result.ok({
-            "pending": 5,
-            "done": 10,
-            "failed": 2,
-        })
+        mock_registry.get_stats.return_value = Result.ok(
+            {
+                "pending": 5,
+                "done": 10,
+                "failed": 2,
+            }
+        )
 
         pending_todos = [
             Todo.create("High priority", "ctx", Priority.HIGH),

@@ -1,10 +1,10 @@
 """Tests for Ouroboros tool definitions."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
+    EvaluateHandler,
     EvolveStepHandler,
     ExecuteSeedHandler,
     GenerateSeedHandler,
@@ -14,7 +14,6 @@ from ouroboros.mcp.tools.definitions import (
     MeasureDriftHandler,
     QueryEventsHandler,
     SessionStatusHandler,
-    EvaluateHandler,
 )
 from ouroboros.mcp.types import ToolInputType
 
@@ -82,14 +81,20 @@ metadata:
   ambiguity_score: 0.1
   interview_id: null
 """
-        result = await handler.handle({
-            "seed_content": valid_seed_yaml,
-            "model_tier": "medium",
-        })
+        result = await handler.handle(
+            {
+                "seed_content": valid_seed_yaml,
+                "model_tier": "medium",
+            }
+        )
 
         # Handler now integrates with actual orchestrator, so we check for proper response
         # The result should contain execution information or a helpful error about dependencies
-        assert result.is_ok or "execution" in str(result.error).lower() or "orchestrator" in str(result.error).lower()
+        assert (
+            result.is_ok
+            or "execution" in str(result.error).lower()
+            or "orchestrator" in str(result.error).lower()
+        )
 
 
 class TestSessionStatusHandler:
@@ -126,10 +131,15 @@ class TestSessionStatusHandler:
         # This is expected behavior - the handler correctly reports "session not found"
         if result.is_ok:
             # If session exists, verify it contains session info
-            assert "test-session" in result.value.text_content or "session" in result.value.text_content.lower()
+            assert (
+                "test-session" in result.value.text_content
+                or "session" in result.value.text_content.lower()
+            )
         else:
             # If session doesn't exist (expected for test data), verify proper error
-            assert "not found" in str(result.error).lower() or "no events" in str(result.error).lower()
+            assert (
+                "not found" in str(result.error).lower() or "no events" in str(result.error).lower()
+            )
 
 
 class TestQueryEventsHandler:
@@ -166,11 +176,13 @@ class TestQueryEventsHandler:
     async def test_handle_with_filters(self) -> None:
         """handle accepts filter parameters."""
         handler = QueryEventsHandler()
-        result = await handler.handle({
-            "session_id": "test-session",
-            "event_type": "execution",
-            "limit": 10,
-        })
+        result = await handler.handle(
+            {
+                "session_id": "test-session",
+                "event_type": "execution",
+                "limit": 10,
+            }
+        )
 
         assert result.is_ok
         assert "test-session" in result.value.text_content
@@ -272,10 +284,12 @@ class TestMeasureDriftHandler:
     async def test_handle_requires_seed_content(self) -> None:
         """handle returns error when seed_content is missing."""
         handler = MeasureDriftHandler()
-        result = await handler.handle({
-            "session_id": "test",
-            "current_output": "some output",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "test",
+                "current_output": "some output",
+            }
+        )
 
         assert result.is_err
         assert "seed_content is required" in str(result.error)
@@ -283,13 +297,15 @@ class TestMeasureDriftHandler:
     async def test_handle_success_with_real_drift(self) -> None:
         """handle returns real drift metrics with valid inputs."""
         handler = MeasureDriftHandler()
-        result = await handler.handle({
-            "session_id": "test-session",
-            "current_output": "Built a test task with Python 3.14",
-            "seed_content": VALID_SEED_YAML,
-            "constraint_violations": [],
-            "current_concepts": ["test_field"],
-        })
+        result = await handler.handle(
+            {
+                "session_id": "test-session",
+                "current_output": "Built a test task with Python 3.14",
+                "seed_content": VALID_SEED_YAML,
+                "constraint_violations": [],
+                "current_concepts": ["test_field"],
+            }
+        )
 
         assert result.is_ok
         text = result.value.text_content
@@ -306,11 +322,13 @@ class TestMeasureDriftHandler:
     async def test_handle_invalid_seed_yaml(self) -> None:
         """handle returns error for invalid seed YAML."""
         handler = MeasureDriftHandler()
-        result = await handler.handle({
-            "session_id": "test",
-            "current_output": "output",
-            "seed_content": "not: valid: yaml: [[[",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "test",
+                "current_output": "output",
+                "seed_content": "not: valid: yaml: [[[",
+            }
+        )
 
         assert result.is_err
 
@@ -374,11 +392,11 @@ class TestEvaluateHandler:
     async def test_handle_success(self) -> None:
         """handle returns success with valid session_id and artifact."""
         from ouroboros.evaluation.models import (
+            CheckResult,
+            CheckType,
             EvaluationResult,
             MechanicalResult,
             SemanticResult,
-            CheckResult,
-            CheckType,
         )
 
         # Create mock results with all required attributes
@@ -419,18 +437,22 @@ class TestEvaluateHandler:
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
 
-        with patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline, \
-             patch("ouroboros.persistence.event_store.EventStore", return_value=mock_store):
+        with (
+            patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline,
+            patch("ouroboros.persistence.event_store.EventStore", return_value=mock_store),
+        ):
             mock_pipeline_instance = AsyncMock()
             mock_pipeline_instance.evaluate = AsyncMock(return_value=mock_pipeline_result)
             MockPipeline.return_value = mock_pipeline_instance
 
             handler = EvaluateHandler()
-            result = await handler.handle({
-                "session_id": "test-session",
-                "artifact": "def hello(): return 'world'",
-                "trigger_consensus": False,
-            })
+            result = await handler.handle(
+                {
+                    "session_id": "test-session",
+                    "artifact": "def hello(): return 'world'",
+                    "trigger_consensus": False,
+                }
+            )
 
         assert result.is_ok
         assert "Evaluation Results" in result.value.text_content

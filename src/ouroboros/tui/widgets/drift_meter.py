@@ -19,7 +19,6 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label, ProgressBar, Static
 
-
 # Drift threshold from NFR5
 DRIFT_THRESHOLD = 0.3
 
@@ -260,11 +259,7 @@ class DriftMeterWidget(Widget):
     @property
     def is_measured(self) -> bool:
         """Check if any drift has been measured."""
-        return (
-            self.goal_drift >= 0.0
-            or self.constraint_drift >= 0.0
-            or self.ontology_drift >= 0.0
-        )
+        return self.goal_drift >= 0.0 or self.constraint_drift >= 0.0 or self.ontology_drift >= 0.0
 
     @property
     def combined_drift(self) -> float:

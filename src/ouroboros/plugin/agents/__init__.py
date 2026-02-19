@@ -11,16 +11,16 @@ Architecture:
 - Uses events.base for state tracking
 """
 
-from ouroboros.plugin.agents.registry import (
-    AgentRegistry,
-    AgentRole,
-    AgentSpec,
-)
 from ouroboros.plugin.agents.pool import (
     AgentInstance,
     AgentPool,
     AgentState,
     TaskRequest,
+)
+from ouroboros.plugin.agents.registry import (
+    AgentRegistry,
+    AgentRole,
+    AgentSpec,
 )
 
 __all__ = [

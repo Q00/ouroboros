@@ -166,7 +166,7 @@ class Result[T, E]:
             return Result.ok(cast(T, self._value))
         return Result.err(fn(cast(E, self._error)))
 
-    def and_then[U](self, fn: Callable[[T], "Result[U, E]"]) -> "Result[U, E]":
+    def and_then[U](self, fn: Callable[[T], Result[U, E]]) -> Result[U, E]:
         """Chain Result-producing operations (flatMap/bind).
 
         If this Result is Ok, apply fn to the value and return the result.

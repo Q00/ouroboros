@@ -21,6 +21,7 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.core.security import InputValidator
 
+
 class _DefaultWorkflowGroup(typer.core.TyperGroup):
     """TyperGroup that falls back to 'workflow' when no subcommand matches.
 
@@ -75,7 +76,7 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
 async def _initialize_mcp_manager(
     config_path: Path,
     tool_prefix: str,
-) -> "MCPClientManager | None":
+) -> MCPClientManager | None:
     """Initialize MCPClientManager from config file.
 
     Args:
@@ -178,6 +179,7 @@ async def _run_orchestrator(
 
     # Initialize components
     import os
+
     db_path = os.path.expanduser("~/.ouroboros/ouroboros.db")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
@@ -322,9 +324,7 @@ def workflow(
     """
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
-        print_warning(
-            "--mcp-config requires --orchestrator flag. Enabling orchestrator mode."
-        )
+        print_warning("--mcp-config requires --orchestrator flag. Enabling orchestrator mode.")
         orchestrator = True
 
     if orchestrator or resume_session:
@@ -334,14 +334,16 @@ def workflow(
                 "[yellow]Warning: --resume requires --orchestrator flag. "
                 "Enabling orchestrator mode.[/yellow]"
             )
-        asyncio.run(_run_orchestrator(
-            seed_file,
-            resume_session,
-            mcp_config,
-            mcp_tool_prefix,
-            debug,
-            parallel=not sequential,
-        ))
+        asyncio.run(
+            _run_orchestrator(
+                seed_file,
+                resume_session,
+                mcp_config,
+                mcp_tool_prefix,
+                debug,
+                parallel=not sequential,
+            )
+        )
     else:
         # Standard workflow (placeholder)
         print_info(f"Would execute workflow from: {seed_file}")

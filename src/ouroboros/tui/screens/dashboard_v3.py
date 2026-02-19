@@ -610,17 +610,16 @@ class DashboardScreenV3(Screen[None]):
         self._phase_bar = DoubleDiamondBar()
         yield self._phase_bar
 
-        with Container(classes="main-area"):
-            with Horizontal(classes="content-row"):
-                with Container(classes="tree-panel"):
-                    self._tree = SelectableACTree(
-                        tree_data=self._state.ac_tree if self._state else {},
-                    )
-                    yield self._tree
+        with Container(classes="main-area"), Horizontal(classes="content-row"):
+            with Container(classes="tree-panel"):
+                self._tree = SelectableACTree(
+                    tree_data=self._state.ac_tree if self._state else {},
+                )
+                yield self._tree
 
-                with Container(classes="detail-panel"):
-                    self._detail_panel = NodeDetailPanel()
-                    yield self._detail_panel
+            with Container(classes="detail-panel"):
+                self._detail_panel = NodeDetailPanel()
+                yield self._detail_panel
 
         self._activity_bar = LiveActivityBar()
         yield self._activity_bar
@@ -699,12 +698,14 @@ class DashboardScreenV3(Screen[None]):
         if existing:
             existing["status"] = message.status
         else:
-            self._subtasks[ac_index].append({
-                "id": message.sub_task_id,
-                "index": message.sub_task_index,
-                "content": message.content,
-                "status": message.status,
-            })
+            self._subtasks[ac_index].append(
+                {
+                    "id": message.sub_task_id,
+                    "index": message.sub_task_index,
+                    "content": message.content,
+                    "status": message.status,
+                }
+            )
 
     def on_tool_call_started(self, message: ToolCallStarted) -> None:
         """Handle tool call started - show inline activity."""

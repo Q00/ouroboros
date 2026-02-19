@@ -6,10 +6,10 @@ Claude Agent SDK) and setting up isolated test environments.
 
 from __future__ import annotations
 
-import tempfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
+import tempfile
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -25,7 +25,6 @@ from ouroboros.core.seed import (
 )
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message, UsageInfo
-
 
 # =============================================================================
 # Seed Fixtures
@@ -175,14 +174,12 @@ class MockLLMProvider:
         default_factory=list, init=False
     )
 
-    def add_response(self, content: str, **kwargs: Any) -> "MockLLMProvider":
+    def add_response(self, content: str, **kwargs: Any) -> MockLLMProvider:
         """Add a response to the sequence."""
         self.responses.append(MockLLMResponse(content=content, **kwargs))
         return self
 
-    async def complete(
-        self, messages: list[Message], config: CompletionConfig
-    ) -> Any:
+    async def complete(self, messages: list[Message], config: CompletionConfig) -> Any:
         """Simulate LLM completion."""
         from ouroboros.core.types import Result
 
@@ -271,9 +268,7 @@ class MockClaudeAgentAdapter:
     _execution_count: int = field(default=0, init=False)
     _execution_history: list[dict[str, Any]] = field(default_factory=list, init=False)
 
-    def add_execution_sequence(
-        self, messages: list[AgentMessage]
-    ) -> "MockClaudeAgentAdapter":
+    def add_execution_sequence(self, messages: list[AgentMessage]) -> MockClaudeAgentAdapter:
         """Add a sequence of messages for a single execution."""
         self.message_sequences.append(messages)
         return self
@@ -282,7 +277,7 @@ class MockClaudeAgentAdapter:
         self,
         steps: int = 3,
         final_message: str = "Task completed successfully.",
-    ) -> "MockClaudeAgentAdapter":
+    ) -> MockClaudeAgentAdapter:
         """Add a successful execution sequence with typical tool usage."""
         messages = [
             AgentMessage(type="assistant", content="Analyzing the task..."),
@@ -295,9 +290,7 @@ class MockClaudeAgentAdapter:
                     tool_name="Read" if i % 2 == 0 else "Edit",
                 )
             )
-            messages.append(
-                AgentMessage(type="assistant", content=f"Step {i + 1} completed")
-            )
+            messages.append(AgentMessage(type="assistant", content=f"Step {i + 1} completed"))
 
         messages.append(
             AgentMessage(
@@ -310,7 +303,7 @@ class MockClaudeAgentAdapter:
 
     def add_failed_execution(
         self, error_message: str = "Execution failed due to an error."
-    ) -> "MockClaudeAgentAdapter":
+    ) -> MockClaudeAgentAdapter:
         """Add a failed execution sequence."""
         messages = [
             AgentMessage(type="assistant", content="Starting task..."),
@@ -439,15 +432,13 @@ class WorkflowSimulator:
     mock_agent: MockClaudeAgentAdapter
     temp_dir: Path
 
-    def configure_interview_flow(self, questions: list[str]) -> "WorkflowSimulator":
+    def configure_interview_flow(self, questions: list[str]) -> WorkflowSimulator:
         """Configure the interview flow with specific questions."""
         for question in questions:
             self.mock_llm.add_response(question)
         return self
 
-    def configure_successful_execution(
-        self, steps: int = 3
-    ) -> "WorkflowSimulator":
+    def configure_successful_execution(self, steps: int = 3) -> WorkflowSimulator:
         """Configure a successful workflow execution."""
         self.mock_agent.add_successful_execution(steps=steps)
         return self

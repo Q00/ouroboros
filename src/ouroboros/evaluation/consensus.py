@@ -73,6 +73,7 @@ class ConsensusConfig:
 def _get_consensus_system_prompt() -> str:
     """Lazy-load consensus system prompt to avoid import-time I/O."""
     from ouroboros.agents.loader import load_agent_prompt
+
     return load_agent_prompt("consensus-reviewer")
 
 
@@ -85,7 +86,9 @@ def build_consensus_prompt(context: EvaluationContext) -> str:
     Returns:
         Formatted prompt string
     """
-    constraints_text = "\n".join(f"- {c}" for c in context.constraints) if context.constraints else "None"
+    constraints_text = (
+        "\n".join(f"- {c}" for c in context.constraints) if context.constraints else "None"
+    )
 
     return f"""Review the following artifact for consensus approval:
 
@@ -271,10 +274,7 @@ class ConsensusEvaluator:
         ]
 
         # Collect votes from all models concurrently
-        vote_tasks = [
-            self._get_vote(messages, model)
-            for model in models
-        ]
+        vote_tasks = [self._get_vote(messages, model) for model in models]
         vote_results = await asyncio.gather(*vote_tasks, return_exceptions=True)
 
         # Process results
@@ -305,9 +305,7 @@ class ConsensusEvaluator:
         approved = majority_ratio >= self._config.majority_threshold
 
         # Collect disagreements (reasoning from dissenting votes)
-        disagreements = tuple(
-            v.reasoning for v in votes if v.approved != approved
-        )
+        disagreements = tuple(v.reasoning for v in votes if v.approved != approved)
 
         consensus_result = ConsensusResult(
             approved=approved,
@@ -368,12 +366,14 @@ class ConsensusEvaluator:
 def _get_advocate_system_prompt() -> str:
     """Lazy-load advocate system prompt to avoid import-time I/O."""
     from ouroboros.agents.loader import load_agent_prompt
+
     return load_agent_prompt("advocate")
 
 
 def _get_judge_system_prompt() -> str:
     """Lazy-load judge system prompt to avoid import-time I/O."""
     from ouroboros.agents.loader import load_agent_prompt
+
     return load_agent_prompt("judge")
 
 
@@ -559,32 +559,26 @@ class DeliberativeConsensus:
         devil_task = self._get_position(context, VoterRole.DEVIL)
 
         # Type hint for asyncio.gather with return_exceptions=True
-        results: list[Result[Vote, ProviderError | ValidationError] | BaseException] = (
-            await asyncio.gather(advocate_task, devil_task, return_exceptions=True)
-        )
+        results: list[
+            Result[Vote, ProviderError | ValidationError] | BaseException
+        ] = await asyncio.gather(advocate_task, devil_task, return_exceptions=True)
         advocate_result, devil_result = results[0], results[1]
 
         # Handle Round 1 errors - type narrowing via isinstance
         if isinstance(advocate_result, BaseException):
-            return Result.err(
-                ValidationError(f"Advocate failed: {advocate_result}")
-            )
+            return Result.err(ValidationError(f"Advocate failed: {advocate_result}"))
         if advocate_result.is_err:
             return Result.err(advocate_result.error)
         advocate_vote = advocate_result.value
 
         if isinstance(devil_result, BaseException):
-            return Result.err(
-                ValidationError(f"Devil's Advocate failed: {devil_result}")
-            )
+            return Result.err(ValidationError(f"Devil's Advocate failed: {devil_result}"))
         if devil_result.is_err:
             return Result.err(devil_result.error)
         devil_vote = devil_result.value
 
         # Round 2: Judge reviews both positions
-        judgment_result = await self._get_judgment(
-            context, advocate_vote, devil_vote
-        )
+        judgment_result = await self._get_judgment(context, advocate_vote, devil_vote)
 
         if judgment_result.is_err:
             return Result.err(judgment_result.error)
@@ -684,9 +678,7 @@ class DeliberativeConsensus:
             return await self._get_devil_position(context)
 
         else:
-            return Result.err(
-                ValidationError(f"Invalid role for position: {role}")
-            )
+            return Result.err(ValidationError(f"Invalid role for position: {role}"))
 
     async def _get_devil_position(
         self,
@@ -806,9 +798,7 @@ Based on both positions above, make your final judgment."""
         if llm_result.is_err:
             return Result.err(llm_result.error)
 
-        return _parse_judgment_response(
-            llm_result.value.content, self._config.judge_model
-        )
+        return _parse_judgment_response(llm_result.value.content, self._config.judge_model)
 
 
 async def run_consensus_evaluation(

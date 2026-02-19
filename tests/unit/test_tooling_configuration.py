@@ -1,4 +1,5 @@
 """Test that tooling is configured correctly."""
+
 from pathlib import Path
 import tomllib
 
@@ -31,7 +32,9 @@ def test_pre_commit_config_exists():
     """Test that .pre-commit-config.yaml exists."""
     root = Path(__file__).parent.parent.parent
     pre_commit_config = root / ".pre-commit-config.yaml"
-    assert pre_commit_config.is_file(), f".pre-commit-config.yaml should exist at {pre_commit_config}"
+    assert pre_commit_config.is_file(), (
+        f".pre-commit-config.yaml should exist at {pre_commit_config}"
+    )
 
 
 def test_mypy_configured():

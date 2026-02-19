@@ -26,16 +26,15 @@ Usage:
             print(f"Processed: {summary.total}, Success: {summary.success_count}")
 """
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Callable, Awaitable
 
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.secondary.todo_registry import (
-    Priority,
     Todo,
     TodoRegistry,
     TodoStatus,
@@ -453,15 +452,17 @@ class SecondaryLoopScheduler:
 
         pending = pending_result.value
 
-        return Result.ok({
-            "stats": stats,
-            "pending_count": stats.get("pending", 0),
-            "next_pending": [
-                {
-                    "id": t.id,
-                    "description": t.description[:50],
-                    "priority": t.priority.value,
-                }
-                for t in pending[:5]
-            ],
-        })
+        return Result.ok(
+            {
+                "stats": stats,
+                "pending_count": stats.get("pending", 0),
+                "next_pending": [
+                    {
+                        "id": t.id,
+                        "description": t.description[:50],
+                        "priority": t.priority.value,
+                    }
+                    for t in pending[:5]
+                ],
+            }
+        )

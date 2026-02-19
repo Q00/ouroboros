@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from ouroboros.orchestrator.events import (
     create_progress_event,
     create_session_completed_event,

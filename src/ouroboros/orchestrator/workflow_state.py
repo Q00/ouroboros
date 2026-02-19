@@ -18,10 +18,10 @@ Usage:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
+import re
 from typing import Any
 
 
@@ -315,8 +315,13 @@ class WorkflowStateTracker:
 
     # Heuristic patterns for completion detection
     COMPLETION_PATTERNS = [
-        re.compile(r"(?:criterion|AC)\s*#?(\d+)\s*(?:is\s+)?(?:complete|done|finished|satisfied)", re.IGNORECASE),
-        re.compile(r"(?:completed|finished|done\s+with)\s*(?:criterion|AC)\s*#?(\d+)", re.IGNORECASE),
+        re.compile(
+            r"(?:criterion|AC)\s*#?(\d+)\s*(?:is\s+)?(?:complete|done|finished|satisfied)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:completed|finished|done\s+with)\s*(?:criterion|AC)\s*#?(\d+)", re.IGNORECASE
+        ),
         re.compile(r"✓\s*(?:criterion|AC)?\s*#?(\d+)", re.IGNORECASE),
     ]
 

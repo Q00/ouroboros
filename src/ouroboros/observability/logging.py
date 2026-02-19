@@ -346,6 +346,7 @@ class _FileWritingPrintLogger:
             level: The log level (e.g., logging.DEBUG, logging.INFO).
         """
         import sys
+
         # Print to stderr only if console logging is enabled
         if _console_logging_enabled:
             print(message, file=sys.stderr)

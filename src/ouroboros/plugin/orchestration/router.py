@@ -29,16 +29,15 @@ Usage:
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+import hashlib
+import json
 from typing import Any
 
 from ouroboros.observability.logging import get_logger
-from ouroboros.routing.complexity import TaskContext, estimate_complexity
-from ouroboros.routing.router import PALRouter, RoutingDecision, _select_tier_from_score
+from ouroboros.routing.complexity import TaskContext
+from ouroboros.routing.router import PALRouter
 from ouroboros.routing.tiers import Tier
 
 log = get_logger(__name__)
@@ -89,9 +88,7 @@ class RoutingContext:
             "tool_range": self._tool_range,
             "depth_range": self._depth_range,
         }
-        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[
-            :16
-        ]
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
 
     @property
     def _token_range(self) -> str:
@@ -270,9 +267,7 @@ class ModelRouter:
 
         return tier
 
-    def _route_from_history(
-        self, context_hash: str, previous_failures: int
-    ) -> Tier | None:
+    def _route_from_history(self, context_hash: str, previous_failures: int) -> Tier | None:
         """Check history for similar tasks and apply escalation.
 
         Args:
@@ -339,9 +334,7 @@ class ModelRouter:
 
         # Prune old records
         if len(self._history[context_hash]) > self.MAX_HISTORY_PER_HASH:
-            self._history[context_hash] = self._history[context_hash][
-                -self.MAX_HISTORY_PER_HASH :
-            ]
+            self._history[context_hash] = self._history[context_hash][-self.MAX_HISTORY_PER_HASH :]
 
         # Prune total history
         total_records = sum(len(v) for v in self._history.values())

@@ -1,15 +1,12 @@
 """Unit tests for ouroboros.bigbang.interview module."""
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ouroboros.bigbang.interview import (
-    MAX_INTERVIEW_ROUNDS,
     InterviewEngine,
     InterviewRound,
     InterviewState,
@@ -19,7 +16,6 @@ from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionResponse,
-    Message,
     MessageRole,
     UsageInfo,
 )
@@ -265,9 +261,7 @@ class TestInterviewEngineAskNextQuestion:
     async def test_ask_first_question(self) -> None:
         """ask_next_question generates first question."""
         mock_adapter = MagicMock()
-        mock_adapter.complete = AsyncMock(
-            return_value=Result.ok(create_mock_completion_response())
-        )
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
 
         engine = InterviewEngine(llm_adapter=mock_adapter)
         state = InterviewState(
@@ -287,9 +281,7 @@ class TestInterviewEngineAskNextQuestion:
     async def test_ask_question_includes_context(self) -> None:
         """ask_next_question includes initial context in prompt."""
         mock_adapter = MagicMock()
-        mock_adapter.complete = AsyncMock(
-            return_value=Result.ok(create_mock_completion_response())
-        )
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
 
         engine = InterviewEngine(llm_adapter=mock_adapter)
         state = InterviewState(
@@ -311,9 +303,7 @@ class TestInterviewEngineAskNextQuestion:
     async def test_ask_question_with_history(self) -> None:
         """ask_next_question includes conversation history."""
         mock_adapter = MagicMock()
-        mock_adapter.complete = AsyncMock(
-            return_value=Result.ok(create_mock_completion_response())
-        )
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
 
         engine = InterviewEngine(llm_adapter=mock_adapter)
         state = InterviewState(

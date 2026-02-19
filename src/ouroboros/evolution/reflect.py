@@ -12,9 +12,9 @@ Reflect handles all subsequent generations autonomously.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
-from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
@@ -97,8 +97,11 @@ class ReflectEngine:
             Result containing ReflectOutput or ProviderError.
         """
         prompt = self._build_prompt(
-            current_seed, execution_output, evaluation_summary,
-            wonder_output, lineage,
+            current_seed,
+            execution_output,
+            evaluation_summary,
+            wonder_output,
+            lineage,
         )
 
         messages = [
@@ -236,9 +239,7 @@ Guidelines:
                 refined_constraints=tuple(
                     data.get("refined_constraints", list(current_seed.constraints))
                 ),
-                refined_acs=tuple(
-                    data.get("refined_acs", list(current_seed.acceptance_criteria))
-                ),
+                refined_acs=tuple(data.get("refined_acs", list(current_seed.acceptance_criteria))),
                 ontology_mutations=tuple(mutations),
                 reasoning=data.get("reasoning", ""),
             )

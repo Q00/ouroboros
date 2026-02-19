@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 
 from ouroboros.core.errors import ProviderError
-from ouroboros.core.security import InputValidator, MAX_LLM_RESPONSE_LENGTH
+from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -99,9 +99,9 @@ class AnthropicAdapter:
         """
         # Strip common prefixes
         if model.startswith("anthropic/"):
-            model = model[len("anthropic/"):]
+            model = model[len("anthropic/") :]
         if model.startswith("openrouter/anthropic/"):
-            model = model[len("openrouter/anthropic/"):]
+            model = model[len("openrouter/anthropic/") :]
 
         # If it looks like a Claude model, use it directly
         if model.startswith("claude"):
@@ -130,9 +130,7 @@ class AnthropicAdapter:
         try:
             client = self._get_client()
         except ImportError as e:
-            return Result.err(
-                ProviderError(str(e), provider="anthropic")
-            )
+            return Result.err(ProviderError(str(e), provider="anthropic"))
 
         if not self._api_key:
             return Result.err(
@@ -227,9 +225,7 @@ class AnthropicAdapter:
             usage=UsageInfo(
                 prompt_tokens=usage.input_tokens if usage else 0,
                 completion_tokens=usage.output_tokens if usage else 0,
-                total_tokens=(
-                    (usage.input_tokens + usage.output_tokens) if usage else 0
-                ),
+                total_tokens=((usage.input_tokens + usage.output_tokens) if usage else 0),
             ),
             finish_reason=response.stop_reason or "end_turn",
         )
@@ -251,9 +247,7 @@ class AnthropicAdapter:
         try:
             import anthropic
         except ImportError:
-            return Result.err(
-                ProviderError(f"Unexpected error: {exc}", provider="anthropic")
-            )
+            return Result.err(ProviderError(f"Unexpected error: {exc}", provider="anthropic"))
 
         if isinstance(exc, anthropic.AuthenticationError):
             log.warning("anthropic.request.failed.auth", model=model, error=str(exc))

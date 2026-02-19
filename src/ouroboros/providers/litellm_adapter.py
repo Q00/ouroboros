@@ -12,7 +12,7 @@ import stamina
 import structlog
 
 from ouroboros.core.errors import ProviderError
-from ouroboros.core.security import InputValidator, MAX_LLM_RESPONSE_LENGTH
+from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -237,6 +237,7 @@ class LiteLLMAdapter:
         Returns:
             Result containing either the completion response or a ProviderError.
         """
+
         # Create the retry-decorated function with instance's max_retries
         @stamina.retry(
             on=RETRIABLE_EXCEPTIONS,

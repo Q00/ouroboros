@@ -242,9 +242,7 @@ class TestSemanticEvaluator:
         sample_context: EvaluationContext,
     ) -> None:
         """Handle LLM error."""
-        mock_llm.complete.return_value = Result.err(
-            ProviderError("API error", provider="test")
-        )
+        mock_llm.complete.return_value = Result.err(ProviderError("API error", provider="test"))
 
         evaluator = SemanticEvaluator(mock_llm)
         result = await evaluator.evaluate(sample_context)

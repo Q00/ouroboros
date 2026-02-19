@@ -8,8 +8,6 @@ Tests cover:
 - Sanitization for logging
 """
 
-import pytest
-
 from ouroboros.core.security import (
     MAX_INITIAL_CONTEXT_LENGTH,
     MAX_LLM_RESPONSE_LENGTH,
@@ -156,14 +154,7 @@ class TestSanitizeForLogging:
 
     def test_sanitize_nested_dict(self) -> None:
         """Nested dictionaries are sanitized recursively."""
-        data = {
-            "config": {
-                "provider": {
-                    "api_key": "sk-secret"
-                }
-            },
-            "name": "test"
-        }
+        data = {"config": {"provider": {"api_key": "sk-secret"}}, "name": "test"}
         result = sanitize_for_logging(data)
         assert result["config"]["provider"]["api_key"] == "<REDACTED>"
         assert result["name"] == "test"

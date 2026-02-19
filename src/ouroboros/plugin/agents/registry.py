@@ -19,8 +19,7 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -254,13 +253,9 @@ class AgentRegistry:
     def __init__(self) -> None:
         """Initialize the agent registry."""
         self._custom_agents: dict[str, AgentSpec] = {}
-        self._role_index: dict[AgentRole, set[str]] = self._build_role_index(
-            BUILTIN_AGENTS
-        )
+        self._role_index: dict[AgentRole, set[str]] = self._build_role_index(BUILTIN_AGENTS)
 
-    def _build_role_index(
-        self, agents: dict[str, AgentSpec]
-    ) -> dict[AgentRole, set[str]]:
+    def _build_role_index(self, agents: dict[str, AgentSpec]) -> dict[AgentRole, set[str]]:
         """Build role -> agent names index."""
         index: dict[AgentRole, set[str]] = {}
         for agent in agents.values():
@@ -374,9 +369,7 @@ class AgentRegistry:
 
         # Parse capabilities
         capabilities_list = sections.get("capabilities", [])
-        capabilities = tuple(
-            cap.lstrip("- ").strip() for cap in capabilities_list if cap.strip()
-        )
+        capabilities = tuple(cap.lstrip("- ").strip() for cap in capabilities_list if cap.strip())
 
         # Parse tools
         tools_list = sections.get("tools", [])
@@ -399,20 +392,13 @@ class AgentRegistry:
         # Determine role from capabilities or defaults
         role = AgentRole.EXECUTION  # Default
         capabilities_lower = " ".join(capabilities).lower()
-        if any(
-            kw in capabilities_lower
-            for kw in ["planning", "plan", "design", "architect"]
-        ):
+        if any(kw in capabilities_lower for kw in ["planning", "plan", "design", "architect"]):
             role = AgentRole.PLANNING
         elif any(
-            kw in capabilities_lower
-            for kw in ["analysis", "analyze", "investigate", "debug"]
+            kw in capabilities_lower for kw in ["analysis", "analyze", "investigate", "debug"]
         ):
             role = AgentRole.ANALYSIS
-        elif any(
-            kw in capabilities_lower
-            for kw in ["review", "verify", "check", "audit"]
-        ):
+        elif any(kw in capabilities_lower for kw in ["review", "verify", "check", "audit"]):
             role = AgentRole.REVIEW
 
         return AgentSpec(

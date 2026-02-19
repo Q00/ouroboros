@@ -34,7 +34,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
 
 from ouroboros.observability.logging import get_logger
 
@@ -354,9 +353,7 @@ class Scheduler:
             ready = []
             for task_id in list(remaining):
                 task = self._tasks[task_id]
-                deps_satisfied = all(
-                    dep in processed for dep in task.dependencies
-                )
+                deps_satisfied = all(dep in processed for dep in task.dependencies)
                 if deps_satisfied:
                     ready.append(task_id)
 
@@ -416,10 +413,7 @@ class Scheduler:
 
             # Execute tasks in this level in parallel
             level_results = await asyncio.gather(
-                *[
-                    self._execute_task(task_id, progress_callback)
-                    for task_id in level_tasks
-                ],
+                *[self._execute_task(task_id, progress_callback) for task_id in level_tasks],
                 return_exceptions=True,
             )
 
@@ -510,7 +504,7 @@ class Scheduler:
                         # Skip dependent tasks
                         await self._skip_dependents(task_id)
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 task.state = TaskState.FAILED
                 task.error = "Task timeout"
 

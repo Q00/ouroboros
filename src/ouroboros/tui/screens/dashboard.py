@@ -366,49 +366,48 @@ class DashboardScreen(Screen[None]):
         """Compose the screen layout."""
         yield Header()
 
-        with Container():
-            with Horizontal(classes="main-content"):
-                with Vertical(classes="left-panel"):
-                    # Status panel
-                    self._status_panel = StatusPanel(
-                        execution_id=self._state.execution_id if self._state else "",
-                        session_id=self._state.session_id if self._state else "",
-                        status=self._state.status if self._state else "idle",
-                    )
-                    yield self._status_panel
+        with Container(), Horizontal(classes="main-content"):
+            with Vertical(classes="left-panel"):
+                # Status panel
+                self._status_panel = StatusPanel(
+                    execution_id=self._state.execution_id if self._state else "",
+                    session_id=self._state.session_id if self._state else "",
+                    status=self._state.status if self._state else "idle",
+                )
+                yield self._status_panel
 
-                    # Phase progress
-                    self._phase_progress = PhaseProgressWidget(
-                        current_phase=self._state.current_phase if self._state else "",
-                        iteration=self._state.iteration if self._state else 0,
-                    )
-                    yield self._phase_progress
+                # Phase progress
+                self._phase_progress = PhaseProgressWidget(
+                    current_phase=self._state.current_phase if self._state else "",
+                    iteration=self._state.iteration if self._state else 0,
+                )
+                yield self._phase_progress
 
-                    # Cost tracker
-                    self._cost_tracker = CostTrackerWidget(
-                        total_tokens=self._state.total_tokens if self._state else 0,
-                        total_cost_usd=self._state.total_cost_usd if self._state else 0.0,
-                    )
-                    yield self._cost_tracker
+                # Cost tracker
+                self._cost_tracker = CostTrackerWidget(
+                    total_tokens=self._state.total_tokens if self._state else 0,
+                    total_cost_usd=self._state.total_cost_usd if self._state else 0.0,
+                )
+                yield self._cost_tracker
 
-                with Vertical(classes="right-panel"):
-                    # Drift meter
-                    self._drift_meter = DriftMeterWidget(
-                        goal_drift=self._state.goal_drift if self._state else 0.0,
-                        constraint_drift=self._state.constraint_drift if self._state else 0.0,
-                        ontology_drift=self._state.ontology_drift if self._state else 0.0,
-                    )
-                    yield self._drift_meter
+            with Vertical(classes="right-panel"):
+                # Drift meter
+                self._drift_meter = DriftMeterWidget(
+                    goal_drift=self._state.goal_drift if self._state else 0.0,
+                    constraint_drift=self._state.constraint_drift if self._state else 0.0,
+                    ontology_drift=self._state.ontology_drift if self._state else 0.0,
+                )
+                yield self._drift_meter
 
-                    # AC tree
-                    self._ac_tree = ACTreeWidget(
-                        tree_data=self._state.ac_tree if self._state else {},
-                    )
-                    yield self._ac_tree
+                # AC tree
+                self._ac_tree = ACTreeWidget(
+                    tree_data=self._state.ac_tree if self._state else {},
+                )
+                yield self._ac_tree
 
-                    # Agent activity (for tool/file/thinking display)
-                    self._agent_activity = AgentActivityWidget()
-                    yield self._agent_activity
+                # Agent activity (for tool/file/thinking display)
+                self._agent_activity = AgentActivityWidget()
+                yield self._agent_activity
 
         yield Footer()
 

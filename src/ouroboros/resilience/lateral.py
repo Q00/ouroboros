@@ -33,7 +33,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
 
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
@@ -275,22 +274,26 @@ class LateralThinker:
         ]
 
         if failed_attempts:
-            prompt_parts.extend([
-                "## Previous Failed Attempts",
-                *[f"- {attempt}" for attempt in failed_attempts],
-                "",
-            ])
+            prompt_parts.extend(
+                [
+                    "## Previous Failed Attempts",
+                    *[f"- {attempt}" for attempt in failed_attempts],
+                    "",
+                ]
+            )
 
-        prompt_parts.extend([
-            "## Lateral Thinking Instructions",
-            *[f"{instr}" for instr in strategy.approach_instructions],
-            "",
-            "## Questions to Consider",
-            *[f"- {q}" for q in strategy.question_templates],
-            "",
-            "## Your Alternative Approach",
-            "Based on the above, propose a fundamentally different approach:",
-        ])
+        prompt_parts.extend(
+            [
+                "## Lateral Thinking Instructions",
+                *[f"{instr}" for instr in strategy.approach_instructions],
+                "",
+                "## Questions to Consider",
+                *[f"- {q}" for q in strategy.question_templates],
+                "",
+                "## Your Alternative Approach",
+                "Based on the above, propose a fundamentally different approach:",
+            ]
+        )
 
         prompt = "\n".join(prompt_parts)
 

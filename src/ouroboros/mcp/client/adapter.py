@@ -315,9 +315,7 @@ class MCPClientAdapter:
                 )
             )
 
-    def _parse_tool_definition(
-        self, tool: Any, server_name: str | None
-    ) -> MCPToolDefinition:
+    def _parse_tool_definition(self, tool: Any, server_name: str | None) -> MCPToolDefinition:
         """Parse a tool definition from the MCP SDK format.
 
         Args:
@@ -409,9 +407,7 @@ class MCPClientAdapter:
 
         for item in getattr(result, "content", []):
             if hasattr(item, "text"):
-                content_items.append(
-                    MCPContentItem(type=ContentType.TEXT, text=item.text)
-                )
+                content_items.append(MCPContentItem(type=ContentType.TEXT, text=item.text))
             elif hasattr(item, "data"):
                 content_items.append(
                     MCPContentItem(
@@ -421,9 +417,7 @@ class MCPClientAdapter:
                     )
                 )
             elif hasattr(item, "uri"):
-                content_items.append(
-                    MCPContentItem(type=ContentType.RESOURCE, uri=item.uri)
-                )
+                content_items.append(MCPContentItem(type=ContentType.RESOURCE, uri=item.uri))
 
         return MCPToolResult(
             content=tuple(content_items),
@@ -574,11 +568,7 @@ class MCPClientAdapter:
         try:
             result = await self._session.get_prompt(name, arguments or {})
             # Combine all text messages into a single prompt
-            texts = [
-                msg.content.text
-                for msg in result.messages
-                if hasattr(msg.content, "text")
-            ]
+            texts = [msg.content.text for msg in result.messages if hasattr(msg.content, "text")]
             return Result.ok("\n".join(texts))
         except Exception as e:
             error_msg = str(e).lower()

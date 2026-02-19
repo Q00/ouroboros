@@ -366,9 +366,7 @@ class TestDecomposeAc:
         from ouroboros.execution.decomposition import decompose_ac
 
         adapter = AsyncMock()
-        adapter.complete.return_value = Result.ok(
-            MagicMock(content="Not valid JSON response")
-        )
+        adapter.complete.return_value = Result.ok(MagicMock(content="Not valid JSON response"))
 
         result = await decompose_ac(
             ac_content="Test AC",

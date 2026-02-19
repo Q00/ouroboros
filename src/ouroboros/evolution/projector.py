@@ -57,11 +57,7 @@ class LineageProjector:
                 ontology = OntologySchema.model_validate(ontology_data)
 
                 eval_data = data.get("evaluation_summary")
-                eval_summary = (
-                    EvaluationSummary.model_validate(eval_data)
-                    if eval_data
-                    else None
-                )
+                eval_summary = EvaluationSummary.model_validate(eval_data) if eval_data else None
 
                 record = GenerationRecord(
                     generation_number=gen_num,
@@ -84,9 +80,7 @@ class LineageProjector:
                 if gen_num in generations:
                     # Update existing record to failed
                     old = generations[gen_num]
-                    generations[gen_num] = old.model_copy(
-                        update={"phase": GenerationPhase.FAILED}
-                    )
+                    generations[gen_num] = old.model_copy(update={"phase": GenerationPhase.FAILED})
 
             elif event.type == "lineage.converged":
                 if lineage is not None:
@@ -104,9 +98,7 @@ class LineageProjector:
                 data = event.data
                 to_gen = data["to_generation"]
                 # Remove generations after the rewind point
-                generations = {
-                    k: v for k, v in generations.items() if k <= to_gen
-                }
+                generations = {k: v for k, v in generations.items() if k <= to_gen}
                 if lineage is not None:
                     lineage = lineage.with_status(LineageStatus.ACTIVE)
 
@@ -114,14 +106,10 @@ class LineageProjector:
             return None
 
         # Build final lineage with sorted generations
-        sorted_records = tuple(
-            generations[k] for k in sorted(generations.keys())
-        )
+        sorted_records = tuple(generations[k] for k in sorted(generations.keys()))
         return lineage.model_copy(update={"generations": sorted_records})
 
-    def find_resume_point(
-        self, events: list[BaseEvent]
-    ) -> tuple[int, GenerationPhase]:
+    def find_resume_point(self, events: list[BaseEvent]) -> tuple[int, GenerationPhase]:
         """Determine where to resume from event history.
 
         Returns:

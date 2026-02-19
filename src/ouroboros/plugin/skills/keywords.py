@@ -10,20 +10,21 @@ This module provides:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import Any
 
 import structlog
 
-from ouroboros.plugin.skills.registry import SkillMetadata, SkillRegistry, get_registry
+from ouroboros.plugin.skills.registry import SkillRegistry, get_registry
 
 log = structlog.get_logger()
 
 
 class MatchType(Enum):
     """Type of keyword match."""
+
     EXACT_PREFIX = "exact_prefix"  # Exact magic prefix match (highest priority)
     PARTIAL_PREFIX = "partial_prefix"  # Partial prefix match
     TRIGGER_KEYWORD = "trigger_keyword"  # Natural language trigger
@@ -41,6 +42,7 @@ class KeywordMatch:
         confidence: Confidence score (0.0 to 1.0).
         metadata: Additional match metadata.
     """
+
     skill_name: str
     match_type: MatchType
     matched_text: str
@@ -83,8 +85,7 @@ class MagicKeywordDetector:
         """
         self._registry = registry or get_registry()
         self._compiled_patterns = [
-            re.compile(pattern, re.IGNORECASE)
-            for pattern in self.PREFIX_PATTERNS
+            re.compile(pattern, re.IGNORECASE) for pattern in self.PREFIX_PATTERNS
         ]
 
     def detect(self, user_input: str) -> list[KeywordMatch]:
@@ -151,24 +152,28 @@ class MagicKeywordDetector:
                 if skill_name:
                     skill = self._registry.get_skill(skill_name)
                     if skill:
-                        matches.append(KeywordMatch(
-                            skill_name=skill_name,
-                            match_type=MatchType.EXACT_PREFIX,
-                            matched_text=match.group(0),
-                            confidence=1.0,  # Exact prefix = highest confidence
-                            metadata={"pattern": pattern.pattern},
-                        ))
+                        matches.append(
+                            KeywordMatch(
+                                skill_name=skill_name,
+                                match_type=MatchType.EXACT_PREFIX,
+                                matched_text=match.group(0),
+                                confidence=1.0,  # Exact prefix = highest confidence
+                                metadata={"pattern": pattern.pattern},
+                            )
+                        )
 
         # Check for "ooo" bare command (welcome skill)
         if user_input.strip().lower() in ("ooo", "/ouroboros", "ouroboros"):
             welcome_skill = self._registry.get_skill("welcome")
             if welcome_skill:
-                matches.append(KeywordMatch(
-                    skill_name="welcome",
-                    match_type=MatchType.EXACT_PREFIX,
-                    matched_text=user_input.strip(),
-                    confidence=1.0,
-                ))
+                matches.append(
+                    KeywordMatch(
+                        skill_name="welcome",
+                        match_type=MatchType.EXACT_PREFIX,
+                        matched_text=user_input.strip(),
+                        confidence=1.0,
+                    )
+                )
 
         return matches
 
@@ -200,13 +205,15 @@ class MagicKeywordDetector:
                         input_lower,
                     )
 
-                    matches.append(KeywordMatch(
-                        skill_name=skill_name,
-                        match_type=MatchType.TRIGGER_KEYWORD,
-                        matched_text=keyword,
-                        confidence=confidence,
-                        metadata={"keyword": keyword},
-                    ))
+                    matches.append(
+                        KeywordMatch(
+                            skill_name=skill_name,
+                            match_type=MatchType.TRIGGER_KEYWORD,
+                            matched_text=keyword,
+                            confidence=confidence,
+                            metadata={"keyword": keyword},
+                        )
+                    )
 
         return matches
 

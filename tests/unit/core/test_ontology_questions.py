@@ -255,9 +255,7 @@ class TestAnalyzeOntologically:
     @pytest.mark.asyncio
     async def test_llm_error_propagated(self, mock_llm: AsyncMock) -> None:
         """LLM errors are propagated."""
-        mock_llm.complete.return_value = Result.err(
-            ProviderError("API Error")
-        )
+        mock_llm.complete.return_value = Result.err(ProviderError("API Error"))
 
         result = await analyze_ontologically(mock_llm, "Test context")
         assert result.is_err
@@ -331,6 +329,7 @@ class TestOntologyAnalysisSystemPrompt:
     def test_prompt_exists(self) -> None:
         """System prompt exists and is non-empty."""
         from ouroboros.core.ontology_questions import _get_ontology_analysis_system_prompt
+
         prompt = _get_ontology_analysis_system_prompt()
         assert prompt
         assert len(prompt) > 100
@@ -338,11 +337,13 @@ class TestOntologyAnalysisSystemPrompt:
     def test_prompt_mentions_json(self) -> None:
         """System prompt mentions JSON format."""
         from ouroboros.core.ontology_questions import _get_ontology_analysis_system_prompt
+
         assert "JSON" in _get_ontology_analysis_system_prompt()
 
     def test_prompt_mentions_all_fields(self) -> None:
         """System prompt mentions all expected output fields."""
         from ouroboros.core.ontology_questions import _get_ontology_analysis_system_prompt
+
         prompt = _get_ontology_analysis_system_prompt()
         assert "essence" in prompt.lower()
         assert "is_root_problem" in prompt

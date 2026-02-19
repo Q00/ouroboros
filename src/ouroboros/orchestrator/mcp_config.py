@@ -27,11 +27,11 @@ Security Features:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
+from pathlib import Path
 import re
 import stat
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import yaml
@@ -147,9 +147,7 @@ def substitute_env_vars_in_dict(data: dict[str, Any]) -> dict[str, Any]:
         elif isinstance(value, dict):
             result[key] = substitute_env_vars_in_dict(value)
         elif isinstance(value, list):
-            result[key] = [
-                substitute_env_vars(v) if isinstance(v, str) else v for v in value
-            ]
+            result[key] = [substitute_env_vars(v) if isinstance(v, str) else v for v in value]
         else:
             result[key] = value
     return result
@@ -203,7 +201,9 @@ def sanitize_server_name(name: str) -> str:
         Sanitized server name.
     """
     # Remove anything that looks like a credential or token
-    sanitized = re.sub(r"(token|key|secret|password|auth)[^a-z]*[a-z0-9]+", r"\1=***", name, flags=re.IGNORECASE)
+    sanitized = re.sub(
+        r"(token|key|secret|password|auth)[^a-z]*[a-z0-9]+", r"\1=***", name, flags=re.IGNORECASE
+    )
     # Truncate if too long
     if len(sanitized) > 50:
         sanitized = sanitized[:47] + "..."

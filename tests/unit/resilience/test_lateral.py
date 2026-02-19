@@ -25,7 +25,6 @@ from ouroboros.resilience.lateral import (
 )
 from ouroboros.resilience.stagnation import StagnationPattern
 
-
 # =============================================================================
 # ThinkingPersona Enum Tests
 # =============================================================================
@@ -235,7 +234,9 @@ class TestLateralThinker:
 
         assert thinker.get_strategy(ThinkingPersona.HACKER).system_prompt == "Custom hacker prompt"
         # Other strategies should be unchanged
-        assert thinker.get_strategy(ThinkingPersona.RESEARCHER).system_prompt != "Custom hacker prompt"
+        assert (
+            thinker.get_strategy(ThinkingPersona.RESEARCHER).system_prompt != "Custom hacker prompt"
+        )
 
 
 class TestLateralThinkerGenerate:
@@ -406,7 +407,8 @@ class TestLateralThinkerSuggest:
 
         # Exclude all with Spinning affinity except one
         exclude = tuple(
-            p for p in ThinkingPersona
+            p
+            for p in ThinkingPersona
             if StagnationPattern.SPINNING in p.affinity_patterns and p != ThinkingPersona.CONTRARIAN
         )
 

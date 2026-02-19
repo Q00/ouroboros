@@ -1,4 +1,5 @@
 """Test project initialization structure."""
+
 from pathlib import Path
 
 

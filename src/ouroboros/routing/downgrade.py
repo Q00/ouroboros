@@ -484,9 +484,7 @@ class DowngradeManager:
         success_count = self._tracker.record_success(pattern_id, tier)
 
         # Check if downgrade threshold met
-        should_downgrade = (
-            success_count >= self._downgrade_threshold and tier != Tier.FRUGAL
-        )
+        should_downgrade = success_count >= self._downgrade_threshold and tier != Tier.FRUGAL
 
         # Determine recommended tier
         if should_downgrade:

@@ -10,10 +10,8 @@ This module tests the full Ouroboros workflow from seed to completion:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
-
-import pytest
 
 from ouroboros.core.seed import Seed
 from ouroboros.orchestrator.adapter import AgentMessage
@@ -24,7 +22,7 @@ from ouroboros.orchestrator.runner import (
 )
 
 if TYPE_CHECKING:
-    from tests.e2e.conftest import MockClaudeAgentAdapter, MockLLMProvider, WorkflowSimulator
+    from tests.e2e.conftest import MockClaudeAgentAdapter, WorkflowSimulator
 
 
 class TestSeedValidation:
@@ -75,18 +73,14 @@ class TestPromptBuilding:
         for constraint in sample_seed.constraints:
             assert constraint in prompt
 
-    def test_system_prompt_includes_evaluation_principles(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_system_prompt_includes_evaluation_principles(self, sample_seed: Seed) -> None:
         """Test that system prompt includes evaluation principles."""
         prompt = build_system_prompt(sample_seed)
 
         for principle in sample_seed.evaluation_principles:
             assert principle.name in prompt
 
-    def test_task_prompt_includes_acceptance_criteria(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_task_prompt_includes_acceptance_criteria(self, sample_seed: Seed) -> None:
         """Test that task prompt includes all acceptance criteria."""
         prompt = build_task_prompt(sample_seed)
 
@@ -108,7 +102,7 @@ class TestOrchestratorExecution:
         self,
         temp_db_path: str,
         sample_seed: Seed,
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test successful workflow execution from start to finish."""
         from ouroboros.persistence.event_store import EventStore
@@ -140,7 +134,7 @@ class TestOrchestratorExecution:
         self,
         temp_db_path: str,
         sample_seed: Seed,
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test handling of failed workflow execution."""
         from ouroboros.persistence.event_store import EventStore
@@ -174,7 +168,7 @@ class TestOrchestratorExecution:
         self,
         temp_db_path: str,
         sample_seed: Seed,
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that execution emits proper events to the event store."""
         from ouroboros.persistence.event_store import EventStore
@@ -212,7 +206,7 @@ class TestOrchestratorExecution:
         self,
         temp_db_path: str,
         sample_seed: Seed,
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test execution with custom execution ID."""
         from ouroboros.persistence.event_store import EventStore
@@ -243,7 +237,7 @@ class TestWorkflowWithMultipleSteps:
         self,
         temp_db_path: str,
         sample_seed: Seed,
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test workflow with multiple tool calls and steps."""
         from ouroboros.persistence.event_store import EventStore
@@ -291,7 +285,7 @@ class TestWorkflowWithMultipleSteps:
         self,
         temp_db_path: str,
         sample_seed: Seed,
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test workflow using all default tool types."""
         from ouroboros.persistence.event_store import EventStore
@@ -336,7 +330,7 @@ class TestWorkflowEdgeCases:
     async def test_empty_acceptance_criteria(
         self,
         temp_db_path: str,
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test workflow with minimal seed (empty lists)."""
         from ouroboros.core.seed import OntologySchema, SeedMetadata
@@ -372,7 +366,7 @@ class TestWorkflowEdgeCases:
         self,
         temp_db_path: str,
         sample_seed: Seed,
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test workflow with many messages (simulating long execution)."""
         from ouroboros.persistence.event_store import EventStore
@@ -380,11 +374,7 @@ class TestWorkflowEdgeCases:
         # Create a long sequence of messages
         messages = []
         for i in range(50):
-            messages.append(
-                AgentMessage(
-                    type="assistant", content=f"Working on step {i + 1}..."
-                )
-            )
+            messages.append(AgentMessage(type="assistant", content=f"Working on step {i + 1}..."))
             if i % 3 == 0:
                 messages.append(
                     AgentMessage(
@@ -426,7 +416,7 @@ class TestWorkflowEdgeCases:
     async def test_execution_with_unicode_content(
         self,
         temp_db_path: str,
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test workflow with unicode content in seed and messages."""
         from ouroboros.core.seed import OntologySchema, SeedMetadata
@@ -473,7 +463,7 @@ class TestWorkflowWithSimulator:
 
     async def test_complete_workflow_scenario(
         self,
-        workflow_simulator: "WorkflowSimulator",
+        workflow_simulator: WorkflowSimulator,
         sample_seed: Seed,
         temp_db_path: str,
     ) -> None:

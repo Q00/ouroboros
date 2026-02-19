@@ -22,13 +22,11 @@ Status colors:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label, Static
-
 
 # Box drawing characters for graph
 BOX_CHARS = {
@@ -220,10 +218,7 @@ class ParallelGraphWidget(Widget):
         # Add legend
         lines.append("")
         lines.append(
-            "[dim][ ][/] Pending  "
-            "[yellow][*][/] Executing  "
-            "[green][OK][/] Done  "
-            "[red][X][/] Failed"
+            "[dim][ ][/] Pending  [yellow][*][/] Executing  [green][OK][/] Done  [red][X][/] Failed"
         )
 
         return "\n".join(lines)

@@ -12,8 +12,6 @@ Tests cover:
 """
 
 from datetime import UTC, datetime
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,8 +20,7 @@ from ouroboros.plugin.orchestration.router import (
     RoutingContext,
     RoutingRecord,
 )
-from ouroboros.routing.complexity import TaskContext
-from ouroboros.routing.router import PALRouter, RoutingDecision
+from ouroboros.routing.router import PALRouter
 from ouroboros.routing.tiers import Tier
 
 
@@ -96,48 +93,66 @@ class TestRoutingContext:
 
     def test_token_range_categories(self) -> None:
         """Test token range categorization."""
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=1, ac_depth=1
-        )._token_range == "tiny"
-        assert RoutingContext(
-            task_type="t", token_estimate=1000, tool_count=1, ac_depth=1
-        )._token_range == "small"
-        assert RoutingContext(
-            task_type="t", token_estimate=3000, tool_count=1, ac_depth=1
-        )._token_range == "medium"
-        assert RoutingContext(
-            task_type="t", token_estimate=6000, tool_count=1, ac_depth=1
-        )._token_range == "large"
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=1, ac_depth=1)._token_range
+            == "tiny"
+        )
+        assert (
+            RoutingContext(
+                task_type="t", token_estimate=1000, tool_count=1, ac_depth=1
+            )._token_range
+            == "small"
+        )
+        assert (
+            RoutingContext(
+                task_type="t", token_estimate=3000, tool_count=1, ac_depth=1
+            )._token_range
+            == "medium"
+        )
+        assert (
+            RoutingContext(
+                task_type="t", token_estimate=6000, tool_count=1, ac_depth=1
+            )._token_range
+            == "large"
+        )
 
     def test_tool_range_categories(self) -> None:
         """Test tool count range categorization."""
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=0, ac_depth=1
-        )._tool_range == "none"
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=1, ac_depth=1
-        )._tool_range == "few"
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=4, ac_depth=1
-        )._tool_range == "some"
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=7, ac_depth=1
-        )._tool_range == "many"
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=0, ac_depth=1)._tool_range
+            == "none"
+        )
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=1, ac_depth=1)._tool_range
+            == "few"
+        )
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=4, ac_depth=1)._tool_range
+            == "some"
+        )
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=7, ac_depth=1)._tool_range
+            == "many"
+        )
 
     def test_depth_range_categories(self) -> None:
         """Test AC depth range categorization."""
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=1, ac_depth=0
-        )._depth_range == "none"
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=1, ac_depth=1
-        )._depth_range == "shallow"
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=1, ac_depth=3
-        )._depth_range == "medium"
-        assert RoutingContext(
-            task_type="t", token_estimate=100, tool_count=1, ac_depth=5
-        )._depth_range == "deep"
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=1, ac_depth=0)._depth_range
+            == "none"
+        )
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=1, ac_depth=1)._depth_range
+            == "shallow"
+        )
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=1, ac_depth=3)._depth_range
+            == "medium"
+        )
+        assert (
+            RoutingContext(task_type="t", token_estimate=100, tool_count=1, ac_depth=5)._depth_range
+            == "deep"
+        )
 
 
 class TestRoutingRecord:
@@ -557,7 +572,7 @@ class TestModelRouterGetStatistics:
         assert stats["unique_contexts"] == 1
         assert stats["total_records"] == 3
         assert stats["successful_routes"] == 2
-        assert stats["success_rate"] == pytest.approx(2/3)
+        assert stats["success_rate"] == pytest.approx(2 / 3)
 
 
 class TestModelRouterClearHistory:

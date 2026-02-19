@@ -132,9 +132,7 @@ class OntologyDelta(BaseModel, frozen=True):
             name_score = len(common_names) / len(all_names) if all_names else 1.0
 
             type_matches = sum(
-                1
-                for n in common_names
-                if old_by_name[n].field_type == new_by_name[n].field_type
+                1 for n in common_names if old_by_name[n].field_type == new_by_name[n].field_type
             )
             type_score = type_matches / len(all_names) if all_names else 1.0
 
@@ -201,9 +199,7 @@ class OntologyLineage(BaseModel, frozen=True):
 
     def with_generation(self, record: GenerationRecord) -> OntologyLineage:
         """Return new lineage with appended generation."""
-        return self.model_copy(
-            update={"generations": self.generations + (record,)}
-        )
+        return self.model_copy(update={"generations": self.generations + (record,)})
 
     def with_status(self, status: LineageStatus) -> OntologyLineage:
         """Return new lineage with updated status."""
@@ -229,13 +225,9 @@ class OntologyLineage(BaseModel, frozen=True):
 
         max_gen = self.generations[-1].generation_number
         if generation_number < 1 or generation_number > max_gen:
-            raise ValueError(
-                f"Generation {generation_number} out of range [1, {max_gen}]"
-            )
+            raise ValueError(f"Generation {generation_number} out of range [1, {max_gen}]")
 
-        truncated = tuple(
-            g for g in self.generations if g.generation_number <= generation_number
-        )
+        truncated = tuple(g for g in self.generations if g.generation_number <= generation_number)
         return self.model_copy(
             update={
                 "generations": truncated,

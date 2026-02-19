@@ -23,10 +23,10 @@ class TestAtomicityCriteria:
     def test_default_criteria(self):
         """AtomicityCriteria should have sensible defaults."""
         from ouroboros.execution.atomicity import (
-            AtomicityCriteria,
             DEFAULT_MAX_COMPLEXITY,
             DEFAULT_MAX_DURATION_SECONDS,
             DEFAULT_MAX_TOOL_COUNT,
+            AtomicityCriteria,
         )
 
         criteria = AtomicityCriteria()

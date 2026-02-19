@@ -153,12 +153,17 @@ class StateCompression:
 
         if not self._needs_compression(data, created_at):
             log.debug("state.compression.skipped", reason="no_compression_needed")
-            return Result.ok((data, CompressionMetrics(
-                before_size=before_size,
-                after_size=before_size,
-                compression_ratio=1.0,
-                strategy_used=CompressionStrategy.NONE,
-            )))
+            return Result.ok(
+                (
+                    data,
+                    CompressionMetrics(
+                        before_size=before_size,
+                        after_size=before_size,
+                        compression_ratio=1.0,
+                        strategy_used=CompressionStrategy.NONE,
+                    ),
+                )
+            )
 
         # Apply compression strategy
         compressed, strategy = await self._apply_strategy(data)
@@ -285,7 +290,8 @@ class StateCompression:
         if workflow_state:
             # Keep acceptance criteria, truncate history
             preserved_wfs: dict[str, Any] = {
-                k: v for k, v in workflow_state.items()
+                k: v
+                for k, v in workflow_state.items()
                 if k != "activity_log" and k != "recent_outputs"
             }
             preserved["workflow_state"] = preserved_wfs
@@ -293,7 +299,9 @@ class StateCompression:
             if "activity_log" in workflow_state:
                 activity_log = workflow_state["activity_log"]
                 if isinstance(activity_log, list):
-                    preserved_wfs["activity_log"] = activity_log[-self._config.preserve_recent_count:]
+                    preserved_wfs["activity_log"] = activity_log[
+                        -self._config.preserve_recent_count :
+                    ]
                 else:
                     preserved_wfs["activity_log"] = activity_log
 

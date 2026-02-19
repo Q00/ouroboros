@@ -129,7 +129,7 @@ class LogEntry(Static):
     def _truncate(self, text: str, max_len: int) -> str:
         """Truncate text to max length."""
         if len(text) > max_len:
-            return text[:max_len - 2] + ".."
+            return text[: max_len - 2] + ".."
         return text
 
 
@@ -443,13 +443,15 @@ class LogsScreen(Screen[None]):
             message: Log message.
             data: Additional data.
         """
-        self._logs.append({
-            "timestamp": datetime.now(UTC).isoformat(),
-            "level": level,
-            "source": source,
-            "message": message,
-            "data": data or {},
-        })
+        self._logs.append(
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "level": level,
+                "source": source,
+                "message": message,
+                "data": data or {},
+            }
+        )
 
         # Keep only last 500 logs
         if len(self._logs) > 500:

@@ -14,13 +14,13 @@ and autonomously evolves through Wonder → Reflect cycles for Gen 2+.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from enum import StrEnum
 import json
 import logging
-from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any
 
-from ouroboros.core.errors import OuroborosError, ProviderError
+from ouroboros.core.errors import OuroborosError
 from ouroboros.core.lineage import (
     EvaluationSummary,
     GenerationPhase,
@@ -31,7 +31,6 @@ from ouroboros.core.lineage import (
 )
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
-from ouroboros.events import BaseEvent
 from ouroboros.events.lineage import (
     lineage_converged,
     lineage_created,
@@ -176,9 +175,7 @@ class EvolutionaryLoop:
         )
 
         # Emit lineage created event
-        await self.event_store.append(
-            lineage_created(lineage.lineage_id, lineage.goal)
-        )
+        await self.event_store.append(lineage_created(lineage.lineage_id, lineage.goal))
 
         generation_results: list[GenerationResult] = []
         current_seed = initial_seed
@@ -205,7 +202,7 @@ class EvolutionaryLoop:
                     ),
                     timeout=self.config.generation_timeout_seconds,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.error(
                     "evolution.generation.timeout",
                     extra={
@@ -257,7 +254,9 @@ class EvolutionaryLoop:
                     generation_number,
                     result.seed.metadata.seed_id,
                     result.seed.ontology_schema.model_dump(mode="json"),
-                    result.evaluation_summary.model_dump(mode="json") if result.evaluation_summary else None,
+                    result.evaluation_summary.model_dump(mode="json")
+                    if result.evaluation_summary
+                    else None,
                     list(result.wonder_output.questions) if result.wonder_output else None,
                     seed_json=json.dumps(result.seed.to_dict()),
                 )
@@ -375,9 +374,7 @@ class EvolutionaryLoop:
                 lineage_id=lineage_id,
                 goal=initial_seed.goal,
             )
-            await self.event_store.append(
-                lineage_created(lineage.lineage_id, lineage.goal)
-            )
+            await self.event_store.append(lineage_created(lineage.lineage_id, lineage.goal))
             generation_number = 1
             current_seed = initial_seed
 
@@ -385,9 +382,7 @@ class EvolutionaryLoop:
             # Gen 2+: reconstruct from events
             lineage = projector.project(events)
             if lineage is None:
-                return Result.err(
-                    OuroborosError("Failed to project lineage from events")
-                )
+                return Result.err(OuroborosError("Failed to project lineage from events"))
 
             # Check if lineage is already terminated
             if lineage.status in (LineageStatus.CONVERGED, LineageStatus.EXHAUSTED):
@@ -414,14 +409,10 @@ class EvolutionaryLoop:
                 last_completed = lineage.generations[-1]
                 if last_completed.seed_json:
                     try:
-                        current_seed = Seed.from_dict(
-                            json.loads(last_completed.seed_json)
-                        )
+                        current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
                     except Exception as e:
                         return Result.err(
-                            OuroborosError(
-                                f"Failed to reconstruct seed from seed_json: {e}"
-                            )
+                            OuroborosError(f"Failed to reconstruct seed from seed_json: {e}")
                         )
                 else:
                     return Result.err(
@@ -431,9 +422,7 @@ class EvolutionaryLoop:
                         )
                     )
             else:
-                return Result.err(
-                    OuroborosError("Events exist but no completed generations found")
-                )
+                return Result.err(OuroborosError("Events exist but no completed generations found"))
 
         # Step 2: Run one generation
         try:
@@ -445,7 +434,7 @@ class EvolutionaryLoop:
                 ),
                 timeout=self.config.generation_timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await self.event_store.append(
                 lineage_generation_failed(
                     lineage.lineage_id,
@@ -521,7 +510,9 @@ class EvolutionaryLoop:
                 generation_number,
                 result.seed.metadata.seed_id,
                 result.seed.ontology_schema.model_dump(mode="json"),
-                result.evaluation_summary.model_dump(mode="json") if result.evaluation_summary else None,
+                result.evaluation_summary.model_dump(mode="json")
+                if result.evaluation_summary
+                else None,
                 list(result.wonder_output.questions) if result.wonder_output else None,
                 seed_json=json.dumps(result.seed.to_dict()),
             )
@@ -666,16 +657,15 @@ class EvolutionaryLoop:
                             str(reflect_result.error),
                         )
                     )
-                    return Result.err(
-                        OuroborosError(f"Reflect failed: {reflect_result.error}")
-                    )
+                    return Result.err(OuroborosError(f"Reflect failed: {reflect_result.error}"))
 
                 reflect_output = reflect_result.value
 
                 # Generate evolved seed
                 if self.seed_generator:
                     seed_result = self.seed_generator.generate_from_reflect(
-                        current_seed, reflect_output,
+                        current_seed,
+                        reflect_output,
                     )
                     if seed_result.is_err:
                         await self.event_store.append(
@@ -720,9 +710,7 @@ class EvolutionaryLoop:
                         exec_result.value, "final_message", str(exec_result.value)
                     )
                 elif hasattr(exec_result, "is_ok"):
-                    return Result.err(
-                        OuroborosError(f"Execution failed: {exec_result.error}")
-                    )
+                    return Result.err(OuroborosError(f"Execution failed: {exec_result.error}"))
                 else:
                     execution_output = str(exec_result)
             except Exception as e:
@@ -794,6 +782,7 @@ class EvolutionaryLoop:
             )
 
             from ouroboros.events.lineage import lineage_rewound
+
             await self.event_store.append(
                 lineage_rewound(
                     lineage.lineage_id,

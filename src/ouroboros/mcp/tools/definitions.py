@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
 import structlog
 import yaml
 
@@ -37,14 +38,12 @@ from ouroboros.mcp.types import (
 from ouroboros.observability.drift import (
     DRIFT_THRESHOLD,
     DriftMeasurement,
-    DriftMetrics,
 )
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
-from rich.console import Console
 
 log = structlog.get_logger(__name__)
 
@@ -204,9 +203,7 @@ class ExecuteSeedHandler:
 
             return Result.ok(
                 MCPToolResult(
-                    content=(
-                        MCPContentItem(type=ContentType.TEXT, text=result_text),
-                    ),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
                     is_error=not exec_result.success,
                     meta={
                         "session_id": exec_result.session_id,
@@ -256,11 +253,13 @@ class ExecuteSeedHandler:
             lines.append("")
 
         if exec_result.final_message:
-            lines.extend([
-                "Final Message:",
-                "-" * 40,
-                exec_result.final_message[:1000],
-            ])
+            lines.extend(
+                [
+                    "Final Message:",
+                    "-" * 40,
+                    exec_result.final_message[:1000],
+                ]
+            )
             if len(exec_result.final_message) > 1000:
                 lines.append("...(truncated)")
 
@@ -368,9 +367,7 @@ class SessionStatusHandler:
 
             return Result.ok(
                 MCPToolResult(
-                    content=(
-                        MCPContentItem(type=ContentType.TEXT, text=status_text),
-                    ),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=status_text),),
                     is_error=False,
                     meta={
                         "session_id": tracker.session_id,
@@ -490,9 +487,7 @@ class QueryEventsHandler:
 
             return Result.ok(
                 MCPToolResult(
-                    content=(
-                        MCPContentItem(type=ContentType.TEXT, text=events_text),
-                    ),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=events_text),),
                     is_error=False,
                     meta={
                         "total_events": len(events),
@@ -543,14 +538,18 @@ class QueryEventsHandler:
             lines.append("No events found matching the criteria.")
         else:
             for i, event in enumerate(events, start=offset + 1):
-                lines.extend([
-                    f"{i}. [{event.type}]",
-                    f"   ID: {event.id}",
-                    f"   Timestamp: {event.timestamp.isoformat()}",
-                    f"   Aggregate: {event.aggregate_type}/{event.aggregate_id}",
-                    f"   Data: {str(event.data)[:100]}..." if len(str(event.data)) > 100 else f"   Data: {event.data}",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        f"{i}. [{event.type}]",
+                        f"   ID: {event.id}",
+                        f"   Timestamp: {event.timestamp.isoformat()}",
+                        f"   Aggregate: {event.aggregate_type}/{event.aggregate_id}",
+                        f"   Data: {str(event.data)[:100]}..."
+                        if len(str(event.data)) > 100
+                        else f"   Data: {event.data}",
+                        "",
+                    ]
+                )
 
         return "\n".join(lines)
 
@@ -728,9 +727,7 @@ class GenerateSeedHandler:
 
             return Result.ok(
                 MCPToolResult(
-                    content=(
-                        MCPContentItem(type=ContentType.TEXT, text=result_text),
-                    ),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
                     is_error=False,
                     meta={
                         "seed_id": seed.metadata.seed_id,
@@ -915,9 +912,7 @@ class MeasureDriftHandler:
 
             return Result.ok(
                 MCPToolResult(
-                    content=(
-                        MCPContentItem(type=ContentType.TEXT, text=drift_text),
-                    ),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=drift_text),),
                     is_error=False,
                     meta={
                         "session_id": session_id,
@@ -1033,11 +1028,14 @@ class InterviewHandler:
 
                 # Record the question as an unanswered round so resume can find it
                 from ouroboros.bigbang.interview import InterviewRound
-                state.rounds.append(InterviewRound(
-                    round_number=1,
-                    question=question,
-                    user_response=None,
-                ))
+
+                state.rounds.append(
+                    InterviewRound(
+                        round_number=1,
+                        question=question,
+                        user_response=None,
+                    )
+                )
                 state.mark_updated()
 
                 # Persist state to disk so subsequent calls can resume
@@ -1125,11 +1123,14 @@ class InterviewHandler:
 
                 # Save pending question as unanswered round for next resume
                 from ouroboros.bigbang.interview import InterviewRound
-                state.rounds.append(InterviewRound(
-                    round_number=state.current_round_number,
-                    question=question,
-                    user_response=None,
-                ))
+
+                state.rounds.append(
+                    InterviewRound(
+                        round_number=state.current_round_number,
+                        question=question,
+                        user_response=None,
+                    )
+                )
                 state.mark_updated()
 
                 save_result = await engine.save_state(state)
@@ -1357,17 +1358,23 @@ class EvaluateHandler:
                 "session_id": session_id,
                 "final_approved": eval_result.final_approved,
                 "highest_stage": eval_result.highest_stage_completed,
-                "stage1_passed": eval_result.stage1_result.passed if eval_result.stage1_result else None,
-                "stage2_ac_compliance": eval_result.stage2_result.ac_compliance if eval_result.stage2_result else None,
-                "stage2_score": eval_result.stage2_result.score if eval_result.stage2_result else None,
-                "stage3_approved": eval_result.stage3_result.approved if eval_result.stage3_result else None,
+                "stage1_passed": eval_result.stage1_result.passed
+                if eval_result.stage1_result
+                else None,
+                "stage2_ac_compliance": eval_result.stage2_result.ac_compliance
+                if eval_result.stage2_result
+                else None,
+                "stage2_score": eval_result.stage2_result.score
+                if eval_result.stage2_result
+                else None,
+                "stage3_approved": eval_result.stage3_result.approved
+                if eval_result.stage3_result
+                else None,
             }
 
             return Result.ok(
                 MCPToolResult(
-                    content=(
-                        MCPContentItem(type=ContentType.TEXT, text=result_text),
-                    ),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
                     is_error=False,
                     meta=meta,
                 )
@@ -1402,12 +1409,14 @@ class EvaluateHandler:
         # Stage 1 results
         if result.stage1_result:
             s1 = result.stage1_result
-            lines.extend([
-                "Stage 1: Mechanical Verification",
-                "-" * 40,
-                f"Status: {'PASSED' if s1.passed else 'FAILED'}",
-                f"Coverage: {s1.coverage_score:.1%}" if s1.coverage_score else "Coverage: N/A",
-            ])
+            lines.extend(
+                [
+                    "Stage 1: Mechanical Verification",
+                    "-" * 40,
+                    f"Status: {'PASSED' if s1.passed else 'FAILED'}",
+                    f"Coverage: {s1.coverage_score:.1%}" if s1.coverage_score else "Coverage: N/A",
+                ]
+            )
             for check in s1.checks:
                 status = "PASS" if check.passed else "FAIL"
                 lines.append(f"  [{status}] {check.check_type}: {check.message}")
@@ -1416,29 +1425,35 @@ class EvaluateHandler:
         # Stage 2 results
         if result.stage2_result:
             s2 = result.stage2_result
-            lines.extend([
-                "Stage 2: Semantic Evaluation",
-                "-" * 40,
-                f"Score: {s2.score:.2f}",
-                f"AC Compliance: {'YES' if s2.ac_compliance else 'NO'}",
-                f"Goal Alignment: {s2.goal_alignment:.2f}",
-                f"Drift Score: {s2.drift_score:.2f}",
-                f"Uncertainty: {s2.uncertainty:.2f}",
-                f"Reasoning: {s2.reasoning[:200]}..." if len(s2.reasoning) > 200 else f"Reasoning: {s2.reasoning}",
-                "",
-            ])
+            lines.extend(
+                [
+                    "Stage 2: Semantic Evaluation",
+                    "-" * 40,
+                    f"Score: {s2.score:.2f}",
+                    f"AC Compliance: {'YES' if s2.ac_compliance else 'NO'}",
+                    f"Goal Alignment: {s2.goal_alignment:.2f}",
+                    f"Drift Score: {s2.drift_score:.2f}",
+                    f"Uncertainty: {s2.uncertainty:.2f}",
+                    f"Reasoning: {s2.reasoning[:200]}..."
+                    if len(s2.reasoning) > 200
+                    else f"Reasoning: {s2.reasoning}",
+                    "",
+                ]
+            )
 
         # Stage 3 results
         if result.stage3_result:
             s3 = result.stage3_result
-            lines.extend([
-                "Stage 3: Multi-Model Consensus",
-                "-" * 40,
-                f"Status: {'APPROVED' if s3.approved else 'REJECTED'}",
-                f"Majority Ratio: {s3.majority_ratio:.1%}",
-                f"Total Votes: {s3.total_votes}",
-                f"Approving: {s3.approving_votes}",
-            ])
+            lines.extend(
+                [
+                    "Stage 3: Multi-Model Consensus",
+                    "-" * 40,
+                    f"Status: {'APPROVED' if s3.approved else 'REJECTED'}",
+                    f"Majority Ratio: {s3.majority_ratio:.1%}",
+                    f"Total Votes: {s3.total_votes}",
+                    f"Approving: {s3.approving_votes}",
+                ]
+            )
             for vote in s3.votes:
                 decision = "APPROVE" if vote.approved else "REJECT"
                 lines.append(f"  [{decision}] {vote.model} (confidence: {vote.confidence:.2f})")
@@ -1450,11 +1465,13 @@ class EvaluateHandler:
 
         # Failure reason
         if not result.final_approved:
-            lines.extend([
-                "Failure Reason",
-                "-" * 40,
-                result.failure_reason or "Unknown",
-            ])
+            lines.extend(
+                [
+                    "Failure Reason",
+                    "-" * 40,
+                    result.failure_reason or "Unknown",
+                ]
+            )
 
         return "\n".join(lines)
 
@@ -1595,9 +1612,7 @@ class LateralThinkHandler:
 
             return Result.ok(
                 MCPToolResult(
-                    content=(
-                        MCPContentItem(type=ContentType.TEXT, text=response_text),
-                    ),
+                    content=(MCPContentItem(type=ContentType.TEXT, text=response_text),),
                     is_error=False,
                     meta={
                         "persona": lateral_result.persona.value,
@@ -1698,9 +1713,7 @@ class EvolveStepHandler:
                 )
 
         try:
-            result = await self.evolutionary_loop.evolve_step(
-                lineage_id, initial_seed
-            )
+            result = await self.evolutionary_loop.evolve_step(lineage_id, initial_seed)
         except Exception as e:
             log.error("mcp.tool.evolve_step.error", error=str(e))
             return Result.err(
@@ -1725,7 +1738,7 @@ class EvolveStepHandler:
         # Format output
         text_lines = [
             f"## Generation {gen.generation_number}",
-            f"",
+            "",
             f"**Action**: {step.action.value}",
             f"**Phase**: {gen.phase.value}",
             f"**Convergence similarity**: {sig.ontology_similarity:.2%}",
@@ -1735,14 +1748,16 @@ class EvolveStepHandler:
         ]
 
         if gen.wonder_output:
-            text_lines.append(f"")
-            text_lines.append(f"### Wonder questions")
+            text_lines.append("")
+            text_lines.append("### Wonder questions")
             for q in gen.wonder_output.questions:
                 text_lines.append(f"- {q}")
 
         if gen.ontology_delta:
-            text_lines.append(f"")
-            text_lines.append(f"### Ontology delta (similarity: {gen.ontology_delta.similarity:.2%})")
+            text_lines.append("")
+            text_lines.append(
+                f"### Ontology delta (similarity: {gen.ontology_delta.similarity:.2%})"
+            )
             for af in gen.ontology_delta.added_fields:
                 text_lines.append(f"- **Added**: {af.name} ({af.field_type})")
             for rf in gen.ontology_delta.removed_fields:
@@ -1752,9 +1767,7 @@ class EvolveStepHandler:
 
         return Result.ok(
             MCPToolResult(
-                content=(
-                    MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),
-                ),
+                content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),),
                 is_error=False,
                 meta={
                     "lineage_id": step.lineage.lineage_id,
@@ -1858,7 +1871,7 @@ class LineageStatusHandler:
 
         text_lines = [
             f"## Lineage: {lineage.lineage_id}",
-            f"",
+            "",
             f"**Status**: {lineage.status.value}",
             f"**Goal**: {lineage.goal}",
             f"**Generations**: {lineage.current_generation}",
@@ -1867,7 +1880,7 @@ class LineageStatusHandler:
 
         # Ontology summary
         if lineage.current_ontology:
-            text_lines.append(f"")
+            text_lines.append("")
             text_lines.append(f"### Current Ontology: {lineage.current_ontology.name}")
             for f in lineage.current_ontology.fields:
                 required = " (required)" if f.required else ""
@@ -1875,19 +1888,19 @@ class LineageStatusHandler:
 
         # Generation history
         if lineage.generations:
-            text_lines.append(f"")
-            text_lines.append(f"### Generation History")
+            text_lines.append("")
+            text_lines.append("### Generation History")
             for gen in lineage.generations:
-                status = "passed" if gen.evaluation_summary and gen.evaluation_summary.final_approved else "pending"
-                text_lines.append(
-                    f"- Gen {gen.generation_number}: {gen.phase.value} | {status}"
+                status = (
+                    "passed"
+                    if gen.evaluation_summary and gen.evaluation_summary.final_approved
+                    else "pending"
                 )
+                text_lines.append(f"- Gen {gen.generation_number}: {gen.phase.value} | {status}")
 
         return Result.ok(
             MCPToolResult(
-                content=(
-                    MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),
-                ),
+                content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),),
                 is_error=False,
                 meta={
                     "lineage_id": lineage.lineage_id,
@@ -1962,7 +1975,7 @@ OUROBOROS_TOOLS: tuple[
     | LateralThinkHandler
     | EvolveStepHandler
     | LineageStatusHandler,
-    ...
+    ...,
 ] = (
     ExecuteSeedHandler(),
     SessionStatusHandler(),

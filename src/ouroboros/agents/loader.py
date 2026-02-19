@@ -13,17 +13,17 @@ after an MCP server restart.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import functools
 import importlib.resources
 import os
-import re
-from dataclasses import dataclass
 from pathlib import Path
-
+import re
 
 # ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
+
 
 @functools.lru_cache(maxsize=64)
 def _resolve_agent_path(agent_name: str) -> Path | None:
@@ -57,6 +57,7 @@ def _resolve_agent_path(agent_name: str) -> Path | None:
 # ---------------------------------------------------------------------------
 # Core loading
 # ---------------------------------------------------------------------------
+
 
 @functools.lru_cache(maxsize=64)
 def load_agent_prompt(agent_name: str) -> str:
@@ -111,6 +112,7 @@ def load_agent_section(agent_name: str, section: str) -> str:
 # ---------------------------------------------------------------------------
 # Section / list parsing utilities
 # ---------------------------------------------------------------------------
+
 
 def extract_section(content: str, section: str) -> str:
     """Extract everything between ``## <section>`` and the next ``##``."""
@@ -182,6 +184,7 @@ def _extract_numbered_items(content: str) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 # Persona prompt data (for lateral thinking agents)
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True, slots=True)
 class PersonaPromptData:

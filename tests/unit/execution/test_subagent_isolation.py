@@ -7,20 +7,16 @@ Tests cover:
 - AC 5: Failed SubAgent doesn't crash main execution
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timezone
-from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ouroboros.core.context import (
-    FilteredContext,
+    RECENT_HISTORY_COUNT,
     WorkflowContext,
     create_filtered_context,
-    RECENT_HISTORY_COUNT,
 )
 from ouroboros.core.types import Result
-from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 
@@ -117,9 +113,8 @@ class TestSubAgentResultValidation:
 
     def test_validate_child_result_success(self) -> None:
         """AC 4: Valid child result should pass validation."""
-        from ouroboros.execution.subagent import validate_child_result
         from ouroboros.execution.double_diamond import CycleResult, Phase, PhaseResult
-        from ouroboros.events.base import BaseEvent
+        from ouroboros.execution.subagent import validate_child_result
 
         child_result = CycleResult(
             execution_id="child-exec-1",
@@ -163,8 +158,8 @@ class TestSubAgentResultValidation:
 
     def test_validate_child_result_failure_on_unsuccessful(self) -> None:
         """AC 4: Unsuccessful child result should fail validation."""
+        from ouroboros.execution.double_diamond import CycleResult
         from ouroboros.execution.subagent import validate_child_result
-        from ouroboros.execution.double_diamond import CycleResult, Phase, PhaseResult
 
         child_result = CycleResult(
             execution_id="child-exec-1",
@@ -182,8 +177,8 @@ class TestSubAgentResultValidation:
 
     def test_validate_child_result_failure_on_missing_phases(self) -> None:
         """AC 4: Child result missing required phases should fail validation."""
-        from ouroboros.execution.subagent import validate_child_result
         from ouroboros.execution.double_diamond import CycleResult, Phase, PhaseResult
+        from ouroboros.execution.subagent import validate_child_result
 
         # Result with missing DELIVER phase (only has DISCOVER, DEFINE, DESIGN)
         child_result = CycleResult(
@@ -216,8 +211,8 @@ class TestSubAgentResultValidation:
 
     def test_validate_child_result_decomposed_allows_partial_phases(self) -> None:
         """AC 4: Decomposed child result can have partial phases (only DISCOVER, DEFINE)."""
-        from ouroboros.execution.subagent import validate_child_result
         from ouroboros.execution.double_diamond import CycleResult, Phase, PhaseResult
+        from ouroboros.execution.subagent import validate_child_result
 
         child_result = CycleResult(
             execution_id="child-exec-1",
@@ -267,8 +262,7 @@ class TestSubAgentFailureHandling:
     @pytest.mark.asyncio
     async def test_failed_subagent_does_not_crash_parent(self, mock_llm_adapter) -> None:
         """AC 5: Failed SubAgent should not crash main execution."""
-        from ouroboros.execution.double_diamond import DoubleDiamond, ExecutionError
-        from ouroboros.core.types import Result
+        from ouroboros.execution.double_diamond import DoubleDiamond
 
         # Create a DoubleDiamond with an adapter that fails for child execution
         dd = DoubleDiamond(llm_adapter=mock_llm_adapter, max_retries=1, base_delay=0.01)

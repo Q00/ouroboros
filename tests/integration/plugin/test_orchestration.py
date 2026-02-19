@@ -9,33 +9,23 @@ Tests cover:
 """
 
 import asyncio
-import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, Mock
+import tempfile
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from ouroboros.core.types import Result
 from ouroboros.plugin.agents.pool import (
-    AgentInstance,
     AgentPool,
     AgentPoolConfig,
-    AgentState,
-    TaskRequest,
-    TaskResult,
 )
 from ouroboros.plugin.agents.registry import (
+    BUILTIN_AGENTS,
     AgentRegistry,
     AgentRole,
-    AgentSpec,
-    BUILTIN_AGENTS,
 )
 from ouroboros.plugin.orchestration.router import ModelRouter, RoutingContext
 from ouroboros.plugin.skills.registry import (
-    SkillInstance,
-    SkillMetadata,
     SkillRegistry,
 )
 from ouroboros.plugin.state.manager import SessionStatus, StateManager

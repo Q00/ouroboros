@@ -9,8 +9,7 @@ Shows real-time agent pool status including:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from textual.app import ComposeResult
 from textual.reactive import reactive
@@ -219,9 +218,7 @@ class AgentsPanel(Widget):
 
         # Update idle count
         if "idle" in self._metrics_widgets:
-            self._metrics_widgets["idle"].update(
-                f"[value]{metrics.idle_count}[/] [label]Idle[/]"
-            )
+            self._metrics_widgets["idle"].update(f"[value]{metrics.idle_count}[/] [label]Idle[/]")
 
         # Update queued count
         if "queued" in self._metrics_widgets:
@@ -261,7 +258,7 @@ class AgentsPanel(Widget):
                     "---",
                     "---",
                     "---",
-                    f"[bold]Utilization:[/]",
+                    "[bold]Utilization:[/]",
                     "---",
                     "---",
                     f"[bold]{metrics.utilization_percent:.0f}%[/]",
@@ -297,9 +294,7 @@ class AgentsPanel(Widget):
         )
 
         if metrics.total_agents > 0:
-            metrics.utilization_percent = (
-                metrics.active_count / metrics.total_agents
-            ) * 100
+            metrics.utilization_percent = (metrics.active_count / metrics.total_agents) * 100
 
         self.metrics = metrics
         self._update_metrics_display()

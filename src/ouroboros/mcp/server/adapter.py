@@ -95,9 +95,7 @@ class MCPServerAdapter:
             ),
             tools=tuple(h.definition for h in self._tool_handlers.values()),
             resources=tuple(
-                defn
-                for handler in self._resource_handlers.values()
-                for defn in handler.definitions
+                defn for handler in self._resource_handlers.values() for defn in handler.definitions
             ),
             prompts=tuple(h.definition for h in self._prompt_handlers.values()),
         )
@@ -199,10 +197,10 @@ class MCPServerAdapter:
             return Result.err(security_result.error)
 
         try:
-            timeout = getattr(handler, 'TIMEOUT_SECONDS', 30.0)
+            timeout = getattr(handler, "TIMEOUT_SECONDS", 30.0)
             result = await asyncio.wait_for(handler.handle(arguments), timeout=timeout)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.error("mcp.server.tool_timeout", tool=name)
             return Result.err(
                 MCPToolError(
@@ -323,7 +321,11 @@ class MCPServerAdapter:
                     # Unwrap nested kwargs from FastMCP schema inference.
                     # FastMCP infers a single "kwargs" param from **kwargs signature,
                     # so clients send {"kwargs": {actual params}} instead of flat params.
-                    if "kwargs" in kwargs and len(kwargs) == 1 and isinstance(kwargs["kwargs"], dict):
+                    if (
+                        "kwargs" in kwargs
+                        and len(kwargs) == 1
+                        and isinstance(kwargs["kwargs"], dict)
+                    ):
                         kwargs = kwargs["kwargs"]
                     result = await h.handle(kwargs)
                     if result.is_ok:
@@ -418,8 +420,19 @@ def create_ouroboros_server(
         ImportError: If MCP SDK is not installed.
     """
     # Import tool definitions
+    from pathlib import Path
+
+    from rich.console import Console
+
+    # Import service dependencies
+    from ouroboros.bigbang.interview import InterviewEngine
+    from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.evaluation import (
+        EvaluationContext,
+        EvaluationPipeline,
+        PipelineConfig,
+    )
     from ouroboros.mcp.tools.definitions import (
-        OUROBOROS_TOOLS,
         EvaluateHandler,
         EvolveStepHandler,
         ExecuteSeedHandler,
@@ -432,27 +445,12 @@ def create_ouroboros_server(
         SessionStatusHandler,
     )
     from ouroboros.mcp.tools.registry import ToolRegistry
-
-    # Import service dependencies
-    from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
-    from ouroboros.bigbang.interview import InterviewEngine
-    from ouroboros.bigbang.seed_generator import SeedGenerator
-    from ouroboros.evaluation import (
-        EvaluationContext,
-        EvaluationPipeline,
-        PipelineConfig,
-    )
-    from ouroboros.observability.drift import DriftMetrics, DRIFT_THRESHOLD
+    from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
-        build_system_prompt,
-        build_task_prompt,
     )
-    from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
     from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
     from ouroboros.resilience.lateral import LateralThinker
-    from pathlib import Path
-    from rich.console import Console
 
     # Create LLM adapter (shared across services)
     # Default to ClaudeCodeAdapter — uses Max Plan auth, no API key needed.
@@ -486,10 +484,10 @@ def create_ouroboros_server(
     lateral_thinker = LateralThinker()
 
     # Create evolution engines for evolve_step
-    from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
-    from ouroboros.evolution.wonder import WonderEngine
-    from ouroboros.evolution.reflect import ReflectEngine
     from ouroboros.core.lineage import EvaluationSummary
+    from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
+    from ouroboros.evolution.reflect import ReflectEngine
+    from ouroboros.evolution.wonder import WonderEngine
 
     wonder_engine = WonderEngine(llm_adapter=llm_adapter, model="default")
     reflect_engine = ReflectEngine(llm_adapter=llm_adapter, model="default")

@@ -303,24 +303,19 @@ class DebugScreen(Screen[None]):
         if not self._config:
             self._config = _load_config_as_dict()
 
-        with Container():
-            with TabbedContent():
-                with TabPane("State", id="tab-state"):
-                    with VerticalScroll():
-                        yield StateInspector(self._state)
+        with Container(), TabbedContent():
+            with TabPane("State", id="tab-state"), VerticalScroll():
+                yield StateInspector(self._state)
 
-                with TabPane("Events", id="tab-events"):
-                    with VerticalScroll():
-                        yield JsonViewer(self._raw_events)
+            with TabPane("Events", id="tab-events"), VerticalScroll():
+                yield JsonViewer(self._raw_events)
 
-                with TabPane("AC Tree", id="tab-tree"):
-                    with VerticalScroll():
-                        tree_data = self._state.ac_tree if self._state else {}
-                        yield JsonViewer(tree_data)
+            with TabPane("AC Tree", id="tab-tree"), VerticalScroll():
+                tree_data = self._state.ac_tree if self._state else {}
+                yield JsonViewer(tree_data)
 
-                with TabPane("Config", id="tab-config"):
-                    with VerticalScroll():
-                        yield JsonViewer(self._config)
+            with TabPane("Config", id="tab-config"), VerticalScroll():
+                yield JsonViewer(self._config)
 
         yield Footer()
 

@@ -318,8 +318,12 @@ class TestACTreeQueries:
     def test_get_atomic_nodes(self):
         """get_atomic_nodes() should return nodes marked as atomic."""
         tree = ACTree()
-        atomic1 = ACNode(id="ac_a1", content="Atomic 1", depth=0, is_atomic=True, status=ACStatus.ATOMIC)
-        atomic2 = ACNode(id="ac_a2", content="Atomic 2", depth=0, is_atomic=True, status=ACStatus.ATOMIC)
+        atomic1 = ACNode(
+            id="ac_a1", content="Atomic 1", depth=0, is_atomic=True, status=ACStatus.ATOMIC
+        )
+        atomic2 = ACNode(
+            id="ac_a2", content="Atomic 2", depth=0, is_atomic=True, status=ACStatus.ATOMIC
+        )
         non_atomic = ACNode(id="ac_na", content="Non-atomic", depth=0, is_atomic=False)
 
         tree.add_node(atomic1)

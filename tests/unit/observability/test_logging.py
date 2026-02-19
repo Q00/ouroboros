@@ -621,10 +621,7 @@ class TestSensitiveDataMasking:
         configure_logging(config)
         log = get_logger()
 
-        log.info(
-            "config.loaded",
-            config={"provider": {"api_key": "sk-secret123"}, "name": "test"}
-        )
+        log.info("config.loaded", config={"provider": {"api_key": "sk-secret123"}, "name": "test"})
 
         captured = capsys.readouterr()
         data = json.loads(captured.err.strip())

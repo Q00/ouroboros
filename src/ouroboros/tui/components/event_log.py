@@ -259,9 +259,9 @@ class EventLog(Widget):
         if self.search_query:
             query_lower = self.search_query.lower()
             filtered = [
-                e for e in filtered
-                if query_lower in e.message.lower()
-                or query_lower in e.source.lower()
+                e
+                for e in filtered
+                if query_lower in e.message.lower() or query_lower in e.source.lower()
             ]
 
         return filtered
@@ -343,18 +343,22 @@ class EventLog(Widget):
                 event_type = EventType.TOOL
 
             try:
-                timestamp = datetime.fromisoformat(log_entry.get("timestamp", datetime.now().isoformat()))
+                timestamp = datetime.fromisoformat(
+                    log_entry.get("timestamp", datetime.now().isoformat())
+                )
             except Exception:
                 timestamp = datetime.now()
 
-            new_entries.append(LogEntry(
-                timestamp=timestamp,
-                event_type=event_type,
-                severity=severity,
-                source=source,
-                message=log_entry.get("message", ""),
-                data=log_entry.get("data", {}),
-            ))
+            new_entries.append(
+                LogEntry(
+                    timestamp=timestamp,
+                    event_type=event_type,
+                    severity=severity,
+                    source=source,
+                    message=log_entry.get("message", ""),
+                    data=log_entry.get("data", {}),
+                )
+            )
 
         # Merge with existing, avoiding duplicates
         existing_timestamps = {e.timestamp.isoformat() for e in self.entries}
@@ -364,7 +368,7 @@ class EventLog(Widget):
 
         # Trim to max
         if len(self.entries) > self.max_entries:
-            self.entries = self.entries[-self.max_entries:]
+            self.entries = self.entries[-self.max_entries :]
 
     def add_entry(
         self,
@@ -394,7 +398,7 @@ class EventLog(Widget):
 
         # Trim to max
         if len(entries) > self.max_entries:
-            entries = entries[-self.max_entries:]
+            entries = entries[-self.max_entries :]
 
         self.entries = entries
 

@@ -438,7 +438,9 @@ async def _generate_seed_from_interview(
     return seed_path, SeedGenerationResult.SUCCESS
 
 
-async def _start_workflow(seed_path: Path, use_orchestrator: bool = False, parallel: bool = True) -> None:
+async def _start_workflow(
+    seed_path: Path, use_orchestrator: bool = False, parallel: bool = True
+) -> None:
     """Start workflow from generated seed.
 
     Args:
@@ -469,9 +471,7 @@ async def _start_workflow(seed_path: Path, use_orchestrator: bool = False, paral
 def start(
     context: Annotated[
         str | None,
-        typer.Argument(
-            help="Initial context or idea (interactive prompt if not provided)."
-        ),
+        typer.Argument(help="Initial context or idea (interactive prompt if not provided)."),
     ] = None,
     resume: Annotated[
         str | None,

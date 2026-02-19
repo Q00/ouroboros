@@ -47,6 +47,7 @@ class SemanticConfig:
 def _get_evaluation_system_prompt() -> str:
     """Lazy-load evaluation system prompt to avoid import-time I/O."""
     from ouroboros.agents.loader import load_agent_prompt
+
     return load_agent_prompt("semantic-evaluator")
 
 
@@ -59,7 +60,11 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
     Returns:
         Formatted prompt string
     """
-    constraints_text = "\n".join(f"- {c}" for c in context.constraints) if context.constraints else "None specified"
+    constraints_text = (
+        "\n".join(f"- {c}" for c in context.constraints)
+        if context.constraints
+        else "None specified"
+    )
 
     return f"""Evaluate the following artifact:
 
@@ -134,7 +139,14 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
         )
 
     # Validate required fields
-    required_fields = ["score", "ac_compliance", "goal_alignment", "drift_score", "uncertainty", "reasoning"]
+    required_fields = [
+        "score",
+        "ac_compliance",
+        "goal_alignment",
+        "drift_score",
+        "uncertainty",
+        "reasoning",
+    ]
     missing = [f for f in required_fields if f not in data]
     if missing:
         return Result.err(

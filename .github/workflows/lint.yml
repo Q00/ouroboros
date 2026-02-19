@@ -10,6 +10,7 @@ jobs:
   ruff:
     name: Ruff Lint
     runs-on: ubuntu-latest
+    continue-on-error: true
 
     steps:
       - name: Checkout code

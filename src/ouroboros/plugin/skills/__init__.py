@@ -44,11 +44,11 @@ from ouroboros.plugin.skills.keywords import (
     route_to_skill,
 )
 from ouroboros.plugin.skills.registry import (
+    SkillFileWatcher,
     SkillInstance,
     SkillMetadata,
     SkillMode,
     SkillRegistry,
-    SkillFileWatcher,
     get_registry,
 )
 

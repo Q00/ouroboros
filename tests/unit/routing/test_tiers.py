@@ -7,8 +7,6 @@ Tests cover:
 - Error handling for invalid configurations
 """
 
-import pytest
-
 from ouroboros.config.models import (
     EconomicsConfig,
     ModelConfig,

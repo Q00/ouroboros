@@ -1,6 +1,6 @@
 """Unit tests for ouroboros.events.base module."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ouroboros.events.base import BaseEvent
 
@@ -34,13 +34,13 @@ class TestBaseEventConstruction:
 
     def test_base_event_auto_generates_timestamp(self) -> None:
         """BaseEvent generates timestamp if not provided."""
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         event = BaseEvent(
             type="test.event.created",
             aggregate_type="test",
             aggregate_id="test-123",
         )
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         assert event.timestamp is not None
         assert before <= event.timestamp <= after
@@ -131,7 +131,7 @@ class TestBaseEventSerialization:
         row = {
             "id": "event-123",
             "event_type": "test.event.created",
-            "timestamp": datetime.now(timezone.utc),
+            "timestamp": datetime.now(UTC),
             "aggregate_type": "test",
             "aggregate_id": "test-456",
             "payload": {"key": "value"},

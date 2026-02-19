@@ -5,8 +5,8 @@ Tests the immutable Seed schema and related types.
 
 from datetime import UTC, datetime
 
-import pytest
 from pydantic import ValidationError as PydanticValidationError
+import pytest
 
 from ouroboros.core.seed import (
     EvaluationPrinciple,

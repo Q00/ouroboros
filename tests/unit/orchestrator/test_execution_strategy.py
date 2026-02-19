@@ -163,9 +163,7 @@ class TestStrategyProtocol:
         "strategy_class",
         [CodeStrategy, ResearchStrategy, AnalysisStrategy],
     )
-    def test_all_strategies_return_non_empty_tools(
-        self, strategy_class: type
-    ) -> None:
+    def test_all_strategies_return_non_empty_tools(self, strategy_class: type) -> None:
         """Test all strategies return at least one tool."""
         tools = strategy_class().get_tools()
         assert len(tools) > 0
@@ -175,9 +173,7 @@ class TestStrategyProtocol:
         "strategy_class",
         [CodeStrategy, ResearchStrategy, AnalysisStrategy],
     )
-    def test_all_strategies_return_non_empty_prompt(
-        self, strategy_class: type
-    ) -> None:
+    def test_all_strategies_return_non_empty_prompt(self, strategy_class: type) -> None:
         """Test all strategies return non-empty system prompt."""
         fragment = strategy_class().get_system_prompt_fragment()
         assert len(fragment) > 0
@@ -186,9 +182,7 @@ class TestStrategyProtocol:
         "strategy_class",
         [CodeStrategy, ResearchStrategy, AnalysisStrategy],
     )
-    def test_all_strategies_return_valid_activity_map(
-        self, strategy_class: type
-    ) -> None:
+    def test_all_strategies_return_valid_activity_map(self, strategy_class: type) -> None:
         """Test all strategies return valid activity maps."""
         activity_map = strategy_class().get_activity_map()
         assert len(activity_map) > 0

@@ -10,23 +10,22 @@ This module provides a skill executor that:
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from enum import Enum
-from pathlib import Path
 from typing import Any
 
 import structlog
 
 from ouroboros.core.types import Result
-from ouroboros.plugin.skills.registry import SkillMetadata, SkillRegistry, get_registry
+from ouroboros.plugin.skills.registry import SkillRegistry, get_registry
 
 log = structlog.get_logger()
 
 
 class ExecutionStatus(Enum):
     """Status of a skill execution."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -49,6 +48,7 @@ class ExecutionContext:
         state: Isolated state dictionary for the skill.
         metadata: Additional execution metadata.
     """
+
     skill_name: str
     user_input: str
     arguments: dict[str, Any]
@@ -81,6 +81,7 @@ class ExecutionResult:
         context: The execution context (may be modified by skill).
         metadata: Additional result metadata.
     """
+
     status: ExecutionStatus
     output: str = ""
     error: str = ""
@@ -111,6 +112,7 @@ class ExecutionRecord:
         completed_at: When execution completed.
         result: The execution result.
     """
+
     id: str
     skill_name: str
     status: ExecutionStatus

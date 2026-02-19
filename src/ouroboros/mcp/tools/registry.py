@@ -4,8 +4,8 @@ This module provides a registry for managing tool handlers, supporting
 dynamic registration, discovery, and invocation of tools.
 """
 
-import threading
 from collections.abc import Sequence
+import threading
 from typing import Any
 
 import structlog
@@ -143,9 +143,7 @@ class ToolRegistry:
         if category is not None:
             tool_names = self._categories.get(category, set())
             return tuple(
-                self._handlers[name].definition
-                for name in tool_names
-                if name in self._handlers
+                self._handlers[name].definition for name in tool_names if name in self._handlers
             )
 
         return tuple(h.definition for h in self._handlers.values())

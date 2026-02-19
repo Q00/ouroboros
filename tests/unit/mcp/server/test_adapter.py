@@ -55,9 +55,7 @@ class MockResourceHandler:
     def __init__(self, uri: str = "test://resource") -> None:
         self._uri = uri
         self.handle_mock = AsyncMock(
-            return_value=Result.ok(
-                MCPResourceContent(uri=uri, text="Resource content")
-            )
+            return_value=Result.ok(MCPResourceContent(uri=uri, text="Resource content"))
         )
 
     @property

@@ -27,9 +27,9 @@ from ouroboros.tui.events import (
     PhaseChanged,
     ResumeRequested,
     SubtaskUpdated,
-    TUIState,
     ToolCallCompleted,
     ToolCallStarted,
+    TUIState,
     WorkflowProgressUpdated,
     create_message_from_event,
 )
@@ -133,9 +133,7 @@ class OuroborosTUI(App[None]):
         """Handle application mount."""
         # Install screens - session selector only if event_store is available
         if self._event_store is not None:
-            self.install_screen(
-                SessionSelectorScreen(self._event_store), name="session_selector"
-            )
+            self.install_screen(SessionSelectorScreen(self._event_store), name="session_selector")
         self.install_screen(DashboardScreenV3(self._state), name="dashboard")
         self.install_screen(ExecutionScreen(self._state), name="execution")
         self.install_screen(LogsScreen(self._state), name="logs")
@@ -209,13 +207,15 @@ class OuroborosTUI(App[None]):
                     try:
                         debug_screen = self.get_screen("debug")
                         if debug_screen and hasattr(debug_screen, "add_raw_event"):
-                            debug_screen.add_raw_event({
-                                "type": event.type,
-                                "aggregate_type": event.aggregate_type,
-                                "aggregate_id": event.aggregate_id,
-                                "data": event.data,
-                                "timestamp": str(event.timestamp),
-                            })
+                            debug_screen.add_raw_event(
+                                {
+                                    "type": event.type,
+                                    "aggregate_type": event.aggregate_type,
+                                    "aggregate_id": event.aggregate_id,
+                                    "data": event.data,
+                                    "timestamp": str(event.timestamp),
+                                }
+                            )
                     except Exception:
                         pass  # Screen might not be installed yet
 
@@ -223,9 +223,7 @@ class OuroborosTUI(App[None]):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self._state.add_log(
-                    "error", "tui.subscription", f"Event subscription error: {e}"
-                )
+                self._state.add_log("error", "tui.subscription", f"Event subscription error: {e}")
                 try:
                     logs_screen = self.get_screen("logs")
                     if logs_screen and hasattr(logs_screen, "add_log"):
@@ -277,9 +275,7 @@ class OuroborosTUI(App[None]):
                 nodes[parent_ac_id]["children_ids"] = child_ac_ids
 
                 # Add child nodes
-                for i, (child_id, child_content) in enumerate(
-                    zip(child_ac_ids, child_contents)
-                ):
+                for i, (child_id, child_content) in enumerate(zip(child_ac_ids, child_contents)):
                     nodes[child_id] = {
                         "id": child_id,
                         "content": child_content,
@@ -315,9 +311,7 @@ class OuroborosTUI(App[None]):
         try:
             logs_screen = self.get_screen("logs")
             if logs_screen and hasattr(logs_screen, "add_log"):
-                logs_screen.add_log(
-                    "info", "tui.main", f"Monitoring execution: {execution_id}"
-                )
+                logs_screen.add_log("info", "tui.main", f"Monitoring execution: {execution_id}")
         except Exception:
             pass
         self._start_event_subscription()
@@ -424,13 +418,15 @@ class OuroborosTUI(App[None]):
         """Handle tool call completed - move to history."""
         self._state.active_tools.pop(message.ac_id, None)
         history = self._state.tool_history.setdefault(message.ac_id, [])
-        history.append({
-            "tool_name": message.tool_name,
-            "tool_detail": message.tool_detail,
-            "call_index": message.call_index,
-            "duration_seconds": message.duration_seconds,
-            "success": message.success,
-        })
+        history.append(
+            {
+                "tool_name": message.tool_name,
+                "tool_detail": message.tool_detail,
+                "call_index": message.call_index,
+                "duration_seconds": message.duration_seconds,
+                "success": message.success,
+            }
+        )
         # Keep last 20 entries per AC
         if len(history) > 20:
             self._state.tool_history[message.ac_id] = history[-20:]
@@ -630,9 +626,7 @@ class OuroborosTUI(App[None]):
         try:
             logs_screen = self.get_screen("logs")
             if logs_screen and hasattr(logs_screen, "add_log"):
-                logs_screen.add_log(
-                    message.level, message.source, message.message, message.data
-                )
+                logs_screen.add_log(message.level, message.source, message.message, message.data)
         except Exception:
             pass  # Screen might not be ready
 
@@ -718,5 +712,6 @@ class OuroborosTUI(App[None]):
             self._subscription_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._subscription_task
+
 
 __all__ = ["OuroborosTUI"]

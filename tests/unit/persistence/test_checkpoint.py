@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -125,8 +124,7 @@ class TestCheckpointStore:
 
         # Verify file exists
         checkpoint_path = (
-            checkpoint_store._base_path
-            / f"checkpoint_{sample_checkpoint.seed_id}.json"
+            checkpoint_store._base_path / f"checkpoint_{sample_checkpoint.seed_id}.json"
         )
         assert checkpoint_path.exists()
 
@@ -137,8 +135,7 @@ class TestCheckpointStore:
         checkpoint_store.save(sample_checkpoint)
 
         checkpoint_path = (
-            checkpoint_store._base_path
-            / f"checkpoint_{sample_checkpoint.seed_id}.json"
+            checkpoint_store._base_path / f"checkpoint_{sample_checkpoint.seed_id}.json"
         )
         with checkpoint_path.open("r") as f:
             data = json.load(f)
@@ -177,8 +174,7 @@ class TestCheckpointStore:
 
         # Corrupt the checkpoint file
         checkpoint_path = (
-            checkpoint_store._base_path
-            / f"checkpoint_{sample_checkpoint.seed_id}.json"
+            checkpoint_store._base_path / f"checkpoint_{sample_checkpoint.seed_id}.json"
         )
         with checkpoint_path.open("r") as f:
             data = json.load(f)
@@ -193,11 +189,12 @@ class TestCheckpointStore:
         result = checkpoint_store.load(sample_checkpoint.seed_id)
         assert result.is_err
         # Error message indicates no valid checkpoint was found after integrity check failed
-        assert "no valid checkpoint" in result.error.message.lower() or "integrity" in result.error.message.lower()
+        assert (
+            "no valid checkpoint" in result.error.message.lower()
+            or "integrity" in result.error.message.lower()
+        )
 
-    def test_load_handles_json_parse_error(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_load_handles_json_parse_error(self, checkpoint_store: CheckpointStore) -> None:
         """CheckpointStore.load() handles corrupted JSON."""
         checkpoint_path = checkpoint_store._base_path / "checkpoint_broken.json"
         checkpoint_path.write_text("{ invalid json }")
@@ -205,15 +202,16 @@ class TestCheckpointStore:
         result = checkpoint_store.load("broken")
         assert result.is_err
         # Error message indicates no valid checkpoint was found (after parse failure at all levels)
-        assert "no valid checkpoint" in result.error.message.lower() or "parse" in result.error.message.lower()
+        assert (
+            "no valid checkpoint" in result.error.message.lower()
+            or "parse" in result.error.message.lower()
+        )
 
 
 class TestCheckpointStoreRollback:
     """Test checkpoint rollback functionality."""
 
-    def test_save_rotates_checkpoints(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_save_rotates_checkpoints(self, checkpoint_store: CheckpointStore) -> None:
         """CheckpointStore.save() rotates old checkpoints."""
         seed_id = "test-seed"
 
@@ -229,9 +227,7 @@ class TestCheckpointStoreRollback:
         rollback_path = checkpoint_store._base_path / f"checkpoint_{seed_id}.json.1"
         assert rollback_path.exists()
 
-    def test_load_uses_rollback_on_corruption(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_load_uses_rollback_on_corruption(self, checkpoint_store: CheckpointStore) -> None:
         """CheckpointStore.load() uses rollback when current is corrupted."""
         seed_id = "test-seed"
 
@@ -256,9 +252,7 @@ class TestCheckpointStoreRollback:
         loaded = result.value
         assert loaded.phase == "phase1"  # Got the older checkpoint
 
-    def test_rollback_depth_limited_to_3(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_rollback_depth_limited_to_3(self, checkpoint_store: CheckpointStore) -> None:
         """Rollback is limited to 3 levels (NFR11)."""
         seed_id = "test-seed"
 

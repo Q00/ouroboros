@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

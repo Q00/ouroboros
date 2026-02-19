@@ -1,4 +1,5 @@
 """Test that dependencies are configured correctly."""
+
 from pathlib import Path
 import tomllib
 

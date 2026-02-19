@@ -6,8 +6,6 @@ from ouroboros.mcp.types import (
     ContentType,
     MCPCapabilities,
     MCPContentItem,
-    MCPPromptArgument,
-    MCPPromptDefinition,
     MCPRequest,
     MCPResourceContent,
     MCPResourceDefinition,
@@ -129,9 +127,7 @@ class TestMCPToolDefinition:
         defn = MCPToolDefinition(
             name="my_tool",
             description="A useful tool",
-            parameters=(
-                MCPToolParameter(name="input", type=ToolInputType.STRING),
-            ),
+            parameters=(MCPToolParameter(name="input", type=ToolInputType.STRING),),
         )
         assert defn.name == "my_tool"
         assert defn.description == "A useful tool"

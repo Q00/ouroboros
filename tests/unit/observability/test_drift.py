@@ -14,8 +14,6 @@ Covers:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pytest
 
 from ouroboros.core.seed import (
@@ -26,7 +24,6 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
-
 
 # =============================================================================
 # Fixtures
@@ -267,9 +264,7 @@ class TestOntologyDriftCalculation:
 
         assert result > 0.7
 
-    def test_ontology_drift_returns_float_between_0_and_1(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_ontology_drift_returns_float_between_0_and_1(self, sample_seed: Seed) -> None:
         """Ontology drift always returns value between 0.0 and 1.0."""
         from ouroboros.observability.drift import calculate_ontology_drift
 

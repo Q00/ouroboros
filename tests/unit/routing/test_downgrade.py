@@ -550,9 +550,7 @@ class TestDowngradeManagerPatternLearning:
         tier = manager.get_recommended_tier_for_pattern("fix bug")
         assert tier == Tier.FRUGAL  # Default
 
-        tier = manager.get_recommended_tier_for_pattern(
-            "fix bug", default_tier=Tier.STANDARD
-        )
+        tier = manager.get_recommended_tier_for_pattern("fix bug", default_tier=Tier.STANDARD)
         assert tier == Tier.STANDARD
 
     def test_get_recommended_tier_no_similar_patterns(self) -> None:

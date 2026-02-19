@@ -11,7 +11,6 @@ Event Types:
 Reference: docs/ontological-framework/aop-design.md
 """
 
-from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 

@@ -8,15 +8,15 @@ This module provides:
 """
 
 import asyncio
-import fcntl
-import hashlib
-import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+import fcntl
+import hashlib
+import json
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.types import Result
@@ -65,9 +65,7 @@ class CheckpointData:
     hash: str
 
     @classmethod
-    def create(
-        cls, seed_id: str, phase: str, state: dict[str, Any]
-    ) -> "CheckpointData":
+    def create(cls, seed_id: str, phase: str, state: dict[str, Any]) -> CheckpointData:
         """Create a new checkpoint with automatic hash generation.
 
         Args:
@@ -113,9 +111,7 @@ class CheckpointData:
         computed_hash = hashlib.sha256(serialized.encode()).hexdigest()
 
         if computed_hash != self.hash:
-            return Result.err(
-                f"Hash mismatch: expected {self.hash}, got {computed_hash}"
-            )
+            return Result.err(f"Hash mismatch: expected {self.hash}, got {computed_hash}")
         return Result.ok(True)
 
     def to_dict(self) -> dict[str, Any]:
@@ -129,7 +125,7 @@ class CheckpointData:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CheckpointData":
+    def from_dict(cls, data: dict[str, Any]) -> CheckpointData:
         """Reconstruct checkpoint from dict.
 
         Args:
@@ -249,18 +245,12 @@ class CheckpointStore:
             if result.is_ok:
                 if level > 0:
                     # Log successful recovery after rollback
-                    print(
-                        f"Recovered checkpoint for {seed_id} "
-                        f"from rollback level {level}"
-                    )
+                    print(f"Recovered checkpoint for {seed_id} from rollback level {level}")
                 return result
 
             # Log corruption details for debugging
             error = result.error
-            print(
-                f"Checkpoint corruption at level {level} for {seed_id}: "
-                f"{error.message}"
-            )
+            print(f"Checkpoint corruption at level {level} for {seed_id}: {error.message}")
 
         # No valid checkpoint found at any level
         return Result.err(
@@ -310,8 +300,7 @@ class CheckpointStore:
             if validation_result.is_err:
                 return Result.err(
                     PersistenceError(
-                        f"Checkpoint integrity validation failed: "
-                        f"{validation_result.error}",
+                        f"Checkpoint integrity validation failed: {validation_result.error}",
                         operation="validate",
                         details={"seed_id": seed_id, "level": level},
                     )
@@ -432,12 +421,10 @@ class PeriodicCheckpointer:
         while not self._stop_event.is_set():
             try:
                 # Wait for interval or stop event
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=self._interval
-                )
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self._interval)
                 # If we get here, stop event was set
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Timeout means it's time to checkpoint
                 try:
                     await self._callback()
@@ -470,9 +457,7 @@ class RecoveryManager:
         """
         self._store = checkpoint_store
 
-    async def recover(
-        self, seed_id: str
-    ) -> Result[CheckpointData | None, PersistenceError]:
+    async def recover(self, seed_id: str) -> Result[CheckpointData | None, PersistenceError]:
         """Recover workflow state from latest valid checkpoint.
 
         Attempts to load the latest checkpoint. If not found or corrupted,

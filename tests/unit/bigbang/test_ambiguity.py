@@ -49,14 +49,16 @@ def create_valid_scoring_response(
     """Create a valid LLM scoring response string in JSON format."""
     import json
 
-    return json.dumps({
-        "goal_clarity_score": goal_score,
-        "goal_clarity_justification": goal_justification,
-        "constraint_clarity_score": constraint_score,
-        "constraint_clarity_justification": constraint_justification,
-        "success_criteria_clarity_score": success_score,
-        "success_criteria_clarity_justification": success_justification,
-    })
+    return json.dumps(
+        {
+            "goal_clarity_score": goal_score,
+            "goal_clarity_justification": goal_justification,
+            "constraint_clarity_score": constraint_score,
+            "constraint_clarity_justification": constraint_justification,
+            "success_criteria_clarity_score": success_score,
+            "success_criteria_clarity_justification": success_justification,
+        }
+    )
 
 
 def create_interview_state_with_rounds(
@@ -404,11 +406,7 @@ class TestAmbiguityScorerScore:
         mock_adapter.complete = AsyncMock(
             side_effect=[
                 Result.err(provider_error),
-                Result.ok(
-                    create_mock_completion_response(
-                        content=create_valid_scoring_response()
-                    )
-                ),
+                Result.ok(create_mock_completion_response(content=create_valid_scoring_response())),
             ]
         )
 
@@ -455,11 +453,7 @@ class TestAmbiguityScorerScore:
                         finish_reason="length",  # Truncated!
                     )
                 ),
-                Result.ok(
-                    create_mock_completion_response(
-                        content=create_valid_scoring_response()
-                    )
-                ),
+                Result.ok(create_mock_completion_response(content=create_valid_scoring_response())),
             ]
         )
 
@@ -488,11 +482,7 @@ class TestAmbiguityScorerScore:
                         finish_reason="stop",  # Not truncated
                     )
                 ),
-                Result.ok(
-                    create_mock_completion_response(
-                        content=create_valid_scoring_response()
-                    )
-                ),
+                Result.ok(create_mock_completion_response(content=create_valid_scoring_response())),
             ]
         )
 
@@ -1040,11 +1030,7 @@ class TestWeightConstants:
 
     def test_weights_sum_to_one(self) -> None:
         """Component weights sum to 1.0."""
-        total = (
-            GOAL_CLARITY_WEIGHT
-            + CONSTRAINT_CLARITY_WEIGHT
-            + SUCCESS_CRITERIA_CLARITY_WEIGHT
-        )
+        total = GOAL_CLARITY_WEIGHT + CONSTRAINT_CLARITY_WEIGHT + SUCCESS_CRITERIA_CLARITY_WEIGHT
         assert abs(total - 1.0) < 0.001
 
     def test_goal_weight(self) -> None:
@@ -1089,9 +1075,7 @@ class TestMaxTokenLimit:
         )
 
         # Start with 4096, should try 4096 -> 8192 -> 16384 (no cap)
-        scorer = AmbiguityScorer(
-            llm_adapter=mock_adapter, initial_max_tokens=4096, max_retries=3
-        )
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter, initial_max_tokens=4096, max_retries=3)
         state = create_interview_state_with_rounds()
 
         result = await scorer.score(state)

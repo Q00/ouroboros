@@ -50,6 +50,7 @@ def _file_lock(file_path: Path, exclusive: bool = True) -> Iterator[None]:
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+
 log = structlog.get_logger()
 
 # Interview round constants
@@ -194,9 +195,7 @@ class InterviewEngine:
         # Validate initial context with security limits
         is_valid, error_msg = InputValidator.validate_initial_context(initial_context)
         if not is_valid:
-            return Result.err(
-                ValidationError(error_msg, field="initial_context")
-            )
+            return Result.err(ValidationError(error_msg, field="initial_context"))
 
         if interview_id is None:
             interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
@@ -295,9 +294,7 @@ class InterviewEngine:
         # Validate user response with security limits
         is_valid, error_msg = InputValidator.validate_user_response(user_response)
         if not is_valid:
-            return Result.err(
-                ValidationError(error_msg, field="user_response")
-            )
+            return Result.err(ValidationError(error_msg, field="user_response"))
 
         if state.is_complete:
             return Result.err(
@@ -330,9 +327,7 @@ class InterviewEngine:
 
         return Result.ok(state)
 
-    async def save_state(
-        self, state: InterviewState
-    ) -> Result[Path, ValidationError]:
+    async def save_state(self, state: InterviewState) -> Result[Path, ValidationError]:
         """Persist interview state to disk.
 
         Uses file locking to prevent race conditions during concurrent access.
@@ -373,9 +368,7 @@ class InterviewEngine:
                 )
             )
 
-    async def load_state(
-        self, interview_id: str
-    ) -> Result[InterviewState, ValidationError]:
+    async def load_state(self, interview_id: str) -> Result[InterviewState, ValidationError]:
         """Load interview state from disk.
 
         Uses file locking to prevent race conditions during concurrent access.
@@ -442,9 +435,7 @@ class InterviewEngine:
         round_info = f"Round {state.current_round_number}"
         preferred_web_tool = os.environ.get("OUROBOROS_WEB_SEARCH_TOOL", "").strip()
         web_search_hint = (
-            f"\n- PREFERRED: Use {preferred_web_tool} for web search"
-            if preferred_web_tool
-            else ""
+            f"\n- PREFERRED: Use {preferred_web_tool} for web search" if preferred_web_tool else ""
         )
 
         base_prompt = load_agent_prompt("socratic-interviewer")
@@ -456,15 +447,11 @@ class InterviewEngine:
         )
 
         if web_search_hint:
-            base_prompt = base_prompt.replace(
-                "## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n"
-            )
+            base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
 
         return f"{dynamic_header}\n{base_prompt}"
 
-    def _build_conversation_history(
-        self, state: InterviewState
-    ) -> list[Message]:
+    def _build_conversation_history(self, state: InterviewState) -> list[Message]:
         """Build conversation history from completed rounds.
 
         Args:
@@ -476,13 +463,9 @@ class InterviewEngine:
         messages: list[Message] = []
 
         for round_data in state.rounds:
-            messages.append(
-                Message(role=MessageRole.ASSISTANT, content=round_data.question)
-            )
+            messages.append(Message(role=MessageRole.ASSISTANT, content=round_data.question))
             if round_data.user_response:
-                messages.append(
-                    Message(role=MessageRole.USER, content=round_data.user_response)
-                )
+                messages.append(Message(role=MessageRole.USER, content=round_data.user_response))
 
         return messages
 

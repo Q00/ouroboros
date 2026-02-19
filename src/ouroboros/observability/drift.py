@@ -156,9 +156,7 @@ def calculate_goal_drift(current_output: str, seed: Seed) -> float:
     return 1.0 - similarity
 
 
-def calculate_constraint_drift(
-    constraint_violations: list[str], seed: Seed
-) -> float:
+def calculate_constraint_drift(constraint_violations: list[str], seed: Seed) -> float:
     """Calculate constraint drift based on violations.
 
     Each violation adds 0.1 to drift, capped at 1.0.
@@ -178,9 +176,7 @@ def calculate_constraint_drift(
     return min(drift, 1.0)
 
 
-def calculate_ontology_drift(
-    current_concepts: list[str], seed: Seed
-) -> float:
+def calculate_ontology_drift(current_concepts: list[str], seed: Seed) -> float:
     """Calculate ontology drift based on concept evolution.
 
     Measures how much the current concept space has drifted from
@@ -199,9 +195,7 @@ def calculate_ontology_drift(
         return 1.0
 
     # Extract seed ontology field names
-    seed_concepts = {
-        field.name.lower() for field in seed.ontology_schema.fields
-    }
+    seed_concepts = {field.name.lower() for field in seed.ontology_schema.fields}
 
     if not seed_concepts:
         # No seed ontology defined - any concepts are acceptable
@@ -232,11 +226,7 @@ def _tokenize(text: str) -> set[str]:
     # Simple word tokenization
     words = text.lower().split()
     # Keep only alphanumeric characters
-    return {
-        "".join(c for c in word if c.isalnum())
-        for word in words
-        if word
-    }
+    return {"".join(c for c in word if c.isalnum()) for word in words if word}
 
 
 # =============================================================================

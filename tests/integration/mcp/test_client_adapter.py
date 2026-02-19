@@ -5,8 +5,8 @@ mock MCP servers, testing the full flow of connection, tool calling,
 resource reading, and prompt handling.
 """
 
-import sys
 from contextlib import asynccontextmanager
+import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -435,10 +435,12 @@ class TestMCPClientAdapterRetry:
         mock_session = MagicMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock()
-        mock_session.initialize = AsyncMock(return_value=MagicMock(
-            protocolVersion="1.0.0",
-            capabilities=MagicMock(tools=False, resources=False, prompts=False, logging=True),
-        ))
+        mock_session.initialize = AsyncMock(
+            return_value=MagicMock(
+                protocolVersion="1.0.0",
+                capabilities=MagicMock(tools=False, resources=False, prompts=False, logging=True),
+            )
+        )
 
         config = MCPServerConfig(
             name="retry-test",

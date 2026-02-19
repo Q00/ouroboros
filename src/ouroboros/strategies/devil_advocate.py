@@ -98,9 +98,7 @@ class DevilAdvocateStrategy:
             "artifact": context.artifact,
             "goal": context.goal,
         }
-        return hashlib.sha256(
-            json.dumps(cache_data, sort_keys=True).encode()
-        ).hexdigest()[:16]
+        return hashlib.sha256(json.dumps(cache_data, sort_keys=True).encode()).hexdigest()[:16]
 
     async def analyze(self, context: ConsensusContext) -> AnalysisResult:
         """Analyze solution using Devil's Advocate lens.
@@ -184,9 +182,7 @@ class DevilAdvocateStrategy:
             parts.extend(["", "## Acceptance Criteria", context.current_ac])
 
         if context.constraints:
-            parts.extend(
-                ["", "## Constraints", *[f"- {c}" for c in context.constraints]]
-            )
+            parts.extend(["", "## Constraints", *[f"- {c}" for c in context.constraints]])
 
         return "\n".join(parts)
 

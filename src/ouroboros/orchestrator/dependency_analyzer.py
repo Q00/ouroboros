@@ -17,8 +17,8 @@ Example:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
+import json
 from typing import TYPE_CHECKING
 
 from ouroboros.core.types import Result
@@ -140,7 +140,7 @@ class DependencyAnalyzer:
 
     def __init__(
         self,
-        llm_adapter: "LLMAdapter | None" = None,
+        llm_adapter: LLMAdapter | None = None,
         model: str | None = None,
     ):
         """Initialize analyzer.
@@ -176,8 +176,7 @@ class DependencyAnalyzer:
         # Single AC or none - no dependencies
         if count <= 1:
             nodes = tuple(
-                ACNode(index=i, content=ac, depends_on=())
-                for i, ac in enumerate(criteria)
+                ACNode(index=i, content=ac, depends_on=()) for i, ac in enumerate(criteria)
             )
             levels: tuple[tuple[int, ...], ...] = (tuple(range(count)),) if count > 0 else ()
 
@@ -226,8 +225,7 @@ class DependencyAnalyzer:
 
             # Fallback: assume all ACs are independent
             nodes = tuple(
-                ACNode(index=i, content=ac, depends_on=())
-                for i, ac in enumerate(criteria)
+                ACNode(index=i, content=ac, depends_on=()) for i, ac in enumerate(criteria)
             )
             levels = (tuple(range(count)),)
 
@@ -253,6 +251,7 @@ class DependencyAnalyzer:
         if self._llm is None:
             # Default to ClaudeCodeAdapter (orchestrator mode)
             from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
+
             self._llm = ClaudeCodeAdapter(max_turns=1)
 
         # Build prompt
@@ -303,8 +302,7 @@ class DependencyAnalyzer:
 
                 # Validate dependencies
                 valid_deps = [
-                    d for d in deps
-                    if isinstance(d, int) and 0 <= d < len(criteria) and d != ac_idx
+                    d for d in deps if isinstance(d, int) and 0 <= d < len(criteria) and d != ac_idx
                 ]
                 dependencies[ac_idx] = valid_deps
 
@@ -341,10 +339,7 @@ class DependencyAnalyzer:
 
         while remaining:
             # Find all nodes with no remaining dependencies
-            ready = tuple(
-                i for i in remaining
-                if in_degree[i] == 0
-            )
+            ready = tuple(i for i in remaining if in_degree[i] == 0)
 
             if not ready:
                 # Circular dependency detected - add all remaining as one level

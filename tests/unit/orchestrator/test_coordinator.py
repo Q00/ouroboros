@@ -29,7 +29,6 @@ from ouroboros.orchestrator.level_context import (
 )
 from ouroboros.orchestrator.parallel_executor import ACExecutionResult
 
-
 # =============================================================================
 # Data Model Tests
 # =============================================================================
@@ -121,7 +120,7 @@ def _make_result(
         sub_results: Optional sub-results for decomposed ACs.
     """
     messages = []
-    for tool_name, file_path in (tool_calls or []):
+    for tool_name, file_path in tool_calls or []:
         messages.append(
             AgentMessage(
                 type="assistant",
@@ -424,9 +423,7 @@ class TestBuildContextPromptWithReview:
         contexts = [
             LevelContext(
                 level_number=1,
-                completed_acs=(
-                    ACContextSummary(ac_index=0, ac_content="AC 1", success=True),
-                ),
+                completed_acs=(ACContextSummary(ac_index=0, ac_content="AC 1", success=True),),
             ),
         ]
         prompt = build_context_prompt(contexts)
@@ -443,9 +440,7 @@ class TestBuildContextPromptWithReview:
         contexts = [
             LevelContext(
                 level_number=1,
-                completed_acs=(
-                    ACContextSummary(ac_index=0, ac_content="AC 1", success=True),
-                ),
+                completed_acs=(ACContextSummary(ac_index=0, ac_content="AC 1", success=True),),
                 coordinator_review=review,
             ),
         ]
@@ -463,9 +458,7 @@ class TestBuildContextPromptWithReview:
         contexts = [
             LevelContext(
                 level_number=1,
-                completed_acs=(
-                    ACContextSummary(ac_index=0, ac_content="AC 1", success=True),
-                ),
+                completed_acs=(ACContextSummary(ac_index=0, ac_content="AC 1", success=True),),
                 coordinator_review=review,
             ),
         ]
@@ -483,16 +476,12 @@ class TestBuildContextPromptWithReview:
         contexts = [
             LevelContext(
                 level_number=1,
-                completed_acs=(
-                    ACContextSummary(ac_index=0, ac_content="AC 1", success=True),
-                ),
+                completed_acs=(ACContextSummary(ac_index=0, ac_content="AC 1", success=True),),
                 # No coordinator_review
             ),
             LevelContext(
                 level_number=2,
-                completed_acs=(
-                    ACContextSummary(ac_index=1, ac_content="AC 2", success=True),
-                ),
+                completed_acs=(ACContextSummary(ac_index=1, ac_content="AC 2", success=True),),
                 coordinator_review=review,
             ),
         ]

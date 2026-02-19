@@ -10,9 +10,9 @@ The WonderEngine asks: "Given what we learned, what do we still not know?"
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
-from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
@@ -77,9 +77,7 @@ class WonderEngine:
         Returns:
             Result containing WonderOutput or ProviderError.
         """
-        prompt = self._build_prompt(
-            current_ontology, evaluation_summary, execution_output, lineage
-        )
+        prompt = self._build_prompt(current_ontology, evaluation_summary, execution_output, lineage)
 
         messages = [
             Message(role=MessageRole.SYSTEM, content=self._system_prompt()),
@@ -99,9 +97,7 @@ class WonderEngine:
                 "WonderEngine LLM call failed, using degraded mode: %s",
                 result.error,
             )
-            return Result.ok(
-                self._degraded_output(evaluation_summary, current_ontology)
-            )
+            return Result.ok(self._degraded_output(evaluation_summary, current_ontology))
 
         return Result.ok(self._parse_response(result.value.content))
 
@@ -208,32 +204,22 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
 
         if eval_summary:
             if not eval_summary.final_approved:
-                questions.append(
-                    "What fundamental requirement is the current ontology missing?"
-                )
+                questions.append("What fundamental requirement is the current ontology missing?")
             if eval_summary.drift_score and eval_summary.drift_score > 0.3:
-                questions.append(
-                    "Why has the implementation drifted from the original intent?"
-                )
-                tensions.append(
-                    "The ontology describes one thing but execution produces another"
-                )
+                questions.append("Why has the implementation drifted from the original intent?")
+                tensions.append("The ontology describes one thing but execution produces another")
             if eval_summary.failure_reason:
-                questions.append(
-                    f"What ontological gap caused: {eval_summary.failure_reason}?"
-                )
+                questions.append(f"What ontological gap caused: {eval_summary.failure_reason}?")
         else:
-            questions.append(
-                "Is the current ontology complete enough to define this domain?"
-            )
+            questions.append("Is the current ontology complete enough to define this domain?")
 
         if len(ontology.fields) < 3:
-            questions.append(
-                "Are there missing entities or relationships in this ontology?"
-            )
+            questions.append("Are there missing entities or relationships in this ontology?")
 
         return WonderOutput(
-            questions=tuple(questions) if questions else ("What are we assuming about this domain?",),
+            questions=tuple(questions)
+            if questions
+            else ("What are we assuming about this domain?",),
             ontology_tensions=tuple(tensions),
             should_continue=True,
             reasoning="Degraded mode: LLM unavailable, using heuristic questions",

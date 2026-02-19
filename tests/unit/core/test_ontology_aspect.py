@@ -7,7 +7,6 @@ from ouroboros.core.ontology_aspect import (
     OntologicalAspect,
     OntologicalJoinPoint,
     OntologicalViolationError,
-    OntologyStrategy,
     create_ontology_aspect,
 )
 from ouroboros.core.types import Result

@@ -27,7 +27,8 @@ class TestMainApp:
         assert result.exit_code == 0
         # Strip ANSI codes for comparison (Rich adds color formatting)
         import re
-        clean_output = re.sub(r'\x1b\[[0-9;]*m', '', result.output)
+
+        clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
         assert __version__ in clean_output
 
     def test_app_version_short_option(self) -> None:
@@ -36,7 +37,8 @@ class TestMainApp:
         assert result.exit_code == 0
         # Strip ANSI codes for comparison (Rich adds color formatting)
         import re
-        clean_output = re.sub(r'\x1b\[[0-9;]*m', '', result.output)
+
+        clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
         assert __version__ in clean_output
 
     def test_no_args_shows_help(self) -> None:
@@ -213,9 +215,7 @@ class TestShorthandCommands:
         seed_file = tmp_path / "seed.yaml"
         seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
 
-        result = runner.invoke(
-            app, ["run", "workflow", str(seed_file), "--no-orchestrator"]
-        )
+        result = runner.invoke(app, ["run", "workflow", str(seed_file), "--no-orchestrator"])
 
         assert result.exit_code == 0
         assert "Would execute" in result.output

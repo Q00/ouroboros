@@ -76,9 +76,7 @@ class ProviderError(OuroborosError):
         self.status_code = status_code
 
     @classmethod
-    def from_exception(
-        cls, exc: Exception, *, provider: str | None = None
-    ) -> ProviderError:
+    def from_exception(cls, exc: Exception, *, provider: str | None = None) -> ProviderError:
         """Create ProviderError from a provider exception.
 
         Args:
@@ -177,10 +175,20 @@ class ValidationError(OuroborosError):
     """
 
     # Fields that should never have their values exposed
-    _SENSITIVE_FIELDS = frozenset({
-        "password", "api_key", "secret", "token", "credential",
-        "auth", "key", "private", "apikey", "api-key",
-    })
+    _SENSITIVE_FIELDS = frozenset(
+        {
+            "password",
+            "api_key",
+            "secret",
+            "token",
+            "credential",
+            "auth",
+            "key",
+            "private",
+            "apikey",
+            "api-key",
+        }
+    )
 
     def __init__(
         self,

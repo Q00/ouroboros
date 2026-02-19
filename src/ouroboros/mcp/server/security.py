@@ -471,8 +471,14 @@ class InputValidator:
         """
         # Check for dangerous patterns in string arguments
         dangerous_patterns = [
-            "__import__", "subprocess", "os.popen", "os.system",
-            "eval(", "exec(", "compile(", "open(",
+            "__import__",
+            "subprocess",
+            "os.popen",
+            "os.system",
+            "eval(",
+            "exec(",
+            "compile(",
+            "open(",
         ]
         path_traversal_patterns = ["../", "..\\"]
         shell_metacharacters = [";", "|", "&&", "||"]
@@ -606,7 +612,12 @@ class SecurityLayer:
 def create_security_middleware(
     security_layer: SecurityLayer,
 ) -> Callable[
-    [str, dict[str, Any], dict[str, str] | None, Callable[..., Awaitable[Result[T, MCPServerError]]]],
+    [
+        str,
+        dict[str, Any],
+        dict[str, str] | None,
+        Callable[..., Awaitable[Result[T, MCPServerError]]],
+    ],
     Awaitable[Result[T, MCPServerError]],
 ]:
     """Create a security middleware function.
@@ -625,9 +636,7 @@ def create_security_middleware(
         handler: Callable[..., Awaitable[Result[T, MCPServerError]]],
     ) -> Result[T, MCPServerError]:
         """Security middleware that checks requests before calling handlers."""
-        check_result = await security_layer.check_request(
-            tool_name, arguments, credentials
-        )
+        check_result = await security_layer.check_request(tool_name, arguments, credentials)
         if check_result.is_err:
             return Result.err(check_result.error)
 

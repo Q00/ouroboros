@@ -103,8 +103,16 @@ class SessionState:
         Returns:
             SessionState instance.
         """
-        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(UTC)
-        updated_at = datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else datetime.now(UTC)
+        created_at = (
+            datetime.fromisoformat(data["created_at"])
+            if data.get("created_at")
+            else datetime.now(UTC)
+        )
+        updated_at = (
+            datetime.fromisoformat(data["updated_at"])
+            if data.get("updated_at")
+            else datetime.now(UTC)
+        )
 
         return cls(
             session_id=data["session_id"],

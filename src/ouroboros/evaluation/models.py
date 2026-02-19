@@ -312,5 +312,7 @@ class EvaluationResult:
         if self.stage2_result and not self.stage2_result.ac_compliance:
             return f"Stage 2 failed: AC non-compliance (score={self.stage2_result.score:.2f})"
         if self.stage3_result and not self.stage3_result.approved:
-            return f"Stage 3 failed: Consensus not reached ({self.stage3_result.majority_ratio:.0%})"
+            return (
+                f"Stage 3 failed: Consensus not reached ({self.stage3_result.majority_ratio:.0%})"
+            )
         return "Unknown failure"

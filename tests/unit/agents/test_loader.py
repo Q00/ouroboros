@@ -1,6 +1,5 @@
 """Unit tests for ouroboros.agents.loader module."""
 
-import os
 from pathlib import Path
 
 import pytest
@@ -22,6 +21,7 @@ def _clear_loader_cache() -> None:
     clear_cache()
     # Also reset lateral.py's lazy-loaded global
     import ouroboros.resilience.lateral as _lat
+
     _lat._PERSONA_STRATEGIES = None
 
 
@@ -180,7 +180,10 @@ Third content here.
         assert "multiple lines" in section
         # Should not include the next section
         assert "Second Section" not in section
-        assert "second section" not in section.lower() or "second section content" not in section.lower()
+        assert (
+            "second section" not in section.lower()
+            or "second section content" not in section.lower()
+        )
 
     def test_section_stops_at_next_heading(self) -> None:
         """extract_section stops at the next ## heading."""
@@ -326,7 +329,9 @@ class TestResolutionOrder:
         custom_agents_dir.mkdir()
 
         custom_agent_file = custom_agents_dir / "hacker.md"
-        custom_content = "# Custom Hacker Agent\n\nThis is a custom version with UNIQUE_MARKER_12345."
+        custom_content = (
+            "# Custom Hacker Agent\n\nThis is a custom version with UNIQUE_MARKER_12345."
+        )
         custom_agent_file.write_text(custom_content, encoding="utf-8")
 
         # Set the env var to point to our custom directory

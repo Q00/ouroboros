@@ -1,6 +1,5 @@
 """Test main entry point."""
 
-
 from typer.testing import CliRunner
 
 import ouroboros

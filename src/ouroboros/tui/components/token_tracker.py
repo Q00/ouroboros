@@ -9,9 +9,8 @@ Displays:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any
 
 from textual.app import ComposeResult
 from textual.reactive import reactive
@@ -245,16 +244,28 @@ class TokenTracker(Widget):
 
         # Summary row
         with Static(classes="summary-row"):
-            yield Static(f"[value]0[/] [label]Tokens[/]", classes="summary-item", id="summary-tokens")
-            yield Static(f"[value]$0.00[/] [label]Cost[/]", classes="summary-item", id="summary-cost")
-            yield Static(f"[value]0[/] [label]Input[/]", classes="summary-item", id="summary-input")
-            yield Static(f"[value]0[/] [label]Output[/]", classes="summary-item", id="summary-output")
+            yield Static(
+                "[value]0[/] [label]Tokens[/]", classes="summary-item", id="summary-tokens"
+            )
+            yield Static(
+                "[value]$0.00[/] [label]Cost[/]", classes="summary-item", id="summary-cost"
+            )
+            yield Static("[value]0[/] [label]Input[/]", classes="summary-item", id="summary-input")
+            yield Static(
+                "[value]0[/] [label]Output[/]", classes="summary-item", id="summary-output"
+            )
 
         # Tier breakdown
         with Static(classes="tier-row"):
-            yield Static("[tier-value]0[/] [tier-label]Haiku[/]", classes="tier-item", id="tier-haiku")
-            yield Static("[tier-value]0[/] [tier-label]Sonnet[/]", classes="tier-item", id="tier-sonnet")
-            yield Static("[tier-value]0[/] [tier-label]Opus[/]", classes="tier-item", id="tier-opus")
+            yield Static(
+                "[tier-value]0[/] [tier-label]Haiku[/]", classes="tier-item", id="tier-haiku"
+            )
+            yield Static(
+                "[tier-value]0[/] [tier-label]Sonnet[/]", classes="tier-item", id="tier-sonnet"
+            )
+            yield Static(
+                "[tier-value]0[/] [tier-label]Opus[/]", classes="tier-item", id="tier-opus"
+            )
 
         # Budget progress (only show if budget is set)
         if self.budget_usd:
@@ -326,7 +337,9 @@ class TokenTracker(Widget):
 
                 if threshold == BudgetThreshold.CRITICAL:
                     status_widget.add_class("critical")
-                    status_widget.update(f"CRITICAL: {progress:.0f}% of ${self.budget_usd:.2f} budget used!")
+                    status_widget.update(
+                        f"CRITICAL: {progress:.0f}% of ${self.budget_usd:.2f} budget used!"
+                    )
                 elif threshold == BudgetThreshold.HIGH:
                     status_widget.add_class("high")
                     status_widget.update(f"WARNING: {progress:.0f}% of budget used")
@@ -404,8 +417,10 @@ class TokenTracker(Widget):
             model_tier: Model tier used.
         """
         total = input_tokens + output_tokens
-        cost = (input_tokens * TIER_COSTS.get(model_tier, 3.0) / 1_000_000
-                + output_tokens * TIER_COSTS.get(model_tier, 3.0) * 3 / 1_000_000)
+        cost = (
+            input_tokens * TIER_COSTS.get(model_tier, 3.0) / 1_000_000
+            + output_tokens * TIER_COSTS.get(model_tier, 3.0) * 3 / 1_000_000
+        )
 
         # Update per-agent usage
         agent_usage = self.per_agent_usage.get(entity_id)

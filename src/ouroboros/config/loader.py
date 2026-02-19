@@ -272,9 +272,7 @@ def config_exists() -> bool:
         True if both config.yaml and credentials.yaml exist.
     """
     config_dir = get_config_dir()
-    return (config_dir / "config.yaml").exists() and (
-        config_dir / "credentials.yaml"
-    ).exists()
+    return (config_dir / "config.yaml").exists() and (config_dir / "credentials.yaml").exists()
 
 
 def credentials_file_secure(credentials_path: Path | None = None) -> bool:

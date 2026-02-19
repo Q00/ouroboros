@@ -368,7 +368,9 @@ async def check_atomicity(
 
     messages = [
         Message(role=MessageRole.SYSTEM, content=ATOMICITY_SYSTEM_PROMPT),
-        Message(role=MessageRole.USER, content=ATOMICITY_USER_TEMPLATE.format(ac_content=ac_content)),
+        Message(
+            role=MessageRole.USER, content=ATOMICITY_USER_TEMPLATE.format(ac_content=ac_content)
+        ),
     ]
 
     config = CompletionConfig(

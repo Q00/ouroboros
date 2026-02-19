@@ -10,17 +10,15 @@ Tests cover:
 - Agent composition with overrides
 """
 
-import asyncio
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from ouroboros.plugin.agents.registry import (
+    BUILTIN_AGENTS,
     AgentRegistry,
     AgentRole,
     AgentSpec,
-    BUILTIN_AGENTS,
 )
 
 
@@ -187,7 +185,7 @@ class TestAgentRegistryInit:
 
     def test_agent_dir_constant(self) -> None:
         """Test AGENT_DIR constant is correctly set."""
-        assert AgentRegistry.AGENT_DIR == Path(".claude-plugin/agents")
+        assert Path(".claude-plugin/agents") == AgentRegistry.AGENT_DIR
 
 
 class TestAgentRegistryGetAgent:

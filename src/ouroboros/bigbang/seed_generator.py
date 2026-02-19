@@ -12,7 +12,6 @@ The SeedGenerator:
 """
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +80,7 @@ class SeedGenerator:
         self,
         state: InterviewState,
         ambiguity_score: AmbiguityScore,
-        parent_seed: "Seed | None" = None,
+        parent_seed: Seed | None = None,
         reflect_output: Any | None = None,
     ) -> Result[Seed, ValidationError | ProviderError]:
         """Generate an immutable Seed from interview state or reflect output.
@@ -175,7 +174,9 @@ class SeedGenerator:
             )
 
     def generate_from_reflect(
-        self, parent_seed: Seed, reflect_output: Any,
+        self,
+        parent_seed: Seed,
+        reflect_output: Any,
     ) -> Result[Seed, ValidationError | ProviderError]:
         """Generate a new Seed from ReflectOutput (Gen 2+ path).
 
@@ -451,9 +452,7 @@ Extract all components and provide them in the specified format."""
         acceptance_criteria: tuple[str, ...] = tuple()
         if "acceptance_criteria" in requirements and requirements["acceptance_criteria"]:
             acceptance_criteria = tuple(
-                c.strip()
-                for c in requirements["acceptance_criteria"].split("|")
-                if c.strip()
+                c.strip() for c in requirements["acceptance_criteria"].split("|") if c.strip()
             )
 
         # Parse ontology fields

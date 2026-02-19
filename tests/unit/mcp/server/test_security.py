@@ -4,18 +4,15 @@ import hashlib
 import hmac
 import time
 
-import pytest
-
 from ouroboros.mcp.errors import MCPAuthError
 from ouroboros.mcp.server.security import (
     AuthConfig,
     AuthContext,
-    AuthMethod,
     Authenticator,
+    AuthMethod,
     Authorizer,
     InputValidator,
     Permission,
-    RateLimitConfig,
     RateLimiter,
     SecurityLayer,
     ToolPermission,
@@ -56,9 +53,7 @@ class TestAuthenticator:
 
     def test_required_auth_without_credentials(self) -> None:
         """Required auth fails without credentials."""
-        authenticator = Authenticator(
-            AuthConfig(method=AuthMethod.API_KEY, required=True)
-        )
+        authenticator = Authenticator(AuthConfig(method=AuthMethod.API_KEY, required=True))
         result = authenticator.authenticate(None)
 
         assert result.is_err

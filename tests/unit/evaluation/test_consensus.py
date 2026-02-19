@@ -236,21 +236,27 @@ class TestConsensusEvaluator:
         """Consensus with 2/3 approval (passes threshold)."""
         # First two approve, third rejects
         mock_llm.complete.side_effect = [
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
-                model="m1",
-                usage=UsageInfo(0, 0, 0),
-            )),
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.85, "reasoning": "OK"}',
-                model="m2",
-                usage=UsageInfo(0, 0, 0),
-            )),
-            Result.ok(CompletionResponse(
-                content='{"approved": false, "confidence": 0.7, "reasoning": "Concerns"}',
-                model="m3",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+                    model="m1",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.85, "reasoning": "OK"}',
+                    model="m2",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": false, "confidence": 0.7, "reasoning": "Concerns"}',
+                    model="m3",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
         ]
 
         config = ConsensusConfig(models=("m1", "m2", "m3"))
@@ -272,21 +278,27 @@ class TestConsensusEvaluator:
     ) -> None:
         """Consensus with 1/3 approval (fails threshold)."""
         mock_llm.complete.side_effect = [
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
-                model="m1",
-                usage=UsageInfo(0, 0, 0),
-            )),
-            Result.ok(CompletionResponse(
-                content='{"approved": false, "confidence": 0.85, "reasoning": "Bad"}',
-                model="m2",
-                usage=UsageInfo(0, 0, 0),
-            )),
-            Result.ok(CompletionResponse(
-                content='{"approved": false, "confidence": 0.8, "reasoning": "No"}',
-                model="m3",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+                    model="m1",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": false, "confidence": 0.85, "reasoning": "Bad"}',
+                    model="m2",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": false, "confidence": 0.8, "reasoning": "No"}',
+                    model="m3",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
         ]
 
         config = ConsensusConfig(models=("m1", "m2", "m3"))
@@ -331,17 +343,21 @@ class TestConsensusEvaluator:
     ) -> None:
         """Handle partial model failures."""
         mock_llm.complete.side_effect = [
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
-                model="m1",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+                    model="m1",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
             Result.err(ProviderError("API error")),
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.85, "reasoning": "OK"}',
-                model="m3",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.85, "reasoning": "OK"}',
+                    model="m3",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
         ]
 
         config = ConsensusConfig(models=("m1", "m2", "m3"))
@@ -362,11 +378,13 @@ class TestConsensusEvaluator:
     ) -> None:
         """Error when too few votes collected."""
         mock_llm.complete.side_effect = [
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
-                model="m1",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+                    model="m1",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
             Result.err(ProviderError("Error 1")),
             Result.err(ProviderError("Error 2")),
         ]
@@ -494,7 +512,10 @@ class TestDeliberativeConfig:
     def test_default_values(self) -> None:
         """Verify default configuration."""
         config = DeliberativeConfig()
-        assert "claude" in config.advocate_model.lower() or "anthropic" in config.advocate_model.lower()
+        assert (
+            "claude" in config.advocate_model.lower()
+            or "anthropic" in config.advocate_model.lower()
+        )
         assert "gpt" in config.devil_model.lower() or "openai" in config.devil_model.lower()
         assert "gemini" in config.judge_model.lower() or "google" in config.judge_model.lower()
 
@@ -564,17 +585,21 @@ class TestDeliberativeConsensus:
         # Round 2: Judge approves via LLM
         mock_llm.complete.side_effect = [
             # Advocate
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.9, "reasoning": "Well designed"}',
-                model="advocate",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.9, "reasoning": "Well designed"}',
+                    model="advocate",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
             # Judge (Devil is now via strategy, not LLM)
-            Result.ok(CompletionResponse(
-                content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Both agree"}',
-                model="judge",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Both agree"}',
+                    model="judge",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
         ]
 
         config = DeliberativeConfig(
@@ -582,7 +607,9 @@ class TestDeliberativeConsensus:
             devil_model="devil",
             judge_model="judge",
         )
-        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_approved)
+        evaluator = DeliberativeConsensus(
+            mock_llm, config, devil_strategy=mock_devil_strategy_approved
+        )
         result = await evaluator.deliberate(sample_context)
 
         assert result.is_ok
@@ -604,17 +631,21 @@ class TestDeliberativeConsensus:
         """Deliberation rejected due to Devil's ontological critique."""
         mock_llm.complete.side_effect = [
             # Advocate approves
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.9, "reasoning": "Looks good"}',
-                model="advocate",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.9, "reasoning": "Looks good"}',
+                    model="advocate",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
             # Judge rejects based on Devil's argument (Devil is via strategy)
-            Result.ok(CompletionResponse(
-                content='{"verdict": "rejected", "confidence": 0.8, "reasoning": "Devil\'s critique is valid"}',
-                model="judge",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"verdict": "rejected", "confidence": 0.8, "reasoning": "Devil\'s critique is valid"}',
+                    model="judge",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
         ]
 
         config = DeliberativeConfig(
@@ -622,7 +653,9 @@ class TestDeliberativeConsensus:
             devil_model="devil",
             judge_model="judge",
         )
-        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_rejected)
+        evaluator = DeliberativeConsensus(
+            mock_llm, config, devil_strategy=mock_devil_strategy_rejected
+        )
         result = await evaluator.deliberate(sample_context)
 
         assert result.is_ok
@@ -641,17 +674,21 @@ class TestDeliberativeConsensus:
         """Deliberation with conditional approval."""
         mock_llm.complete.side_effect = [
             # Advocate approves
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.85, "reasoning": "Good overall"}',
-                model="advocate",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.85, "reasoning": "Good overall"}',
+                    model="advocate",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
             # Judge gives conditional (Devil concerns via strategy)
-            Result.ok(CompletionResponse(
-                content='{"verdict": "conditional", "confidence": 0.75, "reasoning": "Valid with changes", "conditions": ["Add error handling"]}',
-                model="judge",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"verdict": "conditional", "confidence": 0.75, "reasoning": "Valid with changes", "conditions": ["Add error handling"]}',
+                    model="judge",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
         ]
 
         config = DeliberativeConfig(
@@ -659,7 +696,9 @@ class TestDeliberativeConsensus:
             devil_model="devil",
             judge_model="judge",
         )
-        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_rejected)
+        evaluator = DeliberativeConsensus(
+            mock_llm, config, devil_strategy=mock_devil_strategy_rejected
+        )
         result = await evaluator.deliberate(sample_context)
 
         assert result.is_ok
@@ -686,7 +725,9 @@ class TestDeliberativeConsensus:
             devil_model="devil",
             judge_model="judge",
         )
-        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_approved)
+        evaluator = DeliberativeConsensus(
+            mock_llm, config, devil_strategy=mock_devil_strategy_approved
+        )
         result = await evaluator.deliberate(sample_context)
 
         assert result.is_err
@@ -701,17 +742,21 @@ class TestDeliberativeConsensus:
     ) -> None:
         """Events are generated correctly."""
         mock_llm.complete.side_effect = [
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
-                model="advocate",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+                    model="advocate",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
             # Judge (Devil is via strategy)
-            Result.ok(CompletionResponse(
-                content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Agreed"}',
-                model="judge",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Agreed"}',
+                    model="judge",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
         ]
 
         config = DeliberativeConfig(
@@ -719,7 +764,9 @@ class TestDeliberativeConsensus:
             devil_model="devil",
             judge_model="judge",
         )
-        evaluator = DeliberativeConsensus(mock_llm, config, devil_strategy=mock_devil_strategy_approved)
+        evaluator = DeliberativeConsensus(
+            mock_llm, config, devil_strategy=mock_devil_strategy_approved
+        )
         result = await evaluator.deliberate(sample_context, trigger_reason="test")
 
         assert result.is_ok
@@ -737,17 +784,21 @@ class TestRunDeliberativeEvaluation:
         """Test the convenience function works."""
         mock_llm = AsyncMock()
         mock_llm.complete.side_effect = [
-            Result.ok(CompletionResponse(
-                content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
-                model="advocate",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"approved": true, "confidence": 0.9, "reasoning": "Good"}',
+                    model="advocate",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
             # Judge (Devil is via strategy)
-            Result.ok(CompletionResponse(
-                content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Agreed"}',
-                model="judge",
-                usage=UsageInfo(0, 0, 0),
-            )),
+            Result.ok(
+                CompletionResponse(
+                    content='{"verdict": "approved", "confidence": 0.85, "reasoning": "Agreed"}',
+                    model="judge",
+                    usage=UsageInfo(0, 0, 0),
+                )
+            ),
         ]
 
         # Create mock devil strategy

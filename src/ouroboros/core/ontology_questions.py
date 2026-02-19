@@ -197,9 +197,7 @@ def build_devil_advocate_prompt() -> str:
     Returns:
         A formatted prompt string for the Devil's Advocate role.
     """
-    questions = "\n".join(
-        f"- {q.question} ({q.purpose})" for q in ONTOLOGICAL_QUESTIONS.values()
-    )
+    questions = "\n".join(f"- {q.question} ({q.purpose})" for q in ONTOLOGICAL_QUESTIONS.values())
     return f"""You are the DEVIL'S ADVOCATE. Your role is to critically examine
 this solution using ONTOLOGICAL ANALYSIS.
 
@@ -255,9 +253,11 @@ def get_question(question_type: OntologicalQuestionType) -> OntologicalQuestion:
 # - SYMPTOM treatment indicators: "surface", "temporary", "workaround"
 # ============================================================================
 
+
 def _get_ontology_analysis_system_prompt() -> str:
     """Lazy-load ontology analysis system prompt to avoid import-time I/O."""
     from ouroboros.agents.loader import load_agent_prompt
+
     return load_agent_prompt("ontology-analyst")
 
 
@@ -318,15 +318,11 @@ def _parse_insight_response(response_text: str) -> OntologicalInsight | None:
     # Extract and validate fields with defaults
     try:
         prereqs_raw = data.get("prerequisites", [])
-        prerequisites = (
-            tuple(str(p) for p in prereqs_raw) if isinstance(prereqs_raw, list) else ()
-        )
+        prerequisites = tuple(str(p) for p in prereqs_raw) if isinstance(prereqs_raw, list) else ()
 
         assumptions_raw = data.get("hidden_assumptions", [])
         hidden_assumptions = (
-            tuple(str(a) for a in assumptions_raw)
-            if isinstance(assumptions_raw, list)
-            else ()
+            tuple(str(a) for a in assumptions_raw) if isinstance(assumptions_raw, list) else ()
         )
 
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))

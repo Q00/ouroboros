@@ -1,7 +1,5 @@
 """Tests for Consensus Trigger Matrix."""
 
-import pytest
-
 from ouroboros.evaluation.models import SemanticResult
 from ouroboros.evaluation.trigger import (
     ConsensusTrigger,

@@ -34,21 +34,19 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import Enum
+import time
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from ouroboros.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Awaitable
+    from collections.abc import Awaitable, Callable
 
-    from ouroboros.events.base import BaseEvent
-    from ouroboros.plugin.agents.registry import AgentSpec
     from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
+    from ouroboros.plugin.agents.registry import AgentSpec
 
 log = get_logger(__name__)
 
@@ -288,9 +286,7 @@ class AgentPool:
 
         # Pool state
         self._agents: dict[str, AgentInstance] = {}
-        self._task_queue: asyncio.PriorityQueue[tuple[int, TaskRequest]] = (
-            asyncio.PriorityQueue()
-        )
+        self._task_queue: asyncio.PriorityQueue[tuple[int, TaskRequest]] = asyncio.PriorityQueue()
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_results: dict[str, TaskResult] = {}
         self._task_waiters: dict[str, set[asyncio.Future[None]]] = {}
@@ -447,7 +443,7 @@ class AgentPool:
 
         try:
             await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Remove from waiters
             self._task_waiters[task_id].discard(future)
             if not self._task_waiters[task_id]:
@@ -478,11 +474,13 @@ class AgentPool:
             from ouroboros.plugin.agents.registry import (
                 BUILTIN_AGENTS,
             )
+
             spec = BUILTIN_AGENTS.get("executor")
 
         if not spec:
             # Fallback to basic spec
-            from ouroboros.plugin.agents.registry import AgentSpec, AgentRole
+            from ouroboros.plugin.agents.registry import AgentRole, AgentSpec
+
             spec = AgentSpec(
                 name="executor",
                 role=AgentRole.EXECUTION,
@@ -583,7 +581,7 @@ class AgentPool:
                 task_coro = self._execute_task(agent, task)
                 self._running_tasks[task.id] = asyncio.create_task(task_coro)
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except Exception as e:
                 log.exception(
@@ -610,14 +608,12 @@ class AgentPool:
         while time.time() < deadline:
             # Find idle agent
             for agent in self._agents.values():
-                if (
-                    agent.state == AgentState.IDLE
-                    and agent.spec.name == agent_type
-                ):
+                if agent.state == AgentState.IDLE and agent.spec.name == agent_type:
                     return agent
 
                 # Check role match
                 from ouroboros.plugin.agents.registry import AgentRole
+
                 try:
                     role = AgentRole(agent_type)
                     if agent.state == AgentState.IDLE and agent.spec.role == role:
@@ -626,10 +622,7 @@ class AgentPool:
                     pass
 
             # No agent available, try to spawn if under limit
-            if (
-                self._config.enable_auto_scaling
-                and len(self._agents) < self._config.max_instances
-            ):
+            if self._config.enable_auto_scaling and len(self._agents) < self._config.max_instances:
                 new_id = f"agent-{uuid4().hex[:8]}"
                 await self._spawn_agent(new_id)
                 continue
@@ -673,12 +666,14 @@ class AgentPool:
                 # Callback for progress
                 if task.callback:
                     try:
-                        await task.callback({
-                            "type": "progress",
-                            "content": msg.content,
-                            "agent_id": agent.id,
-                            "task_id": task.id,
-                        })
+                        await task.callback(
+                            {
+                                "type": "progress",
+                                "content": msg.content,
+                                "agent_id": agent.id,
+                                "task_id": task.id,
+                            }
+                        )
                     except Exception as e:
                         log.warning(
                             "agents.pool.callback_error",
@@ -773,9 +768,7 @@ class AgentPool:
             try:
                 await asyncio.sleep(self._config.health_check_interval)
 
-                idle_count = sum(
-                    1 for a in self._agents.values() if a.state == AgentState.IDLE
-                )
+                idle_count = sum(1 for a in self._agents.values() if a.state == AgentState.IDLE)
                 busy_count = len(self._agents) - idle_count
                 queue_size = self._task_queue.qsize()
 
@@ -793,14 +786,9 @@ class AgentPool:
                     )
 
                 # Scale down if too many idle
-                elif (
-                    idle_count > self._config.min_instances
-                    and queue_size == 0
-                ):
+                elif idle_count > self._config.min_instances and queue_size == 0:
                     # Find oldest idle agent
-                    idle_agents = [
-                        a for a in self._agents.values() if a.state == AgentState.IDLE
-                    ]
+                    idle_agents = [a for a in self._agents.values() if a.state == AgentState.IDLE]
                     if idle_agents:
                         oldest = min(idle_agents, key=lambda a: a.last_activity)
                         if oldest.idle_duration > self._config.idle_timeout:

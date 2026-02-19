@@ -17,7 +17,6 @@ from textual.widget import Widget
 from textual.widgets import Label, Static, Tree
 from textual.widgets.tree import TreeNode
 
-
 # Status display configuration
 STATUS_ICONS = {
     "pending": "[dim][ ][/dim]",

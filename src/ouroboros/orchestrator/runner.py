@@ -32,8 +32,7 @@ from ouroboros.core.errors import OuroborosError
 from ouroboros.core.types import Result
 from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.adapter import DEFAULT_TOOLS, AgentMessage, ClaudeAgentAdapter
-from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
+from ouroboros.orchestrator.adapter import DEFAULT_TOOLS, ClaudeAgentAdapter
 from ouroboros.orchestrator.events import (
     create_drift_measured_event,
     create_mcp_tools_loaded_event,
@@ -44,6 +43,7 @@ from ouroboros.orchestrator.events import (
     create_tool_called_event,
     create_workflow_progress_event,
 )
+from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.mcp_tools import MCPToolProvider
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 
@@ -347,6 +347,7 @@ class OrchestratorRunner:
 
         # Control console logging based on debug mode
         from ouroboros.observability.logging import set_console_logging
+
         set_console_logging(self._debug)
 
         log.info(
@@ -469,22 +470,22 @@ class OrchestratorRunner:
                     current_completed = state_tracker.state.completed_count
                     if current_completed > last_completed_count:
                         status.stop()
-                        self._console.print(
-                            f"  [green]✓ AC {current_completed} completed[/green]"
-                        )
+                        self._console.print(f"  [green]✓ AC {current_completed} completed[/green]")
                         status.start()
                         last_completed_count = current_completed
 
                     # Update status with current activity
-                    ac_progress = f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
+                    ac_progress = (
+                        f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
+                    )
                     tool_info = f" | {message.tool_name}" if message.tool_name else ""
-                    status.update(f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]")
+                    status.update(
+                        f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]"
+                    )
 
                     # Emit workflow progress event for TUI
                     # Use exec_id defined at start of function (not execution_id param)
-                    progress_data = state_tracker.state.to_tui_message_data(
-                        execution_id=exec_id
-                    )
+                    progress_data = state_tracker.state.to_tui_message_data(execution_id=exec_id)
                     workflow_event = create_workflow_progress_event(
                         execution_id=exec_id,
                         session_id=tracker.session_id,
@@ -678,9 +679,7 @@ class OrchestratorRunner:
         )
 
         # Analyze dependencies
-        self._console.print(
-            "\n[cyan]Analyzing AC dependencies...[/cyan]"
-        )
+        self._console.print("\n[cyan]Analyzing AC dependencies...[/cyan]")
 
         analyzer = DependencyAnalyzer()
         dep_result = await analyzer.analyze(seed.acceptance_criteria)
@@ -735,7 +734,7 @@ class OrchestratorRunner:
 
         # Build summary message
         summary_parts = [
-            f"Parallel Execution Complete",
+            "Parallel Execution Complete",
             f"Success: {parallel_result.success_count}/{len(seed.acceptance_criteria)}",
         ]
         if parallel_result.failure_count > 0:
@@ -840,6 +839,7 @@ class OrchestratorRunner:
         """
         # Control console logging based on debug mode
         from ouroboros.observability.logging import set_console_logging
+
         set_console_logging(self._debug)
 
         log.info(
@@ -953,16 +953,18 @@ Note: This is a resumed session. Please continue from where execution was interr
                     current_completed = state_tracker.state.completed_count
                     if current_completed > last_completed_count:
                         status.stop()
-                        self._console.print(
-                            f"  [green]✓ AC {current_completed} completed[/green]"
-                        )
+                        self._console.print(f"  [green]✓ AC {current_completed} completed[/green]")
                         status.start()
                         last_completed_count = current_completed
 
                     # Update status with current activity
-                    ac_progress = f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
+                    ac_progress = (
+                        f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
+                    )
                     tool_info = f" | {message.tool_name}" if message.tool_name else ""
-                    status.update(f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]")
+                    status.update(
+                        f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]"
+                    )
 
                     # Emit workflow progress event for TUI
                     progress_data = state_tracker.state.to_tui_message_data(
@@ -1064,6 +1066,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     details={"session_id": session_id},
                 )
             )
+
 
 __all__ = [
     "OrchestratorError",

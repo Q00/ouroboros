@@ -29,9 +29,7 @@ def checkpoint_store(tmp_path: Path) -> CheckpointStore:
 
 
 @pytest.fixture
-async def uow(
-    event_store: EventStore, checkpoint_store: CheckpointStore
-) -> UnitOfWork:
+async def uow(event_store: EventStore, checkpoint_store: CheckpointStore) -> UnitOfWork:
     """Create a UnitOfWork instance."""
     return UnitOfWork(event_store, checkpoint_store)
 
@@ -55,9 +53,7 @@ def sample_event() -> BaseEvent:
 class TestUnitOfWork:
     """Test UnitOfWork pattern."""
 
-    async def test_add_event_accumulates_pending_events(
-        self, uow: UnitOfWork
-    ) -> None:
+    async def test_add_event_accumulates_pending_events(self, uow: UnitOfWork) -> None:
         """UnitOfWork.add_event() accumulates events."""
         assert uow.pending_event_count == 0
 
@@ -67,18 +63,14 @@ class TestUnitOfWork:
         uow.add_event(create_sample_event())
         assert uow.pending_event_count == 2
 
-    async def test_add_events_accumulates_multiple_events(
-        self, uow: UnitOfWork
-    ) -> None:
+    async def test_add_events_accumulates_multiple_events(self, uow: UnitOfWork) -> None:
         """UnitOfWork.add_events() accumulates multiple events."""
         events = [create_sample_event() for _ in range(3)]
 
         uow.add_events(events)
         assert uow.pending_event_count == 3
 
-    async def test_has_pending_events_returns_true_when_events_exist(
-        self, uow: UnitOfWork
-    ) -> None:
+    async def test_has_pending_events_returns_true_when_events_exist(self, uow: UnitOfWork) -> None:
         """UnitOfWork.has_pending_events() returns True when events exist."""
         assert not uow.has_pending_events()
 
@@ -98,9 +90,7 @@ class TestUnitOfWork:
         assert result.is_ok
 
         # Verify event was persisted
-        events = await event_store.replay(
-            sample_event.aggregate_type, sample_event.aggregate_id
-        )
+        events = await event_store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
         assert len(events) == 1
         assert events[0].type == sample_event.type
 
@@ -123,9 +113,7 @@ class TestUnitOfWork:
         loaded = load_result.value
         assert loaded.phase == "phase1"
 
-    async def test_commit_clears_pending_events(
-        self, uow: UnitOfWork
-    ) -> None:
+    async def test_commit_clears_pending_events(self, uow: UnitOfWork) -> None:
         """UnitOfWork.commit() clears pending events on success."""
         uow.add_event(create_sample_event())
         uow.add_event(create_sample_event())
@@ -148,14 +136,10 @@ class TestUnitOfWork:
         assert result.is_ok
 
         # Verify event was still persisted
-        events = await event_store.replay(
-            sample_event.aggregate_type, sample_event.aggregate_id
-        )
+        events = await event_store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
         assert len(events) == 1
 
-    async def test_rollback_clears_pending_events(
-        self, uow: UnitOfWork
-    ) -> None:
+    async def test_rollback_clears_pending_events(self, uow: UnitOfWork) -> None:
         """UnitOfWork.rollback() clears pending events."""
         uow.add_event(create_sample_event())
         uow.add_event(create_sample_event())
@@ -175,9 +159,7 @@ class TestUnitOfWork:
         uow.rollback()
 
         # Verify no events were persisted
-        events = await event_store.replay(
-            sample_event.aggregate_type, sample_event.aggregate_id
-        )
+        events = await event_store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
         assert len(events) == 0
 
     async def test_multiple_commits_accumulate_events(
@@ -200,9 +182,7 @@ class TestUnitOfWork:
         assert result2.is_ok
 
         # Verify both events persisted
-        events = await event_store.replay(
-            event1.aggregate_type, event1.aggregate_id
-        )
+        events = await event_store.replay(event1.aggregate_type, event1.aggregate_id)
         assert len(events) == 2
 
 
@@ -225,9 +205,7 @@ class TestPhaseTransaction:
             tx.add_event(sample_event)
 
         # Verify event was persisted
-        events = await event_store.replay(
-            sample_event.aggregate_type, sample_event.aggregate_id
-        )
+        events = await event_store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
         assert len(events) == 1
 
         # Verify checkpoint was saved
@@ -253,9 +231,7 @@ class TestPhaseTransaction:
                 raise ValueError("Test error")
 
         # Verify no events were persisted
-        events = await event_store.replay(
-            sample_event.aggregate_type, sample_event.aggregate_id
-        )
+        events = await event_store.replay(sample_event.aggregate_type, sample_event.aggregate_id)
         assert len(events) == 0
 
         # Verify no checkpoint was saved
@@ -278,9 +254,7 @@ class TestPhaseTransaction:
             tx.add_events(events)
 
         # Verify all events were persisted
-        persisted = await event_store.replay(
-            events[0].aggregate_type, events[0].aggregate_id
-        )
+        persisted = await event_store.replay(events[0].aggregate_type, events[0].aggregate_id)
         assert len(persisted) == 3
 
     async def test_phase_transaction_with_no_events(
@@ -299,9 +273,7 @@ class TestPhaseTransaction:
         assert load_result.is_ok
         assert load_result.value.phase == phase
 
-    async def test_phase_transaction_propagates_exceptions(
-        self, uow: UnitOfWork
-    ) -> None:
+    async def test_phase_transaction_propagates_exceptions(self, uow: UnitOfWork) -> None:
         """PhaseTransaction propagates exceptions (doesn't suppress)."""
         seed_id = "seed-123"
         phase = "planning"
@@ -336,9 +308,7 @@ class TestUnitOfWorkIntegration:
             tx.add_event(event2)
 
         # Verify all events persisted
-        events = await event_store.replay(
-            event1.aggregate_type, event1.aggregate_id
-        )
+        events = await event_store.replay(event1.aggregate_type, event1.aggregate_id)
         assert len(events) == 2
 
         # Verify latest checkpoint is from execution phase

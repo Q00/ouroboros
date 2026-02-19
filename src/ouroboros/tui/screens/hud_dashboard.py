@@ -29,14 +29,13 @@ from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
-from textual.message import Message
+from textual.containers import Container, Horizontal
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Footer, Label, Static, Tree
+from textual.widgets import Footer, Tree
 
 from ouroboros.tui.components import AgentsPanel, EventLog, ProgressTracker, TokenTracker
-from ouroboros.tui.components.event_log import EventType, EventSeverity
+from ouroboros.tui.components.event_log import EventSeverity, EventType
 from ouroboros.tui.components.progress import Phase
 from ouroboros.tui.events import (
     ACUpdated,
@@ -55,7 +54,6 @@ from ouroboros.tui.events import (
     WorkflowProgressUpdated,
 )
 from ouroboros.tui.screens.dashboard_v3 import (
-    STATUS_ICONS,
     DoubleDiamondBar,
     LiveActivityBar,
     NodeDetailPanel,
@@ -185,17 +183,16 @@ class HUDDashboardScreen(Screen[None]):
         self._phase_bar = DoubleDiamondBar()
         yield self._phase_bar
 
-        with Container(classes="main-area"):
-            with Horizontal(classes="content-row"):
-                with Container(classes="tree-panel"):
-                    self._tree = SelectableACTree(
-                        tree_data=self._state.ac_tree if self._state else {},
-                    )
-                    yield self._tree
+        with Container(classes="main-area"), Horizontal(classes="content-row"):
+            with Container(classes="tree-panel"):
+                self._tree = SelectableACTree(
+                    tree_data=self._state.ac_tree if self._state else {},
+                )
+                yield self._tree
 
-                with Container(classes="detail-panel"):
-                    self._detail_panel = NodeDetailPanel()
-                    yield self._detail_panel
+            with Container(classes="detail-panel"):
+                self._detail_panel = NodeDetailPanel()
+                yield self._detail_panel
 
         # HUD row - visibility controlled by reactive
         with Horizontal(classes="hud-row", id="hud-row"):
@@ -265,7 +262,9 @@ class HUDDashboardScreen(Screen[None]):
                 "deliver": Phase.DELIVER,
             }
             phase = phase_map.get(message.current_phase.lower(), Phase.DISCOVER)
-            self._progress_tracker.set_phase_progress(phase, 0.0, f"Started {message.current_phase}")
+            self._progress_tracker.set_phase_progress(
+                phase, 0.0, f"Started {message.current_phase}"
+            )
 
             # Log phase change
             self._event_log.add_entry(
@@ -319,7 +318,9 @@ class HUDDashboardScreen(Screen[None]):
         # Update progress tracker
         if self._progress_tracker:
             self._progress_tracker.set_overall_progress(
-                percent=(message.completed_count / message.total_count * 100) if message.total_count > 0 else 0,
+                percent=(message.completed_count / message.total_count * 100)
+                if message.total_count > 0
+                else 0,
                 completed=message.completed_count,
                 total=message.total_count,
                 elapsed=message.elapsed_display or "",
@@ -366,12 +367,14 @@ class HUDDashboardScreen(Screen[None]):
         if existing:
             existing["status"] = message.status
         else:
-            self._subtasks[ac_index].append({
-                "id": message.sub_task_id,
-                "index": message.sub_task_index,
-                "content": message.content,
-                "status": message.status,
-            })
+            self._subtasks[ac_index].append(
+                {
+                    "id": message.sub_task_id,
+                    "index": message.sub_task_index,
+                    "content": message.content,
+                    "status": message.status,
+                }
+            )
 
     def on_tool_call_started(self, message: ToolCallStarted) -> None:
         """Handle tool call started - show inline activity."""
@@ -425,7 +428,11 @@ class HUDDashboardScreen(Screen[None]):
 
         # Update progress tracker activity
         if self._progress_tracker:
-            thinking = message.thinking_text[:50] + "..." if len(message.thinking_text) > 50 else message.thinking_text
+            thinking = (
+                message.thinking_text[:50] + "..."
+                if len(message.thinking_text) > 50
+                else message.thinking_text
+            )
             self._progress_tracker.set_current_activity(f"Thinking: {thinking}")
 
     # ─────────────────────────────────────────────────────────────────────────

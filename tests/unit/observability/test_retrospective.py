@@ -25,7 +25,6 @@ from ouroboros.core.seed import (
 )
 from ouroboros.observability.drift import DriftMetrics
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -188,9 +187,7 @@ class TestRetrospectiveAnalysis:
 
         assert isinstance(result, RetrospectiveResult)
 
-    def test_analyze_includes_drift_metrics(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_analyze_includes_drift_metrics(self, sample_seed: Seed) -> None:
         """Analysis result includes drift metrics."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -209,9 +206,7 @@ class TestRetrospectiveAnalysis:
         assert 0.0 <= result.drift_metrics.constraint_drift <= 1.0
         assert 0.0 <= result.drift_metrics.ontology_drift <= 1.0
 
-    def test_analyze_includes_iteration_number(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_analyze_includes_iteration_number(self, sample_seed: Seed) -> None:
         """Analysis result includes iteration number."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -227,9 +222,7 @@ class TestRetrospectiveAnalysis:
 
         assert result.iteration == 6
 
-    def test_analyze_compares_to_original_seed(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_analyze_compares_to_original_seed(self, sample_seed: Seed) -> None:
         """Analysis compares current state to original seed."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -255,9 +248,7 @@ class TestRetrospectiveAnalysis:
 class TestCourseCorrection:
     """Tests for course correction recommendations (AC4)."""
 
-    def test_no_recommendations_for_low_drift(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_no_recommendations_for_low_drift(self, sample_seed: Seed) -> None:
         """No correction needed when drift is low."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -274,9 +265,7 @@ class TestCourseCorrection:
         # Low drift - recommendations should be empty or minimal
         assert result.needs_correction is False or len(result.recommendations) == 0
 
-    def test_recommendations_for_high_goal_drift(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_recommendations_for_high_goal_drift(self, sample_seed: Seed) -> None:
         """Recommendations generated for high goal drift."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -294,9 +283,7 @@ class TestCourseCorrection:
         assert len(result.recommendations) > 0
         assert any("goal" in r.lower() for r in result.recommendations)
 
-    def test_recommendations_for_constraint_violations(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_recommendations_for_constraint_violations(self, sample_seed: Seed) -> None:
         """Recommendations generated for constraint violations."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -317,9 +304,7 @@ class TestCourseCorrection:
         assert len(result.recommendations) > 0
         assert any("constraint" in r.lower() for r in result.recommendations)
 
-    def test_recommendations_for_ontology_drift(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_recommendations_for_ontology_drift(self, sample_seed: Seed) -> None:
         """Recommendations generated for ontology drift."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -334,7 +319,9 @@ class TestCourseCorrection:
         )
 
         assert result.needs_correction is True
-        assert any("ontology" in r.lower() or "concept" in r.lower() for r in result.recommendations)
+        assert any(
+            "ontology" in r.lower() or "concept" in r.lower() for r in result.recommendations
+        )
 
 
 # =============================================================================
@@ -345,9 +332,7 @@ class TestCourseCorrection:
 class TestHumanNotification:
     """Tests for high drift human notification (AC5)."""
 
-    def test_requires_human_attention_for_high_drift(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_requires_human_attention_for_high_drift(self, sample_seed: Seed) -> None:
         """High drift should require human attention."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -363,9 +348,7 @@ class TestHumanNotification:
 
         assert result.requires_human_attention is True
 
-    def test_no_human_attention_for_low_drift(
-        self, sample_seed: Seed
-    ) -> None:
+    def test_no_human_attention_for_low_drift(self, sample_seed: Seed) -> None:
         """Low drift should not require human attention."""
         from ouroboros.observability.retrospective import RetrospectiveAnalyzer
 
@@ -383,8 +366,8 @@ class TestHumanNotification:
 
     def test_notification_threshold_configurable(self) -> None:
         """Notification threshold can be configured."""
-        from ouroboros.observability.retrospective import RetrospectiveResult
         from ouroboros.observability.drift import DriftMetrics
+        from ouroboros.observability.retrospective import RetrospectiveResult
 
         metrics = DriftMetrics(goal_drift=0.4, constraint_drift=0.3, ontology_drift=0.2)
 
@@ -411,11 +394,11 @@ class TestRetrospectiveEvents:
 
     def test_retrospective_completed_event(self, sample_seed: Seed) -> None:
         """RetrospectiveCompletedEvent is created with analysis results."""
+        from ouroboros.observability.drift import DriftMetrics
         from ouroboros.observability.retrospective import (
             RetrospectiveCompletedEvent,
             RetrospectiveResult,
         )
-        from ouroboros.observability.drift import DriftMetrics
 
         metrics = DriftMetrics(goal_drift=0.2, constraint_drift=0.1, ontology_drift=0.1)
         result = RetrospectiveResult(
@@ -441,11 +424,11 @@ class TestRetrospectiveEvents:
 
     def test_human_attention_required_event(self, sample_seed: Seed) -> None:
         """HumanAttentionRequiredEvent is created for high drift."""
+        from ouroboros.observability.drift import DriftMetrics
         from ouroboros.observability.retrospective import (
             HumanAttentionRequiredEvent,
             RetrospectiveResult,
         )
-        from ouroboros.observability.drift import DriftMetrics
 
         metrics = DriftMetrics(goal_drift=0.6, constraint_drift=0.5, ontology_drift=0.4)
         result = RetrospectiveResult(
@@ -479,8 +462,8 @@ class TestRetrospectiveEdgeCases:
 
     def test_result_is_immutable(self) -> None:
         """RetrospectiveResult is immutable."""
-        from ouroboros.observability.retrospective import RetrospectiveResult
         from ouroboros.observability.drift import DriftMetrics
+        from ouroboros.observability.retrospective import RetrospectiveResult
 
         metrics = DriftMetrics(goal_drift=0.2, constraint_drift=0.1, ontology_drift=0.1)
         result = RetrospectiveResult(

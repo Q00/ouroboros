@@ -421,13 +421,15 @@ class StateStore:
             try:
                 with open(path, encoding="utf-8") as f:
                     data = json.load(f)
-                    checkpoints.append({
-                        "checkpoint_id": data.get("checkpoint_id", path.stem),
-                        "session_id": data.get("session_id"),
-                        "phase": data.get("phase"),
-                        "created_at": data.get("created_at"),
-                        "path": str(path),
-                    })
+                    checkpoints.append(
+                        {
+                            "checkpoint_id": data.get("checkpoint_id", path.stem),
+                            "session_id": data.get("session_id"),
+                            "phase": data.get("phase"),
+                            "created_at": data.get("created_at"),
+                            "path": str(path),
+                        }
+                    )
             except Exception:
                 # Skip invalid checkpoint files
                 continue

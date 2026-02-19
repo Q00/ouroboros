@@ -1,11 +1,8 @@
 """Tests for MCP client manager."""
 
-import pytest
-
 from ouroboros.mcp.client.manager import (
     ConnectionState,
     MCPClientManager,
-    ServerConnection,
 )
 from ouroboros.mcp.errors import MCPClientError
 from ouroboros.mcp.types import MCPServerConfig, TransportType

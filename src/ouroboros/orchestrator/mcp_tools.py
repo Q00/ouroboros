@@ -28,10 +28,9 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import (
     MCPClientError,
     MCPConnectionError,
-    MCPTimeoutError,
     MCPToolError,
 )
-from ouroboros.mcp.types import MCPToolDefinition, MCPToolResult
+from ouroboros.mcp.types import MCPToolResult
 from ouroboros.observability.logging import get_logger
 
 if TYPE_CHECKING:
@@ -371,7 +370,7 @@ class MCPToolProvider:
 
         try:
             result = await _do_call()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "orchestrator.mcp_tools.timeout_after_retries",
                 tool_name=tool_info.name,

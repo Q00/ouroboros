@@ -41,9 +41,9 @@ from ouroboros.plugin.agents import (
 from ouroboros.plugin.orchestration import (
     ModelRouter,
     RoutingContext,
+    ScheduledTask,
     Scheduler,
     SchedulerConfig,
-    ScheduledTask,
     TaskGraph,
 )
 from ouroboros.plugin.skills import (

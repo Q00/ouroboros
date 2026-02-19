@@ -1,6 +1,5 @@
 """Tests for TODO Registry (Story 7-1)."""
 
-from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -397,15 +396,10 @@ class TestTodoRegistry:
         registry = TodoRegistry(_event_store=mock_event_store)
 
         # Create multiple TODOs
-        todos = [
-            Todo.create(f"Task {i}", "ctx", Priority.MEDIUM)
-            for i in range(5)
-        ]
+        todos = [Todo.create(f"Task {i}", "ctx", Priority.MEDIUM) for i in range(5)]
         registry._todo_ids = {t.id for t in todos}
 
-        mock_event_store.replay.side_effect = [
-            [_create_todo_event(t)] for t in todos
-        ]
+        mock_event_store.replay.side_effect = [[_create_todo_event(t)] for t in todos]
 
         result = await registry.get_pending(limit=3)
 
@@ -437,9 +431,7 @@ class TestTodoRegistry:
             [pending_event],
             [
                 _create_todo_event(Todo.create("Done", "ctx")),
-                _create_status_change_event(
-                    done, TodoStatus.PENDING, TodoStatus.DONE
-                ),
+                _create_status_change_event(done, TodoStatus.PENDING, TodoStatus.DONE),
             ],
         ]
 
@@ -464,7 +456,7 @@ class TestTodoRegistryIntegration:
     """Integration tests for TodoRegistry with real EventStore."""
 
     @pytest.fixture
-    async def event_store(self, tmp_path) -> "EventStore":
+    async def event_store(self, tmp_path) -> EventStore:
         """Create real EventStore with temp database."""
         from ouroboros.persistence.event_store import EventStore
 
@@ -512,9 +504,7 @@ class TestTodoRegistryIntegration:
         assert final_result.value.status == TodoStatus.DONE
 
     @pytest.mark.asyncio
-    async def test_failed_todo_with_error_message(
-        self, registry: TodoRegistry
-    ) -> None:
+    async def test_failed_todo_with_error_message(self, registry: TodoRegistry) -> None:
         """Test marking TODO as failed with error message."""
         reg_result = await registry.register(
             description="Flaky task",
@@ -533,9 +523,7 @@ class TestTodoRegistryIntegration:
         assert fail_result.value.error_message == "Connection refused"
 
     @pytest.mark.asyncio
-    async def test_multiple_todos_priority_sorting(
-        self, registry: TodoRegistry
-    ) -> None:
+    async def test_multiple_todos_priority_sorting(self, registry: TodoRegistry) -> None:
         """Test multiple TODOs are sorted by priority."""
         # Register in mixed order
         await registry.register("Low task", "ctx", Priority.LOW)

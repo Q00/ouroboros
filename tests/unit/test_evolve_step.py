@@ -10,7 +10,6 @@ from ouroboros.core.lineage import (
     EvaluationSummary,
     GenerationPhase,
     GenerationRecord,
-    LineageStatus,
     OntologyDelta,
     OntologyLineage,
 )
@@ -28,7 +27,6 @@ from ouroboros.evolution.convergence import ConvergenceSignal
 from ouroboros.evolution.loop import (
     EvolutionaryLoop,
     EvolutionaryLoopConfig,
-    EvolutionaryResult,
     GenerationResult,
     StepAction,
     StepResult,
@@ -36,7 +34,6 @@ from ouroboros.evolution.loop import (
 from ouroboros.evolution.reflect import ReflectOutput
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.persistence.event_store import EventStore
-
 
 # -- Helpers --
 
@@ -156,9 +153,7 @@ async def seed_events_for_gen1(
     eval_summary: EvaluationSummary | None = None,
 ) -> None:
     """Populate EventStore with Gen 1 events."""
-    await event_store.append(
-        lineage_created(lineage_id, seed.goal)
-    )
+    await event_store.append(lineage_created(lineage_id, seed.goal))
     await event_store.append(
         lineage_generation_completed(
             lineage_id,
@@ -294,7 +289,9 @@ class TestEvolveStepGen2:
             parent_seed_id="seed_v1",
             fields=(
                 OntologyField(name="tasks", field_type="array", description="Tasks", required=True),
-                OntologyField(name="projects", field_type="array", description="Projects", required=True),
+                OntologyField(
+                    name="projects", field_type="array", description="Projects", required=True
+                ),
             ),
         )
         gen_result = GenerationResult(
@@ -303,7 +300,11 @@ class TestEvolveStepGen2:
             evaluation_summary=make_eval_summary(),
             wonder_output=make_wonder_output(),
             ontology_delta=OntologyDelta(
-                added_fields=(OntologyField(name="projects", field_type="array", description="Projects", required=True),),
+                added_fields=(
+                    OntologyField(
+                        name="projects", field_type="array", description="Projects", required=True
+                    ),
+                ),
                 removed_fields=(),
                 modified_fields=(),
                 similarity=0.7,
@@ -422,9 +423,8 @@ class TestEvolveStepErrors:
         # Create events including convergence
         await seed_events_for_gen1(store, "lin_done", seed, make_eval_summary())
         from ouroboros.events.lineage import lineage_converged
-        await store.append(
-            lineage_converged("lin_done", 1, "Ontology stable", 0.98)
-        )
+
+        await store.append(lineage_converged("lin_done", 1, "Ontology stable", 0.98))
 
         loop = make_loop(store)
         result = await loop.evolve_step("lin_done")
@@ -531,12 +531,8 @@ class TestEvolveStepResume:
             lineage_generation_started,
         )
 
-        await store.append(
-            lineage_generation_started("lin_resume", 2, "wondering")
-        )
-        await store.append(
-            lineage_generation_failed("lin_resume", 2, "reflecting", "LLM timeout")
-        )
+        await store.append(lineage_generation_started("lin_resume", 2, "wondering"))
+        await store.append(lineage_generation_failed("lin_resume", 2, "reflecting", "LLM timeout"))
 
         # Now resume — should retry Gen 2
         seed_v2 = make_seed(seed_id="seed_resume_2", parent_seed_id="seed_resume_1")
@@ -685,10 +681,13 @@ class TestEvolveStepHandler:
         handler = EvolveStepHandler(evolutionary_loop=loop)
 
         import yaml
-        result = await handler.handle({
-            "lineage_id": "lin_handler_test",
-            "seed_content": yaml.dump(seed.to_dict()),
-        })
+
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_handler_test",
+                "seed_content": yaml.dump(seed.to_dict()),
+            }
+        )
 
         assert result.is_ok
         assert "Generation 1" in result.value.text_content

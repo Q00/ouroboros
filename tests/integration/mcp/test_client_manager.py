@@ -6,8 +6,8 @@ and health checks.
 """
 
 import asyncio
-import sys
 from contextlib import asynccontextmanager, contextmanager
+import sys
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -20,7 +20,6 @@ from ouroboros.mcp.client.manager import (
 from ouroboros.mcp.errors import MCPConnectionError, MCPTimeoutError
 from ouroboros.mcp.types import (
     MCPServerConfig,
-    MCPToolDefinition,
     MCPToolParameter,
     ToolInputType,
     TransportType,
@@ -29,7 +28,6 @@ from ouroboros.mcp.types import (
 from .conftest import (
     MockMCPServerState,
     create_mock_client_session_class,
-    create_mock_session_factory,
 )
 
 
@@ -330,9 +328,13 @@ class TestMCPClientManagerMultiServer:
         manager = MCPClientManager()
 
         # Server 1 with tools A and B
-        state1 = create_mock_server_with_tools("server1", [("toolA", "Tool A"), ("toolB", "Tool B")])
+        state1 = create_mock_server_with_tools(
+            "server1", [("toolA", "Tool A"), ("toolB", "Tool B")]
+        )
         # Server 2 with tools C and D
-        state2 = create_mock_server_with_tools("server2", [("toolC", "Tool C"), ("toolD", "Tool D")])
+        state2 = create_mock_server_with_tools(
+            "server2", [("toolC", "Tool C"), ("toolD", "Tool D")]
+        )
 
         await manager.add_server(create_server_config("server1"))
         await manager.add_server(create_server_config("server2"))

@@ -1,7 +1,5 @@
 """Tests for MCP error hierarchy."""
 
-import pytest
-
 from ouroboros.core.errors import OuroborosError
 from ouroboros.mcp.errors import (
     MCPAuthError,

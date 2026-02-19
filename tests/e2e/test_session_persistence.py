@@ -9,15 +9,12 @@ This module tests the complete session lifecycle:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
-import pytest
-
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.runner import OrchestratorRunner
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -30,9 +27,9 @@ class TestSessionCreation:
 
     async def test_session_created_on_execution_start(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that a session is created when execution starts."""
         runner = OrchestratorRunner(
@@ -57,9 +54,9 @@ class TestSessionCreation:
 
     async def test_session_has_unique_id(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that each execution creates a unique session ID."""
         runner = OrchestratorRunner(
@@ -77,9 +74,9 @@ class TestSessionCreation:
 
     async def test_session_tracks_execution_id(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that session tracks the execution ID."""
         runner = OrchestratorRunner(
@@ -105,17 +102,15 @@ class TestSessionEventTracking:
 
     async def test_progress_events_emitted(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that progress events are emitted during execution."""
         # Create a sequence with enough messages to trigger progress events
         messages = []
         for i in range(15):  # PROGRESS_EMIT_INTERVAL is 10
-            messages.append(
-                AgentMessage(type="assistant", content=f"Step {i}")
-            )
+            messages.append(AgentMessage(type="assistant", content=f"Step {i}"))
         messages.append(
             AgentMessage(
                 type="result",
@@ -144,9 +139,9 @@ class TestSessionEventTracking:
 
     async def test_tool_called_events_emitted(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that session events track execution."""
         messages = [
@@ -179,9 +174,9 @@ class TestSessionEventTracking:
 
     async def test_completion_event_emitted_on_success(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that completion event is emitted on successful execution."""
         runner = OrchestratorRunner(
@@ -200,9 +195,9 @@ class TestSessionEventTracking:
 
     async def test_failure_event_emitted_on_error(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that failure event is emitted on failed execution."""
         mock_claude_agent_adapter.add_failed_execution(
@@ -229,10 +224,10 @@ class TestSessionReconstruction:
 
     async def test_reconstruct_running_session(
         self,
-        event_store: "EventStore",
+        event_store: EventStore,
         mock_session_id: str,
         mock_execution_id: str,
-        sample_seed: "Seed",
+        sample_seed: Seed,
     ) -> None:
         """Test reconstructing a running session."""
         repo = SessionRepository(event_store)
@@ -261,10 +256,10 @@ class TestSessionReconstruction:
 
     async def test_reconstruct_completed_session(
         self,
-        event_store: "EventStore",
+        event_store: EventStore,
         mock_session_id: str,
         mock_execution_id: str,
-        sample_seed: "Seed",
+        sample_seed: Seed,
     ) -> None:
         """Test reconstructing a completed session."""
         repo = SessionRepository(event_store)
@@ -283,10 +278,10 @@ class TestSessionReconstruction:
 
     async def test_reconstruct_failed_session(
         self,
-        event_store: "EventStore",
+        event_store: EventStore,
         mock_session_id: str,
         mock_execution_id: str,
-        sample_seed: "Seed",
+        sample_seed: Seed,
     ) -> None:
         """Test reconstructing a failed session."""
         repo = SessionRepository(event_store)
@@ -305,7 +300,7 @@ class TestSessionReconstruction:
 
     async def test_reconstruct_nonexistent_session(
         self,
-        event_store: "EventStore",
+        event_store: EventStore,
     ) -> None:
         """Test reconstructing a session that doesn't exist."""
         repo = SessionRepository(event_store)
@@ -322,14 +317,12 @@ class TestSessionResumption:
     async def test_resume_running_session(
         self,
         persisted_session: dict[str, Any],
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test resuming a running session."""
-        mock_claude_agent_adapter.add_successful_execution(
-            final_message="Resumed and completed"
-        )
+        mock_claude_agent_adapter.add_successful_execution(final_message="Resumed and completed")
 
         runner = OrchestratorRunner(
             adapter=mock_claude_agent_adapter,
@@ -348,9 +341,9 @@ class TestSessionResumption:
     async def test_resume_preserves_session_id(
         self,
         persisted_session: dict[str, Any],
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that resuming preserves the original session ID."""
         mock_claude_agent_adapter.add_successful_execution()
@@ -371,9 +364,9 @@ class TestSessionResumption:
 
     async def test_cannot_resume_completed_session(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that completed sessions cannot be resumed."""
         repo = SessionRepository(event_store)
@@ -399,9 +392,9 @@ class TestSessionResumption:
 
     async def test_resume_nonexistent_session(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test resuming a session that doesn't exist."""
         runner = OrchestratorRunner(
@@ -417,9 +410,9 @@ class TestSessionResumption:
     async def test_resume_accumulates_messages(
         self,
         persisted_session: dict[str, Any],
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_claude_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_claude_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that resuming accumulates message count correctly."""
         # The persisted_session fixture tracks 2 progress events
@@ -460,8 +453,8 @@ class TestSessionConsistency:
 
     async def test_session_state_consistent_after_multiple_operations(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
+        event_store: EventStore,
+        sample_seed: Seed,
     ) -> None:
         """Test that session state remains consistent after multiple operations."""
         repo = SessionRepository(event_store)
@@ -490,9 +483,9 @@ class TestSessionConsistency:
 
     async def test_session_events_ordered_by_timestamp(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that session events are ordered by timestamp."""
         runner = OrchestratorRunner(
@@ -512,9 +505,9 @@ class TestSessionConsistency:
 
     async def test_concurrent_session_isolation(
         self,
-        event_store: "EventStore",
-        sample_seed: "Seed",
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        event_store: EventStore,
+        sample_seed: Seed,
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that concurrent sessions are properly isolated."""
         import asyncio
@@ -554,8 +547,8 @@ class TestInterviewStatePersistence:
 
     async def test_interview_state_saved_to_disk(
         self,
-        temp_state_dir: "Any",
-        mock_interview_llm_provider: "Any",
+        temp_state_dir: Any,
+        mock_interview_llm_provider: Any,
     ) -> None:
         """Test that interview state is saved to disk."""
         from ouroboros.bigbang.interview import InterviewEngine
@@ -589,11 +582,11 @@ class TestInterviewStatePersistence:
 
     async def test_interview_state_loaded_from_disk(
         self,
-        temp_state_dir: "Any",
-        mock_interview_llm_provider: "Any",
+        temp_state_dir: Any,
+        mock_interview_llm_provider: Any,
     ) -> None:
         """Test that interview state can be loaded from disk."""
-        from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+        from ouroboros.bigbang.interview import InterviewEngine
 
         engine = InterviewEngine(
             llm_adapter=MagicMock(complete=mock_interview_llm_provider.complete),
@@ -617,8 +610,8 @@ class TestInterviewStatePersistence:
 
     async def test_interview_state_persists_rounds(
         self,
-        temp_state_dir: "Any",
-        mock_interview_llm_provider: "Any",
+        temp_state_dir: Any,
+        mock_interview_llm_provider: Any,
     ) -> None:
         """Test that interview rounds are persisted correctly."""
         from ouroboros.bigbang.interview import InterviewEngine
@@ -655,8 +648,8 @@ class TestInterviewStatePersistence:
 
     async def test_interview_list_returns_all_interviews(
         self,
-        temp_state_dir: "Any",
-        mock_interview_llm_provider: "Any",
+        temp_state_dir: Any,
+        mock_interview_llm_provider: Any,
     ) -> None:
         """Test that list_interviews returns all saved interviews."""
         from ouroboros.bigbang.interview import InterviewEngine

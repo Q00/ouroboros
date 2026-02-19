@@ -37,9 +37,7 @@ class MockToolHandler:
             ),
         )
 
-    async def handle(
-        self, arguments: dict[str, Any]
-    ) -> Result[MCPToolResult, MCPServerError]:
+    async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
         self._call_count += 1
         return Result.ok(
             MCPToolResult(

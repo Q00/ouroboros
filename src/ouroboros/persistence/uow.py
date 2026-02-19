@@ -39,9 +39,7 @@ class UnitOfWork:
             pass
     """
 
-    def __init__(
-        self, event_store: EventStore, checkpoint_store: CheckpointStore
-    ) -> None:
+    def __init__(self, event_store: EventStore, checkpoint_store: CheckpointStore) -> None:
         """Initialize unit of work.
 
         Args:
@@ -197,7 +195,7 @@ class PhaseTransaction:
         """
         self._uow.add_events(events)
 
-    async def __aenter__(self) -> "PhaseTransaction":
+    async def __aenter__(self) -> PhaseTransaction:
         """Enter context manager."""
         return self
 
@@ -214,9 +212,7 @@ class PhaseTransaction:
         """
         if exc_type is None and not self._committed:
             # Success path: commit events and checkpoint
-            checkpoint = CheckpointData.create(
-                self._seed_id, self._phase, self._state
-            )
+            checkpoint = CheckpointData.create(self._seed_id, self._phase, self._state)
             result = await self._uow.commit(checkpoint)
             if result.is_err:
                 # Commit failed, raise the error

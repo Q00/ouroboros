@@ -26,7 +26,6 @@ from ouroboros.resilience.stagnation import (
     create_stagnation_event,
 )
 
-
 # =============================================================================
 # StagnationPattern Enum Tests
 # =============================================================================

@@ -98,9 +98,7 @@ class SeedsResourceHandler:
             )
         except Exception as e:
             log.error("mcp.resource.seeds.error", uri=uri, error=str(e))
-            return Result.err(
-                MCPServerError(f"Failed to read seed resource: {e}")
-            )
+            return Result.err(MCPServerError(f"Failed to read seed resource: {e}"))
 
 
 @dataclass
@@ -208,9 +206,7 @@ class SessionsResourceHandler:
             )
         except Exception as e:
             log.error("mcp.resource.sessions.error", uri=uri, error=str(e))
-            return Result.err(
-                MCPServerError(f"Failed to read session resource: {e}")
-            )
+            return Result.err(MCPServerError(f"Failed to read session resource: {e}"))
 
 
 @dataclass
@@ -297,9 +293,7 @@ class EventsResourceHandler:
             )
         except Exception as e:
             log.error("mcp.resource.events.error", uri=uri, error=str(e))
-            return Result.err(
-                MCPServerError(f"Failed to read events resource: {e}")
-            )
+            return Result.err(MCPServerError(f"Failed to read events resource: {e}"))
 
 
 # Convenience functions for handler access

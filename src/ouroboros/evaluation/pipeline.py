@@ -110,7 +110,13 @@ class EvaluationPipeline:
         if self._config.stage1_enabled:
             result = await self._mechanical.verify(
                 context.execution_id,
-                checks=[CheckType.LINT, CheckType.BUILD, CheckType.TEST, CheckType.STATIC, CheckType.COVERAGE],
+                checks=[
+                    CheckType.LINT,
+                    CheckType.BUILD,
+                    CheckType.TEST,
+                    CheckType.STATIC,
+                    CheckType.COVERAGE,
+                ],
             )
             if result.is_err:
                 return Result.err(result.error)
@@ -236,9 +242,13 @@ class EvaluationPipeline:
                 failed = stage1_result.failed_checks
                 failure_reason = f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
             elif stage2_result and not stage2_result.ac_compliance:
-                failure_reason = f"Stage 2 failed: AC non-compliance (score={stage2_result.score:.2f})"
+                failure_reason = (
+                    f"Stage 2 failed: AC non-compliance (score={stage2_result.score:.2f})"
+                )
             elif stage3_result and not stage3_result.approved:
-                failure_reason = f"Stage 3 failed: Consensus not reached ({stage3_result.majority_ratio:.0%})"
+                failure_reason = (
+                    f"Stage 3 failed: Consensus not reached ({stage3_result.majority_ratio:.0%})"
+                )
             else:
                 failure_reason = "Unknown failure"
 

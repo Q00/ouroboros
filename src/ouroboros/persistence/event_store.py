@@ -4,7 +4,6 @@ Provides async methods for appending and replaying events using SQLAlchemy Core
 with aiosqlite backend.
 """
 
-
 from pathlib import Path
 
 from sqlalchemy import select
@@ -90,9 +89,7 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
-                await conn.execute(
-                    events_table.insert().values(**event.to_db_dict())
-                )
+                await conn.execute(events_table.insert().values(**event.to_db_dict()))
         except Exception as e:
             raise PersistenceError(
                 f"Failed to append event: {e}",
@@ -144,9 +141,7 @@ class EventStore:
                 },
             ) from e
 
-    async def replay(
-        self, aggregate_type: str, aggregate_id: str
-    ) -> list[BaseEvent]:
+    async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
         """Replay all events for a specific aggregate.
 
         The operation uses a transaction for read consistency.
@@ -213,11 +208,7 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
-                query = (
-                    select(events_table)
-                    .order_by(events_table.c.timestamp.desc())
-                    .limit(limit)
-                )
+                query = select(events_table).order_by(events_table.c.timestamp.desc()).limit(limit)
 
                 if event_type:
                     query = query.where(events_table.c.event_type == event_type)
@@ -254,9 +245,7 @@ class EventStore:
             async with self._engine.begin() as conn:
                 query = (
                     select(events_table)
-                    .where(
-                        events_table.c.event_type == "orchestrator.session.started"
-                    )
+                    .where(events_table.c.event_type == "orchestrator.session.started")
                     .order_by(events_table.c.timestamp.desc())
                 )
 
@@ -300,9 +289,7 @@ class EventStore:
 
         try:
             async with self._engine.begin() as conn:
-                query = select(events_table).order_by(
-                    events_table.c.timestamp.desc()
-                )
+                query = select(events_table).order_by(events_table.c.timestamp.desc())
 
                 if aggregate_id:
                     query = query.where(events_table.c.aggregate_id == aggregate_id)

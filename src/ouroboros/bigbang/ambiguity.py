@@ -9,9 +9,9 @@ The scoring algorithm evaluates three key components:
 - Success Criteria Clarity (30%): How measurable the success criteria are
 """
 
+from dataclasses import dataclass
 import json
 import re
-from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -143,9 +143,7 @@ class AmbiguityScorer:
     max_retries: int | None = None  # None = unlimited retries
     max_format_error_retries: int = 5  # Stop after N format errors (non-truncation)
 
-    async def score(
-        self, state: InterviewState
-    ) -> Result[AmbiguityScore, ProviderError]:
+    async def score(self, state: InterviewState) -> Result[AmbiguityScore, ProviderError]:
         """Calculate ambiguity score for interview state.
 
         Evaluates the interview conversation to determine clarity of:
@@ -419,16 +417,13 @@ Analyze each component and provide scores with justifications."""
             Overall ambiguity score between 0.0 and 1.0.
         """
         weighted_clarity = sum(
-            component.clarity_score * component.weight
-            for component in breakdown.components
+            component.clarity_score * component.weight for component in breakdown.components
         )
 
         # Ambiguity = 1 - clarity
         return round(1.0 - weighted_clarity, 4)
 
-    def generate_clarification_questions(
-        self, breakdown: ScoreBreakdown
-    ) -> list[str]:
+    def generate_clarification_questions(self, breakdown: ScoreBreakdown) -> list[str]:
         """Generate clarification questions based on score breakdown.
 
         Identifies which components need clarification and suggests questions.
@@ -445,28 +440,16 @@ Analyze each component and provide scores with justifications."""
         clarification_threshold = 0.8
 
         if breakdown.goal_clarity.clarity_score < clarification_threshold:
-            questions.append(
-                "Can you describe the specific problem this solution should solve?"
-            )
-            questions.append(
-                "What is the primary deliverable or output you expect?"
-            )
+            questions.append("Can you describe the specific problem this solution should solve?")
+            questions.append("What is the primary deliverable or output you expect?")
 
         if breakdown.constraint_clarity.clarity_score < clarification_threshold:
-            questions.append(
-                "Are there any technical constraints or limitations to consider?"
-            )
-            questions.append(
-                "What should definitely be excluded from the scope?"
-            )
+            questions.append("Are there any technical constraints or limitations to consider?")
+            questions.append("What should definitely be excluded from the scope?")
 
         if breakdown.success_criteria_clarity.clarity_score < clarification_threshold:
-            questions.append(
-                "How will you know when this is successfully completed?"
-            )
-            questions.append(
-                "What specific features or behaviors are essential?"
-            )
+            questions.append("How will you know when this is successfully completed?")
+            questions.append("What specific features or behaviors are essential?")
 
         return questions
 
@@ -503,8 +486,7 @@ def format_score_display(score: AmbiguityScore) -> str:
         clarity_percent = component.clarity_score * 100
         weight_percent = component.weight * 100
         lines.append(
-            f"  {component.name} (weight: {weight_percent:.0f}%): "
-            f"{clarity_percent:.0f}% clear"
+            f"  {component.name} (weight: {weight_percent:.0f}%): {clarity_percent:.0f}% clear"
         )
         lines.append(f"    Justification: {component.justification}")
 

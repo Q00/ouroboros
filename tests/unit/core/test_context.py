@@ -1,7 +1,7 @@
 """Tests for context management and compression."""
 
-from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,10 +23,7 @@ from ouroboros.core.context import (
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
-    CompletionConfig,
     CompletionResponse,
-    Message,
-    MessageRole,
     UsageInfo,
 )
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
@@ -88,7 +85,7 @@ class TestContextMetrics:
         context = WorkflowContext(
             seed_summary="Simple task",
             current_ac="Do something",
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         metrics = get_context_metrics(context)
 
@@ -99,7 +96,7 @@ class TestContextMetrics:
 
     def test_get_context_metrics_old_context(self) -> None:
         """Test metrics for old context that needs compression."""
-        old_time = datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS + 1)
+        old_time = datetime.now(UTC) - timedelta(hours=MAX_AGE_HOURS + 1)
         context = WorkflowContext(
             seed_summary="Old task",
             current_ac="Still working",
@@ -495,7 +492,7 @@ class TestEdgeCases:
 
     def test_context_with_future_timestamp(self) -> None:
         """Test context with future created_at timestamp."""
-        future_time = datetime.now(timezone.utc) + timedelta(hours=1)
+        future_time = datetime.now(UTC) + timedelta(hours=1)
         context = WorkflowContext(
             seed_summary="Future context",
             current_ac="Test",

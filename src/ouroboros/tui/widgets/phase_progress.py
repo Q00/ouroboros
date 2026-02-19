@@ -18,7 +18,6 @@ from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Label, Static
 
-
 # Phase configuration with display properties
 PHASES = [
     {"name": "discover", "label": "Discover", "type": "diverge"},

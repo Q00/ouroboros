@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
-from typing import Any
 
 import structlog
 
@@ -29,6 +27,7 @@ log = structlog.get_logger()
 
 class OutputFormat(Enum):
     """Output format for documentation."""
+
     TEXT = "text"  # Plain text
     MARKDOWN = "markdown"  # Markdown format
     TABLE = "table"  # Table format
@@ -49,6 +48,7 @@ class SkillDocumentation:
         version: Skill version.
         raw_content: Raw SKILL.md content.
     """
+
     name: str
     description: str
     usage: str
@@ -93,11 +93,7 @@ class SkillDocumentationGenerator:
 
         # Filter by mode if specified
         if mode:
-            skills = {
-                name: metadata
-                for name, metadata in skills.items()
-                if metadata.mode == mode
-            }
+            skills = {name: metadata for name, metadata in skills.items() if metadata.mode == mode}
 
         if format == OutputFormat.TEXT:
             return self._format_text_all(skills)
@@ -259,9 +255,7 @@ class SkillDocumentationGenerator:
         for mode in [SkillMode.PLUGIN, SkillMode.MCP]:
             mode_name = "Plugin Mode" if mode == SkillMode.PLUGIN else "MCP Mode"
             mode_desc = (
-                "Available without setup"
-                if mode == SkillMode.PLUGIN
-                else "Requires `ooo setup`"
+                "Available without setup" if mode == SkillMode.PLUGIN else "Requires `ooo setup`"
             )
 
             lines.append(f"## {mode_name} Skills")

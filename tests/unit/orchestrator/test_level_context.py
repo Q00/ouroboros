@@ -180,9 +180,7 @@ class TestBuildContextPrompt:
         contexts = [
             LevelContext(
                 level_number=0,
-                completed_acs=(
-                    ACContextSummary(ac_index=0, ac_content="Failed", success=False),
-                ),
+                completed_acs=(ACContextSummary(ac_index=0, ac_content="Failed", success=False),),
             ),
         ]
         assert build_context_prompt(contexts) == ""

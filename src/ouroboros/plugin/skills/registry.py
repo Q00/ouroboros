@@ -11,8 +11,7 @@ This module provides a skill registry that:
 from __future__ import annotations
 
 import asyncio
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from threading import RLock
@@ -26,20 +25,25 @@ from ouroboros.core.types import Result
 try:
     from watchdog.events import FileSystemEventHandler
     from watchdog.observers import Observer
+
     WATCHDOG_AVAILABLE = True
 except ImportError:
     WATCHDOG_AVAILABLE = False
+
     # Create stub classes for type hints
     class FileSystemEventHandler:  # type: ignore
         pass
+
     class Observer:  # type: ignore
         pass
+
 
 log = structlog.get_logger()
 
 
 class SkillMode(Enum):
     """Skill execution mode."""
+
     PLUGIN = "plugin"  # Works without MCP server
     MCP = "mcp"  # Requires MCP server
 
@@ -58,6 +62,7 @@ class SkillMetadata:
         mode: Execution mode (plugin or mcp)
         requires_mcp: Whether MCP server is required
     """
+
     name: str
     path: Path
     trigger_keywords: tuple[str, ...] = ()
@@ -78,6 +83,7 @@ class SkillInstance:
         last_modified: File modification timestamp
         is_loaded: Whether skill is currently loaded
     """
+
     metadata: SkillMetadata
     spec: dict[str, Any]
     last_modified: float
@@ -86,6 +92,7 @@ class SkillInstance:
 
 # File watcher implementation (only when watchdog is available)
 if WATCHDOG_AVAILABLE:
+
     class SkillFileWatcher(FileSystemEventHandler):
         """File system watcher for hot-reload support.
 
@@ -93,7 +100,7 @@ if WATCHDOG_AVAILABLE:
         and triggers reload when files are modified.
         """
 
-        def __init__(self, registry: "SkillRegistry") -> None:
+        def __init__(self, registry: SkillRegistry) -> None:
             """Initialize the watcher.
 
             Args:
@@ -137,7 +144,7 @@ else:
     class SkillFileWatcher:  # type: ignore
         """Stub file watcher when watchdog is not available."""
 
-        def __init__(self, registry: "SkillRegistry") -> None:
+        def __init__(self, registry: SkillRegistry) -> None:
             self._registry = registry
 
 
@@ -456,7 +463,11 @@ class SkillRegistry:
                         while j < len(lines):
                             next_line = lines[j].strip()
                             # Stop if we hit another key: value pair or closing ---
-                            if not next_line or next_line == "---" or (":" in next_line and not next_line.strip().startswith("-")):
+                            if (
+                                not next_line
+                                or next_line == "---"
+                                or (":" in next_line and not next_line.strip().startswith("-"))
+                            ):
                                 break
                             if next_line.startswith("-"):
                                 list_items.append(next_line.lstrip("-").strip())

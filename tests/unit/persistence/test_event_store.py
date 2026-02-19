@@ -161,9 +161,7 @@ class TestEventStoreReplay:
             "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
         ]
 
-    async def test_replay_filters_by_aggregate_type(
-        self, event_store: EventStore
-    ) -> None:
+    async def test_replay_filters_by_aggregate_type(self, event_store: EventStore) -> None:
         """replay() only returns events for the specified aggregate type."""
         event1 = BaseEvent(
             type="ontology.concept.added",
@@ -189,9 +187,7 @@ class TestEventStoreReplay:
         assert len(execution_events) == 1
         assert execution_events[0].data["type"] == "execution"
 
-    async def test_replay_filters_by_aggregate_id(
-        self, event_store: EventStore
-    ) -> None:
+    async def test_replay_filters_by_aggregate_id(self, event_store: EventStore) -> None:
         """replay() only returns events for the specified aggregate ID."""
         event1 = BaseEvent(
             type="ontology.concept.added",

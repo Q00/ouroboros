@@ -15,7 +15,6 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.routing.complexity import (
     MAX_DEPTH_THRESHOLD,
     MAX_TOKEN_THRESHOLD,
-    MAX_TOOL_THRESHOLD,
     TaskContext,
 )
 from ouroboros.routing.router import (
@@ -328,10 +327,7 @@ class TestRouteTaskFunction:
         assert router_result.is_ok
         assert function_result.is_ok
         assert router_result.value.tier == function_result.value.tier
-        assert (
-            router_result.value.complexity.score
-            == function_result.value.complexity.score
-        )
+        assert router_result.value.complexity.score == function_result.value.complexity.score
 
     def test_route_task_propagates_errors(self) -> None:
         """Test that route_task propagates validation errors."""

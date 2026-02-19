@@ -117,7 +117,7 @@ class Todo:
         description: str,
         context: str,
         priority: Priority = Priority.MEDIUM,
-    ) -> "Todo":
+    ) -> Todo:
         """Factory method to create a new TODO.
 
         Args:
@@ -141,7 +141,7 @@ class Todo:
         self,
         status: TodoStatus,
         error_message: str | None = None,
-    ) -> "Todo":
+    ) -> Todo:
         """Return a new Todo with updated status.
 
         Args:

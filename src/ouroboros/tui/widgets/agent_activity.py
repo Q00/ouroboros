@@ -104,9 +104,7 @@ class AgentActivityWidget(Widget):
         yield Static("Agent Activity", classes="header")
         yield Static(self._format_tool_line(), classes="activity-line", id="tool-line")
         yield Static(self._format_file_line(), classes="activity-line", id="file-line")
-        yield Static(
-            self._format_thinking_line(), classes="thinking-line", id="thinking-line"
-        )
+        yield Static(self._format_thinking_line(), classes="thinking-line", id="thinking-line")
 
     def _format_tool_line(self) -> str:
         """Format tool display line."""

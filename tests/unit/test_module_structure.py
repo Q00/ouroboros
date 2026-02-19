@@ -1,4 +1,5 @@
 """Test initial module structure."""
+
 from pathlib import Path
 
 
@@ -33,5 +34,6 @@ def test_module_can_be_imported():
     """Test that ouroboros module can be imported."""
     # This test requires the package to be installed
     import ouroboros
+
     assert hasattr(ouroboros, "__version__")
     assert hasattr(ouroboros, "main")

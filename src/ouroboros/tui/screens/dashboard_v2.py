@@ -47,7 +47,6 @@ from ouroboros.tui.events import (
 )
 from ouroboros.tui.widgets import (
     ACTreeWidget,
-    GraphNode,
     ParallelGraphWidget,
 )
 
@@ -130,7 +129,9 @@ class MiniCostIndicator(Static):
         else:
             token_str = str(self.tokens)
 
-        cost_color = "red" if self.cost_usd >= 1.0 else "yellow" if self.cost_usd >= 0.1 else "green"
+        cost_color = (
+            "red" if self.cost_usd >= 1.0 else "yellow" if self.cost_usd >= 0.1 else "green"
+        )
         return f"[{cost_color}]${self.cost_usd:.2f}[/] [dim]({token_str})[/]"
 
 
@@ -202,7 +203,9 @@ class CommandBar(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal(classes="bar-content"):
-            yield Static("[bold cyan]◆[/] [bold]OUROBOROS[/] [dim]Command Center[/]", classes="logo")
+            yield Static(
+                "[bold cyan]◆[/] [bold]OUROBOROS[/] [dim]Command Center[/]", classes="logo"
+            )
             yield Static("", classes="spacer")
             with Horizontal(classes="indicators"):
                 yield MiniStatusIndicator(id="mini-status")
@@ -549,7 +552,9 @@ class DashboardScreenV2(Screen[None]):
                     status_widget.status = "running"
 
                 phase_widget = self._command_bar.query_one("#mini-phase", MiniPhaseIndicator)
-                phase_widget.phase = message.current_phase.lower() if message.current_phase else "discover"
+                phase_widget.phase = (
+                    message.current_phase.lower() if message.current_phase else "discover"
+                )
 
                 cost_widget = self._command_bar.query_one("#mini-cost", MiniCostIndicator)
                 cost_widget.tokens = message.estimated_tokens
@@ -656,9 +661,15 @@ class DashboardScreenV2(Screen[None]):
 
         if self._command_bar:
             try:
-                self._command_bar.query_one("#mini-status", MiniStatusIndicator).status = state.status
-                self._command_bar.query_one("#mini-phase", MiniPhaseIndicator).phase = state.current_phase
-                self._command_bar.query_one("#mini-drift", MiniDriftIndicator).drift = state.combined_drift
+                self._command_bar.query_one(
+                    "#mini-status", MiniStatusIndicator
+                ).status = state.status
+                self._command_bar.query_one(
+                    "#mini-phase", MiniPhaseIndicator
+                ).phase = state.current_phase
+                self._command_bar.query_one(
+                    "#mini-drift", MiniDriftIndicator
+                ).drift = state.combined_drift
                 cost_widget = self._command_bar.query_one("#mini-cost", MiniCostIndicator)
                 cost_widget.tokens = state.total_tokens
                 cost_widget.cost_usd = state.total_cost_usd

@@ -354,12 +354,14 @@ class ExecutionScreen(Screen[None]):
             details: Event details.
             category: Event category.
         """
-        self._events.append({
-            "timestamp": datetime.now(UTC).isoformat(),
-            "type": event_type,
-            "details": details,
-            "category": category,
-        })
+        self._events.append(
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "type": event_type,
+                "details": details,
+                "category": category,
+            }
+        )
         # Keep only last 100 events
         if len(self._events) > 100:
             self._events = self._events[-100:]
@@ -461,11 +463,20 @@ class ExecutionScreen(Screen[None]):
             )
 
         # Update phase output with current activity
-        if phase_key in self._phase_outputs or phase_key in ["discover", "define", "design", "deliver"]:
+        if phase_key in self._phase_outputs or phase_key in [
+            "discover",
+            "define",
+            "design",
+            "deliver",
+        ]:
             current_output = self._phase_outputs.get(phase_key, "")
             if activity_detail and activity_detail not in current_output:
                 # Append new activity to phase output
-                new_output = f"{current_output}\n• {activity_detail}" if current_output else f"• {activity_detail}"
+                new_output = (
+                    f"{current_output}\n• {activity_detail}"
+                    if current_output
+                    else f"• {activity_detail}"
+                )
                 # Keep only last 500 chars
                 if len(new_output) > 500:
                     new_output = "..." + new_output[-497:]

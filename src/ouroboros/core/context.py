@@ -113,11 +113,7 @@ class WorkflowContext:
             WorkflowContext instance.
         """
         created_at_str = data.get("created_at")
-        created_at = (
-            datetime.fromisoformat(created_at_str)
-            if created_at_str
-            else datetime.now(UTC)
-        )
+        created_at = datetime.fromisoformat(created_at_str) if created_at_str else datetime.now(UTC)
 
         return cls(
             seed_summary=data.get("seed_summary", ""),
@@ -240,7 +236,9 @@ async def compress_context_with_llm(
     # Build summarization prompt
     # Exclude recent history items from summarization
     items_to_summarize = (
-        context.history[:-RECENT_HISTORY_COUNT] if len(context.history) > RECENT_HISTORY_COUNT else []
+        context.history[:-RECENT_HISTORY_COUNT]
+        if len(context.history) > RECENT_HISTORY_COUNT
+        else []
     )
     history_text = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(items_to_summarize))
 
@@ -346,11 +344,11 @@ async def compress_context(
 
         # Count tokens in compressed context
         compressed_str = f"""
-Seed: {compressed_context['seed_summary']}
-Current AC: {compressed_context['current_ac']}
-Summary: {compressed_context['history_summary']}
-Recent: {compressed_context['recent_history']}
-Facts: {compressed_context['key_facts']}
+Seed: {compressed_context["seed_summary"]}
+Current AC: {compressed_context["current_ac"]}
+Summary: {compressed_context["history_summary"]}
+Recent: {compressed_context["recent_history"]}
+Facts: {compressed_context["key_facts"]}
 """
         after_tokens = count_tokens(compressed_str, model)
         compression_ratio = after_tokens / before_tokens if before_tokens > 0 else 1.0
@@ -395,9 +393,9 @@ Facts: {compressed_context['key_facts']}
         }
 
         compressed_str = f"""
-Seed: {compressed_context['seed_summary']}
-Current AC: {compressed_context['current_ac']}
-Facts: {compressed_context['key_facts']}
+Seed: {compressed_context["seed_summary"]}
+Current AC: {compressed_context["current_ac"]}
+Facts: {compressed_context["key_facts"]}
 """
         after_tokens = count_tokens(compressed_str, model)
         compression_ratio = after_tokens / before_tokens if before_tokens > 0 else 1.0

@@ -16,9 +16,9 @@ from ouroboros.plugin.orchestration.router import (
     RoutingContext,
 )
 from ouroboros.plugin.orchestration.scheduler import (
+    ScheduledTask,
     Scheduler,
     SchedulerConfig,
-    ScheduledTask,
     TaskGraph,
 )
 

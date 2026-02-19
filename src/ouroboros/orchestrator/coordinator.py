@@ -23,17 +23,17 @@ Usage:
 
 from __future__ import annotations
 
-import json
-import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+import json
+import re
+from typing import TYPE_CHECKING
 
 from ouroboros.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from ouroboros.orchestrator.adapter import AgentMessage, ClaudeAgentAdapter
+    from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
     from ouroboros.orchestrator.level_context import LevelContext
     from ouroboros.orchestrator.parallel_executor import ACExecutionResult
 
@@ -208,9 +208,7 @@ class LevelCoordinator:
         duration = (datetime.now(UTC) - start_time).total_seconds()
 
         # Parse structured response from Claude
-        review = _parse_review_response(
-            final_text, conflicts, level_number, duration, session_id
-        )
+        review = _parse_review_response(final_text, conflicts, level_number, duration, session_id)
 
         log.info(
             "coordinator.review.completed",
@@ -296,7 +294,7 @@ def _build_review_prompt(
   "review_summary": "Brief analysis of the level results",
   "fixes_applied": ["Description of fix 1", "..."],
   "warnings_for_next_level": ["Warning 1 for next ACs", "..."],
-  "conflicts_resolved": ["{conflicts[0].file_path if conflicts else ''}"]
+  "conflicts_resolved": ["{conflicts[0].file_path if conflicts else ""}"]
 }}
 ```
 
@@ -338,7 +336,9 @@ def _parse_review_response(
 
     if json_match:
         try:
-            data = json.loads(json_match.group(1) if "```" in json_match.group() else json_match.group())
+            data = json.loads(
+                json_match.group(1) if "```" in json_match.group() else json_match.group()
+            )
             review_summary = data.get("review_summary", "")
             fixes_applied = data.get("fixes_applied", [])
             warnings = data.get("warnings_for_next_level", [])

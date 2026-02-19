@@ -10,12 +10,8 @@ Tests cover:
 - Active session management
 """
 
-import asyncio
 from datetime import UTC, datetime
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-
-import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.orchestrator.workflow_state import (
@@ -258,9 +254,7 @@ class TestStateManagerSaveSession:
     async def test_save_session_store_error(self) -> None:
         """Test save handles store errors."""
         mock_store = MagicMock(spec=StateStore)
-        mock_store.write_mode_state = AsyncMock(
-            return_value=Result.err("Storage error")
-        )
+        mock_store.write_mode_state = AsyncMock(return_value=Result.err("Storage error"))
 
         manager = StateManager(store=mock_store)
 

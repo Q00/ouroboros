@@ -368,7 +368,7 @@ class CycleResult:
     phase_results: dict[Phase, PhaseResult]
     events: list[BaseEvent]
     is_decomposed: bool = False
-    child_results: tuple["CycleResult", ...] = field(default_factory=tuple)
+    child_results: tuple[CycleResult, ...] = field(default_factory=tuple)
     depth: int = 0
 
     @property
@@ -829,9 +829,7 @@ class DoubleDiamond:
 
         return await self._execute_phase_with_retry(ctx, _execute)
 
-    async def discover(
-        self, ctx: PhaseContext
-    ) -> Result[PhaseResult, ExecutionError]:
+    async def discover(self, ctx: PhaseContext) -> Result[PhaseResult, ExecutionError]:
         """Execute the Discover phase (diverge).
 
         Explores the problem space and gathers insights.
@@ -844,9 +842,7 @@ class DoubleDiamond:
         """
         return await self._execute_phase(ctx, Phase.DISCOVER)
 
-    async def define(
-        self, ctx: PhaseContext
-    ) -> Result[PhaseResult, ExecutionError]:
+    async def define(self, ctx: PhaseContext) -> Result[PhaseResult, ExecutionError]:
         """Execute the Define phase (converge).
 
         Converges on approach, applying ontology filter.
@@ -859,9 +855,7 @@ class DoubleDiamond:
         """
         return await self._execute_phase(ctx, Phase.DEFINE)
 
-    async def design(
-        self, ctx: PhaseContext
-    ) -> Result[PhaseResult, ExecutionError]:
+    async def design(self, ctx: PhaseContext) -> Result[PhaseResult, ExecutionError]:
         """Execute the Design phase (diverge).
 
         Creates solution options.
@@ -874,9 +868,7 @@ class DoubleDiamond:
         """
         return await self._execute_phase(ctx, Phase.DESIGN)
 
-    async def deliver(
-        self, ctx: PhaseContext
-    ) -> Result[PhaseResult, ExecutionError]:
+    async def deliver(self, ctx: PhaseContext) -> Result[PhaseResult, ExecutionError]:
         """Execute the Deliver phase (converge).
 
         Implements and validates the solution.
@@ -1123,7 +1115,11 @@ class DoubleDiamond:
                 "execution.cycle.failed",
                 execution_id,
                 seed_id,
-                {"iteration": iteration, "failed_phase": "discover", "error": str(discover_result.error)},
+                {
+                    "iteration": iteration,
+                    "failed_phase": "discover",
+                    "error": str(discover_result.error),
+                },
             )
             all_events.append(cycle_failed_event)
             return Result.err(discover_result.error)
@@ -1149,7 +1145,11 @@ class DoubleDiamond:
                 "execution.cycle.failed",
                 execution_id,
                 seed_id,
-                {"iteration": iteration, "failed_phase": "define", "error": str(define_result.error)},
+                {
+                    "iteration": iteration,
+                    "failed_phase": "define",
+                    "error": str(define_result.error),
+                },
             )
             all_events.append(cycle_failed_event)
             return Result.err(define_result.error)
@@ -1326,9 +1326,7 @@ class DoubleDiamond:
 
                         if child_result.is_ok:
                             # AC 4: Validate child result before integration
-                            validation_result = validate_child_result(
-                                child_result.value, child_ac
-                            )
+                            validation_result = validate_child_result(child_result.value, child_ac)
 
                             if validation_result.is_ok:
                                 validated_child = validation_result.value
@@ -1478,7 +1476,11 @@ class DoubleDiamond:
                 "execution.cycle.failed",
                 execution_id,
                 seed_id,
-                {"iteration": iteration, "failed_phase": "design", "error": str(design_result.error)},
+                {
+                    "iteration": iteration,
+                    "failed_phase": "design",
+                    "error": str(design_result.error),
+                },
             )
             all_events.append(cycle_failed_event)
             return Result.err(design_result.error)
@@ -1504,7 +1506,11 @@ class DoubleDiamond:
                 "execution.cycle.failed",
                 execution_id,
                 seed_id,
-                {"iteration": iteration, "failed_phase": "deliver", "error": str(deliver_result.error)},
+                {
+                    "iteration": iteration,
+                    "failed_phase": "deliver",
+                    "error": str(deliver_result.error),
+                },
             )
             all_events.append(cycle_failed_event)
             return Result.err(deliver_result.error)

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
@@ -70,7 +70,7 @@ class TestInitCommand:
         assert "context" in result.output.lower() or "resume" in result.output.lower()
 
     def test_init_with_context_argument(
-        self, temp_state_dir: Path, mock_interview_llm_provider: "MockLLMProvider"
+        self, temp_state_dir: Path, mock_interview_llm_provider: MockLLMProvider
     ) -> None:
         """Test init start with context argument."""
         # Mock the LLM adapter and asyncio.run
@@ -126,9 +126,6 @@ class TestInitCommand:
             mock_adapter_class.return_value = mock_adapter
 
             with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
-                from ouroboros.core.errors import ValidationError
-                from ouroboros.core.types import Result
-
                 # The function should raise typer.Exit on error
                 import typer
 
@@ -233,9 +230,7 @@ class TestRunWorkflowCommand:
 
             assert mock_run.called
 
-    def test_run_workflow_resume_without_orchestrator_warns(
-        self, temp_seed_file: Path
-    ) -> None:
+    def test_run_workflow_resume_without_orchestrator_warns(self, temp_seed_file: Path) -> None:
         """Test that --resume without --orchestrator shows warning."""
         with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
             mock_run.return_value = None
@@ -342,7 +337,7 @@ class TestCLIIntegrationWithWorkflow:
     async def test_init_creates_interview_state(
         self,
         temp_state_dir: Path,
-        mock_interview_llm_provider: "MockLLMProvider",
+        mock_interview_llm_provider: MockLLMProvider,
     ) -> None:
         """Test that init creates interview state file."""
         from ouroboros.bigbang.interview import InterviewEngine
@@ -369,8 +364,8 @@ class TestCLIIntegrationWithWorkflow:
     async def test_workflow_creates_session_events(
         self,
         temp_db_path: str,
-        sample_seed: "Any",
-        mock_successful_agent_adapter: "MockClaudeAgentAdapter",
+        sample_seed: Any,
+        mock_successful_agent_adapter: MockClaudeAgentAdapter,
     ) -> None:
         """Test that workflow execution creates session events."""
         from ouroboros.orchestrator.runner import OrchestratorRunner

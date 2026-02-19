@@ -316,7 +316,9 @@ class TestConfigExists:
         result = config_exists()
         assert isinstance(result, bool)
 
-    def test_config_exists_both_files_required(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_config_exists_both_files_required(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """config_exists requires both config.yaml and credentials.yaml."""
         # This is a conceptual test - in practice we can't easily
         # mock get_config_dir. The function checks for both files.

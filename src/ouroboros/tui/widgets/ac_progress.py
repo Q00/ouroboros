@@ -127,9 +127,7 @@ class ACProgressWidget(Widget):
     }
     """
 
-    acceptance_criteria: reactive[list[ACProgressItem]] = reactive(
-        list, always_update=True
-    )
+    acceptance_criteria: reactive[list[ACProgressItem]] = reactive(list, always_update=True)
     completed_count: reactive[int] = reactive(0)
     total_count: reactive[int] = reactive(0)
     estimated_remaining: reactive[str] = reactive("")
@@ -177,9 +175,7 @@ class ACProgressWidget(Widget):
         else:
             # Progress summary
             percent = (
-                int(self.completed_count / self.total_count * 100)
-                if self.total_count > 0
-                else 0
+                int(self.completed_count / self.total_count * 100) if self.total_count > 0 else 0
             )
             yield Static(
                 f"{self.completed_count}/{self.total_count} complete ({percent}%)",
@@ -231,9 +227,7 @@ class ACProgressWidget(Widget):
         classes = "ac-item current" if ac.is_current else "ac-item"
         return Static(label, classes=classes)
 
-    def watch_acceptance_criteria(
-        self, _new_criteria: list[ACProgressItem]
-    ) -> None:
+    def watch_acceptance_criteria(self, _new_criteria: list[ACProgressItem]) -> None:
         """React to acceptance_criteria changes."""
         self.refresh(recompose=True)
 

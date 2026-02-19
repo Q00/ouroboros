@@ -38,10 +38,9 @@ Usage:
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import Enum
+import hashlib
 from typing import Any
 
 from ouroboros.core.types import Result
@@ -671,7 +670,9 @@ def create_stagnation_event(
         case StagnationPattern.SPINNING:
             return SpinningDetectedEvent(
                 execution_id=execution_id,
-                repeated_output_sample=str(evidence.get("repeated_output_sample", evidence.get("repeated_error", ""))),
+                repeated_output_sample=str(
+                    evidence.get("repeated_output_sample", evidence.get("repeated_error", ""))
+                ),
                 repeat_count=int(evidence.get("repeat_count", 0)),
                 source=str(evidence.get("source", "unknown")),
                 seed_id=seed_id,

@@ -27,8 +27,8 @@ Custom CLI Path:
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Callable
+import os
 from pathlib import Path
 
 import structlog
@@ -328,8 +328,19 @@ class ClaudeCodeAdapter:
         # Otherwise, only block dangerous tools (permissive mode for MCP)
         if self._allowed_tools:
             all_tools = [
-                "Read", "Write", "Edit", "Bash", "WebFetch", "WebSearch", "Glob", "Grep",
-                "Task", "NotebookEdit", "TodoRead", "TodoWrite", "LS",
+                "Read",
+                "Write",
+                "Edit",
+                "Bash",
+                "WebFetch",
+                "WebSearch",
+                "Glob",
+                "Grep",
+                "Task",
+                "NotebookEdit",
+                "TodoRead",
+                "TodoWrite",
+                "LS",
             ]
             disallowed = [t for t in all_tools if t not in self._allowed_tools]
         else:
@@ -451,9 +462,7 @@ class ClaudeCodeAdapter:
         detail = ""
         if tool_name == "Read":
             detail = tool_input.get("file_path", "")
-        elif tool_name == "Glob":
-            detail = tool_input.get("pattern", "")
-        elif tool_name == "Grep":
+        elif tool_name == "Glob" or tool_name == "Grep":
             detail = tool_input.get("pattern", "")
         elif tool_name == "WebFetch":
             detail = tool_input.get("url", "")

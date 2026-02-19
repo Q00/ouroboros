@@ -5,23 +5,13 @@ registration, resource handling, and the full server lifecycle.
 """
 
 import asyncio
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ouroboros.core.types import Result
-from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError, MCPToolError
+from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPToolError
 from ouroboros.mcp.server.adapter import MCPServerAdapter, create_ouroboros_server
 from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig
 from ouroboros.mcp.types import (
-    ContentType,
-    MCPContentItem,
-    MCPResourceContent,
-    MCPResourceDefinition,
-    MCPToolDefinition,
-    MCPToolParameter,
-    MCPToolResult,
     ToolInputType,
 )
 
@@ -31,7 +21,6 @@ from .conftest import (
     EchoToolHandler,
     FailingToolHandler,
     GreetingPromptHandler,
-    SlowToolHandler,
     StaticResourceHandler,
 )
 
@@ -534,10 +523,7 @@ class TestMCPServerAdapterConcurrency:
         server.register_tool(echo_handler)
 
         # Call tool concurrently
-        tasks = [
-            server.call_tool("echo", {"message": f"Message {i}"})
-            for i in range(10)
-        ]
+        tasks = [server.call_tool("echo", {"message": f"Message {i}"}) for i in range(10)]
 
         results = await asyncio.gather(*tasks)
 
@@ -561,10 +547,7 @@ class TestMCPServerAdapterConcurrency:
             server.register_resource(handler)
 
         # Read concurrently
-        tasks = [
-            server.read_resource(f"test://resource{i}")
-            for i in range(5)
-        ]
+        tasks = [server.read_resource(f"test://resource{i}") for i in range(5)]
 
         results = await asyncio.gather(*tasks)
 

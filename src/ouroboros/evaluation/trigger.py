@@ -145,20 +145,24 @@ class ConsensusTrigger:
                 events.append(
                     create_consensus_triggered_event(
                         execution_id=context.execution_id,
-                        trigger_type=result.trigger_type.value if result.trigger_type else "unknown",
+                        trigger_type=result.trigger_type.value
+                        if result.trigger_type
+                        else "unknown",
                         trigger_details=result.details,
                     )
                 )
                 return Result.ok((result, events))
 
         # No trigger condition met
-        return Result.ok((
-            TriggerResult(
-                should_trigger=False,
-                reason="No trigger conditions met",
-            ),
-            events,
-        ))
+        return Result.ok(
+            (
+                TriggerResult(
+                    should_trigger=False,
+                    reason="No trigger conditions met",
+                ),
+                events,
+            )
+        )
 
     def _check_seed_modification(self, context: TriggerContext) -> TriggerResult:
         """Check for seed modification trigger.

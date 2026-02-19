@@ -9,14 +9,12 @@ Tests cover:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ouroboros.core.types import Result
-from ouroboros.mcp.errors import MCPClientError, MCPConnectionError, MCPToolError
+from ouroboros.mcp.errors import MCPClientError, MCPToolError
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -38,12 +36,14 @@ def mock_mcp_manager() -> MagicMock:
     """Create a mock MCPClientManager."""
     manager = MagicMock()
     manager.list_all_tools = AsyncMock(return_value=[])
-    manager.call_tool = AsyncMock(return_value=Result.ok(
-        MCPToolResult(
-            content=(MCPContentItem(type=ContentType.TEXT, text="Success"),),
-            is_error=False,
+    manager.call_tool = AsyncMock(
+        return_value=Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="Success"),),
+                is_error=False,
+            )
         )
-    ))
+    )
     manager.find_tool_server = MagicMock(return_value=None)
     return manager
 
@@ -248,12 +248,14 @@ class TestMCPToolProviderCallTool:
     ) -> None:
         """Test successful tool call."""
         mock_mcp_manager.list_all_tools = AsyncMock(return_value=sample_mcp_tools)
-        mock_mcp_manager.call_tool = AsyncMock(return_value=Result.ok(
-            MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text="File content here"),),
-                is_error=False,
+        mock_mcp_manager.call_tool = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="File content here"),),
+                    is_error=False,
+                )
             )
-        ))
+        )
 
         provider = MCPToolProvider(mock_mcp_manager)
         await provider.get_tools()
@@ -290,11 +292,13 @@ class TestMCPToolProviderCallTool:
     ) -> None:
         """Test calling tool with prefixed name."""
         mock_mcp_manager.list_all_tools = AsyncMock(return_value=sample_mcp_tools)
-        mock_mcp_manager.call_tool = AsyncMock(return_value=Result.ok(
-            MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text="Success"),),
+        mock_mcp_manager.call_tool = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="Success"),),
+                )
             )
-        ))
+        )
 
         provider = MCPToolProvider(mock_mcp_manager, tool_prefix="ext_")
         await provider.get_tools()
@@ -315,9 +319,7 @@ class TestMCPToolProviderCallTool:
     ) -> None:
         """Test calling tool with custom timeout."""
         mock_mcp_manager.list_all_tools = AsyncMock(return_value=sample_mcp_tools)
-        mock_mcp_manager.call_tool = AsyncMock(return_value=Result.ok(
-            MCPToolResult(content=())
-        ))
+        mock_mcp_manager.call_tool = AsyncMock(return_value=Result.ok(MCPToolResult(content=())))
 
         provider = MCPToolProvider(mock_mcp_manager)
         await provider.get_tools()
@@ -335,9 +337,9 @@ class TestMCPToolProviderCallTool:
     ) -> None:
         """Test handling tool execution error."""
         mock_mcp_manager.list_all_tools = AsyncMock(return_value=sample_mcp_tools)
-        mock_mcp_manager.call_tool = AsyncMock(return_value=Result.err(
-            MCPClientError("Tool execution failed", is_retriable=False)
-        ))
+        mock_mcp_manager.call_tool = AsyncMock(
+            return_value=Result.err(MCPClientError("Tool execution failed", is_retriable=False))
+        )
 
         provider = MCPToolProvider(mock_mcp_manager)
         await provider.get_tools()

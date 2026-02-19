@@ -9,7 +9,6 @@ Tests cover:
 - Event emission
 """
 
-from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -206,9 +205,7 @@ class TestDoubleDiamondCycle:
     def mock_llm_adapter(self):
         """Create a mock LLM adapter."""
         adapter = AsyncMock()
-        adapter.complete.return_value = Result.ok(
-            MagicMock(content="Phase completed successfully")
-        )
+        adapter.complete.return_value = Result.ok(MagicMock(content="Phase completed successfully"))
         return adapter
 
     @pytest.fixture
@@ -334,9 +331,7 @@ class TestDoubleDiamondCycle:
                 Phase.DISCOVER: PhaseResult(
                     phase=Phase.DISCOVER, success=True, output={}, events=[]
                 ),
-                Phase.DEFINE: PhaseResult(
-                    phase=Phase.DEFINE, success=True, output={}, events=[]
-                ),
+                Phase.DEFINE: PhaseResult(phase=Phase.DEFINE, success=True, output={}, events=[]),
                 Phase.DESIGN: PhaseResult(
                     phase=Phase.DESIGN, success=True, output={"solution": "code"}, events=[]
                 ),
@@ -358,9 +353,7 @@ class TestPhaseTransitionLogging:
     def mock_llm_adapter(self):
         """Create a mock LLM adapter."""
         adapter = AsyncMock()
-        adapter.complete.return_value = Result.ok(
-            MagicMock(content="Phase completed successfully")
-        )
+        adapter.complete.return_value = Result.ok(MagicMock(content="Phase completed successfully"))
         return adapter
 
     @pytest.mark.asyncio
@@ -461,15 +454,9 @@ class TestCycleResult:
         from ouroboros.execution.double_diamond import CycleResult, Phase, PhaseResult
 
         phase_results = {
-            Phase.DISCOVER: PhaseResult(
-                phase=Phase.DISCOVER, success=True, output={}, events=[]
-            ),
-            Phase.DEFINE: PhaseResult(
-                phase=Phase.DEFINE, success=True, output={}, events=[]
-            ),
-            Phase.DESIGN: PhaseResult(
-                phase=Phase.DESIGN, success=True, output={}, events=[]
-            ),
+            Phase.DISCOVER: PhaseResult(phase=Phase.DISCOVER, success=True, output={}, events=[]),
+            Phase.DEFINE: PhaseResult(phase=Phase.DEFINE, success=True, output={}, events=[]),
+            Phase.DESIGN: PhaseResult(phase=Phase.DESIGN, success=True, output={}, events=[]),
             Phase.DELIVER: PhaseResult(
                 phase=Phase.DELIVER, success=True, output={"result": "success"}, events=[]
             ),
@@ -509,12 +496,8 @@ class TestCycleResult:
             Phase.DISCOVER: PhaseResult(
                 phase=Phase.DISCOVER, success=True, output={}, events=[event1]
             ),
-            Phase.DEFINE: PhaseResult(
-                phase=Phase.DEFINE, success=True, output={}, events=[]
-            ),
-            Phase.DESIGN: PhaseResult(
-                phase=Phase.DESIGN, success=True, output={}, events=[]
-            ),
+            Phase.DEFINE: PhaseResult(phase=Phase.DEFINE, success=True, output={}, events=[]),
+            Phase.DESIGN: PhaseResult(phase=Phase.DESIGN, success=True, output={}, events=[]),
             Phase.DELIVER: PhaseResult(
                 phase=Phase.DELIVER, success=True, output={}, events=[event2]
             ),
@@ -559,9 +542,7 @@ class TestConfigurableModelConfig:
     def mock_llm_adapter(self):
         """Create a mock LLM adapter."""
         adapter = AsyncMock()
-        adapter.complete.return_value = Result.ok(
-            MagicMock(content="Phase completed successfully")
-        )
+        adapter.complete.return_value = Result.ok(MagicMock(content="Phase completed successfully"))
         return adapter
 
     def test_default_model_config(self, mock_llm_adapter):
@@ -627,9 +608,7 @@ class TestCycleEvents:
     def mock_llm_adapter(self):
         """Create a mock LLM adapter."""
         adapter = AsyncMock()
-        adapter.complete.return_value = Result.ok(
-            MagicMock(content="Phase completed successfully")
-        )
+        adapter.complete.return_value = Result.ok(MagicMock(content="Phase completed successfully"))
         return adapter
 
     @pytest.fixture
@@ -659,9 +638,7 @@ class TestCycleEvents:
         cycle_result = result.value
 
         # Find cycle started event
-        started_events = [
-            e for e in cycle_result.events if e.type == "execution.cycle.started"
-        ]
+        started_events = [e for e in cycle_result.events if e.type == "execution.cycle.started"]
         assert len(started_events) == 1
         assert started_events[0].data["iteration"] == 1
         assert started_events[0].data["current_ac"] == "Test AC"
@@ -684,9 +661,7 @@ class TestCycleEvents:
         cycle_result = result.value
 
         # Find cycle completed event
-        completed_events = [
-            e for e in cycle_result.events if e.type == "execution.cycle.completed"
-        ]
+        completed_events = [e for e in cycle_result.events if e.type == "execution.cycle.completed"]
         assert len(completed_events) == 1
         assert completed_events[0].data["iteration"] == 1
         assert completed_events[0].data["phases_completed"] == 4

@@ -29,7 +29,6 @@ from ouroboros.mcp.types import (
     TransportType,
 )
 
-
 # ---------------------------------------------------------------------------
 # Mock MCP Server Components
 # ---------------------------------------------------------------------------
@@ -114,7 +113,7 @@ class MockMCPSession:
         self._state = server_state
         self._initialized = False
 
-    async def __aenter__(self) -> "MockMCPSession":
+    async def __aenter__(self) -> MockMCPSession:
         """Enter async context manager."""
         return self
 
@@ -184,11 +183,13 @@ class MockMCPSession:
         Raises:
             ValueError: If tool not found.
         """
-        self._state.call_log.append({
-            "type": "call_tool",
-            "name": name,
-            "arguments": arguments,
-        })
+        self._state.call_log.append(
+            {
+                "type": "call_tool",
+                "name": name,
+                "arguments": arguments,
+            }
+        )
 
         if name not in self._state.tools:
             raise ValueError(f"Tool not found: {name}")
@@ -244,10 +245,12 @@ class MockMCPSession:
         Raises:
             ValueError: If resource not found.
         """
-        self._state.call_log.append({
-            "type": "read_resource",
-            "uri": uri,
-        })
+        self._state.call_log.append(
+            {
+                "type": "read_resource",
+                "uri": uri,
+            }
+        )
 
         if uri not in self._state.resources:
             raise ValueError(f"Resource not found: {uri}")
@@ -300,11 +303,13 @@ class MockMCPSession:
         Raises:
             ValueError: If prompt not found.
         """
-        self._state.call_log.append({
-            "type": "get_prompt",
-            "name": name,
-            "arguments": arguments,
-        })
+        self._state.call_log.append(
+            {
+                "type": "get_prompt",
+                "name": name,
+                "arguments": arguments,
+            }
+        )
 
         if name not in self._state.prompts:
             raise ValueError(f"Prompt not found: {name}")
@@ -505,9 +510,7 @@ class StaticResourceHandler:
     ) -> Result[MCPResourceContent, MCPServerError]:
         """Handle resource read."""
         if uri != self._uri:
-            return Result.err(
-                MCPServerError(f"Resource not found: {uri}")
-            )
+            return Result.err(MCPServerError(f"Resource not found: {uri}"))
         return Result.ok(
             MCPResourceContent(
                 uri=uri,
@@ -555,15 +558,11 @@ class DynamicResourceHandler:
     ) -> Result[MCPResourceContent, MCPServerError]:
         """Handle resource read."""
         if not uri.startswith(self._uri_prefix):
-            return Result.err(
-                MCPServerError(f"Resource not found: {uri}")
-            )
+            return Result.err(MCPServerError(f"Resource not found: {uri}"))
 
-        key = uri[len(self._uri_prefix) + 1:]
+        key = uri[len(self._uri_prefix) + 1 :]
         if key not in self._data:
-            return Result.err(
-                MCPServerError(f"Resource not found: {uri}")
-            )
+            return Result.err(MCPServerError(f"Resource not found: {uri}"))
 
         return Result.ok(
             MCPResourceContent(
@@ -675,9 +674,7 @@ def configured_mock_server() -> MockMCPServerState:
     state.register_prompt(
         name="greeting",
         description="Generate a greeting",
-        arguments=(
-            MCPPromptArgument(name="name", description="Name to greet", required=True),
-        ),
+        arguments=(MCPPromptArgument(name="name", description="Name to greet", required=True),),
         template="Hello, {name}! Welcome to the system.",
     )
 

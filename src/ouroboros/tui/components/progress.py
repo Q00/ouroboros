@@ -9,17 +9,14 @@ Displays:
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
-from typing import Any, Generator as TypingGenerator
 
 from textual.app import ComposeResult
 from textual.reactive import reactive
 from textual.widget import Widget
-from textual.containers import Horizontal, Vertical
-from textual.widgets import Label, ProgressBar, Static
+from textual.widgets import ProgressBar, Static
 
 from ouroboros.tui.events import TUIState
 
@@ -220,12 +217,14 @@ class ProgressTracker(Widget):
     """
 
     overall: reactive[OverallProgress] = reactive(OverallProgress())
-    phases: reactive[dict[Phase, PhaseProgress]] = reactive({
-        Phase.DISCOVER: PhaseProgress(Phase.DISCOVER),
-        Phase.DEFINE: PhaseProgress(Phase.DEFINE),
-        Phase.DESIGN: PhaseProgress(Phase.DESIGN),
-        Phase.DELIVER: PhaseProgress(Phase.DELIVER),
-    })
+    phases: reactive[dict[Phase, PhaseProgress]] = reactive(
+        {
+            Phase.DISCOVER: PhaseProgress(Phase.DISCOVER),
+            Phase.DEFINE: PhaseProgress(Phase.DEFINE),
+            Phase.DESIGN: PhaseProgress(Phase.DESIGN),
+            Phase.DELIVER: PhaseProgress(Phase.DELIVER),
+        }
+    )
     milestones: reactive[list[Milestone]] = reactive([])
     current_activity: reactive[str] = reactive("")
 
@@ -410,10 +409,9 @@ class ProgressTracker(Widget):
         # Extract AC progress from ac_tree
         nodes = state.ac_tree.get("nodes", {})
         total_acs = len([n for n in nodes.values() if n.get("depth") == 1])
-        completed_acs = len([
-            n for n in nodes.values()
-            if n.get("depth") == 1 and n.get("status") == "completed"
-        ])
+        completed_acs = len(
+            [n for n in nodes.values() if n.get("depth") == 1 and n.get("status") == "completed"]
+        )
 
         percent = (completed_acs / total_acs * 100) if total_acs > 0 else 0.0
 
@@ -506,11 +504,13 @@ class ProgressTracker(Widget):
                 return
 
         milestones = list(self.milestones)
-        milestones.append(Milestone(
-            id=milestone_id,
-            name=name,
-            phase=phase,
-        ))
+        milestones.append(
+            Milestone(
+                id=milestone_id,
+                name=name,
+                phase=phase,
+            )
+        )
         self.milestones = milestones
 
     def complete_milestone(self, milestone_id: str) -> None:

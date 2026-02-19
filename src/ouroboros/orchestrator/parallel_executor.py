@@ -27,15 +27,13 @@ Example:
 
 from __future__ import annotations
 
-import asyncio
-import json
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import anyio
-
 from rich.console import Console
 
 from ouroboros.observability.logging import get_logger
@@ -93,7 +91,7 @@ class ACExecutionResult:
     duration_seconds: float = 0.0
     session_id: str | None = None
     is_decomposed: bool = False
-    sub_results: tuple["ACExecutionResult", ...] = field(default_factory=tuple)
+    sub_results: tuple[ACExecutionResult, ...] = field(default_factory=tuple)
     depth: int = 0
 
 
@@ -188,7 +186,7 @@ class ParallelACExecutor:
         total_acs = len(seed.acceptance_criteria)
 
         # Track AC statuses for TUI updates
-        ac_statuses: dict[int, str] = {i: "pending" for i in range(total_acs)}
+        ac_statuses: dict[int, str] = dict.fromkeys(range(total_acs), "pending")
         completed_count = 0
 
         # Validation: check all AC indices are present in dependency graph
@@ -318,17 +316,15 @@ class ParallelACExecutor:
             # (anyio manages cancel scopes correctly across concurrent tasks,
             # unlike asyncio.gather which creates separate asyncio Tasks
             # that break the SDK's internal cancel scope tracking)
-            level_results: list[ACExecutionResult | BaseException] = [
-                None
-            ] * len(executable)
+            level_results: list[ACExecutionResult | BaseException] = [None] * len(executable)
 
             # Capture current contexts for this level's closure
             current_contexts = list(level_contexts)
 
             # Build sibling AC descriptions for parallel awareness
-            sibling_acs = [
-                seed.acceptance_criteria[i] for i in executable
-            ] if len(executable) > 1 else []
+            sibling_acs = (
+                [seed.acceptance_criteria[i] for i in executable] if len(executable) > 1 else []
+            )
 
             async def _run_ac(idx: int, ac_idx: int) -> None:
                 try:
@@ -425,7 +421,8 @@ class ParallelACExecutor:
 
                 # Coordinator: detect and resolve file conflicts (Approach A)
                 level_ac_results = [
-                    r for r in all_results
+                    r
+                    for r in all_results
                     if isinstance(r, ACExecutionResult) and r.ac_index in executable
                 ]
                 conflicts = self._coordinator.detect_file_conflicts(level_ac_results)
@@ -459,11 +456,14 @@ class ParallelACExecutor:
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
         success_count = sum(1 for r in sorted_results if r.success)
         failure_count = sum(
-            1 for r in sorted_results
-            if not r.success and r.error not in ("Skipped: dependency failed", "Not included in dependency graph")
+            1
+            for r in sorted_results
+            if not r.success
+            and r.error not in ("Skipped: dependency failed", "Not included in dependency graph")
         )
         skipped_count = sum(
-            1 for r in sorted_results
+            1
+            for r in sorted_results
             if r.error in ("Skipped: dependency failed", "Not included in dependency graph")
         )
         total_messages = sum(len(r.messages) for r in sorted_results)
@@ -675,7 +675,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 return None
 
             # Try to extract JSON array
-            json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+            json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
             if json_match:
                 sub_acs = json.loads(json_match.group())
                 if isinstance(sub_acs, list) and all(isinstance(s, str) for s in sub_acs):
@@ -719,15 +719,11 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         Returns:
             List of ACExecutionResult for each Sub-AC.
         """
-        self._console.print(
-            f"    [green]Starting {len(sub_acs)} Sub-ACs in parallel...[/green]"
-        )
+        self._console.print(f"    [green]Starting {len(sub_acs)} Sub-ACs in parallel...[/green]")
 
         # Execute all Sub-ACs in parallel using anyio task group
         # (preserves cancel scope context for SDK calls)
-        sub_results: list[ACExecutionResult | BaseException] = [
-            None
-        ] * len(sub_acs)
+        sub_results: list[ACExecutionResult | BaseException] = [None] * len(sub_acs)
 
         async def _run_sub_ac(idx: int, sub_ac: str) -> None:
             try:
@@ -756,13 +752,15 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         final_results: list[ACExecutionResult] = []
         for i, result in enumerate(sub_results):
             if isinstance(result, BaseException):
-                final_results.append(ACExecutionResult(
-                    ac_index=parent_ac_index * 100 + i,
-                    ac_content=sub_acs[i],
-                    success=False,
-                    error=str(result),
-                    depth=depth,
-                ))
+                final_results.append(
+                    ACExecutionResult(
+                        ac_index=parent_ac_index * 100 + i,
+                        ac_content=sub_acs[i],
+                        success=False,
+                        error=str(result),
+                        depth=depth,
+                    )
+                )
             else:
                 final_results.append(result)
 
@@ -871,12 +869,14 @@ When complete, explicitly state: [TASK_COMPLETE]
                 if message.tool_name:
                     tool_input = message.data.get("tool_input", {})
                     tool_detail = self._format_tool_detail(message.tool_name, tool_input)
-                    self._console.print(
-                        f"{indent}[yellow]{label} → {tool_detail}[/yellow]"
-                    )
+                    self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")
 
                     # Emit tool started event for TUI
-                    ac_id = f"ac_{ac_index}" if not is_sub_ac else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
+                    ac_id = (
+                        f"ac_{ac_index}"
+                        if not is_sub_ac
+                        else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
+                    )
                     from ouroboros.events.base import BaseEvent as _BaseEvent
 
                     tool_event = _BaseEvent(
@@ -893,7 +893,11 @@ When complete, explicitly state: [TASK_COMPLETE]
                     await self._event_store.append(tool_event)
 
                 if message.data.get("thinking"):
-                    ac_id = f"ac_{ac_index}" if not is_sub_ac else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
+                    ac_id = (
+                        f"ac_{ac_index}"
+                        if not is_sub_ac
+                        else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
+                    )
                     from ouroboros.events.base import BaseEvent as _BaseEvent
 
                     thinking_event = _BaseEvent(
@@ -1028,7 +1032,7 @@ When complete, explicitly state: [TASK_COMPLETE]
         self,
         session_id: str,
         execution_id: str,
-        seed: "Seed",
+        seed: Seed,
         ac_statuses: dict[int, str],
         executing_indices: list[int],
         completed_count: int,
@@ -1055,19 +1059,23 @@ When complete, explicitly state: [TASK_COMPLETE]
         acceptance_criteria = []
         for i, ac_content in enumerate(seed.acceptance_criteria):
             status = ac_statuses.get(i, "pending")
-            acceptance_criteria.append({
-                "index": i,
-                "content": ac_content,
-                "status": status,
-                "elapsed": "",
-            })
+            acceptance_criteria.append(
+                {
+                    "index": i,
+                    "content": ac_content,
+                    "status": status,
+                    "elapsed": "",
+                }
+            )
 
         # Determine current AC index (first executing one, or None)
         current_ac_index = executing_indices[0] if executing_indices else None
 
         # Build activity detail
         if executing_indices:
-            activity_detail = f"Level {current_level}/{total_levels}: ACs {[i+1 for i in executing_indices]}"
+            activity_detail = (
+                f"Level {current_level}/{total_levels}: ACs {[i + 1 for i in executing_indices]}"
+            )
         else:
             activity_detail = f"Level {current_level}/{total_levels}"
 
