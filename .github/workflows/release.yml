@@ -27,9 +27,9 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
-          uv pip install build twine
+          uv sync --dev
 
       - name: Build package
         run: |
@@ -69,9 +69,13 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install twine
+      - name: Install dependencies
         run: |
-          uv pip install twine
+          uv sync --dev
+
+      - name: Build package
+        run: |
+          uv build
 
       - name: Publish to PyPI
         env:
