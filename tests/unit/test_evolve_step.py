@@ -33,6 +33,7 @@ from ouroboros.evolution.loop import (
     StepAction,
     StepResult,
 )
+from ouroboros.evolution.reflect import ReflectOutput
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.persistence.event_store import EventStore
 
@@ -553,6 +554,73 @@ class TestEvolveStepResume:
         assert result.is_ok
         step = result.value
         assert step.generation_result.generation_number == 2
+
+
+class TestRunGenerationFailures:
+    """Test failure event emission inside _run_generation()."""
+
+    @pytest.mark.asyncio
+    async def test_seed_generation_failure_emits_failed_event(self) -> None:
+        """Seed generation errors should emit lineage.generation.failed(seeding)."""
+        store = await create_event_store()
+        seed_v1 = make_seed(seed_id="seed_seedfail_1")
+
+        # Build lineage with one completed generation so Gen 2 triggers Wonder/Reflect path
+        lineage = OntologyLineage(
+            lineage_id="lin_seedgen_fail",
+            goal=seed_v1.goal,
+            generations=(
+                GenerationRecord(
+                    generation_number=1,
+                    seed_id=seed_v1.metadata.seed_id,
+                    ontology_snapshot=seed_v1.ontology_schema,
+                    evaluation_summary=make_eval_summary(),
+                    phase=GenerationPhase.COMPLETED,
+                    seed_json=json.dumps(seed_v1.to_dict()),
+                ),
+            ),
+        )
+
+        wonder_engine = MagicMock()
+        wonder_engine.wonder = AsyncMock(return_value=Result.ok(make_wonder_output()))
+
+        reflect_engine = MagicMock()
+        reflect_engine.reflect = AsyncMock(
+            return_value=Result.ok(
+                ReflectOutput(
+                    refined_goal=seed_v1.goal,
+                    refined_constraints=seed_v1.constraints,
+                    refined_acs=seed_v1.acceptance_criteria,
+                    ontology_mutations=(),
+                    reasoning="test",
+                )
+            )
+        )
+
+        seed_generator = MagicMock()
+        seed_generator.generate_from_reflect = MagicMock(
+            return_value=Result.err("synthetic seed generation failure")
+        )
+
+        loop = EvolutionaryLoop(
+            event_store=store,
+            wonder_engine=wonder_engine,
+            reflect_engine=reflect_engine,
+            seed_generator=seed_generator,
+        )
+
+        result = await loop._run_generation(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed_v1,
+        )
+        assert result.is_err
+
+        events = await store.replay_lineage("lin_seedgen_fail")
+        failed = [e for e in events if e.type == "lineage.generation.failed"]
+        assert len(failed) == 1
+        assert failed[0].data["phase"] == GenerationPhase.SEEDING.value
+        assert "synthetic seed generation failure" in failed[0].data["error"]
 
 
 class TestLineageStatusHandler:

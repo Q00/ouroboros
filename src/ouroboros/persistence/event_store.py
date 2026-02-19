@@ -173,7 +173,9 @@ class EventStore:
                     select(events_table)
                     .where(events_table.c.aggregate_type == aggregate_type)
                     .where(events_table.c.aggregate_id == aggregate_id)
-                    .order_by(events_table.c.timestamp)
+                    # Order by timestamp + id for deterministic replay when
+                    # multiple events share the same timestamp resolution.
+                    .order_by(events_table.c.timestamp, events_table.c.id)
                 )
                 rows = result.mappings().all()
                 return [BaseEvent.from_db_row(dict(row)) for row in rows]

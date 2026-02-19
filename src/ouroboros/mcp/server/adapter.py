@@ -448,9 +448,11 @@ def create_ouroboros_server(
         build_system_prompt,
         build_task_prompt,
     )
+    from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
     from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
     from ouroboros.resilience.lateral import LateralThinker
     from pathlib import Path
+    from rich.console import Console
 
     # Create LLM adapter (shared across services)
     # Default to ClaudeCodeAdapter — uses Max Plan auth, no API key needed.
@@ -487,9 +489,98 @@ def create_ouroboros_server(
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
     from ouroboros.evolution.wonder import WonderEngine
     from ouroboros.evolution.reflect import ReflectEngine
+    from ouroboros.core.lineage import EvaluationSummary
 
     wonder_engine = WonderEngine(llm_adapter=llm_adapter, model="default")
     reflect_engine = ReflectEngine(llm_adapter=llm_adapter, model="default")
+
+    # Wire real execution/evaluation callables for evolve_step so that
+    # generation quality is validated, not only ontology deltas.
+    agent_adapter = ClaudeAgentAdapter(permission_mode="acceptEdits")
+    evolution_runner = OrchestratorRunner(
+        adapter=agent_adapter,
+        event_store=event_store,
+        console=Console(),
+        debug=False,
+        enable_decomposition=True,
+    )
+    evolution_eval_pipeline = EvaluationPipeline(
+        llm_adapter=llm_adapter,
+        # Stage 1 is intentionally disabled here to avoid running full
+        # mechanical checks on every generation step.
+        config=PipelineConfig(
+            stage1_enabled=False,
+            stage2_enabled=True,
+            stage3_enabled=False,
+        ),
+    )
+    evolution_store_initialized = False
+    evolution_store_init_lock = asyncio.Lock()
+
+    async def _ensure_evolution_store_initialized() -> None:
+        nonlocal evolution_store_initialized
+        if evolution_store_initialized:
+            return
+
+        async with evolution_store_init_lock:
+            if not evolution_store_initialized:
+                await event_store.initialize()
+                evolution_store_initialized = True
+
+    async def _evolution_executor(seed: Any) -> Any:
+        await _ensure_evolution_store_initialized()
+        return await evolution_runner.execute_seed(
+            seed=seed,
+            execution_id=None,
+            parallel=True,
+        )
+
+    async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
+        await _ensure_evolution_store_initialized()
+
+        artifact = execution_output or ""
+        if not artifact.strip():
+            return EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                drift_score=1.0,
+                failure_reason="Empty execution output",
+            )
+
+        current_ac = (
+            seed.acceptance_criteria[0]
+            if getattr(seed, "acceptance_criteria", None)
+            else "Verify execution output meets requirements"
+        )
+        eval_context = EvaluationContext(
+            execution_id=f"eval_{seed.metadata.seed_id}",
+            seed_id=seed.metadata.seed_id,
+            current_ac=current_ac,
+            artifact=artifact,
+            artifact_type="code",
+            goal=seed.goal,
+            constraints=tuple(seed.constraints),
+        )
+        eval_result = await evolution_eval_pipeline.evaluate(eval_context)
+        if eval_result.is_err:
+            return EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                drift_score=1.0,
+                failure_reason=str(eval_result.error),
+            )
+
+        result = eval_result.value
+        stage2 = result.stage2_result
+        return EvaluationSummary(
+            final_approved=result.final_approved,
+            highest_stage_passed=max(1, result.highest_stage_completed),
+            score=stage2.score if stage2 else None,
+            drift_score=stage2.drift_score if stage2 else None,
+            failure_reason=result.failure_reason,
+        )
 
     evolutionary_loop = EvolutionaryLoop(
         event_store=event_store,
@@ -497,8 +588,8 @@ def create_ouroboros_server(
         wonder_engine=wonder_engine,
         reflect_engine=reflect_engine,
         seed_generator=seed_generator,
-        executor=None,
-        evaluator=None,
+        executor=_evolution_executor,
+        evaluator=_evolution_evaluator,
     )
 
     # Create tool registry for dependency injection

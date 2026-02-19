@@ -127,6 +127,40 @@ class TestEventStoreReplay:
         for i, event in enumerate(replayed):
             assert event.data["order"] == i
 
+    async def test_replay_orders_by_timestamp_then_id_for_ties(
+        self, event_store: EventStore
+    ) -> None:
+        """replay() is deterministic when multiple events share a timestamp."""
+        from datetime import UTC, datetime
+
+        shared_ts = datetime(2026, 2, 19, 0, 0, 0, tzinfo=UTC)
+        later_id = BaseEvent(
+            id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            timestamp=shared_ts,
+            type="test.event.created",
+            aggregate_type="test",
+            aggregate_id="test-order-tie",
+            data={"order": "later-id"},
+        )
+        earlier_id = BaseEvent(
+            id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            timestamp=shared_ts,
+            type="test.event.created",
+            aggregate_type="test",
+            aggregate_id="test-order-tie",
+            data={"order": "earlier-id"},
+        )
+
+        # Insert in reverse lexical id order; replay should sort by (timestamp, id)
+        await event_store.append(later_id)
+        await event_store.append(earlier_id)
+
+        replayed = await event_store.replay("test", "test-order-tie")
+        assert [e.id for e in replayed] == [
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        ]
+
     async def test_replay_filters_by_aggregate_type(
         self, event_store: EventStore
     ) -> None:

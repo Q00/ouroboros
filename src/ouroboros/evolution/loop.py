@@ -678,6 +678,14 @@ class EvolutionaryLoop:
                         current_seed, reflect_output,
                     )
                     if seed_result.is_err:
+                        await self.event_store.append(
+                            lineage_generation_failed(
+                                lineage.lineage_id,
+                                generation_number,
+                                GenerationPhase.SEEDING.value,
+                                str(seed_result.error),
+                            )
+                        )
                         return Result.err(
                             OuroborosError(f"Seed generation failed: {seed_result.error}")
                         )
