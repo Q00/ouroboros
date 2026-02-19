@@ -178,10 +178,13 @@ class TestTUICommands:
 
     def test_tui_monitor_help(self) -> None:
         """Test tui monitor command help."""
+        import re
+
         result = runner.invoke(app, ["tui", "monitor", "--help"])
         assert result.exit_code == 0
-        assert "db-path" in result.output.lower()
-        assert "monitor" in result.output.lower()
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output).lower()
+        assert "db-path" in plain
+        assert "monitor" in plain
 
 
 class TestShorthandCommands:
