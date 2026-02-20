@@ -46,7 +46,7 @@ If the `ouroboros_interview` MCP tool is available, use it for persistent, struc
 
 If the MCP tool is NOT available, fall back to agent-based interview:
 
-1. Read `.claude-plugin/agents/socratic-interviewer.md` and adopt that role
+1. Read `agents/socratic-interviewer.md` and adopt that role
 2. Ask clarifying questions based on the user's topic
 3. Use Read, Glob, Grep, WebFetch to explore context if needed
 4. Continue until the user says "done"

@@ -7,7 +7,7 @@ Transform your vague ideas into validated specifications and execute them with c
 ### Plugin Mode (No Python Required)
 ```bash
 # Install (2 commands)
-claude /plugin marketplace add github:Q00/ouroboros
+claude /plugin marketplace add Q00/ouroboros
 claude /plugin install ouroboros@ouroboros
 
 # Your first workflow (2 commands)
@@ -44,7 +44,7 @@ ouroboros run --seed ~/.ouroboros/seeds/latest.yaml
 ### Option 1: Plugin Mode (Recommended for Beginners)
 ```bash
 # Install via Claude Code marketplace
-claude /plugin marketplace add github:Q00/ouroboros
+claude /plugin marketplace add Q00/ouroboros
 claude /plugin install ouroboros@ouroboros
 
 # Verify installation
@@ -111,7 +111,7 @@ tui:
 # Execution settings
 execution:
   max_parallel_tasks: 5
-  default_mode: autopilot
+  default_mode: standard
   auto_save: true
 ```
 
@@ -228,8 +228,8 @@ ooo analyze "User registration fails with email validation"
 # 2. Generate fix seed
 ooo seed
 
-# 3. Execute with ultrawork (parallel)
-ouroboros run --seed bugfix-email.yaml --mode ultrawork
+# 3. Execute
+ouroboros run --seed bugfix-email.yaml
 
 # 4. Verify fix
 ooo evaluate
@@ -359,9 +359,6 @@ ouroboros run --seed project.yaml --ui cli
 
 #### High costs
 ```bash
-# Use ecomode
-ouroboros run --seed project.yaml --mode ecomode
-
 # Check predictions
 ouroboros predict --seed project.yaml
 
@@ -419,14 +416,9 @@ ouroboros config get limits
 3. **Specify integrations** - APIs, databases, third-party services
 
 ### For Successful Execution
-1. **Choose the right mode** - Use ultrawork for independent tasks, autopilot for complex workflows
-2. **Monitor drift** - Check status regularly to catch deviations early
-3. **Use evaluation** - Always run evaluation to ensure quality
-
-### For Cost Optimization
-1. **Use ecomode** - Automatically saves 85% on suitable tasks
-2. **Batch small tasks** - Group related work to maximize parallel execution
-3. **Monitor costs** - Use the cost dashboard to track spending
+1. **Monitor drift** - Check status regularly to catch deviations early
+2. **Use evaluation** - Always run evaluation to ensure quality
+3. **Iterate with evolve** - Use evolutionary loops to refine specs
 
 ---
 
@@ -458,7 +450,7 @@ ouroboros config get limits
 | CLI not found | Install Python package | `pip install ouroboros-ai` |
 | API errors | Check API key | `export ANTHROPIC_API_KEY=...` |
 | TUI blank | Check terminal | `export TERM=xterm-256color` |
-| High costs | Use ecomode | `ouroboros run --mode ecomode` |
+| High costs | Reduce seed scope | `ooo interview` to refine |
 | Execution stuck | Use unstuck | `ooo unstuck` |
 | Drift detected | Review spec | `ouroboros status drift` |
 

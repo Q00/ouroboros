@@ -37,7 +37,7 @@
 **Plugin Mode** (No Python Required):
 ```bash
 # 1. Install
-claude /plugin marketplace add github:Q00/ouroboros
+claude /plugin marketplace add Q00/ouroboros
 claude /plugin install ouroboros@ouroboros
 
 # 2. Interview — expose hidden assumptions
@@ -168,7 +168,6 @@ ooo setup       # register MCP server (one-time)
 | `ooo evaluate` | 3-stage verification (Mechanical → Semantic → Consensus) |
 | `ooo status` | Drift detection + session tracking |
 | `ouroboros dashboard` | Interactive TUI dashboard |
-| `ouroboros run --eco` | Ecomode: cost-optimized execution |
 
 ### Natural Language Triggers
 
@@ -213,7 +212,7 @@ src/ouroboros/
 ### Plugin Mode
 
 **`ooo: command not found`**
-- Reinstall: `claude /plugin marketplace add github:Q00/ouroboros`
+- Reinstall: `claude /plugin marketplace add Q00/ouroboros`
 - Then: `claude /plugin install ouroboros@ouroboros`
 - Restart Claude Code after installation
 

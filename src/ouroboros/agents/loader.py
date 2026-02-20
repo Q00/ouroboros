@@ -3,8 +3,9 @@
 Loads agent .md files with a 3-tier resolution strategy:
 
 1. ``OUROBOROS_AGENTS_DIR`` env var  -- user-editable plugin agents
-2. ``.claude-plugin/agents/`` (CWD) -- developer mode
-3. ``importlib.resources`` bundle   -- installed-package fallback
+2. ``agents/`` (CWD)               -- plugin / developer mode
+3. ``.claude-plugin/agents/`` (CWD) -- legacy fallback
+4. ``importlib.resources`` bundle   -- installed-package fallback
 
 This allows plugin users to customise agent behaviour by editing
 the ``.md`` files in their plugin directory.  Changes take effect
@@ -44,13 +45,17 @@ def _resolve_agent_path(agent_name: str) -> Path | None:
         if path.exists():
             return path
 
-    # Tier 2: CWD-relative .claude-plugin (dev mode)
-    # Resolve at call time, but cache the result to prevent drift
-    cwd_path = Path.cwd() / ".claude-plugin/agents" / filename
+    # Tier 2: CWD-relative agents/ (plugin convention)
+    cwd_path = Path.cwd() / "agents" / filename
     if cwd_path.exists():
         return cwd_path
 
-    # Tier 3: fall through to importlib.resources
+    # Tier 3: CWD-relative .claude-plugin/agents/ (legacy fallback)
+    legacy_path = Path.cwd() / ".claude-plugin/agents" / filename
+    if legacy_path.exists():
+        return legacy_path
+
+    # Tier 4: fall through to importlib.resources
     return None
 
 
@@ -84,8 +89,8 @@ def load_agent_prompt(agent_name: str) -> str:
     except (FileNotFoundError, TypeError):
         raise FileNotFoundError(
             f"Agent prompt not found: {agent_name}.md "
-            f"(searched OUROBOROS_AGENTS_DIR, .claude-plugin/agents/, "
-            f"and ouroboros.agents package)"
+            f"(searched OUROBOROS_AGENTS_DIR, agents/, "
+            f".claude-plugin/agents/, and ouroboros.agents package)"
         ) from None
 
 

@@ -352,7 +352,7 @@ class TestResolutionOrder:
         # Ensure no env var is set
         monkeypatch.delenv("OUROBOROS_AGENTS_DIR", raising=False)
 
-        # Change to a directory that doesn't have .claude-plugin/agents/
+        # Change to a directory that doesn't have agents/
         monkeypatch.chdir(tmp_path)
 
         # Clear the cache
@@ -369,9 +369,9 @@ class TestResolutionOrder:
     def test_cwd_relative_takes_priority_over_bundle(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """CWD .claude-plugin/agents/ takes priority over bundled agents."""
-        # Create .claude-plugin/agents/ in tmp directory
-        cwd_agents_dir = tmp_path / ".claude-plugin" / "agents"
+        """CWD agents/ takes priority over bundled agents."""
+        # Create agents/ in tmp directory
+        cwd_agents_dir = tmp_path / "agents"
         cwd_agents_dir.mkdir(parents=True)
 
         custom_agent_file = cwd_agents_dir / "hacker.md"
@@ -397,7 +397,7 @@ class TestResolutionOrder:
     def test_env_var_takes_priority_over_cwd(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OUROBOROS_AGENTS_DIR env var takes priority over CWD .claude-plugin/agents/."""
+        """OUROBOROS_AGENTS_DIR env var takes priority over CWD agents/."""
         # Create both directories
         env_agents_dir = tmp_path / "env_agents"
         env_agents_dir.mkdir()

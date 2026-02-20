@@ -162,7 +162,7 @@ class SkillRegistry:
         - Fast keyword indexing
     """
 
-    DEFAULT_SKILL_DIR = Path(".claude-plugin/skills")
+    DEFAULT_SKILL_DIR = Path("skills")
 
     def __init__(self, skill_dir: Path | None = None) -> None:
         """Initialize the skill registry.

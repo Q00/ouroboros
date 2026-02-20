@@ -47,7 +47,17 @@ Check the user's environment with clear feedback:
 
 ```bash
 python3 --version
+which uvx 2>/dev/null && uvx --version 2>/dev/null
+which claude 2>/dev/null
 ```
+
+**IMPORTANT: If system Python is < 3.14 but uvx is available, also check uv-managed Python:**
+
+```bash
+uv python list 2>/dev/null | grep "cpython-3.14"
+```
+
+If `uv python list` shows Python 3.14+ available, this counts as **Full Mode** because `uvx ouroboros-ai mcp serve` automatically uses uv-managed Python 3.14+ (not system Python).
 
 **Report results with personality:**
 
@@ -55,19 +65,22 @@ python3 --version
 Environment Detected:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Python 3.14+              [✓] Full Mode Available
-uvx package runner         [?] Checking...
+System Python 3.13         [!] Below 3.14
+uv Python 3.14+            [✓] Available (uvx will use this)
+uvx package runner         [✓] Available
 Claude Code CLI            [✓] Detected
+
+→ Full Mode Available (via uvx + uv-managed Python 3.14)
 ```
 
 **Decision Matrix:**
 
-| Python Version | Mode | Features |
-|:---------------|:-----|:---------|
-| 3.14+ | **Full Mode** | Everything (TUI, MCP, evaluation, drift) |
-| 3.12-3.13 | Limited | Upgrade recommended for best experience |
-| < 3.12 | Plugin-Only | Skills + agents only, no MCP server |
-| None | Plugin-Only | Plugin features work immediately |
+| Environment | Mode | Features |
+|:------------|:-----|:---------|
+| uvx + uv Python 3.14+ | **Full Mode** | Everything (TUI, MCP, evaluation, drift) |
+| System Python 3.14+ | **Full Mode** | Everything |
+| uvx + Python < 3.14 only | Plugin-Only | `uv python install 3.14` to upgrade |
+| No Python, no uvx | Plugin-Only | Plugin skills work immediately |
 
 **Celebration Checkpoint 1:**
 ```
@@ -80,10 +93,10 @@ Great news! You're ready for Full Mode with all features enabled.
 
 **Only if Full Mode (Python 3.14+)**
 
-Check if `.mcp.json` exists:
+Check if `~/.claude/mcp.json` exists:
 
 ```bash
-ls -la .mcp.json 2>/dev/null && echo "EXISTS" || echo "NOT_FOUND"
+ls -la ~/.claude/mcp.json 2>/dev/null && echo "EXISTS" || echo "NOT_FOUND"
 ```
 
 **Engaging Question:**
@@ -114,7 +127,7 @@ With MCP: Full execution pipeline with visualization
 Recommendation: Enable for complete Ouroboros experience.
 ```
 
-**If Yes, create or update `.mcp.json`:**
+**If Yes, create or update `~/.claude/mcp.json`** (user-level, works across all projects):
 ```json
 {
   "mcpServers": {
@@ -126,7 +139,7 @@ Recommendation: Enable for complete Ouroboros experience.
 }
 ```
 
-If `.mcp.json` already exists, merge intelligently (preserve other servers).
+If `~/.claude/mcp.json` already exists, merge intelligently (preserve other servers).
 
 **Celebration Checkpoint 2:**
 ```
@@ -237,17 +250,17 @@ Run verification with visual feedback:
 
 Check skills are loadable:
 ```bash
-ls .claude-plugin/skills/ | wc -l  # Should show 15+ skills
+ls skills/ | wc -l  # Should show 12+ skills
 ```
 
 Check agents are available:
 ```bash
-ls .claude-plugin/agents/ | wc -l  # Should show 9+ agents
+ls agents/ | wc -l  # Should show 9+ agents
 ```
 
 Check MCP registration (if enabled):
 ```bash
-cat .mcp.json | grep -q ouroboros && echo "MCP: ✓" || echo "MCP: ✗"
+cat ~/.claude/mcp.json | grep -q ouroboros && echo "MCP: ✓" || echo "MCP: ✗"
 ```
 
 ---
@@ -339,7 +352,7 @@ When invoked with `--uninstall`:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 This will remove:
-- MCP server registration from .mcp.json
+- MCP server registration from ~/.claude/mcp.json
 - Ouroboros block from CLAUDE.md
 
 This will NOT remove:
@@ -351,7 +364,7 @@ Uninstall Ouroboros configuration? [Yes / No]
 ```
 
 If Yes:
-1. Remove `ouroboros` entry from `.mcp.json` (if exists)
+1. Remove `ouroboros` entry from `~/.claude/mcp.json` (if exists)
 2. Remove `<!-- ooo:START -->` to `<!-- ooo:END -->` block from CLAUDE.md (if exists)
 3. Confirm: "Ouroboros plugin configuration removed. To remove plugin files, run: claude /plugin uninstall ouroboros"
 
@@ -379,15 +392,15 @@ uvx is recommended but not required. Alternative:
 Install Ouroboros globally:
   pip install ouroboros-ai
 
-Then update .mcp.json with:
+Then update ~/.claude/mcp.json with:
   "command": "python"
   "args": ["-m", "ouroboros", "mcp", "serve"]
 ```
 
-### ".mcp.json conflicts"
+### "~/.claude/mcp.json conflicts"
 ```
 Ouroboros will merge with existing MCP servers.
-If you see issues, share your .mcp.json content and
+If you see issues, share your ~/.claude/mcp.json content and
 we'll help you resolve conflicts.
 ```
 

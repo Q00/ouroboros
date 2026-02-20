@@ -60,9 +60,8 @@ Ouroboros is a **specification-first AI workflow engine** that transforms vague 
 - Version tracking and ambiguity scoring
 
 ### 3. Execution Layer
-**7 execution modes for different workflow patterns**
-- Autopilot, Ultrawork, Ralph, Ultrapilot, Ecomode, Swarm, Pipeline
-- PAL Router: Cost optimization with 85% claimed savings
+**Evolutionary execution with feedback loops**
+- Ralph: Self-referential persistence loop with verification
 - Dependency-aware parallel execution
 - Automatic scaling and resilience
 
@@ -486,7 +485,7 @@ All LLM calls go through LiteLLM for:
 ## Extension Points
 
 ### 1. Skill Development
-Create new skills in `.claude-plugin/skills/`:
+Create new skills in `skills/`:
 
 ```yaml
 # SKILL.md
@@ -500,7 +499,7 @@ magic_prefixes:
 triggers:
   - "do custom thing"
 
-mode: autopilot
+mode: standard
 agents:
   - executor
   - verifier
@@ -511,7 +510,7 @@ tools:
 ```
 
 ### 2. Agent Development
-Create custom agents in `.claude-plugin/agents/`:
+Create custom agents in `agents/`:
 
 ```markdown
 # custom-agent.md
@@ -660,7 +659,7 @@ log_level: INFO
 ### 1. Plugin Mode
 ```bash
 # Install plugin
-claude /plugin marketplace add github:Q00/ouroboros
+claude /plugin marketplace add Q00/ouroboros
 claude /plugin install ouroboros@ouroboros
 
 # Use skills

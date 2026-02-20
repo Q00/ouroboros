@@ -140,7 +140,7 @@ class TestSkillRegistryInit:
         registry = SkillRegistry()
 
         assert registry.skill_dir == SkillRegistry.DEFAULT_SKILL_DIR
-        assert Path(".claude-plugin/skills") == SkillRegistry.DEFAULT_SKILL_DIR
+        assert Path("skills") == SkillRegistry.DEFAULT_SKILL_DIR
 
     def test_custom_skill_dir(self) -> None:
         """Test custom skills directory can be set."""

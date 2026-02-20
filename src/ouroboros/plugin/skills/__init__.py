@@ -1,7 +1,7 @@
 """Ouroboros Skills Package.
 
 This package provides an enhanced skill system with:
-- Auto-discovery from .claude-plugin/skills/
+- Auto-discovery from skills/
 - Hot-reload without restart
 - Magic keyword detection
 - Skill composition support

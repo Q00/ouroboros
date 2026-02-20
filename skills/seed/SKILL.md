@@ -41,7 +41,7 @@ If the `ouroboros_generate_seed` MCP tool is available:
 
 If the MCP tool is NOT available, fall back to agent-based generation:
 
-1. Read `.claude-plugin/agents/seed-architect.md` and adopt that role
+1. Read `agents/seed-architect.md` and adopt that role
 2. Extract structured requirements from the interview Q&A in conversation history
 3. Generate a Seed YAML specification
 4. Present the seed to the user
@@ -112,8 +112,8 @@ Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not se
 }
 ```
 
-- **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `.claude-plugin/skills/setup/SKILL.md`
-- **Just Setup**: Save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `.claude-plugin/skills/setup/SKILL.md`
+- **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
+- **Just Setup**: Save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
 - **Other** (user provides custom text): Save `{"star_asked": true}`, skip setup
 
 Create `~/.ouroboros/` directory if it doesn't exist.

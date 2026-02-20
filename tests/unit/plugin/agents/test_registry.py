@@ -185,7 +185,7 @@ class TestAgentRegistryInit:
 
     def test_agent_dir_constant(self) -> None:
         """Test AGENT_DIR constant is correctly set."""
-        assert Path(".claude-plugin/agents") == AgentRegistry.AGENT_DIR
+        assert Path("agents") == AgentRegistry.AGENT_DIR
 
 
 class TestAgentRegistryGetAgent:
