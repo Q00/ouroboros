@@ -152,10 +152,10 @@ Add Ouroboros quick-reference to your CLAUDE.md?
 This gives you instant command reminders without leaving
 your project context.
 
-What gets added (~30 lines):
-- All ooo commands with descriptions
-- Agent catalog with use cases
-- Quick reference examples
+What gets added (~40 lines):
+- Philosophy and pipeline overview
+- Command routing table with lazy-loaded agents
+- Agent catalog summary
 
 A backup will be created: CLAUDE.md.bak
 
@@ -163,34 +163,54 @@ A backup will be created: CLAUDE.md.bak
 ```
 
 **If "Preview first", show:**
-```markdown
-<!-- OUROBOROS:START -->
-<!-- OUROBOROS:VERSION:0.9.0 -->
-# Ouroboros - Requirement Crystallization Engine
+````markdown
+<!-- ooo:START -->
+<!-- ooo:VERSION:0.11.0 -->
+# Ouroboros — Specification-First AI Development
 
-## Commands (ooo prefix)
-- `ooo` - Welcome + quick start
-- `ooo interview` - Socratic requirement clarification (Plugin)
-- `ooo seed` - Generate validated seed specification (Plugin)
-- `ooo run` - Execute seed workflow (MCP)
-- `ooo evaluate` - Three-stage verification (MCP)
-- `ooo unstuck` - Lateral thinking, 5 personas (Plugin)
-- `ooo status` - Session status and drift check (MCP)
-- `ooo setup` - Installation wizard (Plugin)
-- `ooo help` - Full reference guide (Plugin)
+> Before telling AI what to build, define what should be built.
+> As Socrates asked 2,500 years ago — "What do you truly know?"
+> Ouroboros turns that question into an evolutionary AI workflow engine.
+
+Most AI coding fails at the input, not the output. Ouroboros fixes this by
+**exposing hidden assumptions before any code is written**.
+
+1. **Socratic Clarity** — Question until ambiguity ≤ 0.2
+2. **Ontological Precision** — Solve the root problem, not symptoms
+3. **Evolutionary Loops** — Each evaluation cycle feeds back into better specs
+
+```
+Interview → Seed → Execute → Evaluate
+    ↑                           ↓
+    └─── Evolutionary Loop ─────┘
+```
+
+## ooo Commands
+
+Each command loads its agent/MCP on-demand. Details in each skill file.
+
+| Command | Loads |
+|---------|-------|
+| `ooo` | — |
+| `ooo interview` | `ouroboros:socratic-interviewer` |
+| `ooo seed` | `ouroboros:seed-architect` |
+| `ooo run` | MCP required |
+| `ooo evolve` | MCP: `evolve_step` |
+| `ooo evaluate` | `ouroboros:evaluator` |
+| `ooo unstuck` | `ouroboros:{persona}` |
+| `ooo status` | MCP: `session_status` |
+| `ooo setup` | — |
+| `ooo help` | — |
 
 ## Agents
-- ouroboros:socratic-interviewer - Exposes hidden assumptions
-- ouroboros:ontologist - Finds root problems, not symptoms
-- ouroboros:seed-architect - Crystallizes into seed spec
-- ouroboros:evaluator - Three-stage verification
-- ouroboros:contrarian - "Are we solving the wrong problem?"
-- ouroboros:hacker - "Make it work first"
-- ouroboros:simplifier - "Cut scope to MVP"
-- ouroboros:researcher - "Stop coding, start investigating"
-- ouroboros:architect - "Question the foundation, redesign if needed"
-<!-- OUROBOROS:END -->
-```
+
+Loaded on-demand — not preloaded.
+
+**Core**: socratic-interviewer, ontologist, seed-architect, evaluator,
+wonder, reflect, advocate, contrarian, judge
+**Support**: hacker, simplifier, researcher, architect
+<!-- ooo:END -->
+````
 
 **If Integrate:**
 1. Backup existing CLAUDE.md to CLAUDE.md.bak
@@ -302,7 +322,7 @@ Reveal features gradually to avoid overwhelm:
 - `ooo status` - Drift tracking
 
 ### Power User (Discover organically)
-- Execution modes (ultrawork, ralph, ultrapilot)
+- Evolutionary loop and ralph persistence
 - Cost prediction and optimization
 - Session replay and debugging
 - Custom agents and skills
@@ -332,7 +352,7 @@ Uninstall Ouroboros configuration? [Yes / No]
 
 If Yes:
 1. Remove `ouroboros` entry from `.mcp.json` (if exists)
-2. Remove `<!-- OUROBOROS:START -->` to `<!-- OUROBOROS:END -->` block from CLAUDE.md (if exists)
+2. Remove `<!-- ooo:START -->` to `<!-- ooo:END -->` block from CLAUDE.md (if exists)
 3. Confirm: "Ouroboros plugin configuration removed. To remove plugin files, run: claude /plugin uninstall ouroboros"
 
 ---

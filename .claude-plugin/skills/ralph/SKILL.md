@@ -13,11 +13,11 @@ ooo ralph "<your request>"
 
 ## How It Works
 
-Ralph mode includes ultrawork + automatic verification + persistence:
+Ralph mode includes parallel execution + automatic verification + persistence:
 
-1. **Execute** (ultrawork pattern)
-   - Maximum parallelism
+1. **Execute** (parallel where possible)
    - Independent tasks run concurrently
+   - Dependency-aware scheduling
 
 2. **Verify** (verifier)
    - Check completion
@@ -58,8 +58,8 @@ When the user invokes this skill:
 
    ```
    while iteration < max_iterations:
-       # Execute with ultrawork parallelism
-       result = await execute_ultrawork(request, context)
+       # Execute with parallel agents
+       result = await execute_parallel(request, context)
 
        # Verify the result
        verification = await verify_result(result, acceptance_criteria)
@@ -127,7 +127,7 @@ This is the key phrase. Ralph does not give up:
 User: ooo ralph fix all failing tests
 
 [Ralph Iteration 1/10]
-Executing with ultrawork parallelism...
+Executing in parallel...
 Fixing test failures...
 
 Verification: FAILED
@@ -139,7 +139,7 @@ Issues:
 The boulder never stops. Continuing...
 
 [Ralph Iteration 2/10]
-Executing with ultrawork parallelism...
+Executing in parallel...
 Fixing remaining issues...
 
 Verification: FAILED
@@ -150,7 +150,7 @@ Issues:
 The boulder never stops. Continuing...
 
 [Ralph Iteration 3/10]
-Executing with ultrawork parallelism...
+Executing in parallel...
 Fixing edge case...
 
 Verification: PASSED

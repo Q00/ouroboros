@@ -36,17 +36,12 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo welcome` | First-touch welcome guide | Plugin |
 | `ooo help` | This reference guide | Plugin |
 
-### Execution Modes
+### Evolutionary Loop
 
-| Command | Purpose | Parallelism |
-|---------|---------|-------------|
-| `ooo autopilot` | Full autonomous execution with verification | Sequential |
-| `ooo ultrawork` | Maximum parallelism for independent tasks | Parallel (tasks) |
-| `ooo ralph` | Self-referential loop until verified ("don't stop") | Parallel + loop |
-| `ooo ultrapilot` | Parallel autopilot with file partitioning | Parallel (files) |
-| `ooo ecomode` | Token-efficient execution (haiku/sonnet only) | Sequential |
-| `ooo swarm` | Coordinated multi-agent team | Parallel (agents) |
-| `ooo pipeline` | Sequential agent chaining with data passing | Sequential (stages) |
+| Command | Purpose | Mode |
+|---------|---------|------|
+| `ooo evolve` | Start/monitor evolutionary development loop | MCP |
+| `ooo ralph` | Self-referential loop until verified ("don't stop") | Plugin + MCP |
 
 **Plugin** = Works immediately, no setup needed.
 **MCP** = Requires Python 3.14+ and `ooo setup` for MCP server registration.
@@ -62,17 +57,12 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | "think sideways", "i'm stuck", "break through", "lateral thinking" | `ooo unstuck` |
 | "am I drifting?", "drift check", "session status" | `ooo status` |
 
-### Execution Mode Triggers
+### Loop Triggers
 
 | Phrase | Triggers |
 |--------|----------|
-| "autopilot", "build me", "I want a", "make this", "create this for me" | `ooo autopilot` |
-| "ultrawork", "ulw", "maximum parallelism", "parallel everything" | `ooo ultrawork` |
 | "ralph", "don't stop", "must complete", "until it works", "keep going" | `ooo ralph` |
-| "ultrapilot", "parallel build", "parallel autopilot" | `ooo ultrapilot` |
-| "ecomode", "eco", "budget", "cheap mode", "token efficient" | `ooo ecomode` |
-| "swarm", "team", "coordinated", "multi-agent" | `ooo swarm` |
-| "pipeline", "chain agents", "sequential", "step by step" | `ooo pipeline` |
+| "evolve", "evolutionary loop", "iterate until converged" | `ooo evolve` |
 
 ## Available Skills
 
@@ -90,17 +80,12 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:setup` | Installation wizard | Plugin |
 | `/ouroboros:help` | This guide | Plugin |
 
-### Execution Mode Skills
+### Loop Skills
 
 | Skill | Purpose | Best For |
 |-------|---------|----------|
-| `/ouroboros:autopilot` | Autonomous execution with verification | Most tasks, "just do it" |
-| `/ouroboros:ultrawork` | Maximum parallelism for independent tasks | Multiple independent ACs |
 | `/ouroboros:ralph` | Self-referential loop until verified | "Don't stop", must complete |
-| `/ouroboros:ultrapilot` | Parallel autopilot with file partitioning | Multi-file features |
-| `/ouroboros:ecomode` | Token-efficient (haiku/sonnet only) | Budget-conscious, simple tasks |
-| `/ouroboros:swarm` | Coordinated multi-agent team | Complex, multi-domain work |
-| `/ouroboros:pipeline` | Sequential agent chaining | Clear handoff, audit trail |
+| `/ouroboros:evolve` | Evolutionary ontology refinement | Spec iteration until convergence |
 
 ## Available Agents
 

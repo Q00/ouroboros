@@ -83,7 +83,7 @@ Now that you've seen the core magic, here's what else Ouroboros can do:
 Immediate Wins (Available Now):
 - ooo unstuck    - 5 lateral thinking personas when you're blocked
 - ooo seed       - Generate full specifications from interviews
-- ooo autopilot  - Autonomous execution with verification
+- ooo evolve     - Evolutionary loop until ontology converges
 
 Advanced Features (Setup Required):
 - ooo run        - Execute with visual TUI dashboard
@@ -210,7 +210,7 @@ A successful tutorial ends when:
 ## Tutorial Variations
 
 ### For Technical Users
-- Emphasize the TUI dashboard and execution modes
+- Emphasize the TUI dashboard and evolutionary loop
 - Show cost optimization features (PAL Router)
 - Highlight evaluation pipeline
 

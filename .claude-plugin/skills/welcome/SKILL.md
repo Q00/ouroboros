@@ -88,7 +88,7 @@ You might be wondering how Ouroboros compares to OMC:
 | **Interface** | Visual TUI dashboard + CLI | CLI only |
 | **Approach** | Specification-first (crystallize requirements) | Execution-first (build immediately) |
 | **Cost** | 85% savings via PAL Router | Manual optimization |
-| **Quality** | 3-stage evaluation pipeline | UltraQA cycles |
+| **Quality** | 3-stage evaluation pipeline | Agent-based review |
 | **Debugging** | Full session replay | Session resume |
 
 **Bottom line:** Use Ouroboros when starting something new. Use OMC when working with existing code. They work great together.
