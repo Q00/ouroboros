@@ -21,7 +21,7 @@ class EventStore:
     All operations are transactional for atomicity.
 
     Usage:
-        store = EventStore("sqlite+aiosqlite:///events.db")
+        store = EventStore("sqlite+aiosqlite:///ouroboros.db")
         await store.initialize()
 
         # Append event
@@ -39,12 +39,11 @@ class EventStore:
 
         Args:
             database_url: SQLAlchemy database URL.
-                         If not provided, defaults to ~/.ouroboros/events.db
                          For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
-                         If not provided, defaults to ~/.ouroboros/events.db
+                         If not provided, defaults to ~/.ouroboros/ouroboros.db
         """
         if database_url is None:
-            db_path = Path.home() / ".ouroboros" / "events.db"
+            db_path = Path.home() / ".ouroboros" / "ouroboros.db"
             db_path.parent.mkdir(parents=True, exist_ok=True)
             database_url = f"sqlite+aiosqlite:///{db_path}"
         self._database_url = database_url

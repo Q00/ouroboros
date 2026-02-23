@@ -27,6 +27,7 @@ async def _run_mcp_server(
     host: str,
     port: int,
     transport: str,
+    db_path: str | None = None,
 ) -> None:
     """Run the MCP server.
 
@@ -34,8 +35,15 @@ async def _run_mcp_server(
         host: Host to bind to.
         port: Port to bind to.
         transport: Transport type (stdio or sse).
+        db_path: Optional path to EventStore database.
     """
     from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.persistence.event_store import EventStore
+
+    # Create EventStore with custom path if provided
+    event_store = None
+    if db_path:
+        event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
 
     # Create server with all tools pre-registered via dependency injection.
     # Do NOT re-register OUROBOROS_TOOLS here — create_ouroboros_server already
@@ -43,6 +51,7 @@ async def _run_mcp_server(
     server = create_ouroboros_server(
         name="ouroboros-mcp",
         version="1.0.0",
+        event_store=event_store,
     )
 
     tool_count = len(server.info.tools)
@@ -90,6 +99,13 @@ def serve(
             help="Transport type: stdio or sse.",
         ),
     ] = "stdio",
+    db: Annotated[
+        str,
+        typer.Option(
+            "--db",
+            help="Path to EventStore database (default: ~/.ouroboros/ouroboros.db)",
+        ),
+    ] = "",
 ) -> None:
     """Start the MCP server.
 
@@ -111,7 +127,8 @@ def serve(
         ouroboros mcp serve --transport sse --port 9000
     """
     try:
-        asyncio.run(_run_mcp_server(host, port, transport))
+        db_path = db if db else None
+        asyncio.run(_run_mcp_server(host, port, transport, db_path))
     except KeyboardInterrupt:
         print_info("\nMCP Server stopped")
     except ImportError as e:
