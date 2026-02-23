@@ -37,7 +37,7 @@ jobs:
 
       - name: Check package
         run: |
-          uv run twine check dist/*
+          uv publish --dry-run dist/*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -79,7 +79,6 @@ jobs:
 
       - name: Publish to PyPI
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          uv run twine upload dist/*
+          uv publish dist/*
