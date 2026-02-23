@@ -1050,7 +1050,6 @@ wheels = [
 
 [[package]]
 name = "ouroboros-ai"
-version = "0.13.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

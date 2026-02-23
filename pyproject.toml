@@ -1,6 +1,6 @@
 [project]
 name = "ouroboros-ai"
-version = "0.13.2"
+dynamic = ["version"]
 description = "Self-Improving AI Workflow System"
 readme = "README.md"
 authors = [
@@ -40,6 +40,9 @@ ouroboros = "ouroboros.cli.main:app"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/ouroboros/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ouroboros"]
