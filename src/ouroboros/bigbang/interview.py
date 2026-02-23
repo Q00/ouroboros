@@ -440,11 +440,22 @@ class InterviewEngine:
 
         base_prompt = load_agent_prompt("socratic-interviewer")
 
-        dynamic_header = (
-            f"You are an expert requirements engineer conducting an interview.\n\n"
-            f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
-            f"Initial context: {state.initial_context}\n"
-        )
+        # For first round, add explicit instruction to start directly with a question
+        if state.current_round_number == 1:
+            dynamic_header = (
+                f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
+                f"CRITICAL: Start your FIRST response with a DIRECT QUESTION about the project. "
+                f"Do NOT introduce yourself. Do NOT say \"I'll conduct\" or \"Let me ask\". "
+                f"Just ask a specific, clarifying question immediately.\n\n"
+                f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+                f"Initial context: {state.initial_context}\n"
+            )
+        else:
+            dynamic_header = (
+                f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
+                f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
+                f"Initial context: {state.initial_context}\n"
+            )
 
         if web_search_hint:
             base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
