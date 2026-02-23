@@ -10,6 +10,6 @@
   "homepage": "https://github.com/Q00/ouroboros",
   "license": "MIT",
   "keywords": ["workflow", "requirements", "socratic", "interview", "seed", "evaluation", "self-improving", "drift-detection"],
-  "skills": "./skills/",
+  "skills": "../skills/",
   "mcpServers": "./.mcp.json"
 }

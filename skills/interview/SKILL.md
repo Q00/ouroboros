@@ -1,3 +1,9 @@
+---
+name: interview
+description: "Socratic interview to crystallize vague requirements"
+triggers: "ooo interview"
+---
+
 # /ouroboros:interview
 
 Socratic interview to crystallize vague requirements into clear specifications.

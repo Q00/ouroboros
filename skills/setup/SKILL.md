@@ -1,3 +1,9 @@
+---
+name: setup
+description: "Guided onboarding wizard for Ouroboros setup"
+triggers: "ooo setup"
+---
+
 # /ouroboros:setup
 
 Guided onboarding wizard that converts users into power users.

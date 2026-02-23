@@ -1,3 +1,9 @@
+---
+name: ralph
+description: "Persistent self-referential loop until verification passes"
+triggers: "ooo ralph"
+---
+
 # /ouroboros:ralph
 
 Persistent self-referential loop until verification passes. "The boulder never stops."

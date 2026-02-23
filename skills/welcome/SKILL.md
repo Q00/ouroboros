@@ -1,3 +1,9 @@
+---
+name: welcome
+description: "First-touch experience for new Ouroboros users"
+triggers: "ooo"
+---
+
 # /ouroboros:welcome
 
 First-touch experience that converts new users into engaged community members.

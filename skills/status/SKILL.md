@@ -1,3 +1,9 @@
+---
+name: status
+description: "Check session status and measure goal drift"
+triggers: "ooo status, ooo drift"
+---
+
 # /ouroboros:status
 
 Check session status and measure goal drift.

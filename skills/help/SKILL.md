@@ -1,3 +1,9 @@
+---
+name: help
+description: "Full reference guide for Ouroboros commands and agents"
+triggers: "ooo help"
+---
+
 # /ouroboros:help
 
 Full reference guide for Ouroboros power users.
