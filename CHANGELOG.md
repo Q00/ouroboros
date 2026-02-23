@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] - 2025-02-24
+
+### Fixed
+- **mcp**: Remove double-registration in CLI that overwrote dependency-injected handlers with empty ones
+- **mcp**: Return proper MCP error responses (isError:true) instead of error text in success
+- **mcp**: Catch `pydantic.ValidationError` in ExecuteSeed, MeasureDrift, Evaluate handlers
+- **mcp**: Initialize EventStore before EvolutionaryLoop.evolve_step accesses it
+- **mcp**: Forward host/port CLI args to server for SSE transport
+- **mcp**: Remove dead code (discarded EvaluationPipeline/LateralThinker instances)
+- **mcp**: Remove invalid `llm_adapter` kwarg from ClaudeAgentAdapter init
+- **orchestrator**: Handle DependencyAnalyzer error with all-parallel fallback instead of crash
+- **seed**: Add Pydantic aliases (`type` for field_type, `criteria` for evaluation_criteria)
+- **eval**: Change EvaluationPipeline/SeedGenerator type annotations from LiteLLMAdapter to LLMAdapter Protocol
+- **security**: Validate nested string values in InputValidator, not just top-level
+- **security**: Use MappingProxyType for frozen dataclass AuthContext.metadata
+- **protocol**: Add credentials param to MCPServer protocol to match implementation
+
+### Changed
+- **build**: Use dynamic version from `__init__.py` via hatchling (single source of truth)
+
 ## [0.13.2] - 2025-02-24
 
 ### Fixed
