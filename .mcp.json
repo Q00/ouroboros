@@ -2,7 +2,7 @@
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["ouroboros-ai", "mcp", "serve"]
+      "args": ["--python", "3.14", "--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
     }
   }
 }

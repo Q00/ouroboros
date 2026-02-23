@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2025-02-24
+
+### Fixed
+- **adapter**: Handle unknown message types (`rate_limit_event`) from Claude Agent SDK with retry logic
+- **interview**: Ensure first response is a direct question, not introduction
+- **mcp**: Correct uvx command syntax to use `--python 3.14 --from ouroboros-ai` for proper version resolution
+
 ## [Unreleased]
 
 ### Added
