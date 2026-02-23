@@ -264,18 +264,28 @@ class ClaudeCodeAdapter:
 
             except Exception as e:
                 error_str = str(e)
-                if self._is_retryable_error(error_str) and attempt < _MAX_RETRIES - 1:
+                error_type = type(e).__name__
+
+                # Handle unknown message types from SDK (e.g., rate_limit_event)
+                # These are transient SDK issues that should be retried
+                is_unknown_message = (
+                    "Unknown message type" in error_str or
+                    error_type == "MessageParseError"
+                )
+
+                if (self._is_retryable_error(error_str) or is_unknown_message) and attempt < _MAX_RETRIES - 1:
                     backoff = _INITIAL_BACKOFF_SECONDS * (2**attempt)
                     log.warning(
                         "claude_code_adapter.retryable_exception",
                         error=error_str,
+                        error_type=error_type,
                         attempt=attempt + 1,
                         max_retries=_MAX_RETRIES,
                         backoff_seconds=backoff,
                     )
                     last_error = ProviderError(
                         message=f"Claude Agent SDK request failed: {e}",
-                        details={"error_type": type(e).__name__, "attempt": attempt + 1},
+                        details={"error_type": error_type, "attempt": attempt + 1},
                     )
                     await asyncio.sleep(backoff)
                     continue
@@ -283,11 +293,12 @@ class ClaudeCodeAdapter:
                 log.exception(
                     "claude_code_adapter.request_failed",
                     error=error_str,
+                    error_type=error_type,
                 )
                 return Result.err(
                     ProviderError(
                         message=f"Claude Agent SDK request failed: {e}",
-                        details={"error_type": type(e).__name__},
+                        details={"error_type": error_type},
                     )
                 )
 
