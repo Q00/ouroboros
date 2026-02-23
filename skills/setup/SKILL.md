@@ -1,7 +1,6 @@
 ---
 name: setup
 description: "Guided onboarding wizard for Ouroboros setup"
-triggers: "ooo setup"
 ---
 
 # /ouroboros:setup

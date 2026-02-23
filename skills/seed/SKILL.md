@@ -1,7 +1,6 @@
 ---
 name: seed
 description: "Generate validated Seed specifications from interview results"
-triggers: "ooo seed"
 ---
 
 # /ouroboros:seed

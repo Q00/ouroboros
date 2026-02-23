@@ -1,7 +1,6 @@
 ---
 name: evolve
 description: "Start or monitor an evolutionary development loop"
-triggers: "ooo evolve"
 ---
 
 # ooo evolve - Evolutionary Loop

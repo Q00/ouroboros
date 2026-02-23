@@ -1,7 +1,6 @@
 ---
 name: run
 description: "Execute a Seed specification through the workflow engine"
-triggers: "ooo run"
 ---
 
 # /ouroboros:run

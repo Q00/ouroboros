@@ -1,7 +1,6 @@
 ---
 name: unstuck
 description: "Break through stagnation with lateral thinking personas"
-triggers: "ooo unstuck, ooo stuck, ooo lateral"
 ---
 
 # /ouroboros:unstuck

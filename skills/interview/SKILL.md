@@ -1,7 +1,6 @@
 ---
 name: interview
 description: "Socratic interview to crystallize vague requirements"
-triggers: "ooo interview"
 ---
 
 # /ouroboros:interview

@@ -1,7 +1,6 @@
 ---
 name: ralph
 description: "Persistent self-referential loop until verification passes"
-triggers: "ooo ralph"
 ---
 
 # /ouroboros:ralph

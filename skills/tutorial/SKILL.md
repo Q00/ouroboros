@@ -1,7 +1,6 @@
 ---
 name: tutorial
 description: "Interactive tutorial teaching Ouroboros hands-on"
-triggers: "ooo tutorial"
 ---
 
 # /ouroboros:tutorial

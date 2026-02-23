@@ -1,7 +1,6 @@
 ---
 name: evaluate
 description: "Evaluate execution with three-stage verification pipeline"
-triggers: "ooo evaluate, ooo eval"
 ---
 
 # /ouroboros:evaluate
