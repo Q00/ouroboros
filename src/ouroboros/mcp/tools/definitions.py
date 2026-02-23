@@ -24,6 +24,7 @@ from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBre
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.errors import ValidationError
+from pydantic import ValidationError as PydanticValidationError
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -143,7 +144,7 @@ class ExecuteSeedHandler:
                     tool_name="ouroboros_execute_seed",
                 )
             )
-        except ValidationError as e:
+        except (ValidationError, PydanticValidationError) as e:
             log.error("mcp.tool.execute_seed.validation_error", error=str(e))
             return Result.err(
                 MCPToolError(
@@ -862,7 +863,7 @@ class MeasureDriftHandler:
                     tool_name="ouroboros_measure_drift",
                 )
             )
-        except ValidationError as e:
+        except (ValidationError, PydanticValidationError) as e:
             return Result.err(
                 MCPToolError(
                     f"Seed validation failed: {e}",
@@ -1303,7 +1304,7 @@ class EvaluateHandler:
                     goal = seed.goal
                     constraints = tuple(seed.constraints)
                     seed_id = seed.metadata.seed_id
-                except (yaml.YAMLError, ValidationError) as e:
+                except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
                     log.warning("mcp.tool.evaluate.seed_parse_warning", error=str(e))
                     # Continue without seed data - not fatal
 
@@ -1712,6 +1713,9 @@ class EvolveStepHandler:
                 )
 
         try:
+            # Ensure event store is initialized before evolve_step accesses it
+            # (evolve_step calls replay_lineage/append before executor/evaluator)
+            await self.evolutionary_loop.event_store.initialize()
             result = await self.evolutionary_loop.evolve_step(lineage_id, initial_seed)
         except Exception as e:
             log.error("mcp.tool.evolve_step.error", error=str(e))

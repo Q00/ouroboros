@@ -690,9 +690,16 @@ class OrchestratorRunner:
                 execution_id=exec_id,
                 error=str(dep_result.error),
             )
-            # Continue with all-parallel fallback (analyzer handles this internally)
+            # Fallback: run all ACs in a single parallel level
+            from ouroboros.orchestrator.dependency_analyzer import DependencyGraph
 
-        dependency_graph = dep_result.value
+            all_indices = tuple(range(len(seed.acceptance_criteria)))
+            dependency_graph = DependencyGraph(
+                nodes=(),
+                execution_levels=(all_indices,) if all_indices else (),
+            )
+        else:
+            dependency_graph = dep_result.value
 
         # Log execution plan
         log.info(
