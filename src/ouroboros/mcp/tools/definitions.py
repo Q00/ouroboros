@@ -154,8 +154,7 @@ class ExecuteSeedHandler:
 
         # Use injected or create orchestrator dependencies
         try:
-            llm_adapter = self.llm_adapter or ClaudeCodeAdapter(max_turns=1)
-            agent_adapter = ClaudeAgentAdapter(llm_adapter=llm_adapter)
+            agent_adapter = ClaudeAgentAdapter(permission_mode="acceptEdits")
             event_store = self.event_store or EventStore()
             console = Console()
 
