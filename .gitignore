@@ -100,8 +100,6 @@ _bmad/
 .claude/commands/bmad/
 .omc/
 
-# Local dev MCP config (plugin users get their own via .claude-plugin/.mcp.json)
-.mcp.json
 
 # Local archive for removed/held docs and assets
 archive/
