@@ -372,7 +372,23 @@ class ClaudeCodeAdapter:
         session_id = None
         error_result: ProviderError | None = None
 
-        async for sdk_message in query(prompt=prompt, options=options):
+        # Wrap query() to skip unknown message types (e.g., rate_limit_event)
+        # that the SDK doesn't recognize yet. Without this, a single
+        # MessageParseError inside the generator kills the entire request.
+        async def _safe_query():
+            from claude_agent_sdk._errors import MessageParseError as _MPE
+
+            gen = query(prompt=prompt, options=options).__aiter__()
+            while True:
+                try:
+                    yield await gen.__anext__()
+                except _MPE as parse_err:
+                    log.debug("claude_code_adapter.skipping_unknown_message", error=str(parse_err))
+                    continue
+                except StopAsyncIteration:
+                    break
+
+        async for sdk_message in _safe_query():
             class_name = type(sdk_message).__name__
 
             if class_name == "SystemMessage":
