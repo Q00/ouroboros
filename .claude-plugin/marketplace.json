@@ -10,7 +10,7 @@
     {
       "name": "ouroboros",
       "description": "Transform vague ideas into validated seed specifications through Socratic questioning and ontological analysis",
-      "version": "0.12.0",
+      "version": "0.13.0",
       "author": {
         "name": "Q00",
         "email": "jqyu.lee@gmail.com"
