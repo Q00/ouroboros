@@ -5,189 +5,187 @@ description: "First-touch experience for new Ouroboros users"
 
 # /ouroboros:welcome
 
-First-touch experience that converts new users into engaged community members.
+Interactive onboarding for new Ouroboros users.
 
-## Usage
+## Instructions
 
-```
-ooo
-/ouroboros:welcome
-```
-
-## Response
-
-When this skill is invoked:
-
-1. **Check MCP configuration first:**
-   ```bash
-   cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo "MCP_MISSING"
-   ```
-
-2. **If MCP_MISSING**: After showing the welcome message below, append a setup prompt at the end instead of the normal "What would you like to build today?" ending:
-   ```
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     One-Time Setup Required
-   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-   Ouroboros needs its MCP server registered to work properly.
-   This is a one-time setup that takes ~1 minute.
-
-   Run: ooo setup
-   ```
-   Then use **AskUserQuestion** to prompt setup:
-   ```json
-   {
-     "questions": [{
-       "question": "Run setup now to unlock all Ouroboros features?",
-       "header": "Setup",
-       "options": [
-         { "label": "Run ooo setup", "description": "Register MCP server now (recommended)" },
-         { "label": "Skip for now", "description": "Use basic features only (interview, seed, unstuck)" }
-       ],
-       "multiSelect": false
-     }]
-   }
-   ```
-   - **Run ooo setup**: Read and execute `skills/setup/SKILL.md`
-   - **Skip for now**: Continue normally
-
-3. **If MCP_OK**: Show the welcome message below as-is.
-
-Respond with EXACTLY the following:
+When this skill is invoked, follow this interactive flow step by step.
 
 ---
 
-Welcome to Ouroboros! The serpent that eats itself — better every loop.
+### Step 1: Welcome Banner
 
-You're about to transform how you work with AI. No setup required.
-
----
-
-## What Makes Ouroboros Different
-
-**The Problem:** When you say "build me X", AI guesses what you want. You get something, realize it's wrong, rewrite prompts, and repeat. Hours wasted debugging requirements, not code.
-
-**The Solution:** Ouroboros exposes hidden assumptions BEFORE any code is written. Through Socratic questioning, vague ideas become crystal-clear specifications. Then AI builds exactly what you specified. First try.
-
----
-
-## Try It Right Now (No Setup)
+Display this welcome message:
 
 ```
-ooo interview "I want to build a [your project idea]"
-```
+Welcome to Ouroboros!
 
-Watch as hidden assumptions get exposed:
-- "Who are the primary users?"
-- "What happens when [edge case]?"
-- "Is [feature X] essential or nice-to-have?"
+The serpent that eats itself -- better every loop.
 
-3 minutes later, you have a validated specification ready for AI execution.
+Most AI coding fails at the input, not the output.
+Ouroboros fixes this by exposing hidden assumptions
+BEFORE any code is written.
 
----
-
-## What You Can Do (Right Now)
-
-| Command | What It Does | Setup Needed |
-|:--------|:-------------|:-------------|
-| `ooo interview` | Socratic questioning exposes assumptions | None |
-| `ooo seed` | Crystallizes answers into immutable spec | None |
-| `ooo unstuck` | 5 lateral thinking personas break blocks | None |
-| `ooo tutorial` | Interactive hands-on learning | None |
-
----
-
-## What You Can Do (With Quick Setup)
-
-Run `ooo setup` (2 minutes) to unlock:
-
-| Command | What It Does |
-|:--------|:-------------|
-| `ooo run` | Execute with visual TUI dashboard |
-| `ooo evaluate` | 3-stage verification (Mechanical → Semantic → Consensus) |
-| `ooo status` | Real-time drift detection |
-
----
-
-## Why Not Just Prompt Claude Directly?
-
-| Approach | Result |
-|:---------|:-------|
-| "Build me a task CLI" | Claude guesses → Wrong output → Rewrite prompt → Repeat |
-| `ooo interview` → `ooo seed` → `ooo run` | Assumptions exposed → Precise spec → Right output, first try |
-
-**The difference:** Ouroboros saves you hours of iteration by clarifying requirements upfront.
-
----
-
-## Ouroboros vs oh-my-claudecode (If You're Coming from OMC)
-
-You might be wondering how Ouroboros compares to OMC:
-
-| What | Ouroboros | OMC |
-|:-----|:----------|:-----|
-| **Best For** | New projects with unclear requirements | Existing codebases |
-| **Interface** | Visual TUI dashboard + CLI | CLI only |
-| **Approach** | Specification-first (crystallize requirements) | Execution-first (build immediately) |
-| **Cost** | 85% savings via PAL Router | Manual optimization |
-| **Quality** | 3-stage evaluation pipeline | Agent-based review |
-| **Debugging** | Full session replay | Session resume |
-
-**Bottom line:** Use Ouroboros when starting something new. Use OMC when working with existing code. They work great together.
-
----
-
-## Your First 5 Minutes With Ouroboros
-
-### Minute 1: The Aha Moment
-```
-ooo interview "Build a personal finance tracker"
-```
-Answer 5-10 clarifying questions. Notice how each question reveals assumptions you didn't know you had.
-
-### Minute 2: The Specification
-```
-ooo seed
-```
-Watch your answers crystallize into an immutable Seed specification with ambiguity scoring.
-
-### Minute 3-5: Optional Power Mode
-```
-ooo setup  # Quick 2-minute setup
-ooo run    # Execute with visual TUI
+Interview -> Seed -> Execute -> Evaluate
+    ^                            |
+    +---- Evolutionary Loop -----+
 ```
 
 ---
 
-## Join the Community
+### Step 2: Persona Detection
 
-Found this useful? Star us on GitHub!
+Use **AskUserQuestion** to understand the user:
 
-Every star helps more developers discover Ouroboros and stop wasting time on vague requirements.
+```json
+{
+  "questions": [{
+    "question": "What brings you to Ouroboros?",
+    "header": "Welcome",
+    "options": [
+      {
+        "label": "New project idea",
+        "description": "I have a vague idea and want to crystallize it into a clear spec"
+      },
+      {
+        "label": "Tired of rewriting prompts",
+        "description": "AI keeps building the wrong thing because my requirements are unclear"
+      },
+      {
+        "label": "Just exploring",
+        "description": "Heard about Ouroboros and want to see what it does"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
 
-[github.com/Q00/ouroboros](https://github.com/Q00/ouroboros)
+Based on their answer, give a brief personalized response (1-2 sentences):
+- **New project idea**: "Perfect. Ouroboros will expose your hidden assumptions and turn that vague idea into a precise spec."
+- **Tired of rewriting**: "You're in the right place. Ouroboros makes you specify BEFORE AI builds, so you get it right the first time."
+- **Just exploring**: "Welcome! Let me show you how Ouroboros transforms messy requirements into crystal-clear specifications."
 
 ---
 
-## Ready to Build Something Amazing?
+### Step 3: MCP Check
 
-Pick your path:
+Check if MCP is configured:
 
-**Path A: Dive In** (Recommended)
-```
-ooo interview "your actual project idea"
-```
-
-**Path B: Learn First**
-```
-ooo tutorial  # Interactive hands-on tutorial
+```bash
+cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo "MCP_MISSING"
 ```
 
-**Path C: Explore**
+**If MCP_MISSING**, use **AskUserQuestion**:
+
+```json
+{
+  "questions": [{
+    "question": "Ouroboros has a Python backend for advanced features (TUI dashboard, 3-stage evaluation, drift tracking). Set it up now?",
+    "header": "MCP Setup",
+    "options": [
+      {
+        "label": "Set up now",
+        "description": "Register MCP server (requires Python 3.14+)"
+      },
+      {
+        "label": "Skip for now",
+        "description": "Use basic features first (interview, seed, unstuck)"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
 ```
-ooo help  # Full command reference
+
+- **Set up now**: Read and execute `skills/setup/SKILL.md`, then return to Step 4.
+- **Skip for now**: Continue to Step 4.
+
+**If MCP_OK**: Continue to Step 4.
+
+---
+
+### Step 4: GitHub Star
+
+Check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`, use **AskUserQuestion**:
+
+```json
+{
+  "questions": [{
+    "question": "Ouroboros is free and open-source. A GitHub star helps other developers discover it. Star the repo?",
+    "header": "Community",
+    "options": [
+      {
+        "label": "Star on GitHub",
+        "description": "Takes 1 second -- helps the project grow"
+      },
+      {
+        "label": "Maybe later",
+        "description": "Continue with setup"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+- **Star on GitHub**: Run `gh api -X PUT /user/starred/Q00/ouroboros 2>/dev/null`
+- Both options: Create `~/.ouroboros/` if needed, save `{"star_asked": true, "welcome_shown": true}` to `~/.ouroboros/prefs.json`
+
+If `star_asked` is already `true`, just ensure `welcome_shown` is set to `true`.
+
+---
+
+### Step 5: Quick Reference
+
+Show this command overview:
+
+```
+Available Commands:
++---------------------------------------------------+
+| Command         | What It Does                     |
+|-----------------|----------------------------------|
+| ooo interview   | Socratic Q&A -- expose hidden    |
+|                 | assumptions in your requirements |
+| ooo seed        | Crystallize answers into spec    |
+| ooo run         | Execute with visual TUI          |
+| ooo evaluate    | 3-stage verification             |
+| ooo unstuck     | Lateral thinking when stuck      |
+| ooo help        | Full command reference           |
++---------------------------------------------------+
 ```
 
 ---
 
-What would you like to build today?
+### Step 6: First Action
+
+Use **AskUserQuestion** to prompt immediate action:
+
+```json
+{
+  "questions": [{
+    "question": "What would you like to do first?",
+    "header": "Get started",
+    "options": [
+      {
+        "label": "Start a project",
+        "description": "Run a Socratic interview on your idea right now"
+      },
+      {
+        "label": "Try the tutorial",
+        "description": "Interactive hands-on learning with a sample project"
+      },
+      {
+        "label": "Read the docs",
+        "description": "Full command reference and architecture overview"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+Based on their choice:
+- **Start a project**: Ask "What do you want to build?" and then read and execute `skills/interview/SKILL.md` with their answer.
+- **Try the tutorial**: Read and execute `skills/tutorial/SKILL.md`.
+- **Read the docs**: Read and execute `skills/help/SKILL.md`.
