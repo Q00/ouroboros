@@ -103,13 +103,13 @@ try {
   // No stdin available (e.g., dry run) - exit cleanly
 }
 
-// Check if this is the user's first interaction (welcome not yet shown)
+// Check if this is the user's first interaction (welcome not yet completed)
 function isFirstTime() {
   try {
     const prefsPath = join(homedir(), ".ouroboros", "prefs.json");
     if (!existsSync(prefsPath)) return true;
     const prefs = JSON.parse(readFileSync(prefsPath, "utf-8"));
-    return !prefs.welcome_shown;
+    return !prefs.welcomeCompleted;
   } catch {
     return true;
   }
