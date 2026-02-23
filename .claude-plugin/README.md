@@ -16,8 +16,8 @@ Ouroboros transforms vague ideas into validated, executable specifications throu
 
 ```bash
 # Install via marketplace
-claude /plugin marketplace add Q00/ouroboros
-claude /plugin install ouroboros@ouroboros
+claude plugin marketplace add Q00/ouroboros
+claude plugin install ouroboros@ouroboros
 
 # Then run setup (required — registers MCP server)
 ooo setup

@@ -659,8 +659,8 @@ log_level: INFO
 ### 1. Plugin Mode
 ```bash
 # Install plugin
-claude /plugin marketplace add Q00/ouroboros
-claude /plugin install ouroboros@ouroboros
+claude plugin marketplace add Q00/ouroboros
+claude plugin install ouroboros@ouroboros
 
 # Use skills
 ooo interview "Build an app"

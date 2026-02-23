@@ -2,8 +2,8 @@
 
 > This CLAUDE.md is for **local development only**. End users install via:
 > ```
-> claude /plugin marketplace add Q00/ouroboros
-> claude /plugin install ouroboros@ouroboros
+> claude plugin marketplace add Q00/ouroboros
+> claude plugin install ouroboros@ouroboros
 > ```
 > Once installed as a plugin, skills/hooks/agents work natively without this file.
 

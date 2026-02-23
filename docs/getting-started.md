@@ -7,8 +7,8 @@ Transform your vague ideas into validated specifications and execute them with c
 ### Plugin Mode (No Python Required)
 ```bash
 # Install (2 commands)
-claude /plugin marketplace add Q00/ouroboros
-claude /plugin install ouroboros@ouroboros
+claude plugin marketplace add Q00/ouroboros
+claude plugin install ouroboros@ouroboros
 
 # Your first workflow (2 commands)
 ooo interview "Build a task management CLI"
@@ -44,8 +44,8 @@ ouroboros run --seed ~/.ouroboros/seeds/latest.yaml
 ### Option 1: Plugin Mode (Recommended for Beginners)
 ```bash
 # Install via Claude Code marketplace
-claude /plugin marketplace add Q00/ouroboros
-claude /plugin install ouroboros@ouroboros
+claude plugin marketplace add Q00/ouroboros
+claude plugin install ouroboros@ouroboros
 
 # Verify installation
 ooo help
@@ -300,10 +300,10 @@ The TUI provides real-time visibility into your workflow:
 #### Plugin not recognized
 ```bash
 # Check plugin is installed
-claude /plugin list
+claude plugin list
 
 # Reinstall if needed
-claude /plugin install ouroboros@ouroboros --force
+claude plugin install ouroboros@ouroboros --force
 
 # Restart Claude Code
 ```
@@ -446,7 +446,7 @@ ouroboros config get limits
 
 | Issue | Solution | Command |
 |-------|----------|---------|
-| Plugin not loaded | Reinstall plugin | `claude /plugin install ouroboros@ouroboros` |
+| Plugin not loaded | Reinstall plugin | `claude plugin install ouroboros@ouroboros` |
 | CLI not found | Install Python package | `pip install ouroboros-ai` |
 | API errors | Check API key | `export ANTHROPIC_API_KEY=...` |
 | TUI blank | Check terminal | `export TERM=xterm-256color` |

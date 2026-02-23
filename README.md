@@ -36,8 +36,8 @@
 
 ```bash
 # 1. Install plugin
-claude /plugin marketplace add Q00/ouroboros
-claude /plugin install ouroboros@ouroboros
+claude plugin marketplace add Q00/ouroboros
+claude plugin install ouroboros@ouroboros
 
 # 2. Setup (required — do this first!)
 ooo setup
@@ -202,8 +202,8 @@ src/ouroboros/
 ## Troubleshooting
 
 **`ooo: command not found`**
-- Reinstall: `claude /plugin marketplace add Q00/ouroboros`
-- Then: `claude /plugin install ouroboros@ouroboros`
+- Reinstall: `claude plugin marketplace add Q00/ouroboros`
+- Then: `claude plugin install ouroboros@ouroboros`
 - Restart Claude Code after installation
 - Run `ooo setup` after installation
 

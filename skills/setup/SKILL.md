@@ -404,7 +404,7 @@ Uninstall Ouroboros configuration? [Yes / No]
 If Yes:
 1. Remove `ouroboros` entry from `~/.claude/mcp.json` (if exists)
 2. Remove `<!-- ooo:START -->` to `<!-- ooo:END -->` block from CLAUDE.md (if exists)
-3. Confirm: "Ouroboros plugin configuration removed. To remove plugin files, run: claude /plugin uninstall ouroboros"
+3. Confirm: "Ouroboros plugin configuration removed. To remove plugin files, run: claude plugin uninstall ouroboros"
 
 ---
 
