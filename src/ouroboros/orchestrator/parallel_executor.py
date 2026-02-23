@@ -727,6 +727,15 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         async def _run_sub_ac(idx: int, sub_ac: str) -> None:
             try:
+                # Mark Sub-AC as executing before starting
+                await self._emit_subtask_event(
+                    execution_id=execution_id,
+                    ac_index=parent_ac_index,
+                    sub_task_index=idx + 1,
+                    sub_task_desc=sub_ac[:50],
+                    status="executing",
+                )
+
                 sub_results[idx] = await self._execute_atomic_ac(
                     ac_index=parent_ac_index * 100 + idx,
                     ac_content=sub_ac,
