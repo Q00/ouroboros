@@ -117,11 +117,17 @@ function isFirstTime() {
 
 const result = detectKeywords(input);
 
-// First-time user: trigger welcome on their first message (unless they typed an ooo command)
+// First-time user: append welcome suggestion to their first message
 if (!result.detected && isFirstTime()) {
-  console.log(
-    `[MAGIC KEYWORD: /ouroboros:welcome] First time using Ouroboros! Starting welcome experience.`
-  );
+  // Use skill-suggestion format compatible with Zeude
+  console.log(`${input}
+
+<skill-suggestion>
+🎯 MATCHED SKILLS (use AskUserQuestion to let user choose):
+- /ouroboros:welcome - First time using Ouroboros! Starting welcome experience.
+IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confirm or skip.
+</skill-suggestion>
+`);
   process.exit(0);
 }
 
@@ -130,14 +136,25 @@ if (result.detected) {
   // Gate check: if MCP not configured and skill requires it, redirect to setup
   if (!SETUP_BYPASS_SKILLS.includes(result.suggested_skill) && !isMcpConfigured()) {
     console.log(
-      `[MAGIC KEYWORD: /ouroboros:setup] Ouroboros setup required. ` +
-      `Run "ooo setup" first to register the MCP server. ` +
-      `(You tried: "${result.keyword}" → ${result.suggested_skill})`
+      `${input}
+
+<skill-suggestion>
+🎯 REQUIRED SKILL:
+- /ouroboros:setup - Ouroboros setup required. Run "ooo setup" first to register the MCP server.
+</skill-suggestion>
+`
     );
   } else {
-    console.log(`[MAGIC KEYWORD: ${result.suggested_skill}] Detected "${result.keyword}"`);
+    console.log(`${input}
+
+<skill-suggestion>
+🎯 MATCHED SKILLS:
+- /ouroboros:${result.suggested_skill.replace("/ouroboros:", "")} - Detected "${result.keyword}"
+</skill-suggestion>
+`
+    );
   }
 } else {
-  // No output when no keyword detected - keeps hook output clean
-  console.log("Success");
+  // Pass through unchanged when no keyword detected
+  console.log(input);
 }
