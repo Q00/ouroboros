@@ -2,10 +2,7 @@
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["ouroboros-ai", "mcp", "serve"],
-      "env": {
-        "OUROBOROS_AGENTS_DIR": "${CLAUDE_PLUGIN_ROOT}/agents"
-      }
+      "args": ["ouroboros-ai", "mcp", "serve"]
     }
   }
 }
