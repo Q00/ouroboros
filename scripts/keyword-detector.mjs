@@ -103,7 +103,27 @@ try {
   // No stdin available (e.g., dry run) - exit cleanly
 }
 
+// Check if this is the user's first interaction (welcome not yet shown)
+function isFirstTime() {
+  try {
+    const prefsPath = join(homedir(), ".ouroboros", "prefs.json");
+    if (!existsSync(prefsPath)) return true;
+    const prefs = JSON.parse(readFileSync(prefsPath, "utf-8"));
+    return !prefs.welcome_shown;
+  } catch {
+    return true;
+  }
+}
+
 const result = detectKeywords(input);
+
+// First-time user: trigger welcome on their first message (unless they typed an ooo command)
+if (!result.detected && isFirstTime()) {
+  console.log(
+    `[MAGIC KEYWORD: /ouroboros:welcome] First time using Ouroboros! Starting welcome experience.`
+  );
+  process.exit(0);
+}
 
 // Output result as JSON for Claude Code hook consumption
 if (result.detected) {
