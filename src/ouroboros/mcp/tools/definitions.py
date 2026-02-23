@@ -157,6 +157,7 @@ class ExecuteSeedHandler:
         try:
             agent_adapter = ClaudeAgentAdapter(permission_mode="acceptEdits")
             event_store = self.event_store or EventStore()
+            await event_store.initialize()
             console = Console()
 
             # Create orchestrator runner
