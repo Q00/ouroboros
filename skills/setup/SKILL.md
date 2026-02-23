@@ -170,7 +170,7 @@ This enables:
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["ouroboros-ai", "mcp", "serve"]
+      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
     }
   }
 }
