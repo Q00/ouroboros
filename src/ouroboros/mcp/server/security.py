@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import threading
 import time
+from types import MappingProxyType
 from typing import Any, TypeVar
 
 import structlog
@@ -109,7 +110,9 @@ class AuthContext:
     client_id: str | None = None
     permissions: frozenset[Permission] = field(default_factory=frozenset)
     roles: frozenset[str] = field(default_factory=frozenset)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: MappingProxyType[str, Any] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 class RateLimiter:
@@ -483,32 +486,45 @@ class InputValidator:
         path_traversal_patterns = ["../", "..\\"]
         shell_metacharacters = [";", "|", "&&", "||"]
 
-        for key, value in arguments.items():
-            if isinstance(value, str):
-                for pattern in dangerous_patterns:
-                    if pattern in value:
-                        return Result.err(
-                            MCPServerError(
-                                f"Potentially dangerous input in {key}",
-                                details={"pattern": pattern},
-                            )
+        def _collect_strings(obj: Any, prefix: str = "") -> list[tuple[str, str]]:
+            """Recursively collect all string values with their key paths."""
+            pairs: list[tuple[str, str]] = []
+            if isinstance(obj, str):
+                pairs.append((prefix, obj))
+            elif isinstance(obj, dict):
+                for k, v in obj.items():
+                    child_key = f"{prefix}.{k}" if prefix else k
+                    pairs.extend(_collect_strings(v, child_key))
+            elif isinstance(obj, (list, tuple)):
+                for i, v in enumerate(obj):
+                    pairs.extend(_collect_strings(v, f"{prefix}[{i}]"))
+            return pairs
+
+        for key, value in _collect_strings(arguments):
+            for pattern in dangerous_patterns:
+                if pattern in value:
+                    return Result.err(
+                        MCPServerError(
+                            f"Potentially dangerous input in {key}",
+                            details={"pattern": pattern},
                         )
-                for pattern in path_traversal_patterns:
-                    if pattern in value:
-                        return Result.err(
-                            MCPServerError(
-                                f"Path traversal detected in {key}",
-                                details={"pattern": pattern},
-                            )
+                    )
+            for pattern in path_traversal_patterns:
+                if pattern in value:
+                    return Result.err(
+                        MCPServerError(
+                            f"Path traversal detected in {key}",
+                            details={"pattern": pattern},
                         )
-                for char in shell_metacharacters:
-                    if char in value:
-                        return Result.err(
-                            MCPServerError(
-                                f"Shell metacharacter detected in {key}",
-                                details={"pattern": char},
-                            )
+                    )
+            for char in shell_metacharacters:
+                if char in value:
+                    return Result.err(
+                        MCPServerError(
+                            f"Shell metacharacter detected in {key}",
+                            details={"pattern": char},
                         )
+                    )
 
         # Run custom validator if registered
         if tool_name in self._validators:

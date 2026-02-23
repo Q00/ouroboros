@@ -291,7 +291,12 @@ class MCPServerAdapter:
                 )
             )
 
-    async def serve(self, transport: str = "stdio") -> None:
+    async def serve(
+        self,
+        transport: str = "stdio",
+        host: str = "localhost",
+        port: int = 8080,
+    ) -> None:
         """Start serving MCP requests.
 
         This method blocks until the server is stopped.
@@ -299,6 +304,8 @@ class MCPServerAdapter:
 
         Args:
             transport: Transport type - "stdio" or "sse".
+            host: Host to bind to (SSE only).
+            port: Port to bind to (SSE only).
         """
         try:
             from mcp.server.fastmcp import FastMCP
@@ -313,10 +320,7 @@ class MCPServerAdapter:
         for _name, handler in self._tool_handlers.items():
             defn = handler.definition
 
-            # Create a closure to capture the handler
-            async def create_tool_wrapper(
-                h: ToolHandler,
-            ) -> Any:
+            def _make_tool_wrapper(h: ToolHandler) -> Any:
                 async def tool_wrapper(**kwargs: Any) -> Any:
                     # Unwrap nested kwargs from FastMCP schema inference.
                     # FastMCP infers a single "kwargs" param from **kwargs signature,
@@ -333,11 +337,13 @@ class MCPServerAdapter:
                         tool_result = result.value
                         return tool_result.text_content
                     else:
-                        return f"Error: {result.error}"
+                        # Raise so FastMCP returns a proper MCP error response
+                        # with isError: true, instead of a success with error text.
+                        raise RuntimeError(str(result.error))
 
                 return tool_wrapper
 
-            wrapper = await create_tool_wrapper(handler)
+            wrapper = _make_tool_wrapper(handler)
             self._mcp_server.tool(
                 name=defn.name,
                 description=defn.description,
@@ -346,21 +352,18 @@ class MCPServerAdapter:
         # Register resources with FastMCP
         for uri, res_handler in self._resource_handlers.items():
 
-            async def create_resource_wrapper(
-                h: ResourceHandler,
-                resource_uri: str,
-            ) -> Any:
+            def _make_resource_wrapper(h: ResourceHandler, resource_uri: str) -> Any:
                 async def resource_wrapper() -> str:
                     result = await h.handle(resource_uri)
                     if result.is_ok:
                         content = result.value
                         return content.text or ""
                     else:
-                        return f"Error: {result.error}"
+                        raise RuntimeError(str(result.error))
 
                 return resource_wrapper
 
-            wrapper = await create_resource_wrapper(res_handler, uri)
+            wrapper = _make_resource_wrapper(res_handler, uri)
             self._mcp_server.resource(uri)(wrapper)
 
         log.info(
@@ -372,7 +375,7 @@ class MCPServerAdapter:
 
         # Run the server with the appropriate transport
         if transport == "sse":
-            await self._mcp_server.run_sse_async()
+            await self._mcp_server.run_sse_async(host=host, port=port)
         else:
             await self._mcp_server.run_stdio_async()
 
@@ -474,14 +477,6 @@ def create_ouroboros_server(
     )
 
     seed_generator = SeedGenerator(llm_adapter=llm_adapter)
-
-    evaluation_config = PipelineConfig()
-    EvaluationPipeline(
-        llm_adapter=llm_adapter,
-        config=evaluation_config,
-    )
-
-    LateralThinker()
 
     # Create evolution engines for evolve_step
     from ouroboros.core.lineage import EvaluationSummary

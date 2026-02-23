@@ -30,8 +30,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
-from ouroboros.providers.base import CompletionConfig, Message, MessageRole
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
 log = structlog.get_logger()
 
@@ -66,7 +65,7 @@ class SeedGenerator:
         or passed directly to the constructor.
     """
 
-    llm_adapter: LiteLLMAdapter
+    llm_adapter: LLMAdapter
     model: str = _FALLBACK_MODEL
     temperature: float = EXTRACTION_TEMPERATURE
     max_tokens: int = 4096

@@ -237,12 +237,14 @@ class MCPServer(Protocol):
         self,
         name: str,
         arguments: dict[str, Any],
+        credentials: dict[str, str] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Call a registered tool.
 
         Args:
             name: Name of the tool to call.
             arguments: Arguments for the tool.
+            credentials: Optional credentials for authentication.
 
         Returns:
             Result containing the tool result or an error.

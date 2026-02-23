@@ -19,8 +19,7 @@ from ouroboros.events.evaluation import (
     create_stage2_completed_event,
     create_stage2_started_event,
 )
-from ouroboros.providers.base import CompletionConfig, Message, MessageRole
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
 # Default model for semantic evaluation (Standard tier)
 # Can be overridden via SemanticConfig.model
@@ -197,7 +196,7 @@ class SemanticEvaluator:
 
     def __init__(
         self,
-        llm_adapter: LiteLLMAdapter,
+        llm_adapter: LLMAdapter,
         config: SemanticConfig | None = None,
     ) -> None:
         """Initialize evaluator.
@@ -275,7 +274,7 @@ class SemanticEvaluator:
 
 async def run_semantic_evaluation(
     context: EvaluationContext,
-    llm_adapter: LiteLLMAdapter,
+    llm_adapter: LLMAdapter,
     config: SemanticConfig | None = None,
 ) -> Result[tuple[SemanticResult, list[BaseEvent]], ProviderError | ValidationError]:
     """Convenience function for running semantic evaluation.

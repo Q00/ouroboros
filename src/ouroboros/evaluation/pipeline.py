@@ -30,7 +30,7 @@ from ouroboros.evaluation.trigger import (
 )
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.evaluation import create_pipeline_completed_event
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+from ouroboros.providers.base import LLMAdapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +69,7 @@ class EvaluationPipeline:
 
     def __init__(
         self,
-        llm_adapter: LiteLLMAdapter,
+        llm_adapter: LLMAdapter,
         config: PipelineConfig | None = None,
     ) -> None:
         """Initialize pipeline.

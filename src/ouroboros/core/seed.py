@@ -30,9 +30,11 @@ class ExitCondition(BaseModel, frozen=True):
         evaluation_criteria: How to determine if condition is met.
     """
 
+    model_config = {"populate_by_name": True}
+
     name: str = Field(..., min_length=1)
     description: str = Field(..., min_length=1)
-    evaluation_criteria: str = Field(..., min_length=1)
+    evaluation_criteria: str = Field(..., min_length=1, alias="criteria")
 
 
 class EvaluationPrinciple(BaseModel, frozen=True):
@@ -59,8 +61,10 @@ class OntologyField(BaseModel, frozen=True):
         required: Whether this field is required.
     """
 
+    model_config = {"populate_by_name": True}
+
     name: str = Field(..., min_length=1)
-    field_type: str = Field(..., min_length=1)
+    field_type: str = Field(..., min_length=1, alias="type")
     description: str = Field(..., min_length=1)
     required: bool = Field(default=True)
 
@@ -202,7 +206,7 @@ class Seed(BaseModel, frozen=True):
         Returns:
             Dictionary representation of the seed.
         """
-        return self.model_dump(mode="json")
+        return self.model_dump(mode="json", by_alias=True)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Seed:

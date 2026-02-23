@@ -36,33 +36,32 @@ async def _run_mcp_server(
         transport: Transport type (stdio or sse).
     """
     from ouroboros.mcp.server.adapter import create_ouroboros_server
-    from ouroboros.mcp.tools.definitions import OUROBOROS_TOOLS
 
-    # Create server
+    # Create server with all tools pre-registered via dependency injection.
+    # Do NOT re-register OUROBOROS_TOOLS here — create_ouroboros_server already
+    # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
     server = create_ouroboros_server(
         name="ouroboros-mcp",
         version="1.0.0",
     )
 
-    # Register tools
-    for tool in OUROBOROS_TOOLS:
-        server.register_tool(tool)
+    tool_count = len(server.info.tools)
 
     if transport == "stdio":
         # In stdio mode, stdout is the JSON-RPC channel.
         # All human-readable output must go to stderr.
         _stderr_console.print(f"[green]MCP Server starting on {transport}...[/green]")
-        _stderr_console.print(f"[blue]Registered {len(OUROBOROS_TOOLS)} tools[/blue]")
+        _stderr_console.print(f"[blue]Registered {tool_count} tools[/blue]")
         _stderr_console.print("[blue]Reading from stdin, writing to stdout[/blue]")
         _stderr_console.print("[blue]Press Ctrl+C to stop[/blue]")
     else:
         print_success(f"MCP Server starting on {transport}...")
-        print_info(f"Registered {len(OUROBOROS_TOOLS)} tools")
+        print_info(f"Registered {tool_count} tools")
         print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
 
     # Start serving
-    await server.serve(transport=transport)
+    await server.serve(transport=transport, host=host, port=port)
 
 
 @app.command()
@@ -126,17 +125,12 @@ def info() -> None:
     """Show MCP server information and available tools."""
     from ouroboros.cli.formatters import console
     from ouroboros.mcp.server.adapter import create_ouroboros_server
-    from ouroboros.mcp.tools.definitions import OUROBOROS_TOOLS
 
-    # Create server
+    # Create server with all tools pre-registered
     server = create_ouroboros_server(
         name="ouroboros-mcp",
         version="1.0.0",
     )
-
-    # Register tools
-    for tool in OUROBOROS_TOOLS:
-        server.register_tool(tool)
 
     server_info = server.info
 
