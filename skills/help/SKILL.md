@@ -34,6 +34,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo status` | Session status + drift check | MCP |
 | `ooo setup` | Installation wizard | Plugin |
 | `ooo welcome` | First-touch welcome guide | Plugin |
+| `ooo tutorial` | Interactive hands-on learning | Plugin |
 | `ooo help` | This reference guide | Plugin |
 
 ### Evolutionary Loop
@@ -43,8 +44,8 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo evolve` | Start/monitor evolutionary development loop | MCP |
 | `ooo ralph` | Self-referential loop until verified ("don't stop") | Plugin + MCP |
 
-**Plugin** = Works immediately, no setup needed.
-**MCP** = Requires Python 3.14+ and `ooo setup` for MCP server registration.
+**Plugin** = Works immediately after `ooo setup`.
+**MCP** = Requires `ooo setup` (Python 3.14+ auto-detected). Run setup once to unlock all features.
 
 ## Natural Language Triggers
 
@@ -78,6 +79,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:unstuck` | 5 lateral thinking personas | Plugin |
 | `/ouroboros:status` | Session status + drift check | MCP |
 | `/ouroboros:setup` | Installation wizard | Plugin |
+| `/ouroboros:tutorial` | Interactive hands-on learning | Plugin |
 | `/ouroboros:help` | This guide | Plugin |
 
 ### Loop Skills
@@ -101,7 +103,11 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ouroboros:researcher` | "Stop coding, start investigating" |
 | `ouroboros:architect` | "Question the foundation, redesign if needed" |
 
-## Plugin Modes
+## Setup
 
-- **Plugin Mode**: Skills + Agents work without Python (install only plugin)
-- **Full Mode (MCP)**: MCP server connects to Python core (run `ooo setup`)
+After installing the plugin, run `ooo setup` once to register the MCP server.
+This connects Claude Code to the Ouroboros Python core and unlocks all features.
+
+```
+ooo setup    # One-time setup (~1 minute)
+```

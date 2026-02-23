@@ -30,7 +30,7 @@ function checkActiveSession() {
     // Session files are stored as JSON in the data directory
     // Check if any were modified in the last hour
     const files = readdirSync(ouroborosDir).filter(
-      (f) => f.endsWith(".json") && f.startsWith("interview-")
+      (f) => f.endsWith(".json") && !f.endsWith(".lock") && f.startsWith("interview_")
     );
 
     if (files.length === 0) {

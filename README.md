@@ -34,37 +34,37 @@
 
 ## Quick Start
 
-**Plugin Mode** (No Python Required):
 ```bash
-# 1. Install
+# 1. Install plugin
 claude /plugin marketplace add Q00/ouroboros
 claude /plugin install ouroboros@ouroboros
 
-# 2. Interview — expose hidden assumptions
+# 2. Setup (required — do this first!)
+ooo setup
+
+# 3. Interview — expose hidden assumptions
 ooo interview "I want to build a task management CLI"
 
-# 3. Generate Seed spec
+# 4. Generate Seed spec
 ooo seed
+
+# 5. Execute and evaluate
+ooo run
+ooo evaluate
 ```
 
-**Full Mode** (Python 3.14+):
-```bash
-# 1. Setup
-uv sync && ouroboros setup
-
-# 2. Execute
-ouroboros run --seed project.yaml --parallel
-
-# 3. Evaluate
-ouroboros evaluate
-```
+> **`ooo setup` is required after installation.** It registers the MCP server
+> that powers execution, evaluation, and drift tracking. Without it, other
+> commands will redirect you back to setup.
 
 <details>
 <summary><strong>What just happened?</strong></summary>
 
-1. `ooo interview` — Socratic questioning exposed your hidden assumptions and contradictions
-2. `ooo seed` — Crystallized answers into an immutable specification (the "Seed")
-3. The Seed is what you hand to AI — no more "build me X" and hoping for the best
+1. `ooo setup` — Registered the Ouroboros MCP server (one-time, ~1 minute)
+2. `ooo interview` — Socratic questioning exposed your hidden assumptions and contradictions
+3. `ooo seed` — Crystallized answers into an immutable specification (the "Seed")
+4. `ooo run` — Executed the seed with visual TUI dashboard
+5. `ooo evaluate` — 3-stage verification (Mechanical → Semantic → Consensus)
 
 </details>
 
@@ -145,29 +145,21 @@ Interview → Seed → Route → Execute → Evaluate → Adapt
 
 ## Commands
 
-### Plugin Mode (No Python Required)
+> Run `ooo setup` first after installing the plugin. All commands require it.
 
 | Command | Description |
 |:--------|:------------|
+| `ooo setup` | **Run this first** — register MCP server (one-time) |
 | `ooo interview` | Socratic questioning → expose hidden assumptions |
 | `ooo seed` | Crystallize answers into immutable spec |
-| `ooo unstuck` | 5 lateral thinking personas when you're stuck |
-| `ooo help` | Full command reference |
-
-### Full Mode (Python 3.14+)
-
-Unlock execution, evaluation, and drift tracking:
-
-```bash
-ooo setup       # register MCP server (one-time)
-```
-
-| Command | Description |
-|:--------|:------------|
 | `ooo run` | Execute seed via Double Diamond decomposition |
 | `ooo evaluate` | 3-stage verification (Mechanical → Semantic → Consensus) |
+| `ooo unstuck` | 5 lateral thinking personas when you're stuck |
 | `ooo status` | Drift detection + session tracking |
-| `ouroboros dashboard` | Interactive TUI dashboard |
+| `ooo evolve` | Evolutionary loop until ontology converges |
+| `ooo ralph` | Persistent loop until verified ("don't stop") |
+| `ooo tutorial` | Interactive hands-on learning |
+| `ooo help` | Full command reference |
 
 ### Natural Language Triggers
 
@@ -209,16 +201,16 @@ src/ouroboros/
 
 ## Troubleshooting
 
-### Plugin Mode
-
 **`ooo: command not found`**
 - Reinstall: `claude /plugin marketplace add Q00/ouroboros`
 - Then: `claude /plugin install ouroboros@ouroboros`
 - Restart Claude Code after installation
+- Run `ooo setup` after installation
 
-### Full Mode
+**Commands redirect to setup**
+- This means MCP is not registered yet. Run `ooo setup` to fix it.
 
-**`ouroboros: command not found`**
+**`ouroboros: command not found`** (CLI mode)
 - Ensure Python 3.14+ is installed: `python --version`
 - Run `uv sync` from the ouroboros directory
 - Or install globally: `pip install ouroboros-ai`

@@ -21,6 +21,8 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo evolve ...` | Read `skills/evolve/SKILL.md` and follow it |
 | `ooo unstuck` or `ooo stuck` or `ooo lateral` | Read `skills/unstuck/SKILL.md` and follow it |
 | `ooo status` or `ooo drift` | Read `skills/status/SKILL.md` and follow it |
+| `ooo ralph` | Read `skills/ralph/SKILL.md` and follow it |
+| `ooo tutorial` | Read `skills/tutorial/SKILL.md` and follow it |
 | `ooo setup` | Read `skills/setup/SKILL.md` and follow it |
 | `ooo welcome` | Read `skills/welcome/SKILL.md` and follow it |
 | `ooo help` | Read `skills/help/SKILL.md` and follow it |
@@ -66,6 +68,8 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 | `ooo evaluate` | `ouroboros:evaluator` |
 | `ooo unstuck` | `ouroboros:{persona}` |
 | `ooo status` | MCP: `session_status` |
+| `ooo ralph` | Persistent loop until verified |
+| `ooo tutorial` | Interactive hands-on learning |
 | `ooo setup` | — |
 | `ooo help` | — |
 
@@ -73,7 +77,6 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 
 Loaded on-demand — not preloaded.
 
-**Core**: socratic-interviewer, ontologist, seed-architect, evaluator,
-wonder, reflect, advocate, contrarian, judge
+**Core**: socratic-interviewer, ontologist, seed-architect, evaluator, contrarian
 **Support**: hacker, simplifier, researcher, architect
 <!-- ooo:END -->

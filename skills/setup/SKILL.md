@@ -10,8 +10,8 @@ ooo setup
 /ouroboros:setup --uninstall
 ```
 
-> **Note**: `ooo interview` and `ooo seed` work immediately without setup.
-> Run setup only when you need advanced features (TUI dashboard, evaluation, drift tracking).
+> **Note**: Setup is required for the full Ouroboros experience.
+> Run this after installing the plugin to unlock all features.
 
 ---
 
@@ -38,6 +38,40 @@ What you'll get:
 
 Setup takes ~2 minutes. Let's go!
 ```
+
+---
+
+### Step 0.5: Community Support
+
+Before we begin, check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`, use **AskUserQuestion**:
+
+```json
+{
+  "questions": [{
+    "question": "Ouroboros is free and open-source. A GitHub star helps other developers discover it. Star the repo?",
+    "header": "Community",
+    "options": [
+      {
+        "label": "Star on GitHub",
+        "description": "Takes 1 second — helps the project grow"
+      },
+      {
+        "label": "Skip for now",
+        "description": "Continue with setup"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+- **Star on GitHub**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `{"star_asked": true}` to `~/.ouroboros/prefs.json`
+- **Skip for now**: Save `{"star_asked": true}` to `~/.ouroboros/prefs.json`
+- **Other**: Save `{"star_asked": true}`
+
+Create `~/.ouroboros/` directory if it doesn't exist.
+
+If `star_asked` is already `true`, skip this step silently.
 
 ---
 
@@ -75,23 +109,34 @@ Claude Code CLI            [✓] Detected
 
 **Decision Matrix:**
 
-| Environment | Mode | Features |
-|:------------|:-----|:---------|
-| uvx + uv Python 3.14+ | **Full Mode** | Everything (TUI, MCP, evaluation, drift) |
-| System Python 3.14+ | **Full Mode** | Everything |
-| uvx + Python < 3.14 only | Plugin-Only | `uv python install 3.14` to upgrade |
-| No Python, no uvx | Plugin-Only | Plugin skills work immediately |
+| Environment | Mode | Action |
+|:------------|:-----|:-------|
+| uvx + uv Python 3.14+ | **Ready** | Proceed to MCP registration |
+| System Python 3.14+ | **Ready** | Proceed to MCP registration |
+| uvx + Python < 3.14 only | **Install needed** | Run `uv python install 3.14` then proceed |
+| No uvx | **Install needed** | Run `curl -LsSf https://astral.sh/uv/install.sh \| sh` then `uv python install 3.14` |
+
+**IMPORTANT**: If Python 3.14+ is not available, DO NOT skip to "Plugin-Only mode". Guide the user to install the prerequisites. MCP is required for the full Ouroboros experience.
+
+**If prerequisites are missing, show:**
+```
+Ouroboros requires Python 3.14+ for the MCP server.
+
+Quick install (< 1 minute):
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  uv python install 3.14
+
+Then re-run: ooo setup
+```
 
 **Celebration Checkpoint 1:**
 ```
-Great news! You're ready for Full Mode with all features enabled.
+Great news! You're ready for the full Ouroboros experience.
 ```
 
 ---
 
 ### Step 2: MCP Server Registration
-
-**Only if Full Mode (Python 3.14+)**
 
 Check if `~/.claude/mcp.json` exists:
 
@@ -99,35 +144,22 @@ Check if `~/.claude/mcp.json` exists:
 ls -la ~/.claude/mcp.json 2>/dev/null && echo "EXISTS" || echo "NOT_FOUND"
 ```
 
-**Engaging Question:**
+**Show progress:**
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  MCP Server Registration
+  Registering MCP Server...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Ouroboros can register its MCP server for complete
-Python integration. This unlocks:
+Connecting Ouroboros Python core to Claude Code.
+This enables:
 
   Visual TUI Dashboard    [Watch execution in real-time]
   3-Stage Evaluation     [Mechanical → Semantic → Consensus]
   Drift Detection        [Alert when projects go off-track]
   Session Replay         [Debug any execution from events]
-
-Register MCP server? [Yes / No / Learn more]
 ```
 
-**If "Learn more":**
-```
-MCP (Model Context Protocol) enables Claude Code to
-communicate directly with Ouroboros Python core.
-
-Without MCP: Plugin skills work (interview, seed, unstuck)
-With MCP: Full execution pipeline with visualization
-
-Recommendation: Enable for complete Ouroboros experience.
-```
-
-**If Yes, create or update `~/.claude/mcp.json`** (user-level, works across all projects):
+**Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects):
 ```json
 {
   "mcpServers": {

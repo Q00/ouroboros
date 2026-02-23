@@ -15,31 +15,27 @@ Ouroboros transforms vague ideas into validated, executable specifications throu
 ## Installation
 
 ```bash
-# Option 1: Clone directly to plugins directory
-git clone https://github.com/Q00/ouroboros.git ~/.claude/plugins/ouroboros
+# Install via marketplace
+claude /plugin marketplace add Q00/ouroboros
+claude /plugin install ouroboros@ouroboros
 
-# Option 2: Copy the .claude-plugin directory
-cp -r .claude-plugin ~/.claude/plugins/ouroboros
+# Then run setup (required — registers MCP server)
+ooo setup
 ```
 
 ## Quick Start
 
-```
-ooo interview "Build a CLI task manager"
-```
-
-Answer the clarifying questions, then:
-
-```
-ooo seed
-```
-
-That's it — you have a validated Seed specification.
-
-For execution, evaluation, and drift tracking (requires Python 3.14+):
-
-```
+```bash
+# 1. Setup (one-time, ~1 minute)
 ooo setup
+
+# 2. Interview — expose hidden assumptions
+ooo interview "Build a CLI task manager"
+
+# 3. Generate Seed spec
+ooo seed
+
+# 4. Execute and evaluate
 ooo run
 ooo evaluate
 ```

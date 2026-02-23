@@ -11,7 +11,44 @@ ooo
 
 ## Response
 
-When this skill is invoked, respond with EXACTLY the following:
+When this skill is invoked:
+
+1. **Check MCP configuration first:**
+   ```bash
+   cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo "MCP_MISSING"
+   ```
+
+2. **If MCP_MISSING**: After showing the welcome message below, append a setup prompt at the end instead of the normal "What would you like to build today?" ending:
+   ```
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+     One-Time Setup Required
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+   Ouroboros needs its MCP server registered to work properly.
+   This is a one-time setup that takes ~1 minute.
+
+   Run: ooo setup
+   ```
+   Then use **AskUserQuestion** to prompt setup:
+   ```json
+   {
+     "questions": [{
+       "question": "Run setup now to unlock all Ouroboros features?",
+       "header": "Setup",
+       "options": [
+         { "label": "Run ooo setup", "description": "Register MCP server now (recommended)" },
+         { "label": "Skip for now", "description": "Use basic features only (interview, seed, unstuck)" }
+       ],
+       "multiSelect": false
+     }]
+   }
+   ```
+   - **Run ooo setup**: Read and execute `skills/setup/SKILL.md`
+   - **Skip for now**: Continue normally
+
+3. **If MCP_OK**: Show the welcome message below as-is.
+
+Respond with EXACTLY the following:
 
 ---
 
