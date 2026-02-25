@@ -186,8 +186,16 @@ Guidelines:
             for t in wonder.ontology_tensions:
                 parts.append(f"  - {t}")
 
-        # Truncate execution output
-        truncated = execution_output[:2000]
+        # Head+tail truncation: keep first 500 + last 2000 chars
+        # Real insights (stack traces, test results) live at the end
+        if len(execution_output) <= 3000:
+            truncated = execution_output
+        else:
+            truncated = (
+                execution_output[:500]
+                + "\n\n... (truncated) ...\n\n"
+                + execution_output[-2000:]
+            )
         parts.append(f"\n## Execution Output (truncated)\n{truncated}")
 
         if len(lineage.generations) > 1:

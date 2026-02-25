@@ -1769,10 +1769,15 @@ class EvolveStepHandler:
         if gen.execution_output:
             text_lines.append("")
             text_lines.append("### Execution output")
-            output_preview = gen.execution_output[:2000]
+            if len(gen.execution_output) <= 3000:
+                output_preview = gen.execution_output
+            else:
+                output_preview = (
+                    gen.execution_output[:500]
+                    + "\n\n... (truncated) ...\n\n"
+                    + gen.execution_output[-2000:]
+                )
             text_lines.append(output_preview)
-            if len(gen.execution_output) > 2000:
-                text_lines.append("...(truncated)")
 
         if gen.evaluation_summary:
             text_lines.append("")
