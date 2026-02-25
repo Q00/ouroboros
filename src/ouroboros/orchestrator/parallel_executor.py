@@ -341,6 +341,11 @@ class ParallelACExecutor:
                         sibling_acs=sibling_acs,
                     )
                 except BaseException as e:
+                    # Never suppress anyio Cancelled — doing so breaks
+                    # the task group's cancel-scope propagation and can
+                    # cause the entire group to hang indefinitely.
+                    if isinstance(e, anyio.get_cancelled_exc_class()):
+                        raise
                     level_results[idx] = e
 
             async with anyio.create_task_group() as tg:
@@ -751,6 +756,8 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     level_contexts=level_contexts,
                 )
             except BaseException as e:
+                if isinstance(e, anyio.get_cancelled_exc_class()):
+                    raise
                 sub_results[idx] = e
 
         async with anyio.create_task_group() as tg:
