@@ -445,7 +445,7 @@ class InterviewEngine:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"CRITICAL: Start your FIRST response with a DIRECT QUESTION about the project. "
-                f"Do NOT introduce yourself. Do NOT say \"I'll conduct\" or \"Let me ask\". "
+                f'Do NOT introduce yourself. Do NOT say "I\'ll conduct" or "Let me ask". '
                 f"Just ask a specific, clarifying question immediately.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
                 f"Initial context: {state.initial_context}\n"

@@ -269,11 +269,12 @@ class ClaudeCodeAdapter:
                 # Handle unknown message types from SDK (e.g., rate_limit_event)
                 # These are transient SDK issues that should be retried
                 is_unknown_message = (
-                    "Unknown message type" in error_str or
-                    error_type == "MessageParseError"
+                    "Unknown message type" in error_str or error_type == "MessageParseError"
                 )
 
-                if (self._is_retryable_error(error_str) or is_unknown_message) and attempt < _MAX_RETRIES - 1:
+                if (
+                    self._is_retryable_error(error_str) or is_unknown_message
+                ) and attempt < _MAX_RETRIES - 1:
                     backoff = _INITIAL_BACKOFF_SECONDS * (2**attempt)
                     log.warning(
                         "claude_code_adapter.retryable_exception",

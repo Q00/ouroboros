@@ -110,9 +110,7 @@ class AuthContext:
     client_id: str | None = None
     permissions: frozenset[Permission] = field(default_factory=frozenset)
     roles: frozenset[str] = field(default_factory=frozenset)
-    metadata: MappingProxyType[str, Any] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
+    metadata: MappingProxyType[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
 
 class RateLimiter:

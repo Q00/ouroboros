@@ -329,9 +329,7 @@ class EvolutionaryLoop:
 
         # Best-so-far recovery: if no generations completed, report error
         if not generation_results:
-            return Result.err(
-                OuroborosError("No generations completed before failure")
-            )
+            return Result.err(OuroborosError("No generations completed before failure"))
 
         # Partial results available — return best-so-far (lineage stays ACTIVE for resume)
         return Result.ok(
@@ -721,9 +719,7 @@ class EvolutionaryLoop:
                 exec_result = await self.executor(current_seed)
                 if hasattr(exec_result, "is_ok") and exec_result.is_ok:
                     orch_result = exec_result.value
-                    execution_output = getattr(
-                        orch_result, "final_message", str(orch_result)
-                    )
+                    execution_output = getattr(orch_result, "final_message", str(orch_result))
                     # Log structured metadata for observability
                     logger.info(
                         "evolution.generation.executed",
