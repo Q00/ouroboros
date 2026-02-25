@@ -52,6 +52,7 @@ def lineage_generation_completed(
     evaluation_summary: dict | None = None,
     wonder_questions: list[str] | None = None,
     seed_json: str | None = None,
+    execution_output: str | None = None,
 ) -> BaseEvent:
     """Create event when a generation completes successfully."""
     data = {
@@ -63,6 +64,8 @@ def lineage_generation_completed(
     }
     if seed_json is not None:
         data["seed_json"] = seed_json
+    if execution_output is not None:
+        data["execution_output"] = execution_output[:10_000]
     return BaseEvent(
         type="lineage.generation.completed",
         aggregate_type="lineage",

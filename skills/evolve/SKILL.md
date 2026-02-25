@@ -24,6 +24,11 @@ Gen 3: Wonder → Reflect → Seed(O₃) → Execute → Evaluate
 ooo evolve "build a task management CLI"
 ```
 
+### Fast mode (ontology-only, no execution)
+```
+ooo evolve "build a task management CLI" --no-execute
+```
+
 ### Check lineage status
 ```
 ooo evolve --status <lineage_id>
@@ -46,6 +51,8 @@ ooo evolve --rewind <lineage_id> <generation_number>
 5. Call `ouroboros_evolve_step` with:
    - `lineage_id`: new unique ID (e.g., `lin_<seed_id>`)
    - `seed_content`: the generated seed YAML
+   - `execute`: `true` (default) for full Execute→Evaluate pipeline,
+     `false` for fast ontology-only evolution (no seed execution)
 6. Check the `action` in the response:
    - `continue` → Call `ouroboros_evolve_step` again with just `lineage_id`
    - `converged` → Evolution complete! Display final ontology
@@ -88,3 +95,6 @@ Then add to Claude Code's MCP configuration.
   generation and branch evolution from there
 - **evolve_step**: Runs exactly ONE generation per call. Designed for
   Ralph integration — state is fully reconstructed from events between calls
+- **execute flag**: `true` (default) runs full Execute→Evaluate each generation.
+  `false` skips execution for fast ontology exploration. Previous generation's
+  execution output is fed into Wonder/Reflect for informed evolution

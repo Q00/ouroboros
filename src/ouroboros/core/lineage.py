@@ -170,6 +170,7 @@ class GenerationRecord(BaseModel, frozen=True):
     phase: GenerationPhase = GenerationPhase.COMPLETED
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     seed_json: str | None = None
+    execution_output: str | None = None
 
 
 class OntologyLineage(BaseModel, frozen=True):

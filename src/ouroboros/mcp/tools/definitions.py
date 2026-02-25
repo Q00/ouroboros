@@ -1643,7 +1643,7 @@ class EvolveStepHandler:
 
     evolutionary_loop: Any | None = field(default=None, repr=False)
 
-    TIMEOUT_SECONDS: int = 600  # Override MCP adapter's default 30s
+    TIMEOUT_SECONDS: int = 7200  # Override MCP adapter's default 30s
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -1672,6 +1672,17 @@ class EvolveStepHandler:
                         "Omit for Gen 2+ (seed reconstructed from events)."
                     ),
                     required=False,
+                ),
+                MCPToolParameter(
+                    name="execute",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Whether to run seed execution and evaluation. "
+                        "True (default): full pipeline with Execute→Evaluate. "
+                        "False: ontology-only evolution (fast, no execution)."
+                    ),
+                    required=False,
+                    default=True,
                 ),
             ),
         )
@@ -1713,11 +1724,15 @@ class EvolveStepHandler:
                     )
                 )
 
+        execute = arguments.get("execute", True)
+
         try:
             # Ensure event store is initialized before evolve_step accesses it
             # (evolve_step calls replay_lineage/append before executor/evaluator)
             await self.evolutionary_loop.event_store.initialize()
-            result = await self.evolutionary_loop.evolve_step(lineage_id, initial_seed)
+            result = await self.evolutionary_loop.evolve_step(
+                lineage_id, initial_seed, execute=execute
+            )
         except Exception as e:
             log.error("mcp.tool.evolve_step.error", error=str(e))
             return Result.err(
@@ -1751,6 +1766,24 @@ class EvolveStepHandler:
             f"**Next generation**: {step.next_generation}",
         ]
 
+        if gen.execution_output:
+            text_lines.append("")
+            text_lines.append("### Execution output")
+            output_preview = gen.execution_output[:2000]
+            text_lines.append(output_preview)
+            if len(gen.execution_output) > 2000:
+                text_lines.append("...(truncated)")
+
+        if gen.evaluation_summary:
+            text_lines.append("")
+            text_lines.append("### Evaluation")
+            es = gen.evaluation_summary
+            text_lines.append(f"- **Approved**: {es.final_approved}")
+            text_lines.append(f"- **Score**: {es.score}")
+            text_lines.append(f"- **Drift**: {es.drift_score}")
+            if es.failure_reason:
+                text_lines.append(f"- **Failure**: {es.failure_reason}")
+
         if gen.wonder_output:
             text_lines.append("")
             text_lines.append("### Wonder questions")
@@ -1780,6 +1813,8 @@ class EvolveStepHandler:
                     "similarity": sig.ontology_similarity,
                     "converged": sig.converged,
                     "next_generation": step.next_generation,
+                    "executed": execute,
+                    "has_execution_output": gen.execution_output is not None,
                 },
             )
         )

@@ -59,7 +59,7 @@ class EvolutionaryLoopConfig:
     convergence_threshold: float = 0.95
     stagnation_window: int = 3
     min_generations: int = 2
-    generation_timeout_seconds: int = 600
+    generation_timeout_seconds: int = 7200
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +244,7 @@ class EvolutionaryLoop:
                 evaluation_summary=result.evaluation_summary,
                 wonder_questions=result.wonder_output.questions if result.wonder_output else (),
                 phase=result.phase,
+                execution_output=result.execution_output,
             )
             lineage = lineage.with_generation(record)
 
@@ -259,6 +260,7 @@ class EvolutionaryLoop:
                     else None,
                     list(result.wonder_output.questions) if result.wonder_output else None,
                     seed_json=json.dumps(result.seed.to_dict()),
+                    execution_output=result.execution_output,
                 )
             )
 
@@ -339,6 +341,7 @@ class EvolutionaryLoop:
         self,
         lineage_id: str,
         initial_seed: Seed | None = None,
+        execute: bool = True,
     ) -> Result[StepResult, OuroborosError]:
         """Run exactly one generation of the evolutionary loop.
 
@@ -431,6 +434,7 @@ class EvolutionaryLoop:
                     lineage=lineage,
                     generation_number=generation_number,
                     current_seed=current_seed,
+                    execute=execute,
                 ),
                 timeout=self.config.generation_timeout_seconds,
             )
@@ -501,6 +505,7 @@ class EvolutionaryLoop:
             wonder_questions=result.wonder_output.questions if result.wonder_output else (),
             phase=result.phase,
             seed_json=json.dumps(result.seed.to_dict()),
+            execution_output=result.execution_output,
         )
         lineage = lineage.with_generation(record)
 
@@ -515,6 +520,7 @@ class EvolutionaryLoop:
                 else None,
                 list(result.wonder_output.questions) if result.wonder_output else None,
                 seed_json=json.dumps(result.seed.to_dict()),
+                execution_output=result.execution_output,
             )
         )
 
@@ -584,6 +590,7 @@ class EvolutionaryLoop:
         lineage: OntologyLineage,
         generation_number: int,
         current_seed: Seed,
+        execute: bool = True,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run a single generation within the loop.
 
@@ -612,7 +619,7 @@ class EvolutionaryLoop:
                 wonder_result = await self.wonder_engine.wonder(
                     current_ontology=current_seed.ontology_schema,
                     evaluation_summary=prev_gen.evaluation_summary,
-                    execution_output=None,  # TODO: pass from previous gen
+                    execution_output=prev_gen.execution_output,
                     lineage=lineage,
                 )
                 if wonder_result.is_ok:
@@ -642,7 +649,7 @@ class EvolutionaryLoop:
             if self.reflect_engine and wonder_output and prev_gen.evaluation_summary:
                 reflect_result = await self.reflect_engine.reflect(
                     current_seed=current_seed,
-                    execution_output="",  # TODO: pass from previous gen
+                    execution_output=prev_gen.execution_output or "",
                     evaluation_summary=prev_gen.evaluation_summary,
                     wonder_output=wonder_output,
                     lineage=lineage,
@@ -702,7 +709,7 @@ class EvolutionaryLoop:
 
         # Execute phase (placeholder - actual execution via OrchestratorRunner)
         execution_output: str | None = None
-        if self.executor:
+        if execute and self.executor:
             try:
                 exec_result = await self.executor(current_seed)
                 if hasattr(exec_result, "is_ok") and exec_result.is_ok:
@@ -726,7 +733,7 @@ class EvolutionaryLoop:
 
         # Evaluate phase (placeholder - actual evaluation via EvaluationPipeline)
         evaluation_summary: EvaluationSummary | None = None
-        if self.evaluator:
+        if execute and self.evaluator:
             try:
                 eval_result = await self.evaluator(current_seed, execution_output)
                 if hasattr(eval_result, "is_ok") and eval_result.is_ok:

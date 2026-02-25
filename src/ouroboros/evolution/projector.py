@@ -69,6 +69,7 @@ class LineageProjector:
                     phase=GenerationPhase.COMPLETED,
                     created_at=event.timestamp,
                     seed_json=data.get("seed_json"),
+                    execution_output=data.get("execution_output"),
                 )
                 generations[gen_num] = record
 
