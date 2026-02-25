@@ -17,6 +17,7 @@ import logging
 from pydantic import BaseModel, Field
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologySchema
 from ouroboros.core.types import Result
@@ -146,16 +147,7 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
                 parts.append(f"  Failure: {eval_summary.failure_reason}")
 
         if execution_output:
-            # Head+tail truncation: keep first 500 + last 2000 chars
-            # Real insights (stack traces, test results) live at the end
-            if len(execution_output) <= 3000:
-                truncated = execution_output
-            else:
-                truncated = (
-                    execution_output[:500]
-                    + "\n\n... (truncated) ...\n\n"
-                    + execution_output[-2000:]
-                )
+            truncated = truncate_head_tail(execution_output)
             parts.append(f"\n## Execution Output (truncated)\n{truncated}")
 
         if lineage.generations:

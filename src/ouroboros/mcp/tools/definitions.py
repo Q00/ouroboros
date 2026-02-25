@@ -26,6 +26,7 @@ from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.errors import ValidationError
 from pydantic import ValidationError as PydanticValidationError
 from ouroboros.core.seed import Seed
+from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
@@ -1769,14 +1770,7 @@ class EvolveStepHandler:
         if gen.execution_output:
             text_lines.append("")
             text_lines.append("### Execution output")
-            if len(gen.execution_output) <= 3000:
-                output_preview = gen.execution_output
-            else:
-                output_preview = (
-                    gen.execution_output[:500]
-                    + "\n\n... (truncated) ...\n\n"
-                    + gen.execution_output[-2000:]
-                )
+            output_preview = truncate_head_tail(gen.execution_output)
             text_lines.append(output_preview)
 
         if gen.evaluation_summary:

@@ -19,6 +19,7 @@ import logging
 from pydantic import BaseModel, Field
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyLineage
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
@@ -186,16 +187,7 @@ Guidelines:
             for t in wonder.ontology_tensions:
                 parts.append(f"  - {t}")
 
-        # Head+tail truncation: keep first 500 + last 2000 chars
-        # Real insights (stack traces, test results) live at the end
-        if len(execution_output) <= 3000:
-            truncated = execution_output
-        else:
-            truncated = (
-                execution_output[:500]
-                + "\n\n... (truncated) ...\n\n"
-                + execution_output[-2000:]
-            )
+        truncated = truncate_head_tail(execution_output)
         parts.append(f"\n## Execution Output (truncated)\n{truncated}")
 
         if len(lineage.generations) > 1:
