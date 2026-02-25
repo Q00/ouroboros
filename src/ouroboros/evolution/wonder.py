@@ -17,9 +17,9 @@ import logging
 from pydantic import BaseModel, Field
 
 from ouroboros.core.errors import ProviderError
-from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologySchema
+from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
 from rich.console import Console
 import structlog
 import yaml
@@ -24,7 +25,6 @@ from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBre
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.errors import ValidationError
-from pydantic import ValidationError as PydanticValidationError
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result

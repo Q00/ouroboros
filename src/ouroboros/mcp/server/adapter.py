@@ -453,7 +453,6 @@ def create_ouroboros_server(
         OrchestratorRunner,
     )
     from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
-    from ouroboros.resilience.lateral import LateralThinker
 
     # Create LLM adapter (shared across services)
     # Default to ClaudeCodeAdapter — uses Max Plan auth, no API key needed.

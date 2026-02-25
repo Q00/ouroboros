@@ -277,7 +277,7 @@ class EvaluationPipeline:
 
 async def run_evaluation_pipeline(
     context: EvaluationContext,
-    llm_adapter: LiteLLMAdapter,
+    llm_adapter: LLMAdapter,
     config: PipelineConfig | None = None,
     trigger_context: TriggerContext | None = None,
 ) -> Result[EvaluationResult, ProviderError | ValidationError]:
