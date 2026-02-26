@@ -439,21 +439,34 @@ class ClaudeCodeAdapter:
         if error_result:
             return Result.err(error_result)
 
-        # Check for empty response (custom CLI startup delay, etc.)
-        # Return retriable error so retry logic can handle it
-        if not content and not session_id:
-            log.warning(
-                "claude_code_adapter.empty_response",
-                content_length=0,
-                session_id=session_id,
-                hint="CLI may still be starting (custom CLI sync, etc.)",
-            )
-            return Result.err(
-                ProviderError(
-                    message="Empty response from CLI - may need retry (timeout/startup)",
-                    details={"session_id": session_id, "content_length": 0},
+        # Check for empty response — always an error regardless of session_id
+        if not content:
+            if session_id:
+                log.warning(
+                    "claude_code_adapter.empty_response",
+                    content_length=0,
+                    session_id=session_id,
+                    hint="CLI started but produced no content",
                 )
-            )
+                return Result.err(
+                    ProviderError(
+                        message="Empty response from CLI - session started but no content produced",
+                        details={"session_id": session_id, "content_length": 0},
+                    )
+                )
+            else:
+                log.warning(
+                    "claude_code_adapter.empty_response",
+                    content_length=0,
+                    session_id=session_id,
+                    hint="CLI may still be starting (custom CLI sync, etc.)",
+                )
+                return Result.err(
+                    ProviderError(
+                        message="Empty response from CLI - may need retry (timeout/startup)",
+                        details={"session_id": session_id, "content_length": 0},
+                    )
+                )
 
         log.info(
             "claude_code_adapter.request_completed",

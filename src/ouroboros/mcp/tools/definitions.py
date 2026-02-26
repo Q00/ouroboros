@@ -1000,7 +1000,7 @@ class InterviewHandler:
 
         # Use injected or create interview engine
         engine = self.interview_engine or InterviewEngine(
-            llm_adapter=ClaudeCodeAdapter(max_turns=1),
+            llm_adapter=ClaudeCodeAdapter(max_turns=3),
             state_dir=Path.home() / ".ouroboros" / "data",
         )
 
