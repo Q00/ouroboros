@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2025-02-27
+
+### Fixed
+- **interview**: Fix empty response bypass in ClaudeCodeAdapter — empty content now always triggers error regardless of session_id
+- **interview**: Fix sub-agent turn exhaustion — increase max_turns from 1 to 3 so the agent can use tools and still generate the question
+
+### Maintenance
+- **style**: Apply ruff format to 4 files
+- **ci**: Resolve ruff and mypy CI failures
+
 ## [0.13.4] - 2025-02-24
 
 ### Fixed
