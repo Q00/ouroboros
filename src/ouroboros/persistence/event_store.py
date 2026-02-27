@@ -314,6 +314,43 @@ class EventStore:
                 },
             ) from e
 
+    async def get_all_lineages(self) -> list[BaseEvent]:
+        """Get all lineage creation events.
+
+        Retrieves all events of type 'lineage.created' to identify every
+        evolutionary lineage recorded in the event store.
+
+        Returns:
+            List of lineage creation events, ordered by timestamp descending.
+
+        Raises:
+            PersistenceError: If the query fails.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="get_all_lineages",
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                query = (
+                    select(events_table)
+                    .where(events_table.c.event_type == "lineage.created")
+                    .order_by(events_table.c.timestamp.desc())
+                )
+
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                return [BaseEvent.from_db_row(dict(row)) for row in rows]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to get all lineages: {e}",
+                operation="select",
+                table="events",
+                details={"event_type": "lineage.created"},
+            ) from e
+
     async def replay_lineage(self, lineage_id: str) -> list[BaseEvent]:
         """Replay all events for a lineage aggregate.
 

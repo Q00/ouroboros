@@ -15,6 +15,7 @@ from ouroboros.tui.widgets.ac_tree import ACTreeWidget
 from ouroboros.tui.widgets.agent_activity import AgentActivityWidget
 from ouroboros.tui.widgets.cost_tracker import CostTrackerWidget
 from ouroboros.tui.widgets.drift_meter import DriftMeterWidget
+from ouroboros.tui.widgets.lineage_tree import LineageTreeWidget
 from ouroboros.tui.widgets.parallel_graph import GraphNode, ParallelGraphWidget
 from ouroboros.tui.widgets.phase_progress import PhaseProgressWidget
 
@@ -26,6 +27,7 @@ __all__ = [
     "CostTrackerWidget",
     "DriftMeterWidget",
     "GraphNode",
+    "LineageTreeWidget",
     "ParallelGraphWidget",
     "PhaseProgressWidget",
 ]

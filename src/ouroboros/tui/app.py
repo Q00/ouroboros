@@ -38,8 +38,10 @@ from ouroboros.tui.screens import (
     DashboardScreenV3,
     DebugScreen,
     ExecutionScreen,
+    LineageDetailScreen,
     LogsScreen,
 )
+from ouroboros.tui.screens.lineage_selector import LineageSelectorScreen
 from ouroboros.tui.screens.session_selector import SessionSelectorScreen
 
 if TYPE_CHECKING:
@@ -95,6 +97,7 @@ class OuroborosTUI(App[None]):
         Binding("d", "show_debug", "Debug"),
         Binding("l", "show_logs", "Logs"),
         Binding("s", "show_selector", "Select Session"),
+        Binding("e", "show_lineages", "Lineages"),
         Binding("1", "show_dashboard", "Dashboard", show=False),
         Binding("2", "show_execution", "Execution", show=False),
         Binding("3", "show_logs", "Logs", show=False),
@@ -131,9 +134,10 @@ class OuroborosTUI(App[None]):
 
     def on_mount(self) -> None:
         """Handle application mount."""
-        # Install screens - session selector only if event_store is available
+        # Install screens - session/lineage selectors only if event_store is available
         if self._event_store is not None:
             self.install_screen(SessionSelectorScreen(self._event_store), name="session_selector")
+            self.install_screen(LineageSelectorScreen(self._event_store), name="lineage_selector")
         self.install_screen(DashboardScreenV3(self._state), name="dashboard")
         self.install_screen(ExecutionScreen(self._state), name="execution")
         self.install_screen(LogsScreen(self._state), name="logs")
@@ -688,6 +692,19 @@ class OuroborosTUI(App[None]):
     def action_show_debug(self) -> None:
         self.push_screen("debug")
 
+    def action_show_lineages(self) -> None:
+        """Show lineage selector screen."""
+        if self._event_store is not None:
+            self.push_screen("lineage_selector")
+        else:
+            self.notify("No event store available", severity="warning")
+
+    async def on_lineage_selector_screen_lineage_selected(
+        self, message: LineageSelectorScreen.LineageSelected
+    ) -> None:
+        """Handle lineage selection and push the detail screen."""
+        self.push_screen(LineageDetailScreen(message.lineage, event_store=self._event_store))
+
     def set_pause_callback(self, callback: Any) -> None:
         self._pause_callback = callback
 
@@ -714,6 +731,8 @@ class OuroborosTUI(App[None]):
             self._subscription_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._subscription_task
+        if self._event_store is not None:
+            await self._event_store.close()
 
 
 __all__ = ["OuroborosTUI"]

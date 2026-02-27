@@ -403,6 +403,32 @@ class SubtaskUpdated(Message):
         self.status = status
 
 
+class LineageSelected(Message):
+    """Message indicating a lineage was selected from the selector screen.
+
+    Attributes:
+        lineage_id: The selected lineage ID.
+    """
+
+    def __init__(self, lineage_id: str) -> None:
+        super().__init__()
+        self.lineage_id = lineage_id
+
+
+class GenerationSelected(Message):
+    """Message indicating a generation was selected in the lineage detail view.
+
+    Attributes:
+        lineage_id: The lineage this generation belongs to.
+        generation_number: The selected generation number.
+    """
+
+    def __init__(self, lineage_id: str, generation_number: int) -> None:
+        super().__init__()
+        self.lineage_id = lineage_id
+        self.generation_number = generation_number
+
+
 class PauseRequested(Message):
     """Message indicating user requested execution pause.
 
@@ -788,6 +814,8 @@ __all__ = [
     "CostUpdated",
     "DriftUpdated",
     "ExecutionUpdated",
+    "GenerationSelected",
+    "LineageSelected",
     "LogMessage",
     "ParallelBatchCompleted",
     "ParallelBatchStarted",

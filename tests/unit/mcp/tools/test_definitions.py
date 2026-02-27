@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
     EvaluateHandler,
+    EvolveRewindHandler,
     EvolveStepHandler,
     ExecuteSeedHandler,
     GenerateSeedHandler,
@@ -193,7 +194,7 @@ class TestOuroborosTools:
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
         """OUROBOROS_TOOLS contains all standard handlers."""
-        assert len(OUROBOROS_TOOLS) == 10
+        assert len(OUROBOROS_TOOLS) == 11
 
         handler_types = {type(h) for h in OUROBOROS_TOOLS}
         assert ExecuteSeedHandler in handler_types
@@ -206,6 +207,7 @@ class TestOuroborosTools:
         assert LateralThinkHandler in handler_types
         assert EvolveStepHandler in handler_types
         assert LineageStatusHandler in handler_types
+        assert EvolveRewindHandler in handler_types
 
     def test_all_tools_have_unique_names(self) -> None:
         """All tools have unique names."""

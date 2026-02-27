@@ -794,14 +794,6 @@ class EvolutionaryLoop:
             from_gen = lineage.current_generation
             rewound = lineage.rewind_to(generation_number)
 
-            await self.event_store.append(
-                lineage_generation_started(
-                    lineage.lineage_id,
-                    generation_number,
-                    "rewound",
-                )
-            )
-
             from ouroboros.events.lineage import lineage_rewound
 
             await self.event_store.append(

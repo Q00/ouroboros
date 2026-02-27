@@ -124,9 +124,13 @@ class LineageProjector:
             if event.type == "lineage.generation.started":
                 gen = event.data.get("generation_number", 0)
                 phase_str = event.data.get("phase", "wondering")
+                try:
+                    phase = GenerationPhase(phase_str)
+                except ValueError:
+                    continue  # Skip unknown phases (e.g., legacy "rewound" events)
                 if gen > last_gen:
                     last_gen = gen
-                    last_phase = GenerationPhase(phase_str)
+                    last_phase = phase
 
             elif event.type == "lineage.generation.completed":
                 gen = event.data.get("generation_number", 0)

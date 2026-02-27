@@ -1820,6 +1820,174 @@ class EvolveStepHandler:
 
 
 @dataclass
+class EvolveRewindHandler:
+    """Handler for the ouroboros_evolve_rewind tool.
+
+    Rewinds an evolutionary lineage to a specific generation.
+    Delegates to EvolutionaryLoop.rewind_to().
+    """
+
+    evolutionary_loop: Any | None = field(default=None, repr=False)
+
+    TIMEOUT_SECONDS: int = 60
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        """Return the tool definition."""
+        return MCPToolDefinition(
+            name="ouroboros_evolve_rewind",
+            description=(
+                "Rewind an evolutionary lineage to a specific generation. "
+                "Truncates all generations after the target and emits a "
+                "lineage.rewound event. The lineage can then continue evolving "
+                "from the rewind point."
+            ),
+            parameters=(
+                MCPToolParameter(
+                    name="lineage_id",
+                    type=ToolInputType.STRING,
+                    description="ID of the lineage to rewind",
+                    required=True,
+                ),
+                MCPToolParameter(
+                    name="to_generation",
+                    type=ToolInputType.INTEGER,
+                    description="Generation number to rewind to (inclusive)",
+                    required=True,
+                ),
+            ),
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle a rewind request."""
+        lineage_id = arguments.get("lineage_id")
+        if not lineage_id:
+            return Result.err(
+                MCPToolError(
+                    "lineage_id is required",
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        to_generation = arguments.get("to_generation")
+        if to_generation is None:
+            return Result.err(
+                MCPToolError(
+                    "to_generation is required",
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        if self.evolutionary_loop is None:
+            return Result.err(
+                MCPToolError(
+                    "EvolutionaryLoop not configured",
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        try:
+            await self.evolutionary_loop.event_store.initialize()
+            events = await self.evolutionary_loop.event_store.replay_lineage(lineage_id)
+        except Exception as e:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to replay lineage: {e}",
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        if not events:
+            return Result.err(
+                MCPToolError(
+                    f"No lineage found with ID: {lineage_id}",
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        from ouroboros.evolution.projector import LineageProjector
+
+        projector = LineageProjector()
+        lineage = projector.project(events)
+
+        if lineage is None:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to project lineage: {lineage_id}",
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        # Validate generation is in range
+        if to_generation < 1 or to_generation > lineage.current_generation:
+            return Result.err(
+                MCPToolError(
+                    f"Generation {to_generation} out of range [1, {lineage.current_generation}]",
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        if to_generation == lineage.current_generation:
+            return Result.err(
+                MCPToolError(
+                    f"Already at generation {to_generation}, nothing to rewind",
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        from_gen = lineage.current_generation
+        result = await self.evolutionary_loop.rewind_to(lineage, to_generation)
+
+        if result.is_err:
+            return Result.err(
+                MCPToolError(
+                    str(result.error),
+                    tool_name="ouroboros_evolve_rewind",
+                )
+            )
+
+        rewound_lineage = result.value
+
+        # Get seed_json from the target generation if available
+        target_gen = None
+        for g in rewound_lineage.generations:
+            if g.generation_number == to_generation:
+                target_gen = g
+                break
+
+        seed_info = ""
+        if target_gen and target_gen.seed_json:
+            seed_info = f"\n\n### Target generation seed\n```yaml\n{target_gen.seed_json}\n```"
+
+        text = (
+            f"## Rewind Complete\n\n"
+            f"**Lineage**: {lineage_id}\n"
+            f"**From generation**: {from_gen}\n"
+            f"**To generation**: {to_generation}\n"
+            f"**Status**: {rewound_lineage.status.value}\n"
+            f"**Git tag**: `ooo/{lineage_id}/gen_{to_generation}`\n\n"
+            f"Generations {to_generation + 1}–{from_gen} have been truncated.\n"
+            f"Run `ralph.sh --lineage-id {lineage_id}` to resume evolution."
+            f"{seed_info}"
+        )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                is_error=False,
+                meta={
+                    "lineage_id": lineage_id,
+                    "from_generation": from_gen,
+                    "to_generation": to_generation,
+                },
+            )
+        )
+
+
+@dataclass
 class LineageStatusHandler:
     """Handler for the ouroboros_lineage_status tool.
 
@@ -2001,6 +2169,11 @@ def lineage_status_handler() -> LineageStatusHandler:
     return LineageStatusHandler()
 
 
+def evolve_rewind_handler() -> EvolveRewindHandler:
+    """Create an EvolveRewindHandler instance."""
+    return EvolveRewindHandler()
+
+
 # List of all Ouroboros tools for registration
 OUROBOROS_TOOLS: tuple[
     ExecuteSeedHandler
@@ -2012,7 +2185,8 @@ OUROBOROS_TOOLS: tuple[
     | EvaluateHandler
     | LateralThinkHandler
     | EvolveStepHandler
-    | LineageStatusHandler,
+    | LineageStatusHandler
+    | EvolveRewindHandler,
     ...,
 ] = (
     ExecuteSeedHandler(),
@@ -2025,4 +2199,5 @@ OUROBOROS_TOOLS: tuple[
     LateralThinkHandler(),
     EvolveStepHandler(),
     LineageStatusHandler(),
+    EvolveRewindHandler(),
 )
