@@ -330,33 +330,47 @@ class InterviewEngine:
             response_length=len(user_response),
         )
 
-        # Auto-trigger explore when brownfield detected + paths collected
-        if state.is_brownfield and state.codebase_paths and not state.explore_completed:
-            try:
-                from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
-
-                explorer = CodebaseExplorer(llm_adapter=self.llm_adapter, model=self.model)
-                results = await explorer.explore(state.codebase_paths)
-                state.codebase_context = format_explore_results(results)
-                state.explore_completed = True
-
-                log.info(
-                    "interview.explore_completed",
-                    interview_id=state.interview_id,
-                    paths_explored=len(results),
-                    context_length=len(state.codebase_context),
-                )
-            except Exception as e:
-                log.warning(
-                    "interview.explore_failed",
-                    interview_id=state.interview_id,
-                    error=str(e),
-                )
+        # Trigger codebase exploration if brownfield conditions met
+        await self._trigger_codebase_exploration(state)
 
         # Note: No auto-complete on round limit. User controls when to stop.
         # CLI handles prompting user to continue after each round.
 
         return Result.ok(state)
+
+    async def _trigger_codebase_exploration(self, state: InterviewState) -> None:
+        """Trigger codebase exploration for brownfield projects.
+
+        Explores referenced codebase directories and stores the context
+        in the interview state. Only runs once (guarded by explore_completed).
+        Failures are logged but do not interrupt the interview flow.
+
+        Args:
+            state: Current interview state (mutated in place on success).
+        """
+        if not state.is_brownfield or not state.codebase_paths or state.explore_completed:
+            return
+
+        try:
+            from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
+
+            explorer = CodebaseExplorer(llm_adapter=self.llm_adapter, model=self.model)
+            results = await explorer.explore(state.codebase_paths)
+            state.codebase_context = format_explore_results(results)
+            state.explore_completed = True
+
+            log.info(
+                "interview.explore_completed",
+                interview_id=state.interview_id,
+                paths_explored=len(results),
+                context_length=len(state.codebase_context),
+            )
+        except Exception as e:
+            log.warning(
+                "interview.explore_failed",
+                interview_id=state.interview_id,
+                error=str(e),
+            )
 
     async def save_state(self, state: InterviewState) -> Result[Path, ValidationError]:
         """Persist interview state to disk.

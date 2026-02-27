@@ -308,7 +308,7 @@ class TestAmbiguityScorerInit:
         assert scorer.model == "openrouter/google/gemini-2.0-flash-001"
         assert scorer.temperature == SCORING_TEMPERATURE
         assert scorer.initial_max_tokens == 2048
-        assert scorer.max_retries is None  # Unlimited by default
+        assert scorer.max_retries == 10  # Default to 10 retries
 
     def test_scorer_custom_values(self) -> None:
         """AmbiguityScorer accepts custom values."""

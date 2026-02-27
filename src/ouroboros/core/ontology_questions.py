@@ -115,9 +115,9 @@ class OntologicalInsight:
     is_root_problem: bool
     prerequisites: tuple[str, ...]
     hidden_assumptions: tuple[str, ...]
+    confidence: float
+    reasoning: str
     existing_context: tuple[str, ...] = ()
-    confidence: float = 0.5
-    reasoning: str = ""
 
 
 class OntologicalAnalyzer(Protocol):

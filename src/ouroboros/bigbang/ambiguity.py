@@ -151,7 +151,7 @@ class AmbiguityScorer:
     model: str = DEFAULT_MODEL
     temperature: float = SCORING_TEMPERATURE
     initial_max_tokens: int = 2048
-    max_retries: int | None = None  # None = unlimited retries
+    max_retries: int | None = 10  # Default to 10 retries (None = unlimited)
     max_format_error_retries: int = 5  # Stop after N format errors (non-truncation)
 
     async def score(

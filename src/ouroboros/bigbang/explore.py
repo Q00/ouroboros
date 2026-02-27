@@ -150,8 +150,8 @@ class CodebaseExplorer:
 
     llm_adapter: LLMAdapter
     model: str = _FALLBACK_MODEL
-    max_files_per_scan: int = 50
-    max_type_defs: int = 30
+    max_files_per_scan: int = 200
+    max_type_defs: int = 100
 
     async def explore(
         self,
@@ -171,7 +171,15 @@ class CodebaseExplorer:
         for entry in paths:
             path = entry.get("path", "")
             role = entry.get("role", "reference")
-            dir_path = Path(path)
+
+            try:
+                dir_path = Path(path).resolve(strict=True)
+            except (OSError, ValueError):
+                log.warning(
+                    "explore.invalid_path",
+                    path=path,
+                )
+                continue
 
             if not dir_path.is_dir():
                 log.warning(
@@ -204,7 +212,7 @@ class CodebaseExplorer:
                 )
 
             except Exception as e:
-                log.warning(
+                log.exception(
                     "explore.scan_failed",
                     path=path,
                     error=str(e),
@@ -266,6 +274,8 @@ class CodebaseExplorer:
                 files_scanned = 0
 
                 for glob_pattern in type_globs:
+                    if files_scanned >= self.max_files_per_scan:
+                        break
                     for source_file in sorted(dir_path.rglob(glob_pattern)):
                         if files_scanned >= self.max_files_per_scan:
                             break
