@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node .claude-plugin/scripts/keyword-detector.mjs",
+            "command": "node scripts/keyword-detector.mjs",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node .claude-plugin/scripts/drift-monitor.mjs",
+            "command": "node scripts/drift-monitor.mjs",
             "timeout": 3
           }
         ]
