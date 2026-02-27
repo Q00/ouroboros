@@ -28,10 +28,16 @@ log = structlog.get_logger()
 # Threshold for allowing Seed generation (NFR6)
 AMBIGUITY_THRESHOLD = 0.2
 
-# Weights for score components
+# Weights for greenfield score components (3 dimensions)
 GOAL_CLARITY_WEIGHT = 0.40
 CONSTRAINT_CLARITY_WEIGHT = 0.30
 SUCCESS_CRITERIA_CLARITY_WEIGHT = 0.30
+
+# Weights for brownfield score components (4 dimensions)
+BROWNFIELD_GOAL_CLARITY_WEIGHT = 0.35
+BROWNFIELD_CONSTRAINT_CLARITY_WEIGHT = 0.25
+BROWNFIELD_SUCCESS_CRITERIA_CLARITY_WEIGHT = 0.25
+BROWNFIELD_CONTEXT_CLARITY_WEIGHT = 0.15
 
 DEFAULT_MODEL = "openrouter/google/gemini-2.0-flash-001"
 
@@ -65,20 +71,25 @@ class ScoreBreakdown(BaseModel):
         goal_clarity: Score for goal statement clarity.
         constraint_clarity: Score for constraint specification clarity.
         success_criteria_clarity: Score for success criteria measurability.
+        context_clarity: Score for codebase context clarity (brownfield only).
     """
 
     goal_clarity: ComponentScore
     constraint_clarity: ComponentScore
     success_criteria_clarity: ComponentScore
+    context_clarity: ComponentScore | None = None
 
     @property
     def components(self) -> list[ComponentScore]:
         """Return all component scores as a list."""
-        return [
+        result = [
             self.goal_clarity,
             self.constraint_clarity,
             self.success_criteria_clarity,
         ]
+        if self.context_clarity is not None:
+            result.append(self.context_clarity)
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +154,11 @@ class AmbiguityScorer:
     max_retries: int | None = None  # None = unlimited retries
     max_format_error_retries: int = 5  # Stop after N format errors (non-truncation)
 
-    async def score(self, state: InterviewState) -> Result[AmbiguityScore, ProviderError]:
+    async def score(
+        self,
+        state: InterviewState,
+        is_brownfield: bool = False,
+    ) -> Result[AmbiguityScore, ProviderError]:
         """Calculate ambiguity score for interview state.
 
         Evaluates the interview conversation to determine clarity of:
@@ -166,11 +181,14 @@ class AmbiguityScorer:
             rounds=len(state.rounds),
         )
 
+        # Use brownfield flag from state if available
+        is_brownfield = is_brownfield or getattr(state, "is_brownfield", False)
+
         # Build the context from interview
         context = self._build_interview_context(state)
 
         # Create scoring prompt
-        system_prompt = self._build_scoring_system_prompt()
+        system_prompt = self._build_scoring_system_prompt(is_brownfield=is_brownfield)
         user_prompt = self._build_scoring_user_prompt(context)
 
         messages = [
@@ -212,7 +230,10 @@ class AmbiguityScorer:
 
             # Parse the LLM response into scores
             try:
-                breakdown = self._parse_scoring_response(result.value.content)
+                breakdown = self._parse_scoring_response(
+                    result.value.content,
+                    is_brownfield=is_brownfield,
+                )
                 overall_score = self._calculate_overall_score(breakdown)
 
                 ambiguity_score = AmbiguityScore(
@@ -298,12 +319,31 @@ class AmbiguityScorer:
 
         return "\n".join(parts)
 
-    def _build_scoring_system_prompt(self) -> str:
+    def _build_scoring_system_prompt(self, is_brownfield: bool = False) -> str:
         """Build system prompt for scoring.
+
+        Args:
+            is_brownfield: Whether this is a brownfield project.
 
         Returns:
             System prompt string.
         """
+        if is_brownfield:
+            return """You are an expert requirements analyst. Evaluate the clarity of software requirements.
+
+Evaluate four components:
+1. Goal Clarity (35%): Is the goal specific and well-defined?
+2. Constraint Clarity (25%): Are constraints and limitations specified?
+3. Success Criteria Clarity (25%): Are success criteria measurable?
+4. Context Clarity (15%): Is the existing codebase context clear? Are referenced codebases, patterns, and conventions well understood?
+
+Score each from 0.0 (unclear) to 1.0 (perfectly clear). Scores above 0.8 require very specific requirements.
+
+RESPOND ONLY WITH VALID JSON. No other text before or after.
+
+Required JSON format:
+{"goal_clarity_score": 0.0, "goal_clarity_justification": "string", "constraint_clarity_score": 0.0, "constraint_clarity_justification": "string", "success_criteria_clarity_score": 0.0, "success_criteria_clarity_justification": "string", "context_clarity_score": 0.0, "context_clarity_justification": "string"}"""
+
         return """You are an expert requirements analyst. Evaluate the clarity of software requirements.
 
 Evaluate three components:
@@ -335,11 +375,16 @@ Required JSON format:
 
 Analyze each component and provide scores with justifications."""
 
-    def _parse_scoring_response(self, response: str) -> ScoreBreakdown:
+    def _parse_scoring_response(
+        self,
+        response: str,
+        is_brownfield: bool = False,
+    ) -> ScoreBreakdown:
         """Parse LLM response into ScoreBreakdown.
 
         Args:
             response: Raw LLM response text.
+            is_brownfield: Whether to parse brownfield context_clarity dimension.
 
         Returns:
             Parsed ScoreBreakdown.
@@ -384,25 +429,46 @@ Analyze each component and provide scores with justifications."""
             score = float(value)
             return max(0.0, min(1.0, score))
 
+        # Select weights based on project type
+        if is_brownfield:
+            goal_weight = BROWNFIELD_GOAL_CLARITY_WEIGHT
+            constraint_weight = BROWNFIELD_CONSTRAINT_CLARITY_WEIGHT
+            criteria_weight = BROWNFIELD_SUCCESS_CRITERIA_CLARITY_WEIGHT
+        else:
+            goal_weight = GOAL_CLARITY_WEIGHT
+            constraint_weight = CONSTRAINT_CLARITY_WEIGHT
+            criteria_weight = SUCCESS_CRITERIA_CLARITY_WEIGHT
+
+        # Parse context clarity for brownfield projects
+        context_clarity: ComponentScore | None = None
+        if is_brownfield and "context_clarity_score" in data:
+            context_clarity = ComponentScore(
+                name="Context Clarity",
+                clarity_score=clamp_score(data["context_clarity_score"]),
+                weight=BROWNFIELD_CONTEXT_CLARITY_WEIGHT,
+                justification=str(data.get("context_clarity_justification", "")),
+            )
+
         return ScoreBreakdown(
             goal_clarity=ComponentScore(
                 name="Goal Clarity",
                 clarity_score=clamp_score(data["goal_clarity_score"]),
-                weight=GOAL_CLARITY_WEIGHT,
+                weight=goal_weight,
                 justification=str(data["goal_clarity_justification"]),
             ),
             constraint_clarity=ComponentScore(
                 name="Constraint Clarity",
                 clarity_score=clamp_score(data["constraint_clarity_score"]),
-                weight=CONSTRAINT_CLARITY_WEIGHT,
+                weight=constraint_weight,
                 justification=str(data["constraint_clarity_justification"]),
             ),
             success_criteria_clarity=ComponentScore(
                 name="Success Criteria Clarity",
                 clarity_score=clamp_score(data["success_criteria_clarity_score"]),
-                weight=SUCCESS_CRITERIA_CLARITY_WEIGHT,
+                weight=criteria_weight,
                 justification=str(data["success_criteria_clarity_justification"]),
             ),
+            context_clarity=context_clarity,
         )
 
     def _calculate_overall_score(self, breakdown: ScoreBreakdown) -> float:
@@ -450,6 +516,13 @@ Analyze each component and provide scores with justifications."""
         if breakdown.success_criteria_clarity.clarity_score < clarification_threshold:
             questions.append("How will you know when this is successfully completed?")
             questions.append("What specific features or behaviors are essential?")
+
+        if (
+            breakdown.context_clarity is not None
+            and breakdown.context_clarity.clarity_score < clarification_threshold
+        ):
+            questions.append("Can you point to the specific directories of the existing codebase?")
+            questions.append("What existing patterns or conventions must the new code follow?")
 
         return questions
 

@@ -13,6 +13,11 @@ from ouroboros.bigbang.ambiguity import (
     format_score_display,
     is_ready_for_seed,
 )
+from ouroboros.bigbang.explore import (
+    CodebaseExplorer,
+    CodebaseExploreResult,
+    format_explore_results,
+)
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
@@ -29,6 +34,10 @@ __all__ = [
     "ScoreBreakdown",
     "format_score_display",
     "is_ready_for_seed",
+    # Explore
+    "CodebaseExploreResult",
+    "CodebaseExplorer",
+    "format_explore_results",
     # Interview
     "InterviewEngine",
     "InterviewState",

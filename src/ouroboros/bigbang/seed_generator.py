@@ -22,6 +22,8 @@ from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD, AmbiguityScore
 from ouroboros.bigbang.interview import InterviewState
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
+    BrownfieldContext,
+    ContextReference,
     EvaluationPrinciple,
     ExitCondition,
     OntologyField,
@@ -211,6 +213,7 @@ class SeedGenerator:
             seed = Seed(
                 goal=reflect_output.refined_goal,
                 task_type=parent_seed.task_type,
+                brownfield_context=parent_seed.brownfield_context,
                 constraints=reflect_output.refined_constraints,
                 acceptance_criteria=reflect_output.refined_acs,
                 ontology_schema=new_ontology,
@@ -410,6 +413,10 @@ Extract all components and provide them in the specified format."""
                 "ONTOLOGY_FIELDS:",
                 "EVALUATION_PRINCIPLES:",
                 "EXIT_CONDITIONS:",
+                "PROJECT_TYPE:",
+                "CONTEXT_REFERENCES:",
+                "EXISTING_PATTERNS:",
+                "EXISTING_DEPENDENCIES:",
             ]:
                 if line.startswith(prefix):
                     key = prefix[:-1].lower()  # Remove colon and lowercase
@@ -518,8 +525,51 @@ Extract all components and provide them in the specified format."""
                         )
                     )
 
+        # Parse brownfield context
+        brownfield_context = BrownfieldContext()
+        project_type = requirements.get("project_type", "greenfield").strip().lower()
+        if project_type == "brownfield":
+            # Parse context references: path:role:summary | ...
+            context_refs: list[ContextReference] = []
+            if "context_references" in requirements and requirements["context_references"]:
+                for ref_str in requirements["context_references"].split("|"):
+                    ref_str = ref_str.strip()
+                    if not ref_str:
+                        continue
+                    parts = ref_str.split(":")
+                    if len(parts) >= 2:
+                        context_refs.append(
+                            ContextReference(
+                                path=parts[0].strip(),
+                                role=parts[1].strip() if len(parts) > 1 else "reference",
+                                summary=":".join(parts[2:]).strip() if len(parts) > 2 else "",
+                            )
+                        )
+
+            # Parse existing patterns
+            existing_patterns: tuple[str, ...] = ()
+            if "existing_patterns" in requirements and requirements["existing_patterns"]:
+                existing_patterns = tuple(
+                    p.strip() for p in requirements["existing_patterns"].split("|") if p.strip()
+                )
+
+            # Parse existing dependencies
+            existing_deps: tuple[str, ...] = ()
+            if "existing_dependencies" in requirements and requirements["existing_dependencies"]:
+                existing_deps = tuple(
+                    d.strip() for d in requirements["existing_dependencies"].split("|") if d.strip()
+                )
+
+            brownfield_context = BrownfieldContext(
+                project_type="brownfield",
+                context_references=tuple(context_refs),
+                existing_patterns=existing_patterns,
+                existing_dependencies=existing_deps,
+            )
+
         return Seed(
             goal=requirements["goal"],
+            brownfield_context=brownfield_context,
             constraints=constraints,
             acceptance_criteria=acceptance_criteria,
             ontology_schema=ontology_schema,

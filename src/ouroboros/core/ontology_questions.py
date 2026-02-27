@@ -44,6 +44,7 @@ class OntologicalQuestionType(StrEnum):
     ROOT_CAUSE = "root_cause"
     PREREQUISITES = "prerequisites"
     HIDDEN_ASSUMPTIONS = "hidden_assumptions"
+    EXISTING_CONTEXT = "existing_context"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,12 @@ ONTOLOGICAL_QUESTIONS: dict[OntologicalQuestionType, OntologicalQuestion] = {
         purpose="Surface implicit beliefs that may be wrong",
         follow_up="What if the opposite were true?",
     ),
+    OntologicalQuestionType.EXISTING_CONTEXT: OntologicalQuestion(
+        type=OntologicalQuestionType.EXISTING_CONTEXT,
+        question="What already exists?",
+        purpose="Discover existing code, patterns, and constraints that must be respected",
+        follow_up="What would break if we ignore what's already built?",
+    ),
 }
 
 
@@ -108,8 +115,9 @@ class OntologicalInsight:
     is_root_problem: bool
     prerequisites: tuple[str, ...]
     hidden_assumptions: tuple[str, ...]
-    confidence: float
-    reasoning: str
+    existing_context: tuple[str, ...] = ()
+    confidence: float = 0.5
+    reasoning: str = ""
 
 
 class OntologicalAnalyzer(Protocol):
@@ -292,7 +300,7 @@ def _build_analysis_prompt(
 {context}
 {focus}
 
-Respond with JSON containing: essence, is_root_problem, prerequisites, hidden_assumptions, confidence, reasoning."""
+Respond with JSON containing: essence, is_root_problem, prerequisites, hidden_assumptions, existing_context, confidence, reasoning."""
 
 
 def _parse_insight_response(response_text: str) -> OntologicalInsight | None:
@@ -325,6 +333,11 @@ def _parse_insight_response(response_text: str) -> OntologicalInsight | None:
             tuple(str(a) for a in assumptions_raw) if isinstance(assumptions_raw, list) else ()
         )
 
+        existing_raw = data.get("existing_context", [])
+        existing_context = (
+            tuple(str(e) for e in existing_raw) if isinstance(existing_raw, list) else ()
+        )
+
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
 
         return OntologicalInsight(
@@ -332,6 +345,7 @@ def _parse_insight_response(response_text: str) -> OntologicalInsight | None:
             is_root_problem=bool(data.get("is_root_problem", False)),
             prerequisites=prerequisites,
             hidden_assumptions=hidden_assumptions,
+            existing_context=existing_context,
             confidence=confidence,
             reasoning=str(data.get("reasoning", "No reasoning provided")),
         )

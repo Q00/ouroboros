@@ -86,6 +86,51 @@ class OntologySchema(BaseModel, frozen=True):
     fields: tuple[OntologyField, ...] = Field(default_factory=tuple)
 
 
+class ContextReference(BaseModel, frozen=True):
+    """Reference to an existing codebase directory.
+
+    Attributes:
+        path: Absolute path to the codebase directory.
+        role: 'primary' (modify this) or 'reference' (read-only).
+        summary: Auto-generated codebase summary from exploration.
+    """
+
+    path: str = Field(..., min_length=1, description="Absolute path to codebase")
+    role: str = Field(..., description="'primary' (modify this) or 'reference' (read-only)")
+    summary: str = Field(default="", description="Auto-generated codebase summary")
+
+
+class BrownfieldContext(BaseModel, frozen=True):
+    """Context for brownfield projects.
+
+    For greenfield projects, this remains at defaults (project_type="greenfield",
+    empty references). For brownfield, it carries discovered codebase context.
+
+    Attributes:
+        project_type: 'greenfield' or 'brownfield'.
+        context_references: Referenced codebase directories with roles.
+        existing_patterns: Key patterns discovered in existing code.
+        existing_dependencies: Key dependencies discovered in existing code.
+    """
+
+    project_type: str = Field(
+        default="greenfield",
+        description="'greenfield' or 'brownfield'",
+    )
+    context_references: tuple[ContextReference, ...] = Field(
+        default_factory=tuple,
+        description="Referenced codebase directories",
+    )
+    existing_patterns: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Key patterns discovered in existing code",
+    )
+    existing_dependencies: tuple[str, ...] = Field(
+        default_factory=tuple,
+        description="Key dependencies discovered in existing code",
+    )
+
+
 class SeedMetadata(BaseModel, frozen=True):
     """Metadata about the Seed generation.
 
@@ -166,6 +211,10 @@ class Seed(BaseModel, frozen=True):
     task_type: str = Field(
         default="code",
         description="Type of task execution: 'code', 'research', or 'analysis'",
+    )
+    brownfield_context: BrownfieldContext = Field(
+        default_factory=BrownfieldContext,
+        description="Brownfield project context (empty for greenfield)",
     )
     constraints: tuple[str, ...] = Field(
         default_factory=tuple,

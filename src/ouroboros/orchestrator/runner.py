@@ -126,6 +126,29 @@ def build_system_prompt(
         else "None"
     )
 
+    # Build brownfield context section
+    brownfield_section = ""
+    if seed.brownfield_context.project_type == "brownfield":
+        refs = "\n".join(
+            f"- [{r.role.upper()}] {r.path}: {r.summary}"
+            for r in seed.brownfield_context.context_references
+        )
+        patterns = "\n".join(f"- {p}" for p in seed.brownfield_context.existing_patterns)
+        deps = ", ".join(seed.brownfield_context.existing_dependencies)
+        brownfield_section = f"""
+## Existing Codebase Context (BROWNFIELD)
+IMPORTANT: You are extending existing code, NOT creating a new project.
+
+### Referenced Codebases
+{refs or "None specified"}
+
+### Existing Patterns to Follow
+{patterns or "None specified"}
+
+### Existing Dependencies to Reuse
+{deps or "None specified"}
+"""
+
     ac_tracking = get_ac_tracking_prompt()
     strategy_fragment = strategy.get_system_prompt_fragment()
 
@@ -136,7 +159,7 @@ def build_system_prompt(
 
 ## Constraints
 {constraints_text}
-
+{brownfield_section}
 ## Evaluation Principles
 {principles_text}
 

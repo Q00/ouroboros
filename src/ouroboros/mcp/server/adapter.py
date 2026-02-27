@@ -6,8 +6,8 @@ handling, and server lifecycle.
 """
 
 import asyncio
-import inspect
 from collections.abc import Sequence
+import inspect
 from typing import Any
 
 import structlog
@@ -599,7 +599,9 @@ def create_ouroboros_server(
         passed = sum(1 for m in matches if m == "PASS")
         score = passed / total if total > 0 else 0.0
 
-        total_acs = len(seed.acceptance_criteria) if getattr(seed, "acceptance_criteria", None) else total
+        total_acs = (
+            len(seed.acceptance_criteria) if getattr(seed, "acceptance_criteria", None) else total
+        )
         approved = passed >= total_acs and passed == total
 
         failure_reason = None

@@ -38,6 +38,13 @@ Format: name:description:weight (pipe-separated, weight 0.0-1.0)
 Conditions that indicate the workflow should terminate.
 Format: name:description:criteria (pipe-separated)
 
+### 7. BROWNFIELD CONTEXT (if applicable)
+If the interview mentions existing codebases, extract:
+- **PROJECT_TYPE**: 'greenfield' or 'brownfield'
+- **CONTEXT_REFERENCES**: path:role:summary (pipe-separated, role is 'primary' or 'reference')
+- **EXISTING_PATTERNS**: Key patterns that must be followed (pipe-separated)
+- **EXISTING_DEPENDENCIES**: Key dependencies to reuse (pipe-separated)
+
 ## OUTPUT FORMAT
 
 Provide your analysis in this exact structure:
@@ -51,9 +58,14 @@ ONTOLOGY_DESCRIPTION: <description>
 ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
 EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
 EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+PROJECT_TYPE: greenfield|brownfield
+CONTEXT_REFERENCES: <path>:<role>:<summary> | ...
+EXISTING_PATTERNS: <pattern 1> | <pattern 2> | ...
+EXISTING_DEPENDENCIES: <dep 1> | <dep 2> | ...
 ```
 
 Field types should be one of: string, number, boolean, array, object
 Weights should be between 0.0 and 1.0
 
 Be specific and concrete. Extract actual requirements from the conversation, not generic placeholders.
+For brownfield projects, ensure context references and patterns are extracted from the interview.

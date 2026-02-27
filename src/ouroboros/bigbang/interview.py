@@ -99,6 +99,10 @@ class InterviewState(BaseModel):
         initial_context: The initial context provided by the user.
         created_at: When the interview was created.
         updated_at: When the interview was last updated.
+        is_brownfield: Whether this is a brownfield project.
+        codebase_paths: Directories to explore for brownfield context.
+        codebase_context: Summary from auto-explore phase.
+        explore_completed: Whether exploration has been completed.
     """
 
     interview_id: str
@@ -107,6 +111,10 @@ class InterviewState(BaseModel):
     initial_context: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    is_brownfield: bool = False
+    codebase_paths: list[dict[str, str]] = Field(default_factory=list)
+    codebase_context: str = ""
+    explore_completed: bool = False
 
     @property
     def current_round_number(self) -> int:
@@ -322,6 +330,29 @@ class InterviewEngine:
             response_length=len(user_response),
         )
 
+        # Auto-trigger explore when brownfield detected + paths collected
+        if state.is_brownfield and state.codebase_paths and not state.explore_completed:
+            try:
+                from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
+
+                explorer = CodebaseExplorer(llm_adapter=self.llm_adapter, model=self.model)
+                results = await explorer.explore(state.codebase_paths)
+                state.codebase_context = format_explore_results(results)
+                state.explore_completed = True
+
+                log.info(
+                    "interview.explore_completed",
+                    interview_id=state.interview_id,
+                    paths_explored=len(results),
+                    context_length=len(state.codebase_context),
+                )
+            except Exception as e:
+                log.warning(
+                    "interview.explore_failed",
+                    interview_id=state.interview_id,
+                    error=str(e),
+                )
+
         # Note: No auto-complete on round limit. User controls when to stop.
         # CLI handles prompting user to continue after each round.
 
@@ -459,6 +490,14 @@ class InterviewEngine:
 
         if web_search_hint:
             base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
+
+        # Inject codebase context for brownfield projects
+        if state.is_brownfield and state.codebase_context:
+            dynamic_header += (
+                f"\n\n## Existing Codebase Context\n{state.codebase_context}"
+                "\n\nIMPORTANT: Ask ontological questions INFORMED by this context."
+                "\nRefer to actual types, patterns, and protocols found in the code."
+            )
 
         return f"{dynamic_header}\n{base_prompt}"
 
