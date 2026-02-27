@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ouroboros.core.lineage import OntologyDelta, OntologyLineage
+from ouroboros.core.lineage import EvaluationSummary, OntologyDelta, OntologyLineage
 from ouroboros.evolution.wonder import WonderOutput
 
 
@@ -43,11 +43,15 @@ class ConvergenceCriteria:
     stagnation_window: int = 3
     min_generations: int = 2
     max_generations: int = 30
+    enable_oscillation_detection: bool = True
+    eval_gate_enabled: bool = False
+    eval_min_score: float = 0.7
 
     def evaluate(
         self,
         lineage: OntologyLineage,
         latest_wonder: WonderOutput | None = None,
+        latest_evaluation: EvaluationSummary | None = None,
     ) -> ConvergenceSignal:
         """Check if the loop should terminate.
 
@@ -82,6 +86,22 @@ class ConvergenceCriteria:
         # Signal 1: Ontology stability (latest two generations)
         latest_sim = self._latest_similarity(lineage)
         if latest_sim >= self.convergence_threshold:
+            # Eval gate: block convergence if evaluation is unsatisfactory
+            if self.eval_gate_enabled and latest_evaluation is not None:
+                eval_blocks = not latest_evaluation.final_approved or (
+                    latest_evaluation.score is not None
+                    and latest_evaluation.score < self.eval_min_score
+                )
+                if eval_blocks:
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=(
+                            f"Ontology stable (similarity {latest_sim:.3f}) "
+                            f"but evaluation unsatisfactory"
+                        ),
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                    )
             return ConvergenceSignal(
                 converged=True,
                 reason=(
@@ -102,6 +122,17 @@ class ConvergenceCriteria:
                         f"Stagnation detected: ontology unchanged for "
                         f"{self.stagnation_window} consecutive generations"
                     ),
+                    ontology_similarity=latest_sim,
+                    generation=current_gen,
+                )
+
+        # Signal 2.5: Oscillation detection (A→B→A→B cycling)
+        if self.enable_oscillation_detection and num_gens >= 3:
+            oscillating = self._check_oscillation(lineage)
+            if oscillating:
+                return ConvergenceSignal(
+                    converged=True,
+                    reason=("Oscillation detected: ontology is cycling between similar states"),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
                 )
@@ -151,6 +182,31 @@ class ConvergenceCriteria:
                 return False
 
         return True
+
+    def _check_oscillation(self, lineage: OntologyLineage) -> bool:
+        """Detect oscillation: N~N-2 AND N-1~N-3 (full period-2 verification)."""
+        gens = lineage.generations
+
+        # Period-2 full check: A→B→A→B — verify BOTH half-periods
+        if len(gens) >= 4:
+            sim_n_n2 = OntologyDelta.compute(
+                gens[-3].ontology_snapshot, gens[-1].ontology_snapshot
+            ).similarity
+            sim_n1_n3 = OntologyDelta.compute(
+                gens[-4].ontology_snapshot, gens[-2].ontology_snapshot
+            ).similarity
+            if sim_n_n2 >= self.convergence_threshold and sim_n1_n3 >= self.convergence_threshold:
+                return True
+
+        # Simpler period-2 check: only 3 gens available, check N~N-2
+        elif len(gens) >= 3:
+            sim = OntologyDelta.compute(
+                gens[-3].ontology_snapshot, gens[-1].ontology_snapshot
+            ).similarity
+            if sim >= self.convergence_threshold:
+                return True
+
+        return False
 
     def _check_repetitive_feedback(
         self,
