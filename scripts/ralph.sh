@@ -75,7 +75,7 @@ log() {
     echo "[ralph] $(date '+%H:%M:%S') $*" >&2
 }
 
-# Create a lightweight git tag for the generation.
+# Commit changes and create a git tag for the generation.
 # Skipped when --no-execute (no code changes to snapshot).
 tag_generation() {
     local gen="$1"
@@ -85,10 +85,54 @@ tag_generation() {
         return 0
     fi
 
-    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        # Overwrite tag if it already exists (re-run scenario)
-        git tag -f "$tag" >/dev/null 2>&1 || true
-        log "Tagged ${tag}"
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # Auto-commit: commit any changes from this generation
+    if ! git diff --quiet HEAD 2>/dev/null || \
+       ! git diff --cached --quiet 2>/dev/null || \
+       [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]; then
+        git add -A >/dev/null 2>&1 || true
+        git commit -m "ooo: gen ${gen} [${LINEAGE_ID}]" >/dev/null 2>&1 || true
+        log "Committed changes for gen ${gen}"
+    fi
+
+    # Overwrite tag if it already exists (re-run scenario)
+    git tag -f "$tag" >/dev/null 2>&1 || true
+    log "Tagged ${tag}"
+}
+
+# Rollback working tree to previous generation on failure.
+rollback_to_previous() {
+    local current_gen="$1"
+    local prev_gen=$((current_gen - 1))
+
+    if (( prev_gen < 1 )); then
+        log "No previous generation to rollback to"
+        return 0
+    fi
+
+    if [[ "$NO_EXECUTE" == "true" ]]; then
+        return 0
+    fi
+
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local prev_tag="ooo/${LINEAGE_ID}/gen_${prev_gen}"
+    if git rev-parse "$prev_tag" >/dev/null 2>&1; then
+        log "Rolling back to ${prev_tag} after failure"
+        git checkout "$prev_tag" -- . >/dev/null 2>&1 || {
+            log "WARNING: rollback to ${prev_tag} failed"
+            return 0
+        }
+        git reset HEAD >/dev/null 2>&1 || true
+        git clean -fd >/dev/null 2>&1 || true
+        log "Rollback complete"
+    else
+        log "No tag ${prev_tag} found, skipping rollback"
     fi
 }
 
@@ -153,8 +197,8 @@ while (( cycle < MAX_CYCLES )); do
 
     log "  action=${action} gen=${generation} sim=${similarity}"
 
-    # Tag the generation
-    if [[ -n "$generation" ]] && [[ "$generation" != "None" ]]; then
+    # Tag the generation (skip on failure — rollback handles that case)
+    if [[ -n "$generation" ]] && [[ "$generation" != "None" ]] && [[ "$action" != "failed" ]]; then
         tag_generation "$generation"
     fi
 
@@ -185,6 +229,9 @@ while (( cycle < MAX_CYCLES )); do
             ;;
         failed)
             log "FAILED: ${error_msg}"
+            if [[ -n "$generation" ]] && [[ "$generation" != "None" ]]; then
+                rollback_to_previous "$generation"
+            fi
             echo "$output"
             exit 12
             ;;

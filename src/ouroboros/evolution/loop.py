@@ -60,6 +60,9 @@ class EvolutionaryLoopConfig:
     stagnation_window: int = 3
     min_generations: int = 2
     generation_timeout_seconds: int = 7200
+    enable_oscillation_detection: bool = True
+    eval_gate_enabled: bool = False
+    eval_min_score: float = 0.7
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +152,9 @@ class EvolutionaryLoop:
             stagnation_window=self.config.stagnation_window,
             min_generations=self.config.min_generations,
             max_generations=self.config.max_generations,
+            enable_oscillation_detection=self.config.enable_oscillation_detection,
+            eval_gate_enabled=self.config.eval_gate_enabled,
+            eval_min_score=self.config.eval_min_score,
         )
 
     async def run(
@@ -278,6 +284,7 @@ class EvolutionaryLoop:
             signal = self._convergence.evaluate(
                 lineage,
                 result.wonder_output,
+                latest_evaluation=result.evaluation_summary,
             )
 
             if signal.converged:
@@ -301,7 +308,7 @@ class EvolutionaryLoop:
                         )
                     )
                     lineage = lineage.with_status(LineageStatus.EXHAUSTED)
-                elif "Stagnation" in signal.reason:
+                elif "Stagnation" in signal.reason or "Oscillation" in signal.reason:
                     await self.event_store.append(
                         lineage_stagnated(
                             lineage.lineage_id,
@@ -543,6 +550,7 @@ class EvolutionaryLoop:
         signal = self._convergence.evaluate(
             lineage,
             result.wonder_output,
+            latest_evaluation=result.evaluation_summary,
         )
 
         action = StepAction.CONTINUE
@@ -557,7 +565,7 @@ class EvolutionaryLoop:
                 )
                 lineage = lineage.with_status(LineageStatus.EXHAUSTED)
                 action = StepAction.EXHAUSTED
-            elif "Stagnation" in signal.reason:
+            elif "Stagnation" in signal.reason or "Oscillation" in signal.reason:
                 await self.event_store.append(
                     lineage_stagnated(
                         lineage.lineage_id,
