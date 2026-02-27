@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -33,21 +33,32 @@ class TestRalphRewindParser:
 
     def test_git_checkout_flag(self) -> None:
         parser = build_parser()
-        args = parser.parse_args([
-            "--lineage-id", "lin_test",
-            "--to-generation", "2",
-            "--git-checkout",
-        ])
+        args = parser.parse_args(
+            [
+                "--lineage-id",
+                "lin_test",
+                "--to-generation",
+                "2",
+                "--git-checkout",
+            ]
+        )
         assert args.git_checkout is True
 
     def test_custom_server_command(self) -> None:
         parser = build_parser()
-        args = parser.parse_args([
-            "--lineage-id", "lin_test",
-            "--to-generation", "1",
-            "--server-command", "/usr/local/bin/ouroboros",
-            "--server-args", "mcp", "serve",
-        ])
+        args = parser.parse_args(
+            [
+                "--lineage-id",
+                "lin_test",
+                "--to-generation",
+                "1",
+                "--server-command",
+                "/usr/local/bin/ouroboros",
+                "--server-args",
+                "mcp",
+                "serve",
+            ]
+        )
         assert args.server_command == "/usr/local/bin/ouroboros"
         assert args.server_args == ["mcp", "serve"]
 

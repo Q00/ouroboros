@@ -11,8 +11,6 @@ Tests for:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import pytest
 
 from ouroboros.core.lineage import (
@@ -33,7 +31,6 @@ from ouroboros.tui.widgets.lineage_tree import (
     GenerationNodeSelected,
     LineageTreeWidget,
 )
-
 
 # =============================================================================
 # Test Fixtures
@@ -316,13 +313,15 @@ class TestOntologyDeltaInViewer:
 
     def test_delta_added_fields(self) -> None:
         """Detects added fields between generations."""
-        old = make_ontology(fields=(
-            OntologyField(name="id", field_type="string", description="ID"),
-        ))
-        new = make_ontology(fields=(
-            OntologyField(name="id", field_type="string", description="ID"),
-            OntologyField(name="title", field_type="string", description="Title"),
-        ))
+        old = make_ontology(
+            fields=(OntologyField(name="id", field_type="string", description="ID"),)
+        )
+        new = make_ontology(
+            fields=(
+                OntologyField(name="id", field_type="string", description="ID"),
+                OntologyField(name="title", field_type="string", description="Title"),
+            )
+        )
         delta = OntologyDelta.compute(old, new)
         assert len(delta.added_fields) == 1
         assert delta.added_fields[0].name == "title"
@@ -330,13 +329,15 @@ class TestOntologyDeltaInViewer:
 
     def test_delta_removed_fields(self) -> None:
         """Detects removed fields between generations."""
-        old = make_ontology(fields=(
-            OntologyField(name="id", field_type="string", description="ID"),
-            OntologyField(name="obsolete", field_type="string", description="Old field"),
-        ))
-        new = make_ontology(fields=(
-            OntologyField(name="id", field_type="string", description="ID"),
-        ))
+        old = make_ontology(
+            fields=(
+                OntologyField(name="id", field_type="string", description="ID"),
+                OntologyField(name="obsolete", field_type="string", description="Old field"),
+            )
+        )
+        new = make_ontology(
+            fields=(OntologyField(name="id", field_type="string", description="ID"),)
+        )
         delta = OntologyDelta.compute(old, new)
         assert len(delta.removed_fields) == 1
         assert "obsolete" in delta.removed_fields
@@ -351,12 +352,12 @@ class TestOntologyDeltaInViewer:
 
     def test_delta_modified_fields(self) -> None:
         """Detects type changes in common fields."""
-        old = make_ontology(fields=(
-            OntologyField(name="count", field_type="string", description="Count"),
-        ))
-        new = make_ontology(fields=(
-            OntologyField(name="count", field_type="number", description="Count"),
-        ))
+        old = make_ontology(
+            fields=(OntologyField(name="count", field_type="string", description="Count"),)
+        )
+        new = make_ontology(
+            fields=(OntologyField(name="count", field_type="number", description="Count"),)
+        )
         delta = OntologyDelta.compute(old, new)
         assert len(delta.modified_fields) == 1
         assert delta.modified_fields[0].field_name == "count"

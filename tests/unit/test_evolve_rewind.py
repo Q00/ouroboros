@@ -61,8 +61,6 @@ class TestEvolveRewindHandlerErrors:
     @pytest.mark.asyncio
     async def test_no_evolutionary_loop(self) -> None:
         handler = EvolveRewindHandler(evolutionary_loop=None)
-        result = await handler.handle(
-            {"lineage_id": "lin_test", "to_generation": 1}
-        )
+        result = await handler.handle({"lineage_id": "lin_test", "to_generation": 1})
         assert result.is_err
         assert "EvolutionaryLoop not configured" in str(result.error)

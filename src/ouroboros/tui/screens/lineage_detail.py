@@ -15,17 +15,14 @@ from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, Static
 
-from ouroboros.events.lineage import lineage_rewound
-from ouroboros.tui.screens.confirm_rewind import ConfirmRewindScreen
-
 from ouroboros.core.lineage import (
     GenerationRecord,
-    LineageStatus,
     OntologyDelta,
     OntologyLineage,
 )
+from ouroboros.events.lineage import lineage_rewound
+from ouroboros.tui.screens.confirm_rewind import ConfirmRewindScreen
 from ouroboros.tui.widgets.lineage_tree import GenerationNodeSelected, LineageTreeWidget
-
 
 # =============================================================================
 # GENERATION DETAIL PANEL
@@ -122,8 +119,7 @@ class GenerationDetailPanel(Static):
 
         if self.selected_generation is None:
             yield Static(
-                "[dim]Select a generation from the tree[/]\n"
-                "[dim]to view details[/]",
+                "[dim]Select a generation from the tree[/]\n[dim]to view details[/]",
                 classes="empty-state",
             )
             return
@@ -137,7 +133,15 @@ class GenerationDetailPanel(Static):
 
         with Horizontal(classes="detail-row"):
             yield Label("Phase:", classes="label")
-            phase_color = "green" if gen.phase == "completed" else "yellow" if gen.phase == "executing" else "red" if gen.phase == "failed" else "dim"
+            phase_color = (
+                "green"
+                if gen.phase == "completed"
+                else "yellow"
+                if gen.phase == "executing"
+                else "red"
+                if gen.phase == "failed"
+                else "dim"
+            )
             yield Static(f"[{phase_color}]{gen.phase.value}[/]", classes="value")
 
         with Horizontal(classes="detail-row"):
@@ -169,7 +173,9 @@ class GenerationDetailPanel(Static):
             ev = gen.evaluation_summary
             yield Label("Evaluation:", classes="section-header")
 
-            approved_str = "[bold green]APPROVED[/]" if ev.final_approved else "[bold red]REJECTED[/]"
+            approved_str = (
+                "[bold green]APPROVED[/]" if ev.final_approved else "[bold red]REJECTED[/]"
+            )
             with Horizontal(classes="detail-row"):
                 yield Label("Result:", classes="label")
                 yield Static(approved_str, classes="value")
@@ -192,7 +198,11 @@ class GenerationDetailPanel(Static):
             if ev.failure_reason:
                 with Horizontal(classes="detail-row"):
                     yield Label("Failure:", classes="label")
-                    reason = ev.failure_reason[:50] + "..." if len(ev.failure_reason) > 50 else ev.failure_reason
+                    reason = (
+                        ev.failure_reason[:50] + "..."
+                        if len(ev.failure_reason) > 50
+                        else ev.failure_reason
+                    )
                     yield Static(f"[red]{reason}[/]", classes="value")
 
         # Wonder questions
@@ -200,7 +210,7 @@ class GenerationDetailPanel(Static):
             yield Label("Wonder Questions:", classes="section-header")
             for i, q in enumerate(gen.wonder_questions, 1):
                 display_q = q[:70] + "..." if len(q) > 70 else q
-                yield Static(f"  {i}. \"{display_q}\"", classes="wonder-item")
+                yield Static(f'  {i}. "{display_q}"', classes="wonder-item")
 
         # Delta vs previous
         if self.previous_generation is not None:
@@ -212,7 +222,13 @@ class GenerationDetailPanel(Static):
             )
             with Horizontal(classes="detail-row"):
                 yield Label("Similarity:", classes="label")
-                sim_color = "green" if delta.similarity >= 0.8 else "yellow" if delta.similarity >= 0.5 else "red"
+                sim_color = (
+                    "green"
+                    if delta.similarity >= 0.8
+                    else "yellow"
+                    if delta.similarity >= 0.5
+                    else "red"
+                )
                 yield Static(f"[{sim_color}]{delta.similarity:.3f}[/]", classes="value")
 
             for field in delta.added_fields:
@@ -224,8 +240,7 @@ class GenerationDetailPanel(Static):
                 yield Static(f"  [red]-[/] {field_name}", classes="delta-item")
             for mod in delta.modified_fields:
                 yield Static(
-                    f"  [yellow]~[/] {mod.field_name}: "
-                    f"{mod.old_type}\u2192{mod.new_type}",
+                    f"  [yellow]~[/] {mod.field_name}: {mod.old_type}\u2192{mod.new_type}",
                     classes="delta-item",
                 )
 
@@ -237,14 +252,10 @@ class GenerationDetailPanel(Static):
                 preview += "\n..."
             yield Static(f"[dim]{preview}[/]", classes="output-preview")
 
-    def watch_selected_generation(
-        self, _new_value: GenerationRecord | None
-    ) -> None:
+    def watch_selected_generation(self, _new_value: GenerationRecord | None) -> None:
         self.refresh(recompose=True)
 
-    def watch_previous_generation(
-        self, _new_value: GenerationRecord | None
-    ) -> None:
+    def watch_previous_generation(self, _new_value: GenerationRecord | None) -> None:
         self.refresh(recompose=True)
 
 
@@ -331,9 +342,7 @@ class LineageDetailScreen(Screen[None]):
 
         yield Footer()
 
-    def on_generation_node_selected(
-        self, message: GenerationNodeSelected
-    ) -> None:
+    def on_generation_node_selected(self, message: GenerationNodeSelected) -> None:
         gen_num = message.generation_number
         self._selected_gen_num = gen_num
 
@@ -376,9 +385,7 @@ class LineageDetailScreen(Screen[None]):
             )
             return
 
-        delta = OntologyDelta.compute(
-            prev_gen.ontology_snapshot, gen.ontology_snapshot
-        )
+        delta = OntologyDelta.compute(prev_gen.ontology_snapshot, gen.ontology_snapshot)
         parts = [
             f"Delta Gen {prev_gen.generation_number} \u2192 Gen {gen.generation_number}:",
             f"  Similarity: {delta.similarity:.3f}",
@@ -388,9 +395,7 @@ class LineageDetailScreen(Screen[None]):
         if delta.removed_fields:
             parts.append(f"  Removed: {', '.join(delta.removed_fields)}")
         if delta.modified_fields:
-            parts.append(
-                f"  Modified: {', '.join(m.field_name for m in delta.modified_fields)}"
-            )
+            parts.append(f"  Modified: {', '.join(m.field_name for m in delta.modified_fields)}")
         self.notify("\n".join(parts), title="Ontology Diff")
 
     def action_show_git_tag(self) -> None:
@@ -455,9 +460,7 @@ class LineageDetailScreen(Screen[None]):
         # 1. Emit rewind event
         try:
             assert self._event_store is not None
-            await self._event_store.append(
-                lineage_rewound(lineage_id, from_gen, to_generation)
-            )
+            await self._event_store.append(lineage_rewound(lineage_id, from_gen, to_generation))
         except Exception as e:
             self.notify(f"Failed to emit rewind event: {e}", severity="error")
             return
@@ -466,7 +469,9 @@ class LineageDetailScreen(Screen[None]):
         tag_name = f"ooo/{lineage_id}/gen_{to_generation}"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "status", "--porcelain",
+                "git",
+                "status",
+                "--porcelain",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -486,7 +491,10 @@ class LineageDetailScreen(Screen[None]):
         # 3. Verify tag exists
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "rev-parse", "--verify", f"refs/tags/{tag_name}",
+                "git",
+                "rev-parse",
+                "--verify",
+                f"refs/tags/{tag_name}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -506,7 +514,9 @@ class LineageDetailScreen(Screen[None]):
         # 4. Git checkout
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "checkout", tag_name,
+                "git",
+                "checkout",
+                tag_name,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -527,8 +537,7 @@ class LineageDetailScreen(Screen[None]):
 
         # 5. Success notification
         self.notify(
-            f"Rewound to Gen {to_generation}. "
-            f"Run `ralph.sh --lineage-id {lineage_id}` to resume.",
+            f"Rewound to Gen {to_generation}. Run `ralph.sh --lineage-id {lineage_id}` to resume.",
             title="Rewind Complete",
         )
         self.app.pop_screen()

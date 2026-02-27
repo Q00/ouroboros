@@ -152,13 +152,9 @@ class LineageTreeWidget(Widget):
             if prev_ontology is not None:
                 delta = OntologyDelta.compute(prev_ontology, gen.ontology_snapshot)
                 for field in delta.added_fields:
-                    gen_node.add_leaf(
-                        f"  [green]+Added:[/] {field.name} ({field.field_type})"
-                    )
+                    gen_node.add_leaf(f"  [green]+Added:[/] {field.name} ({field.field_type})")
                 for field_name in delta.removed_fields:
-                    gen_node.add_leaf(
-                        f"  [red]-Removed:[/] {field_name}"
-                    )
+                    gen_node.add_leaf(f"  [red]-Removed:[/] {field_name}")
                 for mod in delta.modified_fields:
                     gen_node.add_leaf(
                         f"  [yellow]~Modified:[/] {mod.field_name} "
@@ -168,7 +164,7 @@ class LineageTreeWidget(Widget):
             # Add wonder questions
             for q in gen.wonder_questions[:3]:
                 display_q = q[:60] + "..." if len(q) > 60 else q
-                gen_node.add_leaf(f"  [cyan]Wonder:[/] \"{display_q}\"")
+                gen_node.add_leaf(f'  [cyan]Wonder:[/] "{display_q}"')
 
             # Show convergence marker on last generation
             if (
@@ -192,8 +188,7 @@ class LineageTreeWidget(Widget):
         onto_name = gen.ontology_snapshot.name
 
         label_parts = [
-            f"{phase_icon} Gen {gen.generation_number}: {onto_name} "
-            f"({field_count} fields)"
+            f"{phase_icon} Gen {gen.generation_number}: {onto_name} ({field_count} fields)"
         ]
 
         # Add evaluation score if available
@@ -212,13 +207,9 @@ class LineageTreeWidget(Widget):
     def watch_lineage(self, new_lineage: OntologyLineage | None) -> None:
         self.refresh(recompose=True)
 
-    def on_tree_node_selected(
-        self, event: Tree.NodeSelected[dict[str, Any]]
-    ) -> None:
+    def on_tree_node_selected(self, event: Tree.NodeSelected[dict[str, Any]]) -> None:
         if event.node.data and "generation_number" in event.node.data:
-            self.post_message(
-                GenerationNodeSelected(event.node.data["generation_number"])
-            )
+            self.post_message(GenerationNodeSelected(event.node.data["generation_number"]))
 
 
 __all__ = ["GenerationNodeSelected", "LineageTreeWidget"]

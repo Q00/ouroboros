@@ -6,10 +6,6 @@ Covers:
 - project() truncating generations on lineage.rewound event
 """
 
-from datetime import UTC, datetime
-
-import pytest
-
 from ouroboros.core.lineage import GenerationPhase, LineageStatus
 from ouroboros.events.base import BaseEvent
 from ouroboros.evolution.projector import LineageProjector
@@ -34,18 +30,27 @@ class TestFindResumePointRewind:
         """A generation.started event with phase='rewound' is skipped without error."""
         projector = LineageProjector()
         events = [
-            _make_event("lineage.generation.started", {
-                "generation_number": 1,
-                "phase": "wondering",
-            }),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 1,
-            }),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 1,
+                    "phase": "wondering",
+                },
+            ),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 1,
+                },
+            ),
             # Legacy bug: rewind_to() used to emit this invalid phase
-            _make_event("lineage.generation.started", {
-                "generation_number": 1,
-                "phase": "rewound",
-            }),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 1,
+                    "phase": "rewound",
+                },
+            ),
         ]
 
         gen, phase = projector.find_resume_point(events)
@@ -58,20 +63,32 @@ class TestFindResumePointRewind:
         """After rewind, find_resume_point returns the rewind target generation as COMPLETED."""
         projector = LineageProjector()
         events = [
-            _make_event("lineage.generation.started", {
-                "generation_number": 1,
-                "phase": "wondering",
-            }),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 1,
-            }),
-            _make_event("lineage.generation.started", {
-                "generation_number": 2,
-                "phase": "wondering",
-            }),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 2,
-            }),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 1,
+                    "phase": "wondering",
+                },
+            ),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 1,
+                },
+            ),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 2,
+                    "phase": "wondering",
+                },
+            ),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 2,
+                },
+            ),
             # Rewind to gen 1 — no generation.started with "rewound" anymore
             # but the completed event for gen 2 was the last, so gen=2 COMPLETED
         ]
@@ -85,10 +102,13 @@ class TestFindResumePointRewind:
         """Any unknown phase string is gracefully skipped."""
         projector = LineageProjector()
         events = [
-            _make_event("lineage.generation.started", {
-                "generation_number": 5,
-                "phase": "totally_invalid_phase",
-            }),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 5,
+                    "phase": "totally_invalid_phase",
+                },
+            ),
         ]
 
         gen, phase = projector.find_resume_point(events)
@@ -115,26 +135,38 @@ class TestProjectRewind:
 
         events = [
             _make_event("lineage.created", {"goal": "Build something"}),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 1,
-                "seed_id": "seed_1",
-                "ontology_snapshot": ontology,
-            }),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 2,
-                "seed_id": "seed_2",
-                "ontology_snapshot": ontology,
-            }),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 3,
-                "seed_id": "seed_3",
-                "ontology_snapshot": ontology,
-            }),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 1,
+                    "seed_id": "seed_1",
+                    "ontology_snapshot": ontology,
+                },
+            ),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 2,
+                    "seed_id": "seed_2",
+                    "ontology_snapshot": ontology,
+                },
+            ),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 3,
+                    "seed_id": "seed_3",
+                    "ontology_snapshot": ontology,
+                },
+            ),
             # Rewind to generation 1
-            _make_event("lineage.rewound", {
-                "from_generation": 3,
-                "to_generation": 1,
-            }),
+            _make_event(
+                "lineage.rewound",
+                {
+                    "from_generation": 3,
+                    "to_generation": 1,
+                },
+            ),
         ]
 
         lineage = projector.project(events)
@@ -158,17 +190,23 @@ class TestProjectRewind:
 
         events = [
             _make_event("lineage.created", {"goal": "Build something"}),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 1,
-                "seed_id": "seed_1",
-                "ontology_snapshot": ontology,
-            }),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 1,
+                    "seed_id": "seed_1",
+                    "ontology_snapshot": ontology,
+                },
+            ),
             _make_event("lineage.exhausted", {}),
             # Rewind to gen 1 from exhausted state
-            _make_event("lineage.rewound", {
-                "from_generation": 1,
-                "to_generation": 1,
-            }),
+            _make_event(
+                "lineage.rewound",
+                {
+                    "from_generation": 1,
+                    "to_generation": 1,
+                },
+            ),
         ]
 
         lineage = projector.project(events)

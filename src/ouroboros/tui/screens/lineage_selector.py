@@ -122,18 +122,14 @@ class LineageSelectorScreen(Screen[None]):
 
                 # Format timestamp
                 ts = lineage.created_at
-                time_str = (
-                    ts.strftime("%m/%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
-                )
+                time_str = ts.strftime("%m/%d %H:%M") if hasattr(ts, "strftime") else str(ts)[:16]
 
                 # Format goal
                 goal = lineage.goal or "[No goal]"
                 goal_display = goal[:45] + "..." if len(goal) > 45 else goal
 
                 # Format status with color
-                status_display = STATUS_COLORS.get(
-                    lineage.status.value, lineage.status.value
-                )
+                status_display = STATUS_COLORS.get(lineage.status.value, lineage.status.value)
 
                 # Format lineage ID (short)
                 lid_short = lineage_id[:16] + "..." if len(lineage_id) > 16 else lineage_id
