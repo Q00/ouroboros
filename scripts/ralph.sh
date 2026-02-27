@@ -102,9 +102,8 @@ build_py_args() {
     if [[ -n "$SERVER_COMMAND" ]]; then
         py_args+=("--server-command" "$SERVER_COMMAND")
     fi
-    if [[ -n "$SERVER_ARGS" ]]; then
-        py_args+=("--server-args" $SERVER_ARGS)
-    fi
+    # NOTE: --server-args is NOT included here.
+    # It uses REMAINDER and must be appended LAST in the main loop.
 
     echo "${py_args[@]}"
 }
@@ -124,6 +123,11 @@ while (( cycle < MAX_CYCLES )); do
     # Cycle 1: include seed file; Cycle 2+: omit it
     if (( cycle == 1 )) && [[ -n "$SEED_FILE" ]]; then
         py_args+=("--seed-file" "$SEED_FILE")
+    fi
+
+    # --server-args MUST be last (REMAINDER captures everything after it)
+    if [[ -n "$SERVER_ARGS" ]]; then
+        py_args+=("--server-args" $SERVER_ARGS)
     fi
 
     log "Cycle ${cycle}/${MAX_CYCLES} ..."

@@ -205,9 +205,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--server-args",
-        nargs="*",
+        nargs=argparse.REMAINDER,
         default=["mcp"],
-        help="Arguments for the MCP server command (default: mcp)",
+        help="Arguments for the MCP server command (default: mcp). "
+        "Must be the LAST option — all remaining tokens are captured.",
     )
     return p
 
