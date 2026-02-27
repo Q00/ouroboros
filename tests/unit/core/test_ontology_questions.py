@@ -24,15 +24,16 @@ class TestOntologicalQuestionType:
     """Tests for OntologicalQuestionType enum."""
 
     def test_all_types_exist(self) -> None:
-        """All four question types are defined."""
+        """All five question types are defined."""
         assert OntologicalQuestionType.ESSENCE == "essence"
         assert OntologicalQuestionType.ROOT_CAUSE == "root_cause"
         assert OntologicalQuestionType.PREREQUISITES == "prerequisites"
         assert OntologicalQuestionType.HIDDEN_ASSUMPTIONS == "hidden_assumptions"
+        assert OntologicalQuestionType.EXISTING_CONTEXT == "existing_context"
 
     def test_enum_count(self) -> None:
-        """Exactly four question types exist."""
-        assert len(OntologicalQuestionType) == 4
+        """Exactly five question types exist."""
+        assert len(OntologicalQuestionType) == 5
 
 
 class TestOntologicalQuestion:
@@ -168,7 +169,7 @@ class TestGetAllQuestions:
         """Returns a list of all questions."""
         questions = get_all_questions()
         assert isinstance(questions, list)
-        assert len(questions) == 4
+        assert len(questions) == 5
 
     def test_all_are_ontological_questions(self) -> None:
         """All returned items are OntologicalQuestion instances."""
