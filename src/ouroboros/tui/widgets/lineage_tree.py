@@ -161,10 +161,9 @@ class LineageTreeWidget(Widget):
                         f"({mod.old_type}\u2192{mod.new_type})"
                     )
 
-            # Add wonder questions
-            for q in gen.wonder_questions[:3]:
-                display_q = q[:60] + "..." if len(q) > 60 else q
-                gen_node.add_leaf(f'  [cyan]Wonder:[/] "{display_q}"')
+            # Add wonder questions (full text)
+            for q in gen.wonder_questions:
+                gen_node.add_leaf(f'  [cyan]Wonder:[/] "{q}"')
 
             # Show convergence marker on last generation
             if (

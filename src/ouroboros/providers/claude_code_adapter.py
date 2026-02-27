@@ -46,7 +46,7 @@ from ouroboros.providers.base import (
 log = structlog.get_logger(__name__)
 
 # Retry configuration for transient API errors
-_MAX_RETRIES = 3
+_MAX_RETRIES = 5
 _INITIAL_BACKOFF_SECONDS = 2.0  # Increased for custom CLI startup
 _RETRYABLE_ERROR_PATTERNS = (
     "concurrency",

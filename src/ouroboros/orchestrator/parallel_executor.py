@@ -855,7 +855,25 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     f"Sibling tasks in progress:\n{other_list}\n"
                 )
 
+        # Scan project files so the agent doesn't hallucinate paths.
+        import os
+
+        cwd = os.getcwd()
+        try:
+            entries = sorted(os.listdir(cwd))
+            file_listing = "\n".join(f"- {e}" for e in entries if not e.startswith("."))
+        except OSError:
+            file_listing = "(unable to list)"
+
         prompt = f"""Execute the following task:
+
+## Working Directory
+`{cwd}`
+
+Files present:
+{file_listing}
+
+**Important**: Use Glob to discover files. Never guess absolute paths.
 
 ## Goal Context
 {seed_goal}

@@ -739,7 +739,9 @@ class OrchestratorRunner:
         # Determine overall success
         success = parallel_result.all_succeeded
 
-        # Build summary message
+        # Build summary message with per-AC results for downstream evaluation.
+        # The evaluator uses final_message as the artifact to judge compliance,
+        # so a bare "Success: 6/6" gives it no evidence to work with.
         summary_parts = [
             "Parallel Execution Complete",
             f"Success: {parallel_result.success_count}/{len(seed.acceptance_criteria)}",
@@ -748,6 +750,18 @@ class OrchestratorRunner:
             summary_parts.append(f"Failed: {parallel_result.failure_count}")
         if parallel_result.skipped_count > 0:
             summary_parts.append(f"Skipped: {parallel_result.skipped_count}")
+
+        summary_parts.append("\n## AC Results")
+        for r in parallel_result.results:
+            status = "PASS" if r.success else "FAIL"
+            ac_label = f"AC {r.ac_index + 1}"
+            summary_parts.append(f"\n### {ac_label}: [{status}] {r.ac_content}")
+            if r.final_message:
+                # Include last 500 chars of agent output as evidence
+                evidence = r.final_message[-500:] if len(r.final_message) > 500 else r.final_message
+                summary_parts.append(evidence)
+            elif r.error:
+                summary_parts.append(f"Error: {r.error}")
 
         final_message = "\n".join(summary_parts)
 

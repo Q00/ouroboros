@@ -6,6 +6,7 @@ handling, and server lifecycle.
 """
 
 import asyncio
+import inspect
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,10 +27,56 @@ from ouroboros.mcp.types import (
     MCPResourceDefinition,
     MCPServerInfo,
     MCPToolDefinition,
+    MCPToolParameter,
     MCPToolResult,
+    ToolInputType,
 )
 
 log = structlog.get_logger(__name__)
+
+# Map MCPToolParameter types to Python annotations for FastMCP schema inference.
+_TOOL_TYPE_MAP: dict[ToolInputType, type] = {
+    ToolInputType.STRING: str,
+    ToolInputType.INTEGER: int,
+    ToolInputType.NUMBER: float,
+    ToolInputType.BOOLEAN: bool,
+    ToolInputType.ARRAY: list,
+    ToolInputType.OBJECT: dict,
+}
+
+
+def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.Signature:
+    """Build an inspect.Signature from MCPToolParameter definitions.
+
+    FastMCP infers JSON schema from function signatures via inspect.signature().
+    Using **kwargs produces a single "kwargs" parameter in the schema, which
+    forces clients to wrap arguments as {"kwargs": {actual_args}}.
+
+    By setting __signature__ with explicit parameters, FastMCP generates the
+    correct schema and clients can send flat argument dicts.
+    """
+    sig_params = []
+    for p in parameters:
+        python_type = _TOOL_TYPE_MAP.get(p.type, Any)
+        if p.required:
+            sig_params.append(
+                inspect.Parameter(
+                    name=p.name,
+                    kind=inspect.Parameter.KEYWORD_ONLY,
+                    annotation=python_type,
+                )
+            )
+        else:
+            default = p.default if p.default is not None else None
+            sig_params.append(
+                inspect.Parameter(
+                    name=p.name,
+                    kind=inspect.Parameter.KEYWORD_ONLY,
+                    default=default,
+                    annotation=python_type | None,
+                )
+            )
+    return inspect.Signature(parameters=sig_params)
 
 
 class MCPServerAdapter:
@@ -322,9 +369,8 @@ class MCPServerAdapter:
 
             def _make_tool_wrapper(h: ToolHandler) -> Any:
                 async def tool_wrapper(**kwargs: Any) -> Any:
-                    # Unwrap nested kwargs from FastMCP schema inference.
-                    # FastMCP infers a single "kwargs" param from **kwargs signature,
-                    # so clients send {"kwargs": {actual params}} instead of flat params.
+                    # Backward compat: unwrap nested kwargs from clients that
+                    # used the old schema where FastMCP inferred a single "kwargs" param.
                     if (
                         "kwargs" in kwargs
                         and len(kwargs) == 1
@@ -341,6 +387,9 @@ class MCPServerAdapter:
                         # with isError: true, instead of a success with error text.
                         raise RuntimeError(str(result.error))
 
+                # Set proper signature so FastMCP generates correct JSON schema
+                # instead of a single "kwargs" parameter.
+                tool_wrapper.__signature__ = _build_tool_signature(h.definition.parameters)
                 return tool_wrapper
 
             wrapper = _make_tool_wrapper(handler)
@@ -490,10 +539,12 @@ def create_ouroboros_server(
     # Wire real execution/evaluation callables for evolve_step so that
     # generation quality is validated, not only ontology deltas.
     agent_adapter = ClaudeAgentAdapter(permission_mode="acceptEdits")
+    # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
+    # Any non-protocol output on stdout corrupts the MCP communication.
     evolution_runner = OrchestratorRunner(
         adapter=agent_adapter,
         event_store=event_store,
-        console=Console(),
+        console=Console(stderr=True),
         debug=False,
         enable_decomposition=True,
     )
@@ -528,6 +579,42 @@ def create_ouroboros_server(
             parallel=True,
         )
 
+    def _evaluate_mechanically(artifact: str, seed: Any) -> EvaluationSummary | None:
+        """Parse structured AC results from execution output.
+
+        The parallel executor emits '### AC N: [PASS/FAIL] ...' lines.
+        When these are present, we can score mechanically without an LLM call,
+        which is more reliable in MCP stdio mode where nested CLI spawning
+        is unstable.
+
+        Returns None if the output doesn't contain parseable AC results.
+        """
+        import re
+
+        matches = re.findall(r"### AC \d+: \[(PASS|FAIL)\]", artifact)
+        if not matches:
+            return None
+
+        total = len(matches)
+        passed = sum(1 for m in matches if m == "PASS")
+        score = passed / total if total > 0 else 0.0
+
+        total_acs = len(seed.acceptance_criteria) if getattr(seed, "acceptance_criteria", None) else total
+        approved = passed >= total_acs and passed == total
+
+        failure_reason = None
+        if not approved:
+            failed_count = total - passed
+            failure_reason = f"{failed_count}/{total} ACs failed"
+
+        return EvaluationSummary(
+            final_approved=approved,
+            highest_stage_passed=3 if approved else 2,
+            score=score,
+            drift_score=1.0 - score,
+            failure_reason=failure_reason,
+        )
+
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()
 
@@ -541,6 +628,13 @@ def create_ouroboros_server(
                 failure_reason="Empty execution output",
             )
 
+        # Use mechanical evaluation from structured AC results.
+        # More reliable than LLM-based evaluation in MCP stdio mode.
+        mechanical = _evaluate_mechanically(artifact, seed)
+        if mechanical is not None:
+            return mechanical
+
+        # Fallback: LLM-based evaluation when no structured AC results
         current_ac = (
             seed.acceptance_criteria[0]
             if getattr(seed, "acceptance_criteria", None)
@@ -555,6 +649,7 @@ def create_ouroboros_server(
             goal=seed.goal,
             constraints=tuple(seed.constraints),
         )
+
         eval_result = await evolution_eval_pipeline.evaluate(eval_context)
         if eval_result.is_err:
             return EvaluationSummary(

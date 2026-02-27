@@ -209,8 +209,7 @@ class GenerationDetailPanel(Static):
         if gen.wonder_questions:
             yield Label("Wonder Questions:", classes="section-header")
             for i, q in enumerate(gen.wonder_questions, 1):
-                display_q = q[:70] + "..." if len(q) > 70 else q
-                yield Static(f'  {i}. "{display_q}"', classes="wonder-item")
+                yield Static(f'  {i}. "{q}"', classes="wonder-item")
 
         # Delta vs previous
         if self.previous_generation is not None:
@@ -239,8 +238,12 @@ class GenerationDetailPanel(Static):
             for field_name in delta.removed_fields:
                 yield Static(f"  [red]-[/] {field_name}", classes="delta-item")
             for mod in delta.modified_fields:
+                if mod.old_type != mod.new_type:
+                    change = f"{mod.old_type}\u2192{mod.new_type}"
+                else:
+                    change = f"{mod.old_type} (desc changed)"
                 yield Static(
-                    f"  [yellow]~[/] {mod.field_name}: {mod.old_type}\u2192{mod.new_type}",
+                    f"  [yellow]~[/] {mod.field_name}: {change}",
                     classes="delta-item",
                 )
 

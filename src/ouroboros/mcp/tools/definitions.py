@@ -159,7 +159,8 @@ class ExecuteSeedHandler:
             agent_adapter = ClaudeAgentAdapter(permission_mode="acceptEdits")
             event_store = self.event_store or EventStore()
             await event_store.initialize()
-            console = Console()
+            # Use stderr: in MCP stdio mode, stdout is the JSON-RPC channel.
+            console = Console(stderr=True)
 
             # Create orchestrator runner
             runner = OrchestratorRunner(
