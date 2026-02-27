@@ -59,7 +59,7 @@ while [[ $# -gt 0 ]]; do
         --max-retries)  MAX_RETRIES="$2"; shift 2 ;;
         --no-execute)   NO_EXECUTE=true; shift ;;
         --server-command) SERVER_COMMAND="$2"; shift 2 ;;
-        --server-args)  SERVER_ARGS="$2"; shift 2 ;;
+        --server-args)  shift; SERVER_ARGS="$*"; break ;;
         -h|--help)      usage ;;
         *)              echo "Unknown option: $1" >&2; exit 2 ;;
     esac
