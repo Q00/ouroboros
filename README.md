@@ -25,7 +25,6 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
-  <a href="#the-problem-everyone-ignores">Why</a> ·
   <a href="#from-wonder-to-ontology">Philosophy</a> ·
   <a href="#the-loop">How</a> ·
   <a href="#commands">Commands</a> ·
@@ -107,32 +106,6 @@ The serpent completed one loop. Each loop, it knows more than the last.
 
 ---
 
-## The Problem Everyone Ignores
-
-```
-You: "Build me a task management CLI"
-                    ↓
-          Claude builds something
-                    ↓
-     "Wait — I forgot about priorities"
-                    ↓
-        Rewrite prompt → rebuild
-                    ↓
-     3 hours later: debugging requirements, not code
-```
-
-This isn't an AI problem. It's a **clarity** problem.
-
-> *"Should completed tasks be deletable or archived?"*
-> *"What happens when two tasks have the same priority?"*
-> *"Is this for teams or solo use?"*
-
-You didn't know what you wanted. Neither did the AI.
-
-**Ouroboros asks these questions first.** Not after the build fails — before it begins.
-
----
-
 ## The Loop
 
 The ouroboros — a serpent devouring its own tail — isn't decoration. It IS the architecture:
@@ -171,7 +144,70 @@ Ralph Cycle 3: evolve_step(lineage)       → Gen 3 → action=CONVERGED ✓
                                                     The ontology has stabilized.
 ```
 
-> *"The boulder never stops."*
+### Ambiguity Score: The Gate Between Wonder and Code
+
+The Interview doesn't end when you feel ready — it ends when the **math** says you're ready. Ouroboros quantifies ambiguity as the inverse of weighted clarity:
+
+```
+Ambiguity = 1 − Σ(clarityᵢ × weightᵢ)
+```
+
+Each dimension is scored 0.0–1.0 by the LLM (temperature 0.1 for reproducibility), then weighted:
+
+| Dimension | Greenfield | Brownfield |
+|:----------|:----------:|:----------:|
+| **Goal Clarity** — *Is the goal specific?* | 40% | 35% |
+| **Constraint Clarity** — *Are limitations defined?* | 30% | 25% |
+| **Success Criteria** — *Are outcomes measurable?* | 30% | 25% |
+| **Context Clarity** — *Is the existing codebase understood?* | — | 15% |
+
+**Threshold: Ambiguity ≤ 0.2** — only then can a Seed be generated.
+
+```
+Example (Greenfield):
+
+  Goal: 0.9 × 0.4  = 0.36
+  Constraint: 0.8 × 0.3  = 0.24
+  Success: 0.7 × 0.3  = 0.21
+                        ──────
+  Clarity             = 0.81
+  Ambiguity = 1 − 0.81 = 0.19  ≤ 0.2 → ✓ Ready for Seed
+```
+
+Why 0.2? Because at 80% weighted clarity, the remaining unknowns are small enough that code-level decisions can resolve them. Above that threshold, you're still guessing at architecture.
+
+### Ontology Convergence: When the Serpent Stops
+
+The evolutionary loop doesn't run forever. It stops when consecutive generations produce ontologically identical schemas. Similarity is measured as a weighted comparison of schema fields:
+
+```
+Similarity = 0.5 × name_overlap + 0.3 × type_match + 0.2 × exact_match
+```
+
+| Component | Weight | What It Measures |
+|:----------|:------:|:-----------------|
+| **Name overlap** | 50% | Do the same field names exist in both generations? |
+| **Type match** | 30% | Do shared fields have the same types? |
+| **Exact match** | 20% | Are name, type, AND description all identical? |
+
+**Threshold: Similarity ≥ 0.95** — the loop converges and stops evolving.
+
+But raw similarity isn't the only signal. The system also detects pathological patterns:
+
+| Signal | Condition | What It Means |
+|:-------|:----------|:--------------|
+| **Stagnation** | Similarity ≥ 0.95 for 3 consecutive generations | Ontology has stabilized |
+| **Oscillation** | Gen N ≈ Gen N-2 (period-2 cycle) | Stuck bouncing between two designs |
+| **Repetitive feedback** | ≥ 70% question overlap across 3 generations | Wonder is asking the same things |
+| **Hard cap** | 30 generations reached | Safety valve |
+
+```
+Gen 1: {Task, Priority, Status}
+Gen 2: {Task, Priority, Status, DueDate}     → similarity 0.78 → CONTINUE
+Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED ✓
+```
+
+Two mathematical gates, one philosophy: **don't build until you're clear (Ambiguity ≤ 0.2), don't stop evolving until you're stable (Similarity ≥ 0.95).**
 
 ---
 
@@ -192,15 +228,6 @@ Ralph Cycle 3: evolve_step(lineage)       → Gen 3 → action=CONVERGED ✓
 | `ooo ralph` | Persistent loop until verified |
 | `ooo tutorial` | Interactive hands-on learning |
 | `ooo help` | Full reference |
-
-You can also just say what you mean:
-
-| Instead of... | Say... |
-|:--------------|:-------|
-| `ooo interview` | *"Clarify requirements"* / *"Explore this idea"* |
-| `ooo unstuck` | *"I'm stuck"* / *"Help me think differently"* |
-| `ooo evaluate` | *"Check if this works"* |
-| `ooo status` | *"Where are we?"* |
 
 ---
 
