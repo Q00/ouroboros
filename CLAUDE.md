@@ -34,7 +34,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 Custom agents are in `agents/`. When a skill references an agent (e.g., `ouroboros:socratic-interviewer`), read its definition from `agents/{name}.md` and adopt that role.
 
 <!-- ooo:START -->
-<!-- ooo:VERSION:0.11.0 -->
+<!-- ooo:VERSION:0.14.0 -->
 # Ouroboros — Specification-First AI Development
 
 > Before telling AI what to build, define what should be built.

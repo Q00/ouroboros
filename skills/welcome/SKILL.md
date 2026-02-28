@@ -213,10 +213,10 @@ gh auth status &>/dev/null && echo "GH_OK" || echo "GH_MISSING"
 ```
 
 - **Star on GitHub**: `gh api -X PUT /user/starred/Q00/ouroboros`
-- Both: Save `{"star_asked": true, "welcomeShown": true, "welcomeCompleted": "$(date -Iseconds)", "welcomeVersion": "0.13.0"}` to `~/.ouroboros/prefs.json`
+- Both: Save `{"star_asked": true, "welcomeShown": true, "welcomeCompleted": "$(date -Iseconds)", "welcomeVersion": "0.14.0"}` to `~/.ouroboros/prefs.json`
 
 **If `GH_MISSING` or `star_asked` is true:**
-Just save `{"welcomeShown": true, "welcomeCompleted": "$(date -Iseconds)", "welcomeVersion": "0.13.0"}`
+Just save `{"welcomeShown": true, "welcomeCompleted": "$(date -Iseconds)", "welcomeVersion": "0.14.0"}`
 
 ---
 
@@ -250,7 +250,7 @@ READY TO BUILD:
 {
   "welcomeShown": true,
   "welcomeCompleted": "2025-02-23T15:30:00+09:00",
-  "welcomeVersion": "0.13.0",
+  "welcomeVersion": "0.14.0",
   "star_asked": true
 }
 ```
