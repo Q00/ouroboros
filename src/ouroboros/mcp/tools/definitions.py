@@ -1680,8 +1680,19 @@ class EvolveStepHandler:
                     type=ToolInputType.BOOLEAN,
                     description=(
                         "Whether to run seed execution and evaluation. "
-                        "True (default): full pipeline with Execute→Evaluate. "
+                        "True (default): full pipeline with Execute→Validate→Evaluate. "
                         "False: ontology-only evolution (fast, no execution)."
+                    ),
+                    required=False,
+                    default=True,
+                ),
+                MCPToolParameter(
+                    name="parallel",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "Whether to run ACs in parallel. "
+                        "True (default): parallel execution (fast, may cause import conflicts). "
+                        "False: sequential execution (slower, more stable code generation)."
                     ),
                     required=False,
                     default=True,
@@ -1727,13 +1738,14 @@ class EvolveStepHandler:
                 )
 
         execute = arguments.get("execute", True)
+        parallel = arguments.get("parallel", True)
 
         try:
             # Ensure event store is initialized before evolve_step accesses it
             # (evolve_step calls replay_lineage/append before executor/evaluator)
             await self.evolutionary_loop.event_store.initialize()
             result = await self.evolutionary_loop.evolve_step(
-                lineage_id, initial_seed, execute=execute
+                lineage_id, initial_seed, execute=execute, parallel=parallel
             )
         except Exception as e:
             log.error("mcp.tool.evolve_step.error", error=str(e))
@@ -1789,6 +1801,11 @@ class EvolveStepHandler:
             text_lines.append("### Wonder questions")
             for q in gen.wonder_output.questions:
                 text_lines.append(f"- {q}")
+
+        if gen.validation_output:
+            text_lines.append("")
+            text_lines.append("### Validation")
+            text_lines.append(gen.validation_output)
 
         if gen.ontology_delta:
             text_lines.append("")

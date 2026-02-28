@@ -30,7 +30,8 @@ from ouroboros.providers.base import (
 
 logger = logging.getLogger(__name__)
 
-_FALLBACK_MODEL = "claude-sonnet-4-20250514"
+# Wonder requires divergent, creative thinking — Opus excels here
+_FALLBACK_MODEL = "claude-opus-4-6"
 
 
 class WonderOutput(BaseModel, frozen=True):

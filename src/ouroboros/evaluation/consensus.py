@@ -46,7 +46,7 @@ from ouroboros.strategies.devil_advocate import ConsensusContext, DevilAdvocateS
 # Can be overridden via ConsensusConfig.models
 DEFAULT_CONSENSUS_MODELS: tuple[str, ...] = (
     "openrouter/openai/gpt-4o",
-    "openrouter/anthropic/claude-sonnet-4-20250514",
+    "openrouter/anthropic/claude-opus-4-6",
     "openrouter/google/gemini-2.5-pro",
 )
 
@@ -389,7 +389,7 @@ class DeliberativeConfig:
         max_tokens: Maximum tokens per response
     """
 
-    advocate_model: str = "openrouter/anthropic/claude-sonnet-4-20250514"
+    advocate_model: str = "openrouter/anthropic/claude-opus-4-6"
     devil_model: str = "openrouter/openai/gpt-4o"
     judge_model: str = "openrouter/google/gemini-2.5-pro"
     temperature: float = 0.3

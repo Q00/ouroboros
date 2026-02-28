@@ -34,7 +34,7 @@ from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 def create_mock_completion_response(
     content: str,
-    model: str = "openrouter/google/gemini-2.0-flash-001",
+    model: str = "claude-opus-4-6",
 ) -> CompletionResponse:
     """Create a mock completion response."""
     return CompletionResponse(
@@ -164,7 +164,7 @@ class TestSeedGeneratorConstruction:
                 output_dir=Path(tmp_dir) / "seeds",
             )
 
-            assert generator.model == "openrouter/google/gemini-2.0-flash-001"
+            assert generator.model == "claude-opus-4-6"
             assert generator.temperature == 0.2
             assert generator.max_tokens == 4096
 

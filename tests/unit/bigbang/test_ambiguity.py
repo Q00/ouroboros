@@ -26,7 +26,7 @@ from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 def create_mock_completion_response(
     content: str,
-    model: str = "openrouter/google/gemini-2.0-flash-001",
+    model: str = "claude-opus-4-6",
     finish_reason: str = "stop",
 ) -> CompletionResponse:
     """Create a mock completion response."""
@@ -305,7 +305,7 @@ class TestAmbiguityScorerInit:
         scorer = AmbiguityScorer(llm_adapter=mock_adapter)
 
         assert scorer.llm_adapter == mock_adapter
-        assert scorer.model == "openrouter/google/gemini-2.0-flash-001"
+        assert scorer.model == "claude-opus-4-6"
         assert scorer.temperature == SCORING_TEMPERATURE
         assert scorer.initial_max_tokens == 2048
         assert scorer.max_retries == 10  # Default to 10 retries

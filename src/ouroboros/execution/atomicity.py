@@ -312,7 +312,7 @@ async def check_atomicity(
     criteria: AtomicityCriteria | None = None,
     *,
     use_llm: bool = True,
-    model: str = "openrouter/google/gemini-2.0-flash-001",
+    model: str = "claude-opus-4-6",
 ) -> Result[AtomicityResult, ProviderError | ValidationError]:
     """Check if an AC is atomic using LLM + heuristic fallback.
 

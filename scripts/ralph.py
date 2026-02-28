@@ -17,11 +17,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Text parser — FastMCP drops meta, so we regex the text block
@@ -49,6 +48,7 @@ def parse_evolve_text(text: str) -> dict[str, Any]:
     Returns a dict with keys: generation, action, similarity,
     next_generation, lineage_id.  Missing fields are None.
     """
+
     def _first(pattern: re.Pattern[str]) -> str | None:
         m = pattern.search(text)
         return m.group(1) if m else None
@@ -69,6 +69,7 @@ def parse_evolve_text(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # MCP session helpers
 # ---------------------------------------------------------------------------
+
 
 async def connect_and_run(args: argparse.Namespace) -> dict[str, Any]:
     """Open an MCP stdio session and call evolve_step once."""
@@ -97,6 +98,8 @@ async def _call_evolve(session: Any, args: argparse.Namespace) -> dict[str, Any]
         tool_args["seed_content"] = seed_path.read_text(encoding="utf-8")
     if args.no_execute:
         tool_args["execute"] = False
+    if args.no_parallel:
+        tool_args["parallel"] = False
 
     result = await session.call_tool("ouroboros_evolve_step", tool_args)
 
@@ -126,8 +129,8 @@ async def _call_evolve(session: Any, args: argparse.Namespace) -> dict[str, Any]
     # Handle stagnation — retry with lateral_think
     lateral_applied = False
     if action == "stagnated":
-        for retry in range(args.max_retries):
-            lateral_result = await session.call_tool(
+        for _retry in range(args.max_retries):
+            await session.call_tool(
                 "ouroboros_lateral_think",
                 {
                     "problem_context": f"Evolutionary lineage {lineage_id} stagnated at generation {parsed.get('generation')}",
@@ -189,6 +192,7 @@ def _error_result(msg: str) -> dict[str, Any]:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ralph",
@@ -196,8 +200,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--lineage-id", required=True, help="Lineage ID to evolve")
     p.add_argument("--seed-file", default=None, help="Path to seed YAML (Gen 1 only)")
-    p.add_argument("--no-execute", action="store_true", help="Ontology-only evolution (skip execution)")
-    p.add_argument("--max-retries", type=int, default=2, help="Lateral-think retries on stagnation (default: 2)")
+    p.add_argument(
+        "--no-execute", action="store_true", help="Ontology-only evolution (skip execution)"
+    )
+    p.add_argument(
+        "--no-parallel", action="store_true", help="Sequential AC execution (slower, more stable)"
+    )
+    p.add_argument(
+        "--max-retries",
+        type=int,
+        default=2,
+        help="Lateral-think retries on stagnation (default: 2)",
+    )
     p.add_argument(
         "--server-command",
         default="ouroboros",
@@ -242,9 +256,7 @@ def main() -> None:
 
     # Map action to exit code
     action = output.get("action")
-    if action == "failed":
-        sys.exit(3)
-    elif output.get("error"):
+    if action == "failed" or output.get("error"):
         sys.exit(3)
     else:
         sys.exit(0)

@@ -292,7 +292,7 @@ async def decompose_ac(
     llm_adapter: LiteLLMAdapter,
     discover_insights: str = "",
     *,
-    model: str = "openrouter/anthropic/claude-3.5-sonnet",
+    model: str = "claude-opus-4-6",
 ) -> Result[DecompositionResult, DecompositionError | ProviderError]:
     """Decompose a non-atomic AC into child ACs using LLM.
 

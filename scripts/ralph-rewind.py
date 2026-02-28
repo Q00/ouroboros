@@ -21,10 +21,10 @@ import subprocess
 import sys
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # MCP session helpers
 # ---------------------------------------------------------------------------
+
 
 async def connect_and_run(args: argparse.Namespace) -> dict[str, Any]:
     """Open an MCP stdio session and call evolve_rewind once."""
@@ -122,6 +122,7 @@ def _error_result(msg: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(

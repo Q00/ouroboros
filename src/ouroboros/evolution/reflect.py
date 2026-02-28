@@ -33,7 +33,7 @@ from ouroboros.providers.base import (
 
 logger = logging.getLogger(__name__)
 
-_FALLBACK_MODEL = "claude-sonnet-4-20250514"
+_FALLBACK_MODEL = "claude-opus-4-6"
 
 
 class OntologyMutation(BaseModel, frozen=True):

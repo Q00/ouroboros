@@ -72,7 +72,7 @@ class DevilAdvocateStrategy:
     """
 
     llm_adapter: LLMAdapter
-    model: str = "openrouter/google/gemini-2.0-flash-001"
+    model: str = "claude-opus-4-6"
     confidence_threshold: float = 0.7
     temperature: float = 0.3
     max_tokens: int = 2048

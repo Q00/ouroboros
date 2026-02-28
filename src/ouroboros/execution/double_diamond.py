@@ -433,7 +433,7 @@ class DoubleDiamond:
     """
 
     # Default model - can be overridden via __init__ for PAL router integration
-    DEFAULT_MODEL = "openrouter/google/gemini-2.0-flash-001"
+    DEFAULT_MODEL = "claude-opus-4-6"
     DEFAULT_TEMPERATURE = 0.7
     DEFAULT_MAX_TOKENS = 4096
 

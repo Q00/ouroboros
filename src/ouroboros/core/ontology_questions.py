@@ -357,7 +357,7 @@ async def analyze_ontologically(
     llm_adapter: LLMAdapter,
     context: str,
     question_types: tuple[OntologicalQuestionType, ...] = (),
-    model: str = "openrouter/google/gemini-2.0-flash-001",
+    model: str = "claude-opus-4-6",
     temperature: float = 0.3,
     max_tokens: int = 2048,
 ) -> Result[OntologicalInsight, ProviderError | ValidationError]:

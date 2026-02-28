@@ -23,7 +23,7 @@ from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, Mess
 
 # Default model for semantic evaluation (Standard tier)
 # Can be overridden via SemanticConfig.model
-DEFAULT_SEMANTIC_MODEL = "openrouter/google/gemini-2.0-flash-001"
+DEFAULT_SEMANTIC_MODEL = "claude-opus-4-6"
 
 
 @dataclass(frozen=True, slots=True)

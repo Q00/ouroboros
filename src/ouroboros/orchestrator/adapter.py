@@ -175,6 +175,7 @@ class ClaudeAgentAdapter:
         self,
         api_key: str | None = None,
         permission_mode: str = "acceptEdits",
+        model: str | None = None,
     ) -> None:
         """Initialize Claude Agent adapter.
 
@@ -185,9 +186,12 @@ class ClaudeAgentAdapter:
                 - "acceptEdits": Auto-approve file edits
                 - "bypassPermissions": Run without prompts (CI/CD)
                 - "default": Require canUseTool callback
+            model: Claude model to use (e.g., "claude-sonnet-4-6").
+                If not provided, uses the SDK default.
         """
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self._permission_mode = permission_mode
+        self._model = model
 
         log.info(
             "orchestrator.adapter.initialized",
@@ -270,6 +274,9 @@ class ClaudeAgentAdapter:
                     "permission_mode": self._permission_mode,
                     "cwd": os.getcwd(),  # Use current working directory
                 }
+
+                if self._model:
+                    options_kwargs["model"] = self._model
 
                 if system_prompt:
                     options_kwargs["system_prompt"] = system_prompt

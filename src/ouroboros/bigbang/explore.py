@@ -106,7 +106,7 @@ _TYPE_DEF_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
-_FALLBACK_MODEL = "openrouter/google/gemini-2.0-flash-001"
+_FALLBACK_MODEL = "claude-opus-4-6"
 
 
 @dataclass(frozen=True, slots=True)

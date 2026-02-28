@@ -23,7 +23,7 @@ from ouroboros.providers.base import (
 
 log = structlog.get_logger()
 
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_MODEL = "claude-sonnet-4-6"
 
 
 class AnthropicAdapter:
@@ -36,7 +36,7 @@ class AnthropicAdapter:
         adapter = AnthropicAdapter()
         result = await adapter.complete(
             messages=[Message(role=MessageRole.USER, content="Hello!")],
-            config=CompletionConfig(model="claude-sonnet-4-20250514"),
+            config=CompletionConfig(model="claude-sonnet-4-6"),
         )
     """
 

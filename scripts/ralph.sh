@@ -22,6 +22,7 @@ SEED_FILE=""
 MAX_CYCLES=30
 MAX_RETRIES=2
 NO_EXECUTE=false
+NO_PARALLEL=false
 SERVER_COMMAND=""
 SERVER_ARGS=""
 
@@ -36,6 +37,7 @@ Options:
   --max-cycles N         Max loop iterations (default: 30)
   --max-retries N        Lateral-think retries per stagnation (default: 2)
   --no-execute           Ontology-only evolution (skip execution)
+  --no-parallel          Sequential AC execution (slower, more stable)
   --server-command CMD   MCP server executable (default: ouroboros)
   --server-args ARGS     MCP server arguments (default: mcp)
   -h, --help             Show this help
@@ -58,6 +60,7 @@ while [[ $# -gt 0 ]]; do
         --max-cycles)   MAX_CYCLES="$2"; shift 2 ;;
         --max-retries)  MAX_RETRIES="$2"; shift 2 ;;
         --no-execute)   NO_EXECUTE=true; shift ;;
+        --no-parallel)  NO_PARALLEL=true; shift ;;
         --server-command) SERVER_COMMAND="$2"; shift 2 ;;
         --server-args)  shift; SERVER_ARGS="$*"; break ;;
         -h|--help)      usage ;;
@@ -142,6 +145,9 @@ build_py_args() {
 
     if [[ "$NO_EXECUTE" == "true" ]]; then
         py_args+=("--no-execute")
+    fi
+    if [[ "$NO_PARALLEL" == "true" ]]; then
+        py_args+=("--no-parallel")
     fi
     if [[ -n "$SERVER_COMMAND" ]]; then
         py_args+=("--server-command" "$SERVER_COMMAND")

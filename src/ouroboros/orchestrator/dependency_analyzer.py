@@ -264,7 +264,7 @@ class DependencyAnalyzer:
         # Build config - use provided model or default
         # Note: ClaudeCodeAdapter ignores the model and uses Claude Code's default
         config = CompletionConfig(
-            model=self._model or "claude-sonnet-4-20250514",
+            model=self._model or "claude-opus-4-6",
             temperature=0.0,  # Deterministic
             max_tokens=1000,
         )

@@ -8,7 +8,7 @@ Usage:
     adapter = ClaudeCodeAdapter()
     result = await adapter.complete(
         messages=[Message(role=MessageRole.USER, content="Hello!")],
-        config=CompletionConfig(model="claude-sonnet-4-20250514"),
+        config=CompletionConfig(model="claude-sonnet-4-6"),
     )
 
 Custom CLI Path:
@@ -75,7 +75,7 @@ class ClaudeCodeAdapter:
         adapter = ClaudeCodeAdapter()
         result = await adapter.complete(
             messages=[Message(role=MessageRole.USER, content="Hello!")],
-            config=CompletionConfig(model="claude-sonnet-4-20250514"),
+            config=CompletionConfig(model="claude-sonnet-4-6"),
         )
         if result.is_ok:
             print(result.value.content)
@@ -358,15 +358,20 @@ class ClaudeCodeAdapter:
         else:
             disallowed = dangerous_tools
 
-        options = ClaudeAgentOptions(
-            allowed_tools=self._allowed_tools if self._allowed_tools else [],
-            disallowed_tools=disallowed,
-            max_turns=self._max_turns,
+        options_kwargs: dict = {
+            "allowed_tools": self._allowed_tools if self._allowed_tools else [],
+            "disallowed_tools": disallowed,
+            "max_turns": self._max_turns,
             # Allow MCP and other ~/.claude/ settings to be inherited
-            permission_mode=self._permission_mode,  # type: ignore[arg-type]
-            cwd=os.getcwd(),
-            cli_path=self._cli_path,
-        )
+            "permission_mode": self._permission_mode,
+            "cwd": os.getcwd(),
+            "cli_path": self._cli_path,
+        }
+        # Pass model from CompletionConfig if specified
+        if config.model:
+            options_kwargs["model"] = config.model
+
+        options = ClaudeAgentOptions(**options_kwargs)
 
         # Collect the response - let the generator run to completion
         content = ""

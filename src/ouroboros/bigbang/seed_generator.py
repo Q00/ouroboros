@@ -37,7 +37,7 @@ from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, Mess
 log = structlog.get_logger()
 
 # Default model moved to config.models.ClarificationConfig.default_model
-_FALLBACK_MODEL = "openrouter/google/gemini-2.0-flash-001"
+_FALLBACK_MODEL = "claude-opus-4-6"
 EXTRACTION_TEMPERATURE = 0.2
 
 

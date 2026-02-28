@@ -59,7 +59,7 @@ SOFT_LIMIT_WARNING_THRESHOLD = 15  # Warn about diminishing returns after this
 DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 
 # Default model moved to config.models.ClarificationConfig.default_model
-_FALLBACK_MODEL = "openrouter/google/gemini-2.0-flash-001"
+_FALLBACK_MODEL = "claude-opus-4-6"
 
 # Legacy alias for backward compatibility
 MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS

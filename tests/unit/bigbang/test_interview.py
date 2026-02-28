@@ -23,7 +23,7 @@ from ouroboros.providers.base import (
 
 def create_mock_completion_response(
     content: str = "What is your target audience?",
-    model: str = "openrouter/google/gemini-2.0-flash-001",
+    model: str = "claude-opus-4-6",
 ) -> CompletionResponse:
     """Create a mock completion response."""
     return CompletionResponse(

@@ -2,9 +2,9 @@
 
 Transforms the linear pipeline into a closed evolutionary loop:
 
-    Gen 1: Seed(O₁) → Execute → Evaluate
-    Gen 2: Wonder(O₁, E₁) → Reflect → Seed(O₂) → Execute → Evaluate
-    Gen 3: Wonder(O₂, E₂) → Reflect → Seed(O₃) → Execute → Evaluate
+    Gen 1: Seed(O₁) → Execute → Validate → Evaluate
+    Gen 2: Wonder(O₁, E₁) → Reflect → Seed(O₂) → Execute → Validate → Evaluate
+    Gen 3: Wonder(O₂, E₂) → Reflect → Seed(O₃) → Execute → Validate → Evaluate
     ...until convergence or max_generations
 
 The loop accepts a pre-built Seed for Gen 1 (interview is handled externally)
@@ -76,6 +76,7 @@ class GenerationResult:
     wonder_output: WonderOutput | None = None
     reflect_output: ReflectOutput | None = None
     ontology_delta: OntologyDelta | None = None
+    validation_output: str | None = None
     phase: GenerationPhase = GenerationPhase.COMPLETED
     success: bool = True
 
@@ -139,6 +140,7 @@ class EvolutionaryLoop:
         seed_generator: Any | None = None,
         executor: Any | None = None,
         evaluator: Any | None = None,
+        validator: Any | None = None,
     ) -> None:
         self.event_store = event_store
         self.config = config or EvolutionaryLoopConfig()
@@ -147,6 +149,7 @@ class EvolutionaryLoop:
         self.seed_generator = seed_generator
         self.executor = executor
         self.evaluator = evaluator
+        self.validator = validator
         self._convergence = ConvergenceCriteria(
             convergence_threshold=self.config.convergence_threshold,
             stagnation_window=self.config.stagnation_window,
@@ -354,6 +357,7 @@ class EvolutionaryLoop:
         lineage_id: str,
         initial_seed: Seed | None = None,
         execute: bool = True,
+        parallel: bool = True,
     ) -> Result[StepResult, OuroborosError]:
         """Run exactly one generation of the evolutionary loop.
 
@@ -447,6 +451,7 @@ class EvolutionaryLoop:
                     generation_number=generation_number,
                     current_seed=current_seed,
                     execute=execute,
+                    parallel=parallel,
                 ),
                 timeout=self.config.generation_timeout_seconds,
             )
@@ -604,6 +609,7 @@ class EvolutionaryLoop:
         generation_number: int,
         current_seed: Seed,
         execute: bool = True,
+        parallel: bool = True,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run a single generation within the loop.
 
@@ -724,7 +730,7 @@ class EvolutionaryLoop:
         execution_output: str | None = None
         if execute and self.executor:
             try:
-                exec_result = await self.executor(current_seed)
+                exec_result = await self.executor(current_seed, parallel=parallel)
                 if hasattr(exec_result, "is_ok") and exec_result.is_ok:
                     orch_result = exec_result.value
                     execution_output = getattr(orch_result, "final_message", str(orch_result))
@@ -753,6 +759,31 @@ class EvolutionaryLoop:
                 )
                 return Result.err(OuroborosError(f"Execution error: {e}"))
 
+        # Validate phase - reconcile parallel execution artifacts
+        validation_output: str | None = None
+        if execute and execution_output and self.validator:
+            try:
+                validation_result = await self.validator(current_seed, execution_output)
+                if isinstance(validation_result, str):
+                    validation_output = validation_result
+                elif hasattr(validation_result, "is_ok"):
+                    if validation_result.is_ok:
+                        validation_output = str(validation_result.value)
+                    else:
+                        validation_output = f"Validation error: {validation_result.error}"
+                else:
+                    validation_output = str(validation_result)
+                logger.info(
+                    "evolution.generation.validated",
+                    extra={"generation": generation_number},
+                )
+            except Exception as e:
+                logger.warning(
+                    "evolution.validation.failed",
+                    extra={"error": str(e), "generation": generation_number},
+                )
+                validation_output = f"Validation skipped: {e}"
+
         # Evaluate phase (placeholder - actual evaluation via EvaluationPipeline)
         evaluation_summary: EvaluationSummary | None = None
         if execute and self.evaluator:
@@ -777,6 +808,7 @@ class EvolutionaryLoop:
                 wonder_output=wonder_output,
                 reflect_output=reflect_output,
                 ontology_delta=ontology_delta,
+                validation_output=validation_output,
                 phase=GenerationPhase.COMPLETED,
                 success=True,
             )

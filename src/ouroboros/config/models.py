@@ -113,7 +113,7 @@ class ClarificationConfig(BaseModel, frozen=True):
     ambiguity_threshold: float = Field(default=0.2, ge=0.0, le=1.0)
     max_interview_rounds: int = Field(default=10, ge=1)
     model_tier: Literal["frugal", "standard", "frontier"] = "standard"
-    default_model: str = "openrouter/google/gemini-2.0-flash-001"
+    default_model: str = "claude-opus-4-6"
 
 
 class ExecutionConfig(BaseModel, frozen=True):
@@ -303,7 +303,7 @@ def get_default_config() -> OuroborosConfig:
                     intelligence_range=(14, 16),
                     models=[
                         ModelConfig(provider="openai", model="gpt-4o"),
-                        ModelConfig(provider="anthropic", model="claude-sonnet-4-20250514"),
+                        ModelConfig(provider="anthropic", model="claude-sonnet-4-6"),
                         ModelConfig(provider="google", model="gemini-2.5-pro"),
                     ],
                     use_cases=["logic_design", "stage2_evaluation", "refactoring"],
@@ -313,7 +313,7 @@ def get_default_config() -> OuroborosConfig:
                     intelligence_range=(18, 20),
                     models=[
                         ModelConfig(provider="openai", model="o3"),
-                        ModelConfig(provider="anthropic", model="claude-opus-4-5-20251101"),
+                        ModelConfig(provider="anthropic", model="claude-opus-4-6"),
                     ],
                     use_cases=["consensus", "lateral_thinking", "big_bang"],
                 ),
