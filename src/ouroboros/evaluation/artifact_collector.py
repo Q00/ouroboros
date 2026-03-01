@@ -44,7 +44,7 @@ class ArtifactCollector:
         if not project_dir:
             return ArtifactBundle(text_summary=execution_output)
 
-        file_paths = self._extract_file_paths(execution_output)
+        file_paths = self._extract_file_paths(execution_output, project_dir)
         if not file_paths:
             return ArtifactBundle(text_summary=execution_output)
 
@@ -84,8 +84,14 @@ class ArtifactCollector:
             total_chars=total_chars,
         )
 
-    def _extract_file_paths(self, output: str) -> list[str]:
-        """Extract file paths from Write/Edit tool calls in output."""
+    def _extract_file_paths(
+        self, output: str, project_dir: str | None = None,
+    ) -> list[str]:
+        """Extract file paths from Write/Edit tool calls in output.
+
+        Validates that paths are within project_dir to prevent
+        reading arbitrary files from the filesystem.
+        """
         # Match common patterns from Claude tool use output
         patterns = [
             r"(?:Write|Edit)(?:\s+to)?:\s*(/[^\s]+)",
@@ -93,15 +99,25 @@ class ArtifactCollector:
             r"Created\s+(?:file\s+)?(/[^\s]+)",
         ]
 
+        real_project = os.path.realpath(project_dir) if project_dir else None
+
         paths: list[str] = []
         seen: set[str] = set()
 
         for pattern in patterns:
             for match in re.finditer(pattern, output):
                 path = match.group(1)
-                if path not in seen and os.path.isfile(path):
-                    paths.append(path)
-                    seen.add(path)
+                if path in seen:
+                    continue
+                if not os.path.isfile(path):
+                    continue
+                # Path boundary check: only allow files within project_dir
+                if real_project and not os.path.realpath(path).startswith(
+                    real_project + os.sep
+                ):
+                    continue
+                paths.append(path)
+                seen.add(path)
 
         return paths
 

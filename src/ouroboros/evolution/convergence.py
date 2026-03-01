@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ouroboros.core.lineage import EvaluationSummary, OntologyDelta, OntologyLineage
-from ouroboros.evolution.regression import RegressionDetector, RegressionReport
+from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.evolution.wonder import WonderOutput
 
 
