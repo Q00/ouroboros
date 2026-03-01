@@ -487,6 +487,7 @@ def create_ouroboros_server(
     )
     from ouroboros.mcp.tools.definitions import (
         EvaluateHandler,
+        ACDashboardHandler,
         EvolveRewindHandler,
         EvolveStepHandler,
         ExecuteSeedHandler,
@@ -998,6 +999,9 @@ def create_ouroboros_server(
         ),
         EvolveRewindHandler(
             evolutionary_loop=evolutionary_loop,
+        ),
+        ACDashboardHandler(
+            event_store=event_store,
         ),
     ]
 

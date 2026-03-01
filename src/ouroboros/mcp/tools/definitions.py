@@ -2145,6 +2145,141 @@ class LineageStatusHandler:
         )
 
 
+@dataclass
+class ACDashboardHandler:
+    """Handler for the ouroboros_ac_dashboard tool.
+
+    Displays per-AC pass/fail visibility across generations
+    with three display modes: summary, full, ac.
+    """
+
+    event_store: EventStore | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Initialize event store."""
+        self._event_store = self.event_store or EventStore()
+        self._initialized = False
+
+    async def _ensure_initialized(self) -> None:
+        """Ensure the event store is initialized."""
+        if not self._initialized:
+            await self._event_store.initialize()
+            self._initialized = True
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        """Return the tool definition."""
+        return MCPToolDefinition(
+            name="ouroboros_ac_dashboard",
+            description=(
+                "Display per-AC pass/fail compliance dashboard across generations. "
+                "Shows which acceptance criteria passed, failed, or are flaky. "
+                "Modes: 'summary' (default), 'full' (AC x Gen matrix), 'ac' (single AC history)."
+            ),
+            parameters=(
+                MCPToolParameter(
+                    name="lineage_id",
+                    type=ToolInputType.STRING,
+                    description="ID of the lineage to display",
+                    required=True,
+                ),
+                MCPToolParameter(
+                    name="mode",
+                    type=ToolInputType.STRING,
+                    description="Display mode: 'summary' (default), 'full', or 'ac'",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="ac_index",
+                    type=ToolInputType.INTEGER,
+                    description="AC index (1-based) for 'ac' mode. Required when mode='ac'.",
+                    required=False,
+                ),
+            ),
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle a dashboard request."""
+        lineage_id = arguments.get("lineage_id")
+        if not lineage_id:
+            return Result.err(
+                MCPToolError(
+                    "lineage_id is required",
+                    tool_name="ouroboros_ac_dashboard",
+                )
+            )
+
+        mode = arguments.get("mode", "summary")
+        ac_index = arguments.get("ac_index")
+
+        await self._ensure_initialized()
+
+        try:
+            events = await self._event_store.replay_lineage(lineage_id)
+        except Exception as e:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to query events: {e}",
+                    tool_name="ouroboros_ac_dashboard",
+                )
+            )
+
+        if not events:
+            return Result.err(
+                MCPToolError(
+                    f"No lineage found with ID: {lineage_id}",
+                    tool_name="ouroboros_ac_dashboard",
+                )
+            )
+
+        from ouroboros.evolution.projector import LineageProjector
+        from ouroboros.mcp.tools.dashboard import (
+            format_full,
+            format_single_ac,
+            format_summary,
+        )
+
+        projector = LineageProjector()
+        lineage = projector.project(events)
+
+        if lineage is None:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to project lineage: {lineage_id}",
+                    tool_name="ouroboros_ac_dashboard",
+                )
+            )
+
+        if mode == "full":
+            text = format_full(lineage)
+        elif mode == "ac":
+            if ac_index is None:
+                return Result.err(
+                    MCPToolError(
+                        "ac_index is required for mode='ac'",
+                        tool_name="ouroboros_ac_dashboard",
+                    )
+                )
+            text = format_single_ac(lineage, int(ac_index) - 1)  # Convert to 0-based
+        else:
+            text = format_summary(lineage)
+
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                is_error=False,
+                meta={
+                    "lineage_id": lineage.lineage_id,
+                    "mode": mode,
+                    "generations": lineage.current_generation,
+                },
+            )
+        )
+
+
 # Convenience functions for handler access
 def execute_seed_handler() -> ExecuteSeedHandler:
     """Create an ExecuteSeedHandler instance."""
