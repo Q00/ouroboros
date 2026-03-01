@@ -140,6 +140,7 @@ class ParallelACExecutor:
         event_store: EventStore,
         console: Console | None = None,
         enable_decomposition: bool = True,
+        max_concurrent: int = 3,
     ):
         """Initialize executor.
 
@@ -148,12 +149,14 @@ class ParallelACExecutor:
             event_store: Event store for progress tracking.
             console: Rich console for output.
             enable_decomposition: Enable Claude to decompose complex ACs.
+            max_concurrent: Maximum number of concurrent AC executions.
         """
         self._adapter = adapter
         self._event_store = event_store
         self._console = console or Console()
         self._enable_decomposition = enable_decomposition
         self._coordinator = LevelCoordinator(adapter)
+        self._semaphore = anyio.Semaphore(max_concurrent)
 
     async def execute_parallel(
         self,
@@ -327,26 +330,27 @@ class ParallelACExecutor:
             )
 
             async def _run_ac(idx: int, ac_idx: int) -> None:
-                try:
-                    level_results[idx] = await self._execute_single_ac(
-                        ac_index=ac_idx,
-                        ac_content=seed.acceptance_criteria[ac_idx],
-                        session_id=session_id,
-                        tools=tools,
-                        system_prompt=system_prompt,
-                        seed_goal=seed.goal,
-                        depth=0,
-                        execution_id=execution_id,
-                        level_contexts=current_contexts,
-                        sibling_acs=sibling_acs,
-                    )
-                except BaseException as e:
-                    # Never suppress anyio Cancelled — doing so breaks
-                    # the task group's cancel-scope propagation and can
-                    # cause the entire group to hang indefinitely.
-                    if isinstance(e, anyio.get_cancelled_exc_class()):
-                        raise
-                    level_results[idx] = e
+                async with self._semaphore:
+                    try:
+                        level_results[idx] = await self._execute_single_ac(
+                            ac_index=ac_idx,
+                            ac_content=seed.acceptance_criteria[ac_idx],
+                            session_id=session_id,
+                            tools=tools,
+                            system_prompt=system_prompt,
+                            seed_goal=seed.goal,
+                            depth=0,
+                            execution_id=execution_id,
+                            level_contexts=current_contexts,
+                            sibling_acs=sibling_acs,
+                        )
+                    except BaseException as e:
+                        # Never suppress anyio Cancelled — doing so breaks
+                        # the task group's cancel-scope propagation and can
+                        # cause the entire group to hang indefinitely.
+                        if isinstance(e, anyio.get_cancelled_exc_class()):
+                            raise
+                        level_results[idx] = e
 
             async with anyio.create_task_group() as tg:
                 for i, ac_idx in enumerate(executable):
@@ -731,33 +735,34 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         sub_results: list[ACExecutionResult | BaseException] = [None] * len(sub_acs)
 
         async def _run_sub_ac(idx: int, sub_ac: str) -> None:
-            try:
-                # Mark Sub-AC as executing before starting
-                await self._emit_subtask_event(
-                    execution_id=execution_id,
-                    ac_index=parent_ac_index,
-                    sub_task_index=idx + 1,
-                    sub_task_desc=sub_ac[:50],
-                    status="executing",
-                )
+            async with self._semaphore:
+                try:
+                    # Mark Sub-AC as executing before starting
+                    await self._emit_subtask_event(
+                        execution_id=execution_id,
+                        ac_index=parent_ac_index,
+                        sub_task_index=idx + 1,
+                        sub_task_desc=sub_ac[:50],
+                        status="executing",
+                    )
 
-                sub_results[idx] = await self._execute_atomic_ac(
-                    ac_index=parent_ac_index * 100 + idx,
-                    ac_content=sub_ac,
-                    session_id=session_id,
-                    tools=tools,
-                    system_prompt=system_prompt,
-                    seed_goal=seed_goal,
-                    depth=depth,
-                    start_time=datetime.now(UTC),
-                    is_sub_ac=True,
-                    parent_ac_index=parent_ac_index,
-                    sub_ac_index=idx,
-                    level_contexts=level_contexts,
-                )
-            except BaseException as e:
-                if isinstance(e, anyio.get_cancelled_exc_class()):
-                    raise
+                    sub_results[idx] = await self._execute_atomic_ac(
+                        ac_index=parent_ac_index * 100 + idx,
+                        ac_content=sub_ac,
+                        session_id=session_id,
+                        tools=tools,
+                        system_prompt=system_prompt,
+                        seed_goal=seed_goal,
+                        depth=depth,
+                        start_time=datetime.now(UTC),
+                        is_sub_ac=True,
+                        parent_ac_index=parent_ac_index,
+                        sub_ac_index=idx,
+                        level_contexts=level_contexts,
+                    )
+                except BaseException as e:
+                    if isinstance(e, anyio.get_cancelled_exc_class()):
+                        raise
                 sub_results[idx] = e
 
         async with anyio.create_task_group() as tg:

@@ -333,14 +333,42 @@ class TestEvolveStepConvergence:
 
     @pytest.mark.asyncio
     async def test_convergence_detected(self) -> None:
-        """When ontology similarity >= threshold, action=CONVERGED."""
+        """When ontology similarity >= threshold after genuine evolution, action=CONVERGED."""
         store = await create_event_store()
-        seed_v1 = make_seed(seed_id="seed_conv_1")
 
-        # Need at least 2 generations for convergence (min_generations=2)
-        await event_store_with_n_generations(store, "lin_conv", seed_v1, n=2)
+        # Gen 1: different ontology (to show genuine evolution occurred)
+        seed_v1 = make_seed(
+            seed_id="seed_conv_1",
+            ontology_name="TaskManagerV1",
+            fields=(
+                OntologyField(
+                    name="items", field_type="array",
+                    description="List of items", required=True,
+                ),
+            ),
+        )
+        # Gen 2: evolved ontology (standard schema)
+        seed_v2 = make_seed(seed_id="seed_conv_2", parent_seed_id="seed_conv_1")
 
-        # Gen 3 returns identical ontology (similarity=1.0)
+        await store.append(lineage_created("lin_conv", seed_v1.goal))
+        await store.append(
+            lineage_generation_completed(
+                "lin_conv", 1, seed_v1.metadata.seed_id,
+                seed_v1.ontology_schema.model_dump(mode="json"),
+                make_eval_summary().model_dump(mode="json"),
+                ["Q1"], json.dumps(seed_v1.to_dict()),
+            )
+        )
+        await store.append(
+            lineage_generation_completed(
+                "lin_conv", 2, seed_v2.metadata.seed_id,
+                seed_v2.ontology_schema.model_dump(mode="json"),
+                make_eval_summary().model_dump(mode="json"),
+                ["Q2"], json.dumps(seed_v2.to_dict()),
+            )
+        )
+
+        # Gen 3 returns identical ontology to Gen 2 (similarity=1.0)
         seed_v3 = make_seed(seed_id="seed_conv_3", parent_seed_id="seed_conv_2")
         gen_result = GenerationResult(
             generation_number=3,

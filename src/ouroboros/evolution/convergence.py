@@ -102,6 +102,24 @@ class ConvergenceCriteria:
                         ontology_similarity=latest_sim,
                         generation=current_gen,
                     )
+
+            # False convergence gate: block if ontology never actually evolved.
+            # When Wonder→Reflect repeatedly fails, the same seed is re-executed
+            # and similarity stays at 1.0 — this is convergence through failure,
+            # not through genuine stabilization.
+            evolved_count = self._count_evolved_generations(lineage)
+            if evolved_count == 0:
+                return ConvergenceSignal(
+                    converged=False,
+                    reason=(
+                        f"False convergence blocked: similarity {latest_sim:.3f} "
+                        f"but ontology never evolved across {num_gens} generations "
+                        f"(Wonder→Reflect may have failed)"
+                    ),
+                    ontology_similarity=latest_sim,
+                    generation=current_gen,
+                )
+
             return ConvergenceSignal(
                 converged=True,
                 reason=(
@@ -165,6 +183,29 @@ class ConvergenceCriteria:
         curr = lineage.generations[-1].ontology_snapshot
         delta = OntologyDelta.compute(prev, curr)
         return delta.similarity
+
+    def _count_evolved_generations(self, lineage: OntologyLineage) -> int:
+        """Count how many consecutive generation pairs show actual ontology evolution.
+
+        Returns the number of transitions where similarity < convergence_threshold,
+        indicating Wonder→Reflect successfully mutated the ontology.
+        A return of 0 means the ontology never changed — likely due to repeated
+        Wonder/Reflect failures causing the same seed to be re-executed.
+        """
+        gens = lineage.generations
+        if len(gens) < 2:
+            return 0
+
+        count = 0
+        for i in range(1, len(gens)):
+            delta = OntologyDelta.compute(
+                gens[i - 1].ontology_snapshot,
+                gens[i].ontology_snapshot,
+            )
+            if delta.similarity < self.convergence_threshold:
+                count += 1
+
+        return count
 
     def _check_stagnation(self, lineage: OntologyLineage) -> bool:
         """Check if ontology has been unchanged for stagnation_window gens."""

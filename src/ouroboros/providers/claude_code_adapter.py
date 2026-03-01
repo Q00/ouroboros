@@ -368,7 +368,8 @@ class ClaudeCodeAdapter:
             "cli_path": self._cli_path,
         }
         # Pass model from CompletionConfig if specified
-        if config.model:
+        # "default" is not a valid SDK model — treat it as None (use SDK default)
+        if config.model and config.model != "default":
             options_kwargs["model"] = config.model
 
         options = ClaudeAgentOptions(**options_kwargs)

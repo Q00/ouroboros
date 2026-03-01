@@ -258,15 +258,21 @@ class TestConvergenceGating:
     """Tests for eval_gate_enabled convergence gating."""
 
     def _converging_lineage(self) -> OntologyLineage:
-        """Create a 2-gen lineage where latest two are identical (similarity=1.0)."""
-        return _lineage_with_schemas(SCHEMA_A, SCHEMA_A)
+        """Create a 3-gen lineage that evolved once then converged (B→A→A).
 
-    def test_gate_disabled_by_default(self) -> None:
-        """Default config: gate disabled, convergence proceeds normally."""
+        Gen 1→2: B→A = genuine evolution (similarity < threshold).
+        Gen 2→3: A→A = stable (similarity = 1.0).
+        This passes the false-convergence gate because evolution DID occur.
+        """
+        return _lineage_with_schemas(SCHEMA_B, SCHEMA_A, SCHEMA_A)
+
+    def test_gate_disabled_explicitly(self) -> None:
+        """Explicitly disabled gate: convergence proceeds despite bad eval."""
         lineage = self._converging_lineage()
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
+            eval_gate_enabled=False,
         )
         signal = criteria.evaluate(
             lineage,
@@ -395,3 +401,60 @@ class TestConvergenceGating:
         )
         assert not signal.converged
         assert "unsatisfactory" in signal.reason
+
+
+class TestFalseConvergenceDetection:
+    """Tests for false convergence detection (P1-5).
+
+    When Wonder->Reflect repeatedly fails, the same seed is re-executed and
+    ontology stays identical. The system should block convergence in this case.
+    """
+
+    def test_blocks_when_ontology_never_evolved(self) -> None:
+        """Identical ontology across all generations -> false convergence blocked."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage)
+        assert not signal.converged
+        assert "False convergence" in signal.reason
+
+    def test_allows_when_ontology_evolved_at_least_once(self) -> None:
+        """Ontology evolved once then stabilized -> genuine convergence."""
+        lineage = _lineage_with_schemas(SCHEMA_B, SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert "converged" in signal.reason.lower()
+
+    def test_blocks_two_gen_identical(self) -> None:
+        """Two identical generations with no evolution -> blocked."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage)
+        assert not signal.converged
+        assert "False convergence" in signal.reason
+
+    def test_max_generations_overrides_false_convergence(self) -> None:
+        """Hard cap still terminates even with false convergence."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            max_generations=3,
+            eval_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert "Max generations" in signal.reason
