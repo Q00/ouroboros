@@ -12,6 +12,7 @@ via the MCP server:
 - ouroboros_generate_seed: Convert interview to immutable seed
 """
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1645,7 +1646,9 @@ class EvolveStepHandler:
 
     evolutionary_loop: Any | None = field(default=None, repr=False)
 
-    TIMEOUT_SECONDS: int = 7200  # Override MCP adapter's default 30s
+    TIMEOUT_SECONDS: int = int(
+        os.environ.get("OUROBOROS_GENERATION_TIMEOUT", "7200")
+    )  # Override MCP adapter's default 30s
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -1795,6 +1798,12 @@ class EvolveStepHandler:
             text_lines.append(f"- **Drift**: {es.drift_score}")
             if es.failure_reason:
                 text_lines.append(f"- **Failure**: {es.failure_reason}")
+            if es.ac_results:
+                text_lines.append("")
+                text_lines.append("#### Per-AC Results")
+                for ac in es.ac_results:
+                    status = "PASS" if ac.passed else "FAIL"
+                    text_lines.append(f"- AC {ac.ac_index + 1}: [{status}] {ac.ac_content[:80]}")
 
         if gen.wonder_output:
             text_lines.append("")

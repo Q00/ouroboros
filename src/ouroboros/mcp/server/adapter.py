@@ -529,13 +529,21 @@ def create_ouroboros_server(
     seed_generator = SeedGenerator(llm_adapter=llm_adapter)
 
     # Create evolution engines for evolve_step
-    from ouroboros.core.lineage import EvaluationSummary
+    from ouroboros.core.lineage import ACResult, EvaluationSummary
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
     from ouroboros.evolution.reflect import ReflectEngine
     from ouroboros.evolution.wonder import WonderEngine
 
-    wonder_engine = WonderEngine(llm_adapter=llm_adapter, model="default")
-    reflect_engine = ReflectEngine(llm_adapter=llm_adapter, model="default")
+    wonder_model = os.environ.get("OUROBOROS_WONDER_MODEL")  # None → use engine's fallback
+    reflect_model = os.environ.get("OUROBOROS_REFLECT_MODEL")  # None → use engine's fallback
+    wonder_engine = WonderEngine(
+        llm_adapter=llm_adapter,
+        **({"model": wonder_model} if wonder_model else {}),
+    )
+    reflect_engine = ReflectEngine(
+        llm_adapter=llm_adapter,
+        **({"model": reflect_model} if reflect_model else {}),
+    )
 
     # Wire real execution/evaluation callables for evolve_step so that
     # generation quality is validated, not only ontology deltas.
@@ -597,23 +605,39 @@ def create_ouroboros_server(
         """
         import re
 
-        matches = re.findall(r"### AC \d+: \[(PASS|FAIL)\]", artifact)
-        if not matches:
+        # Match full AC lines: "### AC 3: [PASS] Some description..."
+        ac_line_matches = re.findall(r"### AC (\d+): \[(PASS|FAIL)\]\s*(.*)", artifact)
+        if not ac_line_matches:
             return None
 
-        total = len(matches)
-        passed = sum(1 for m in matches if m == "PASS")
+        seed_acs = getattr(seed, "acceptance_criteria", None) or ()
+
+        ac_results: list[ACResult] = []
+        for ac_num_str, status, description in ac_line_matches:
+            ac_idx = int(ac_num_str) - 1  # 0-based index
+            ac_content = seed_acs[ac_idx] if ac_idx < len(seed_acs) else description.strip()
+            ac_results.append(
+                ACResult(
+                    ac_index=ac_idx,
+                    ac_content=ac_content,
+                    passed=status == "PASS",
+                    score=1.0 if status == "PASS" else 0.0,
+                    evidence=description.strip(),
+                    verification_method="mechanical",
+                )
+            )
+
+        total = len(ac_results)
+        passed = sum(1 for r in ac_results if r.passed)
         score = passed / total if total > 0 else 0.0
 
-        total_acs = (
-            len(seed.acceptance_criteria) if getattr(seed, "acceptance_criteria", None) else total
-        )
+        total_acs = len(seed_acs) if seed_acs else total
         approved = passed >= total_acs and passed == total
 
         failure_reason = None
         if not approved:
-            failed_count = total - passed
-            failure_reason = f"{failed_count}/{total} ACs failed"
+            failed_indices = [r.ac_index + 1 for r in ac_results if not r.passed]
+            failure_reason = f"{len(failed_indices)}/{total} ACs failed (AC {', '.join(str(i) for i in failed_indices)})"
 
         return EvaluationSummary(
             final_approved=approved,
@@ -621,6 +645,7 @@ def create_ouroboros_server(
             score=score,
             drift_score=1.0 - score,
             failure_reason=failure_reason,
+            ac_results=tuple(ac_results),
         )
 
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
@@ -643,11 +668,13 @@ def create_ouroboros_server(
             return mechanical
 
         # Fallback: LLM-based evaluation when no structured AC results
-        current_ac = (
-            seed.acceptance_criteria[0]
-            if getattr(seed, "acceptance_criteria", None)
-            else "Verify execution output meets requirements"
-        )
+        acs = getattr(seed, "acceptance_criteria", None)
+        if acs:
+            current_ac = "\n".join(
+                f"AC {i + 1}: {ac}" for i, ac in enumerate(acs)
+            )
+        else:
+            current_ac = "Verify execution output meets requirements"
         eval_context = EvaluationContext(
             execution_id=f"eval_{seed.metadata.seed_id}",
             seed_id=seed.metadata.seed_id,

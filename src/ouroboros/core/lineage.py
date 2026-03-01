@@ -49,6 +49,17 @@ class MutationAction(StrEnum):
     REMOVE = "remove"
 
 
+class ACResult(BaseModel, frozen=True):
+    """Result of evaluating a single acceptance criterion."""
+
+    ac_index: int
+    ac_content: str
+    passed: bool
+    score: float | None = None
+    evidence: str = ""
+    verification_method: str = "unknown"
+
+
 class EvaluationSummary(BaseModel, frozen=True):
     """Typed summary of evaluation results for a generation.
 
@@ -61,6 +72,7 @@ class EvaluationSummary(BaseModel, frozen=True):
     score: float | None = None
     drift_score: float | None = None
     failure_reason: str | None = None
+    ac_results: tuple[ACResult, ...] = ()
 
 
 class FieldModification(BaseModel, frozen=True):

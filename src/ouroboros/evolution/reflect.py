@@ -177,6 +177,14 @@ Guidelines:
         parts.append(f"  Drift: {eval_summary.drift_score}")
         if eval_summary.failure_reason:
             parts.append(f"  Failure: {eval_summary.failure_reason}")
+        if eval_summary.ac_results:
+            parts.append("\n  Per-AC Breakdown:")
+            for ac in eval_summary.ac_results:
+                status = "PASS" if ac.passed else "FAIL"
+                parts.append(f"    AC {ac.ac_index + 1} [{status}]: {ac.ac_content}")
+            failed_acs = [ac for ac in eval_summary.ac_results if not ac.passed]
+            if failed_acs:
+                parts.append(f"\n  PRIORITY: Fix {len(failed_acs)} failing AC(s) while preserving passing ones.")
 
         parts.append("\n## Wonder Questions (what we still don't know)")
         for q in wonder.questions:

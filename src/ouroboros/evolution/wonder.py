@@ -146,6 +146,14 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             parts.append(f"  Drift: {eval_summary.drift_score}")
             if eval_summary.failure_reason:
                 parts.append(f"  Failure: {eval_summary.failure_reason}")
+            if eval_summary.ac_results:
+                failed_acs = [ac for ac in eval_summary.ac_results if not ac.passed]
+                if failed_acs:
+                    parts.append(f"\n  Failed ACs ({len(failed_acs)}):")
+                    for ac in failed_acs:
+                        parts.append(f"    - AC {ac.ac_index + 1}: {ac.ac_content}")
+                passed_count = sum(1 for ac in eval_summary.ac_results if ac.passed)
+                parts.append(f"  AC pass rate: {passed_count}/{len(eval_summary.ac_results)}")
 
         if execution_output:
             truncated = truncate_head_tail(execution_output)
