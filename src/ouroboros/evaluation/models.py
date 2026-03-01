@@ -245,6 +245,41 @@ class DeliberationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FileArtifact:
+    """A single file collected from execution output.
+
+    Attributes:
+        file_path: Absolute path to the file
+        content: File content (may be truncated)
+        ac_indices: Which ACs modified this file
+        truncated: Whether content was truncated to fit token budget
+    """
+
+    file_path: str
+    content: str
+    ac_indices: tuple[int, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactBundle:
+    """Bundle of file artifacts collected from execution.
+
+    Provides actual source code to the semantic evaluator instead of
+    relying solely on agent text summaries.
+
+    Attributes:
+        files: Collected file artifacts
+        text_summary: Original text summary (backward compat)
+        total_chars: Total characters across all files
+    """
+
+    files: tuple[FileArtifact, ...] = ()
+    text_summary: str = ""
+    total_chars: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationContext:
     """Input context for the evaluation pipeline.
 
@@ -256,6 +291,7 @@ class EvaluationContext:
         artifact_type: Type of artifact (code, document, etc.)
         goal: Original goal from seed
         constraints: Constraints from seed
+        artifact_bundle: Optional file-based artifacts for richer evaluation
     """
 
     execution_id: str
@@ -265,6 +301,7 @@ class EvaluationContext:
     artifact_type: str = "code"
     goal: str = ""
     constraints: tuple[str, ...] = ()
+    artifact_bundle: ArtifactBundle | None = None
 
 
 @dataclass(frozen=True, slots=True)

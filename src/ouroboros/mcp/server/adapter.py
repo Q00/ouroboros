@@ -534,6 +534,7 @@ def create_ouroboros_server(
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
     from ouroboros.evolution.reflect import ReflectEngine
     from ouroboros.evolution.wonder import WonderEngine
+    from ouroboros.evaluation.artifact_collector import ArtifactCollector
     from ouroboros.verification.extractor import AssertionExtractor
     from ouroboros.verification.verifier import SpecVerifier
 
@@ -805,6 +806,11 @@ def create_ouroboros_server(
             )
         else:
             current_ac = "Verify execution output meets requirements"
+
+        # Collect file-based artifacts for richer evaluation
+        project_dir = _extract_project_dir(artifact)
+        artifact_bundle = ArtifactCollector().collect(artifact, project_dir)
+
         eval_context = EvaluationContext(
             execution_id=f"eval_{seed.metadata.seed_id}",
             seed_id=seed.metadata.seed_id,
@@ -813,6 +819,7 @@ def create_ouroboros_server(
             artifact_type="code",
             goal=seed.goal,
             constraints=tuple(seed.constraints),
+            artifact_bundle=artifact_bundle,
         )
 
         eval_result = await evolution_eval_pipeline.evaluate(eval_context)

@@ -65,6 +65,16 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
         else "None specified"
     )
 
+    # Build file artifacts section if available
+    file_section = ""
+    if context.artifact_bundle and context.artifact_bundle.files:
+        file_lines = ["\n## Source Files (actual code)"]
+        for fa in context.artifact_bundle.files:
+            truncated_note = " [TRUNCATED]" if fa.truncated else ""
+            file_lines.append(f"\n### {fa.file_path}{truncated_note}")
+            file_lines.append(f"```\n{fa.content}\n```")
+        file_section = "\n".join(file_lines)
+
     return f"""Evaluate the following artifact:
 
 ## Acceptance Criterion
@@ -83,6 +93,7 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 ```
 {context.artifact}
 ```
+{file_section}
 
 Provide your evaluation as a JSON object."""
 
