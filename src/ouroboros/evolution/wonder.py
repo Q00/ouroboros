@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
+from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.core.seed import OntologySchema
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
@@ -154,6 +155,19 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
                         parts.append(f"    - AC {ac.ac_index + 1}: {ac.ac_content}")
                 passed_count = sum(1 for ac in eval_summary.ac_results if ac.passed)
                 parts.append(f"  AC pass rate: {passed_count}/{len(eval_summary.ac_results)}")
+
+        # Regression context
+        if lineage and len(lineage.generations) >= 2:
+            report = RegressionDetector().detect(lineage)
+            if report.has_regressions:
+                parts.append(f"\n## REGRESSIONS ({len(report.regressions)})")
+                for reg in report.regressions:
+                    parts.append(
+                        f"  - AC {reg.ac_index + 1}: passed in Gen {reg.passed_in_generation}, "
+                        f"failing since Gen {reg.failed_in_generation} "
+                        f"({reg.consecutive_failures} consecutive): {reg.ac_text}"
+                    )
+                parts.append("  WHY did these previously-passing ACs start failing?")
 
         if execution_output:
             truncated = truncate_head_tail(execution_output)

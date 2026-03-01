@@ -1779,6 +1779,10 @@ class EvolveStepHandler:
             f"**Phase**: {gen.phase.value}",
             f"**Convergence similarity**: {sig.ontology_similarity:.2%}",
             f"**Reason**: {sig.reason}",
+            *(
+                [f"**Failed ACs**: {', '.join(str(i + 1) for i in sig.failed_acs)}"]
+                if sig.failed_acs else []
+            ),
             f"**Lineage**: {step.lineage.lineage_id} ({step.lineage.current_generation} generations)",
             f"**Next generation**: {step.next_generation}",
         ]

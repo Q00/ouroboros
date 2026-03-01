@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ouroboros.core.lineage import EvaluationSummary, OntologyDelta, OntologyLineage
+from ouroboros.evolution.regression import RegressionDetector, RegressionReport
 from ouroboros.evolution.wonder import WonderOutput
 
 
@@ -24,6 +25,7 @@ class ConvergenceSignal:
     reason: str
     ontology_similarity: float
     generation: int
+    failed_acs: tuple[int, ...] = ()
 
 
 @dataclass
@@ -46,6 +48,9 @@ class ConvergenceCriteria:
     enable_oscillation_detection: bool = True
     eval_gate_enabled: bool = False
     eval_min_score: float = 0.7
+    ac_gate_mode: str = "all"  # "all" | "ratio" | "off"
+    ac_min_pass_ratio: float = 1.0  # for "ratio" mode
+    regression_gate_enabled: bool = True
 
     def evaluate(
         self,
@@ -101,6 +106,41 @@ class ConvergenceCriteria:
                         ),
                         ontology_similarity=latest_sim,
                         generation=current_gen,
+                    )
+
+            # Per-AC gate: block convergence if individual ACs are failing
+            if (
+                self.eval_gate_enabled
+                and self.ac_gate_mode != "off"
+                and latest_evaluation is not None
+                and latest_evaluation.ac_results
+            ):
+                ac_block = self._check_ac_gate(latest_evaluation)
+                if ac_block is not None:
+                    failed_indices, reason = ac_block
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=reason,
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                        failed_acs=failed_indices,
+                    )
+
+            # Signal 5: Regression gate — block convergence if ACs regressed
+            if self.regression_gate_enabled:
+                regression_report = RegressionDetector().detect(lineage)
+                if regression_report.has_regressions:
+                    regressed = regression_report.regressed_ac_indices
+                    display = ", ".join(str(i + 1) for i in regressed)
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=(
+                            f"Regression detected: {len(regressed)} AC(s) "
+                            f"regressed (AC {display})"
+                        ),
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                        failed_acs=regressed,
                     )
 
             # False convergence gate: block if ontology never actually evolved.
@@ -206,6 +246,36 @@ class ConvergenceCriteria:
                 count += 1
 
         return count
+
+    def _check_ac_gate(
+        self, evaluation: EvaluationSummary,
+    ) -> tuple[tuple[int, ...], str] | None:
+        """Check per-AC gate. Returns (failed_ac_indices, reason) if blocked, None if OK."""
+        if not evaluation.ac_results:
+            return None
+
+        failed = tuple(ac.ac_index for ac in evaluation.ac_results if not ac.passed)
+        if not failed:
+            return None
+
+        total = len(evaluation.ac_results)
+        passed = total - len(failed)
+        ratio = passed / total if total > 0 else 0.0
+
+        if self.ac_gate_mode == "all":
+            failed_display = ", ".join(str(i + 1) for i in failed)
+            return failed, (
+                f"Per-AC gate (mode=all): {len(failed)} AC(s) still failing "
+                f"(AC {failed_display})"
+            )
+        elif self.ac_gate_mode == "ratio":
+            if ratio < self.ac_min_pass_ratio:
+                return failed, (
+                    f"Per-AC gate (mode=ratio): pass ratio {ratio:.2f} "
+                    f"< required {self.ac_min_pass_ratio:.2f}"
+                )
+
+        return None
 
     def _check_stagnation(self, lineage: OntologyLineage) -> bool:
         """Check if ontology has been unchanged for stagnation_window gens."""

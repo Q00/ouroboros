@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyLineage
+from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
@@ -185,6 +186,20 @@ Guidelines:
             failed_acs = [ac for ac in eval_summary.ac_results if not ac.passed]
             if failed_acs:
                 parts.append(f"\n  PRIORITY: Fix {len(failed_acs)} failing AC(s) while preserving passing ones.")
+
+        # Regression context
+        if lineage and len(lineage.generations) >= 2:
+            report = RegressionDetector().detect(lineage)
+            if report.has_regressions:
+                parts.append(f"\n## REGRESSIONS ({len(report.regressions)})")
+                for reg in report.regressions:
+                    parts.append(
+                        f"  - AC {reg.ac_index + 1} (Gen {reg.passed_in_generation}→Gen {reg.failed_in_generation}): "
+                        f"{reg.ac_text}"
+                    )
+                parts.append(
+                    "  CRITICAL: These ACs previously passed. Preserve their behavior while fixing other issues."
+                )
 
         parts.append("\n## Wonder Questions (what we still don't know)")
         for q in wonder.questions:
