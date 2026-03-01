@@ -533,6 +533,8 @@ def create_ouroboros_server(
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
     from ouroboros.evolution.reflect import ReflectEngine
     from ouroboros.evolution.wonder import WonderEngine
+    from ouroboros.verification.extractor import AssertionExtractor
+    from ouroboros.verification.verifier import SpecVerifier
 
     wonder_model = os.environ.get("OUROBOROS_WONDER_MODEL")  # None → use engine's fallback
     reflect_model = os.environ.get("OUROBOROS_REFLECT_MODEL")  # None → use engine's fallback
@@ -648,6 +650,129 @@ def create_ouroboros_server(
             ac_results=tuple(ac_results),
         )
 
+    spec_extractor = AssertionExtractor(llm_adapter=llm_adapter)
+
+    def _extract_project_dir(artifact: str) -> str | None:
+        """Extract project directory from execution output.
+
+        Looks for Write/Edit file paths and walks up to find project root.
+        """
+        import re
+        from pathlib import Path
+
+        write_matches = re.findall(r"(?:Write|Edit): (/[^\s]+)", artifact)
+        if not write_matches:
+            return None
+
+        for path_str in write_matches:
+            candidate = Path(path_str).parent
+            for _ in range(10):
+                if (candidate / "pyproject.toml").exists() or (candidate / "setup.py").exists():
+                    return str(candidate)
+                if candidate == candidate.parent:
+                    break
+                candidate = candidate.parent
+
+        return None
+
+    async def _verify_spec_compliance(
+        seed: Any,
+        artifact: str,
+        mechanical: EvaluationSummary,
+    ) -> EvaluationSummary | None:
+        """Run spec verification and override mechanical results if discrepancies found.
+
+        Returns a corrected EvaluationSummary if discrepancies are detected,
+        or None if no override is needed (verification passed or unavailable).
+        """
+        project_dir = _extract_project_dir(artifact)
+        if not project_dir:
+            return None
+
+        seed_acs = getattr(seed, "acceptance_criteria", None) or ()
+        if not seed_acs:
+            return None
+
+        seed_id = getattr(getattr(seed, "metadata", None), "seed_id", None)
+        if not seed_id:
+            return None
+
+        # Extract assertions from ACs (cached by seed_id)
+        extract_result = await spec_extractor.extract(seed_id, seed_acs)
+        if extract_result.is_err:
+            log.warning("spec_verification.extraction_failed", error=str(extract_result.error))
+            return None
+
+        assertions = extract_result.value
+        if not assertions:
+            return None
+
+        # Build agent results map from mechanical evaluation
+        agent_results = {ac.ac_index: ac.passed for ac in mechanical.ac_results}
+
+        # Run verification
+        verifier = SpecVerifier(project_dir=project_dir)
+        summary = verifier.verify_all(assertions, agent_results)
+
+        if not summary.has_discrepancies:
+            return None
+
+        # Override: rebuild ac_results with verification corrections
+        log.warning(
+            "spec_verification.discrepancies_found",
+            count=summary.discrepancy_count,
+            project_dir=project_dir,
+        )
+
+        corrected_results: list[ACResult] = []
+        discrepant_indices: set[int] = set()
+        for report in summary.reports:
+            if report.has_discrepancy:
+                discrepant_indices.add(report.ac_index)
+
+        for ac in mechanical.ac_results:
+            if ac.ac_index in discrepant_indices:
+                # Find the verification detail for evidence
+                detail = ""
+                for report in summary.reports:
+                    if report.ac_index == ac.ac_index:
+                        details = [r.detail for r in report.results if r.discrepancy]
+                        detail = "; ".join(details)
+                        break
+
+                corrected_results.append(
+                    ACResult(
+                        ac_index=ac.ac_index,
+                        ac_content=ac.ac_content,
+                        passed=False,
+                        score=0.0,
+                        evidence=f"Spec verification override: {detail}",
+                        verification_method="spec_verifier",
+                    )
+                )
+            else:
+                corrected_results.append(ac)
+
+        total = len(corrected_results)
+        passed = sum(1 for r in corrected_results if r.passed)
+        score = passed / total if total > 0 else 0.0
+
+        failed_indices = [r.ac_index + 1 for r in corrected_results if not r.passed]
+        failure_reason = (
+            f"{len(failed_indices)}/{total} ACs failed "
+            f"(AC {', '.join(str(i) for i in failed_indices)}) "
+            f"[{summary.discrepancy_count} spec verification override(s)]"
+        )
+
+        return EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            score=score,
+            drift_score=1.0 - score,
+            failure_reason=failure_reason,
+            ac_results=tuple(corrected_results),
+        )
+
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()
 
@@ -665,6 +790,10 @@ def create_ouroboros_server(
         # More reliable than LLM-based evaluation in MCP stdio mode.
         mechanical = _evaluate_mechanically(artifact, seed)
         if mechanical is not None:
+            # Run spec verification to catch agent self-report lies
+            verified = await _verify_spec_compliance(seed, artifact, mechanical)
+            if verified is not None:
+                return verified
             return mechanical
 
         # Fallback: LLM-based evaluation when no structured AC results
