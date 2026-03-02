@@ -16,6 +16,10 @@ from ouroboros.core.lineage import (
 from ouroboros.core.seed import OntologySchema
 from ouroboros.events.base import BaseEvent
 
+# Sentinel for generations that haven't completed (started/failed).
+# These don't have a real ontology yet, but GenerationRecord requires one.
+_PENDING_ONTOLOGY = OntologySchema(name="(pending)", description="(pending)", fields=())
+
 
 class LineageProjector:
     """Reconstructs OntologyLineage state from event replay.
@@ -49,6 +53,24 @@ class LineageProjector:
                     created_at=event.timestamp,
                 )
 
+            elif event.type == "lineage.generation.started":
+                data = event.data
+                gen_num = data.get("generation_number", 0)
+                if gen_num and gen_num not in generations:
+                    # Track started-but-not-yet-completed generations
+                    # so they appear in lineage status (e.g., stuck at wondering)
+                    try:
+                        phase = GenerationPhase(data.get("phase", "wondering"))
+                    except ValueError:
+                        phase = GenerationPhase.WONDERING
+                    generations[gen_num] = GenerationRecord(
+                        generation_number=gen_num,
+                        seed_id=data.get("seed_id") or "",
+                        ontology_snapshot=_PENDING_ONTOLOGY,
+                        phase=phase,
+                        created_at=event.timestamp,
+                    )
+
             elif event.type == "lineage.generation.completed":
                 data = event.data
                 gen_num = data["generation_number"]
@@ -76,12 +98,23 @@ class LineageProjector:
             elif event.type == "lineage.generation.failed":
                 data = event.data
                 gen_num = data["generation_number"]
-                GenerationPhase(data.get("phase", "failed"))
+                try:
+                    phase = GenerationPhase(data.get("phase", "failed"))
+                except ValueError:
+                    phase = GenerationPhase.FAILED
 
                 if gen_num in generations:
-                    # Update existing record to failed
                     old = generations[gen_num]
-                    generations[gen_num] = old.model_copy(update={"phase": GenerationPhase.FAILED})
+                    generations[gen_num] = old.model_copy(update={"phase": phase})
+                else:
+                    # Generation failed before completion record existed
+                    generations[gen_num] = GenerationRecord(
+                        generation_number=gen_num,
+                        seed_id=data.get("seed_id") or "",
+                        ontology_snapshot=_PENDING_ONTOLOGY,
+                        phase=phase,
+                        created_at=event.timestamp,
+                    )
 
             elif event.type == "lineage.converged":
                 if lineage is not None:
