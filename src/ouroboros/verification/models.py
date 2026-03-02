@@ -108,12 +108,8 @@ class SpecVerificationSummary(BaseModel, frozen=True):
     ) -> SpecVerificationSummary:
         """Build summary from individual AC reports."""
         total = sum(len(r.results) for r in reports)
-        verified = sum(
-            sum(1 for v in r.results if v.verified) for r in reports
-        )
-        failed = sum(
-            sum(1 for v in r.results if not v.verified) for r in reports
-        )
+        verified = sum(sum(1 for v in r.results if v.verified) for r in reports)
+        failed = sum(sum(1 for v in r.results if not v.verified) for r in reports)
         skipped = sum(1 for r in reports if not r.results)
         discrepancies = sum(1 for r in reports if r.has_discrepancy)
 

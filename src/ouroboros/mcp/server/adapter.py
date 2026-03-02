@@ -801,9 +801,7 @@ def create_ouroboros_server(
         # Fallback: LLM-based evaluation when no structured AC results
         acs = getattr(seed, "acceptance_criteria", None)
         if acs:
-            current_ac = "\n".join(
-                f"AC {i + 1}: {ac}" for i, ac in enumerate(acs)
-            )
+            current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(acs))
         else:
             current_ac = "Verify execution output meets requirements"
 

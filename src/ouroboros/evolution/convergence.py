@@ -135,8 +135,7 @@ class ConvergenceCriteria:
                     return ConvergenceSignal(
                         converged=False,
                         reason=(
-                            f"Regression detected: {len(regressed)} AC(s) "
-                            f"regressed (AC {display})"
+                            f"Regression detected: {len(regressed)} AC(s) regressed (AC {display})"
                         ),
                         ontology_similarity=latest_sim,
                         generation=current_gen,
@@ -248,7 +247,8 @@ class ConvergenceCriteria:
         return count
 
     def _check_ac_gate(
-        self, evaluation: EvaluationSummary,
+        self,
+        evaluation: EvaluationSummary,
     ) -> tuple[tuple[int, ...], str] | None:
         """Check per-AC gate. Returns (failed_ac_indices, reason) if blocked, None if OK."""
         if not evaluation.ac_results:
@@ -265,8 +265,7 @@ class ConvergenceCriteria:
         if self.ac_gate_mode == "all":
             failed_display = ", ".join(str(i + 1) for i in failed)
             return failed, (
-                f"Per-AC gate (mode=all): {len(failed)} AC(s) still failing "
-                f"(AC {failed_display})"
+                f"Per-AC gate (mode=all): {len(failed)} AC(s) still failing (AC {failed_display})"
             )
         elif self.ac_gate_mode == "ratio":
             if ratio < self.ac_min_pass_ratio:

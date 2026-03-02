@@ -88,10 +88,7 @@ def format_summary(lineage: OntologyLineage) -> str:
     if es:
         score_str = f"{es.score:.2f}" if es.score is not None else "N/A"
         status = "APPROVED" if es.final_approved else "REJECTED"
-        lines.append(
-            f"### Gen {latest_gen.generation_number} — "
-            f"Score: {score_str} | {status}"
-        )
+        lines.append(f"### Gen {latest_gen.generation_number} — Score: {score_str} | {status}")
     else:
         lines.append(f"### Gen {latest_gen.generation_number} — No evaluation")
 
@@ -217,8 +214,7 @@ def format_single_ac(
     classification = _classify_ac(ac_history)
     passed_total = sum(1 for _, p in ac_history if p)
     lines.append(
-        f"**Classification**: {classification} | "
-        f"**Pass rate**: {passed_total}/{len(ac_history)}"
+        f"**Classification**: {classification} | **Pass rate**: {passed_total}/{len(ac_history)}"
     )
     lines.append("")
 

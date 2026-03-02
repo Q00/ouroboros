@@ -144,11 +144,7 @@ class AssertionExtractor:
             assertions: list[SpecAssertion] = []
             for item in data:
                 ac_idx = item.get("ac_index", 0)
-                ac_text = (
-                    acceptance_criteria[ac_idx]
-                    if ac_idx < len(acceptance_criteria)
-                    else ""
-                )
+                ac_text = acceptance_criteria[ac_idx] if ac_idx < len(acceptance_criteria) else ""
                 try:
                     tier = VerificationTier(item.get("tier", "t4_unverifiable"))
                 except ValueError:

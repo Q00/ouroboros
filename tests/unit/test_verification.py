@@ -56,9 +56,7 @@ class TestVerificationModels:
         assert not r.verified
 
     def test_ac_report_verified_pass_all_pass(self) -> None:
-        assertion = SpecAssertion(
-            ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT
-        )
+        assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
         report = ACVerificationReport(
             ac_index=0,
             ac_text="test",
@@ -72,9 +70,7 @@ class TestVerificationModels:
         assert not report.has_discrepancy
 
     def test_ac_report_has_discrepancy(self) -> None:
-        assertion = SpecAssertion(
-            ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT
-        )
+        assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
         report = ACVerificationReport(
             ac_index=0,
             ac_text="test",
@@ -98,9 +94,7 @@ class TestVerificationModels:
         assert not report.has_discrepancy
 
     def test_summary_from_reports(self) -> None:
-        assertion = SpecAssertion(
-            ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT
-        )
+        assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
         reports = (
             ACVerificationReport(
                 ac_index=0,
@@ -111,7 +105,9 @@ class TestVerificationModels:
             ACVerificationReport(
                 ac_index=1,
                 ac_text="test2",
-                results=(SpecVerificationResult(assertion=assertion, verified=False, discrepancy=True),),
+                results=(
+                    SpecVerificationResult(assertion=assertion, verified=False, discrepancy=True),
+                ),
                 agent_reported_pass=True,
             ),
             ACVerificationReport(
@@ -131,9 +127,7 @@ class TestVerificationModels:
         assert summary.override_approval is False
 
     def test_summary_no_discrepancies(self) -> None:
-        assertion = SpecAssertion(
-            ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT
-        )
+        assertion = SpecAssertion(ac_index=0, ac_text="test", tier=VerificationTier.T1_CONSTANT)
         reports = (
             ACVerificationReport(
                 ac_index=0,
@@ -168,9 +162,11 @@ class TestSpecVerifier:
 
     def test_t1_constant_found_correct(self) -> None:
         """T1: expected value matches actual → verified."""
-        project = self._create_project({
-            "config.py": "WARMUP_FRAMES = 10\nFPS = 60\n",
-        })
+        project = self._create_project(
+            {
+                "config.py": "WARMUP_FRAMES = 10\nFPS = 60\n",
+            }
+        )
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
             ac_index=0,
@@ -186,9 +182,11 @@ class TestSpecVerifier:
 
     def test_t1_constant_found_wrong_value(self) -> None:
         """T1: expected 10 but found 30 → discrepancy."""
-        project = self._create_project({
-            "config.py": "WARMUP_FRAMES = 30\n",
-        })
+        project = self._create_project(
+            {
+                "config.py": "WARMUP_FRAMES = 30\n",
+            }
+        )
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
             ac_index=0,
@@ -205,9 +203,11 @@ class TestSpecVerifier:
 
     def test_t1_pattern_not_found(self) -> None:
         """T1: pattern not in any file → verification fails."""
-        project = self._create_project({
-            "main.py": "print('hello')\n",
-        })
+        project = self._create_project(
+            {
+                "main.py": "print('hello')\n",
+            }
+        )
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
             ac_index=0,
@@ -222,9 +222,11 @@ class TestSpecVerifier:
 
     def test_t2_structural_class_found(self) -> None:
         """T2: class exists in source → verified."""
-        project = self._create_project({
-            "provider.py": "class CameraProvider:\n    pass\n",
-        })
+        project = self._create_project(
+            {
+                "provider.py": "class CameraProvider:\n    pass\n",
+            }
+        )
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
             ac_index=0,
@@ -238,9 +240,11 @@ class TestSpecVerifier:
 
     def test_t2_structural_missing(self) -> None:
         """T2: required class not found → fails."""
-        project = self._create_project({
-            "main.py": "class SomethingElse:\n    pass\n",
-        })
+        project = self._create_project(
+            {
+                "main.py": "class SomethingElse:\n    pass\n",
+            }
+        )
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
             ac_index=0,
@@ -258,12 +262,8 @@ class TestSpecVerifier:
         project = self._create_project({"main.py": ""})
         verifier = SpecVerifier(project_dir=project)
         assertions = (
-            SpecAssertion(
-                ac_index=0, ac_text="behavioral", tier=VerificationTier.T3_BEHAVIORAL
-            ),
-            SpecAssertion(
-                ac_index=1, ac_text="subjective", tier=VerificationTier.T4_UNVERIFIABLE
-            ),
+            SpecAssertion(ac_index=0, ac_text="behavioral", tier=VerificationTier.T3_BEHAVIORAL),
+            SpecAssertion(ac_index=1, ac_text="subjective", tier=VerificationTier.T4_UNVERIFIABLE),
         )
         summary = verifier.verify_all(assertions)
         assert summary.total_assertions == 0
@@ -286,21 +286,27 @@ class TestSpecVerifier:
 
     def test_multiple_assertions_per_ac(self) -> None:
         """Multiple assertions for one AC — all must pass."""
-        project = self._create_project({
-            "config.py": "WARMUP = 10\nFPS = 60\n",
-        })
+        project = self._create_project(
+            {
+                "config.py": "WARMUP = 10\nFPS = 60\n",
+            }
+        )
         verifier = SpecVerifier(project_dir=project)
         assertions = (
             SpecAssertion(
-                ac_index=0, ac_text="Config values",
+                ac_index=0,
+                ac_text="Config values",
                 tier=VerificationTier.T1_CONSTANT,
-                pattern=r"WARMUP\s*=\s*", expected_value="10",
+                pattern=r"WARMUP\s*=\s*",
+                expected_value="10",
                 file_hint="*.py",
             ),
             SpecAssertion(
-                ac_index=0, ac_text="Config values",
+                ac_index=0,
+                ac_text="Config values",
                 tier=VerificationTier.T1_CONSTANT,
-                pattern=r"FPS\s*=\s*", expected_value="30",  # Wrong!
+                pattern=r"FPS\s*=\s*",
+                expected_value="30",  # Wrong!
                 file_hint="*.py",
             ),
         )
@@ -309,15 +315,19 @@ class TestSpecVerifier:
 
     def test_pycache_excluded(self) -> None:
         """__pycache__ directories are excluded from search."""
-        project = self._create_project({
-            "__pycache__/cached.py": "WARMUP = 999\n",
-            "config.py": "WARMUP = 10\n",
-        })
+        project = self._create_project(
+            {
+                "__pycache__/cached.py": "WARMUP = 999\n",
+                "config.py": "WARMUP = 10\n",
+            }
+        )
         verifier = SpecVerifier(project_dir=project)
         assertion = SpecAssertion(
-            ac_index=0, ac_text="test",
+            ac_index=0,
+            ac_text="test",
             tier=VerificationTier.T1_CONSTANT,
-            pattern=r"WARMUP\s*=\s*", expected_value="10",
+            pattern=r"WARMUP\s*=\s*",
+            expected_value="10",
             file_hint="**/*.py",
         )
         summary = verifier.verify_all((assertion,))
@@ -347,16 +357,18 @@ class TestAssertionExtractor:
     @pytest.mark.asyncio
     async def test_extracts_t1_assertion(self) -> None:
         """Extractor produces T1 assertion from LLM response."""
-        extractor = self._make_extractor([
-            {
-                "ac_index": 0,
-                "tier": "t1_constant",
-                "pattern": r"WARMUP_FRAMES\s*=\s*",
-                "expected_value": "10",
-                "file_hint": "*.py",
-                "description": "Warmup frames check",
-            }
-        ])
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t1_constant",
+                    "pattern": r"WARMUP_FRAMES\s*=\s*",
+                    "expected_value": "10",
+                    "file_hint": "*.py",
+                    "description": "Warmup frames check",
+                }
+            ]
+        )
         result = await extractor.extract("seed_1", ("WARMUP_FRAMES should be 10",))
         assert result.is_ok
         assertions = result.value
@@ -367,10 +379,18 @@ class TestAssertionExtractor:
     @pytest.mark.asyncio
     async def test_caches_by_seed_id(self) -> None:
         """Second call with same seed_id returns cached results."""
-        extractor = self._make_extractor([
-            {"ac_index": 0, "tier": "t2_structural", "pattern": "class Foo",
-             "expected_value": "", "file_hint": "*.py", "description": ""}
-        ])
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "t2_structural",
+                    "pattern": "class Foo",
+                    "expected_value": "",
+                    "file_hint": "*.py",
+                    "description": "",
+                }
+            ]
+        )
         r1 = await extractor.extract("seed_cache", ("Has class Foo",))
         r2 = await extractor.extract("seed_cache", ("Has class Foo",))
         assert r1.is_ok and r2.is_ok
@@ -382,9 +402,7 @@ class TestAssertionExtractor:
     async def test_llm_failure_returns_error(self) -> None:
         """LLM failure → Result.err."""
         mock_adapter = AsyncMock()
-        mock_adapter.complete = AsyncMock(
-            return_value=Result.err("timeout")
-        )
+        mock_adapter.complete = AsyncMock(return_value=Result.err("timeout"))
         extractor = AssertionExtractor(llm_adapter=mock_adapter)
         result = await extractor.extract("seed_fail", ("test",))
         assert result.is_err
@@ -419,10 +437,18 @@ class TestAssertionExtractor:
     @pytest.mark.asyncio
     async def test_invalid_tier_defaults_to_t4(self) -> None:
         """Unknown tier string → defaults to T4_UNVERIFIABLE."""
-        extractor = self._make_extractor([
-            {"ac_index": 0, "tier": "invalid_tier", "pattern": "",
-             "expected_value": "", "file_hint": "", "description": ""}
-        ])
+        extractor = self._make_extractor(
+            [
+                {
+                    "ac_index": 0,
+                    "tier": "invalid_tier",
+                    "pattern": "",
+                    "expected_value": "",
+                    "file_hint": "",
+                    "description": "",
+                }
+            ]
+        )
         result = await extractor.extract("seed_tier", ("test",))
         assert result.is_ok
         assert result.value[0].tier == VerificationTier.T4_UNVERIFIABLE

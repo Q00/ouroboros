@@ -69,9 +69,7 @@ class RegressionDetector:
             if not gen.evaluation_summary or not gen.evaluation_summary.ac_results:
                 continue
             for ac in gen.evaluation_summary.ac_results:
-                ac_history.setdefault(ac.ac_index, []).append(
-                    (gen.generation_number, ac.passed)
-                )
+                ac_history.setdefault(ac.ac_index, []).append((gen.generation_number, ac.passed))
 
         regressions: list[ACRegression] = []
         for ac in latest.evaluation_summary.ac_results:

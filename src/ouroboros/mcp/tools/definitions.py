@@ -1047,9 +1047,13 @@ class InterviewHandler:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
-                    await self._emit_event(interview_failed(
-                        state.interview_id, error_msg, phase="question_generation",
-                    ))
+                    await self._emit_event(
+                        interview_failed(
+                            state.interview_id,
+                            error_msg,
+                            phase="question_generation",
+                        )
+                    )
                     # Return recoverable result with session ID for retry
                     if "empty response" in error_msg.lower():
                         return Result.ok(
@@ -1060,7 +1064,7 @@ class InterviewHandler:
                                         text=(
                                             f"Interview started but question generation failed after retries. "
                                             f"Session ID: {state.interview_id}\n\n"
-                                            f"Resume with: session_id=\"{state.interview_id}\""
+                                            f'Resume with: session_id="{state.interview_id}"'
                                         ),
                                     ),
                                 ),
@@ -1068,9 +1072,7 @@ class InterviewHandler:
                                 meta={"session_id": state.interview_id, "recoverable": True},
                             )
                         )
-                    return Result.err(
-                        MCPToolError(error_msg, tool_name="ouroboros_interview")
-                    )
+                    return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
 
                 question = question_result.value
 
@@ -1097,9 +1099,12 @@ class InterviewHandler:
                 # Emit interview started event
                 from ouroboros.events.interview import interview_started
 
-                await self._emit_event(interview_started(
-                    state.interview_id, initial_context,
-                ))
+                await self._emit_event(
+                    interview_started(
+                        state.interview_id,
+                        initial_context,
+                    )
+                )
 
                 log.info(
                     "mcp.tool.interview.started",
@@ -1163,12 +1168,14 @@ class InterviewHandler:
                     # Emit response recorded event
                     from ouroboros.events.interview import interview_response_recorded
 
-                    await self._emit_event(interview_response_recorded(
-                        interview_id=session_id,
-                        round_number=len(state.rounds),
-                        question_preview=last_question,
-                        response_preview=answer,
-                    ))
+                    await self._emit_event(
+                        interview_response_recorded(
+                            interview_id=session_id,
+                            round_number=len(state.rounds),
+                            question_preview=last_question,
+                            response_preview=answer,
+                        )
+                    )
 
                     log.info(
                         "mcp.tool.interview.response_recorded",
@@ -1181,9 +1188,13 @@ class InterviewHandler:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
-                    await self._emit_event(interview_failed(
-                        session_id, error_msg, phase="question_generation",
-                    ))
+                    await self._emit_event(
+                        interview_failed(
+                            session_id,
+                            error_msg,
+                            phase="question_generation",
+                        )
+                    )
                     if "empty response" in error_msg.lower():
                         return Result.ok(
                             MCPToolResult(
@@ -1193,7 +1204,7 @@ class InterviewHandler:
                                         text=(
                                             f"Question generation failed after retries. "
                                             f"Session ID: {session_id}\n\n"
-                                            f"Resume with: session_id=\"{session_id}\""
+                                            f'Resume with: session_id="{session_id}"'
                                         ),
                                     ),
                                 ),
@@ -1201,9 +1212,7 @@ class InterviewHandler:
                                 meta={"session_id": session_id, "recoverable": True},
                             )
                         )
-                    return Result.err(
-                        MCPToolError(error_msg, tool_name="ouroboros_interview")
-                    )
+                    return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
 
                 question = question_result.value
 
@@ -1257,9 +1266,13 @@ class InterviewHandler:
             if _interview_id:
                 from ouroboros.events.interview import interview_failed
 
-                await self._emit_event(interview_failed(
-                    _interview_id, str(e), phase="unexpected_error",
-                ))
+                await self._emit_event(
+                    interview_failed(
+                        _interview_id,
+                        str(e),
+                        phase="unexpected_error",
+                    )
+                )
             return Result.err(
                 MCPToolError(
                     f"Interview failed: {e}",
@@ -1869,7 +1882,8 @@ class EvolveStepHandler:
             f"**Reason**: {sig.reason}",
             *(
                 [f"**Failed ACs**: {', '.join(str(i + 1) for i in sig.failed_acs)}"]
-                if sig.failed_acs else []
+                if sig.failed_acs
+                else []
             ),
             f"**Lineage**: {step.lineage.lineage_id} ({step.lineage.current_generation} generations)",
             f"**Next generation**: {step.next_generation}",

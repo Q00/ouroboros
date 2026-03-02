@@ -28,9 +28,7 @@ def _schema() -> OntologySchema:
     return OntologySchema(
         name="Test",
         description="Test schema",
-        fields=(
-            OntologyField(name="x", field_type="string", description="x", required=True),
-        ),
+        fields=(OntologyField(name="x", field_type="string", description="x", required=True),),
     )
 
 
@@ -71,9 +69,7 @@ def _generation(
 
 
 def _lineage_with_gens(*gen_ac_lists: tuple[ACResult, ...]) -> OntologyLineage:
-    gens = tuple(
-        _generation(i + 1, acs) for i, acs in enumerate(gen_ac_lists)
-    )
+    gens = tuple(_generation(i + 1, acs) for i, acs in enumerate(gen_ac_lists))
     return OntologyLineage(
         lineage_id="test_lin",
         goal="test goal",
@@ -107,14 +103,10 @@ class TestExtractACHistory:
             generation_number=1,
             seed_id="s1",
             ontology_snapshot=_schema(),
-            evaluation_summary=EvaluationSummary(
-                final_approved=True, highest_stage_passed=2
-            ),
+            evaluation_summary=EvaluationSummary(final_approved=True, highest_stage_passed=2),
             phase=GenerationPhase.COMPLETED,
         )
-        lineage = OntologyLineage(
-            lineage_id="no_ac", goal="test", generations=(gen,)
-        )
+        lineage = OntologyLineage(lineage_id="no_ac", goal="test", generations=(gen,))
         history = _extract_ac_history(lineage)
         assert history == {}
 
@@ -190,14 +182,10 @@ class TestFormatSummary:
             generation_number=1,
             seed_id="s1",
             ontology_snapshot=_schema(),
-            evaluation_summary=EvaluationSummary(
-                final_approved=True, highest_stage_passed=2
-            ),
+            evaluation_summary=EvaluationSummary(final_approved=True, highest_stage_passed=2),
             phase=GenerationPhase.COMPLETED,
         )
-        lineage = OntologyLineage(
-            lineage_id="no_ac", goal="test", generations=(gen,)
-        )
+        lineage = OntologyLineage(lineage_id="no_ac", goal="test", generations=(gen,))
         output = format_summary(lineage)
         assert "No per-AC data" in output
 
@@ -208,12 +196,8 @@ class TestFormatSummary:
             _ac_result(i, i >= 2)  # 0,1 fail; 2-11 pass
             for i in range(12)
         )
-        acs_gen2 = tuple(
-            _ac_result(i, i >= 2) for i in range(12)
-        )
-        acs_gen3 = tuple(
-            _ac_result(i, i >= 2) for i in range(12)
-        )
+        acs_gen2 = tuple(_ac_result(i, i >= 2) for i in range(12))
+        acs_gen3 = tuple(_ac_result(i, i >= 2) for i in range(12))
         lineage = _lineage_with_gens(acs_gen1, acs_gen2, acs_gen3)
         output = format_summary(lineage)
         assert "stable ACs" in output
@@ -286,7 +270,9 @@ class TestACDashboardHandler:
         )
         await store.append(
             lineage_generation_completed(
-                "lin_dash", 1, "seed_1",
+                "lin_dash",
+                1,
+                "seed_1",
                 _schema().model_dump(mode="json"),
                 eval_summary.model_dump(mode="json"),
                 ["Q1"],

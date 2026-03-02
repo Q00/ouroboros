@@ -430,8 +430,11 @@ class EvolutionaryLoop:
                 current_seed = initial_seed
             elif lineage.generations:
                 last_completed = next(
-                    (g for g in reversed(lineage.generations)
-                     if g.phase == GenerationPhase.COMPLETED),
+                    (
+                        g
+                        for g in reversed(lineage.generations)
+                        if g.phase == GenerationPhase.COMPLETED
+                    ),
                     None,
                 )
                 if last_completed is None:

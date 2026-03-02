@@ -194,7 +194,9 @@ Guidelines:
                 parts.append(f"    AC {ac.ac_index + 1} [{status}]: {ac.ac_content}")
             failed_acs = [ac for ac in eval_summary.ac_results if not ac.passed]
             if failed_acs:
-                parts.append(f"\n  PRIORITY: Fix {len(failed_acs)} failing AC(s) while preserving passing ones.")
+                parts.append(
+                    f"\n  PRIORITY: Fix {len(failed_acs)} failing AC(s) while preserving passing ones."
+                )
 
         # Regression context
         if lineage and len(lineage.generations) >= 2:

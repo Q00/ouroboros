@@ -85,7 +85,9 @@ class ArtifactCollector:
         )
 
     def _extract_file_paths(
-        self, output: str, project_dir: str | None = None,
+        self,
+        output: str,
+        project_dir: str | None = None,
     ) -> list[str]:
         """Extract file paths from Write/Edit tool calls in output.
 
@@ -112,9 +114,7 @@ class ArtifactCollector:
                 if not os.path.isfile(path):
                     continue
                 # Path boundary check: only allow files within project_dir
-                if real_project and not os.path.realpath(path).startswith(
-                    real_project + os.sep
-                ):
+                if real_project and not os.path.realpath(path).startswith(real_project + os.sep):
                     continue
                 paths.append(path)
                 seen.add(path)

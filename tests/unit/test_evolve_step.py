@@ -342,8 +342,10 @@ class TestEvolveStepConvergence:
             ontology_name="TaskManagerV1",
             fields=(
                 OntologyField(
-                    name="items", field_type="array",
-                    description="List of items", required=True,
+                    name="items",
+                    field_type="array",
+                    description="List of items",
+                    required=True,
                 ),
             ),
         )
@@ -353,18 +355,24 @@ class TestEvolveStepConvergence:
         await store.append(lineage_created("lin_conv", seed_v1.goal))
         await store.append(
             lineage_generation_completed(
-                "lin_conv", 1, seed_v1.metadata.seed_id,
+                "lin_conv",
+                1,
+                seed_v1.metadata.seed_id,
                 seed_v1.ontology_schema.model_dump(mode="json"),
                 make_eval_summary().model_dump(mode="json"),
-                ["Q1"], json.dumps(seed_v1.to_dict()),
+                ["Q1"],
+                json.dumps(seed_v1.to_dict()),
             )
         )
         await store.append(
             lineage_generation_completed(
-                "lin_conv", 2, seed_v2.metadata.seed_id,
+                "lin_conv",
+                2,
+                seed_v2.metadata.seed_id,
                 seed_v2.ontology_schema.model_dump(mode="json"),
                 make_eval_summary().model_dump(mode="json"),
-                ["Q2"], json.dumps(seed_v2.to_dict()),
+                ["Q2"],
+                json.dumps(seed_v2.to_dict()),
             )
         )
 

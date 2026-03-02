@@ -72,10 +72,12 @@ class TestArtifactCollector:
         assert bundle.text_summary == output
 
     def test_total_chars_tracked(self) -> None:
-        tmpdir = self._create_project({
-            "a.py": "x" * 100,
-            "b.py": "y" * 200,
-        })
+        tmpdir = self._create_project(
+            {
+                "a.py": "x" * 100,
+                "b.py": "y" * 200,
+            }
+        )
         output = f"Write: {os.path.join(tmpdir, 'a.py')}\nWrite: {os.path.join(tmpdir, 'b.py')}\n"
 
         collector = ArtifactCollector()

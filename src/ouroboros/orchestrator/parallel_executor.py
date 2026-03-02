@@ -552,9 +552,7 @@ class ParallelACExecutor:
 
         # Try decomposition if enabled and not too deep
         if self._enable_decomposition and depth < MAX_DECOMPOSITION_DEPTH:
-            self._console.print(
-                f"  [dim]AC {ac_index + 1}: Analyzing complexity...[/dim]"
-            )
+            self._console.print(f"  [dim]AC {ac_index + 1}: Analyzing complexity...[/dim]")
             self._flush_console()
             sub_acs = await self._try_decompose_ac(
                 ac_content=ac_content,

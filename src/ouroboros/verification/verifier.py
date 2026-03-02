@@ -243,11 +243,11 @@ class SpecVerifier:
 
         # Filter: must be within project_dir + exclude noise directories
         filtered = [
-            f for f in files
+            f
+            for f in files
             if os.path.realpath(f).startswith(real_project + os.sep)
             and not any(
-                skip in f
-                for skip in ("__pycache__", ".git", "node_modules", ".venv", ".tox")
+                skip in f for skip in ("__pycache__", ".git", "node_modules", ".venv", ".tox")
             )
         ]
 
@@ -274,7 +274,7 @@ class SpecVerifier:
         - "value"
         """
         end = match.end()
-        rest = content[end:end + 100]
+        rest = content[end : end + 100]
 
         # Try to extract a value: number, quoted string, or identifier
         value_match = re.match(
