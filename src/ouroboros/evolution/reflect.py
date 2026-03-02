@@ -20,10 +20,10 @@ from pydantic import BaseModel, Field
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyLineage
-from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
+from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.evolution.wonder import WonderOutput
 from ouroboros.providers.base import (
     CompletionConfig,

@@ -21,7 +21,6 @@ from ouroboros.verification.models import (
 )
 from ouroboros.verification.verifier import SpecVerifier
 
-
 # -- Model Tests --
 
 

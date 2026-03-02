@@ -95,7 +95,7 @@ class RegressionDetector:
 
             # Count consecutive failures from latest backwards
             consecutive = 0
-            for gen_num, passed in reversed(history):
+            for _gen_num, passed in reversed(history):
                 if not passed:
                     consecutive += 1
                 else:

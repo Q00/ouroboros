@@ -486,8 +486,8 @@ def create_ouroboros_server(
         PipelineConfig,
     )
     from ouroboros.mcp.tools.definitions import (
-        EvaluateHandler,
         ACDashboardHandler,
+        EvaluateHandler,
         EvolveRewindHandler,
         EvolveStepHandler,
         ExecuteSeedHandler,
@@ -531,10 +531,10 @@ def create_ouroboros_server(
 
     # Create evolution engines for evolve_step
     from ouroboros.core.lineage import ACResult, EvaluationSummary
+    from ouroboros.evaluation.artifact_collector import ArtifactCollector
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
     from ouroboros.evolution.reflect import ReflectEngine
     from ouroboros.evolution.wonder import WonderEngine
-    from ouroboros.evaluation.artifact_collector import ArtifactCollector
     from ouroboros.verification.extractor import AssertionExtractor
     from ouroboros.verification.verifier import SpecVerifier
 
@@ -659,8 +659,8 @@ def create_ouroboros_server(
 
         Looks for Write/Edit file paths and walks up to find project root.
         """
-        import re
         from pathlib import Path
+        import re
 
         write_matches = re.findall(r"(?:Write|Edit): (/[^\s]+)", artifact)
         if not write_matches:

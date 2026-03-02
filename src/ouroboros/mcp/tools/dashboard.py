@@ -165,7 +165,7 @@ def format_full(lineage: OntologyLineage) -> str:
     all_indices = sorted(history.keys())
     for ac_idx in all_indices:
         ac_results = history[ac_idx]
-        results_by_gen = {gen: passed for gen, passed in ac_results}
+        results_by_gen = dict(ac_results)
 
         row = f"AC {ac_idx + 1:<4}"
         for g in gen_numbers:

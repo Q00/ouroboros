@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from ouroboros.core.lineage import (
@@ -22,7 +20,6 @@ from ouroboros.mcp.tools.dashboard import (
     format_single_ac,
     format_summary,
 )
-
 
 # -- Helpers --
 
@@ -270,7 +267,6 @@ class TestACDashboardHandler:
 
     @pytest.mark.asyncio
     async def test_summary_mode(self) -> None:
-        from ouroboros.core.seed import Seed, SeedMetadata, EvaluationPrinciple, ExitCondition
         from ouroboros.events.lineage import lineage_created, lineage_generation_completed
         from ouroboros.mcp.tools.definitions import ACDashboardHandler
         from ouroboros.persistence.event_store import EventStore

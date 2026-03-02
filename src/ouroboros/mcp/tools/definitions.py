@@ -12,8 +12,8 @@ via the MCP server:
 - ouroboros_generate_seed: Convert interview to immutable seed
 """
 
-import os
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 

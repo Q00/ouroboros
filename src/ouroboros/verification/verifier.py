@@ -6,11 +6,11 @@ by scanning project files with regex patterns. T3/T4 are skipped.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import glob
 import logging
 import os
 import re
-from dataclasses import dataclass
 
 from ouroboros.verification.models import (
     ACVerificationReport,
