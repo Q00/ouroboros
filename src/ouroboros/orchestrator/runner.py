@@ -745,6 +745,7 @@ class OrchestratorRunner:
             adapter=self._adapter,
             event_store=self._event_store,
             console=self._console,
+            enable_decomposition=self._enable_decomposition,
         )
 
         parallel_result = await parallel_executor.execute_parallel(

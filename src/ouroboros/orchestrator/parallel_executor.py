@@ -158,6 +158,14 @@ class ParallelACExecutor:
         self._coordinator = LevelCoordinator(adapter)
         self._semaphore = anyio.Semaphore(max_concurrent)
 
+    def _flush_console(self) -> None:
+        """Flush console output to ensure progress is visible immediately."""
+        if hasattr(self._console, "file") and hasattr(self._console.file, "flush"):
+            try:
+                self._console.file.flush()
+            except (OSError, ValueError):
+                pass
+
     async def execute_parallel(
         self,
         seed: Seed,
@@ -291,8 +299,9 @@ class ParallelACExecutor:
 
             self._console.print(
                 f"\n[cyan]Level {level_num}/{total_levels}: "
-                f"Executing ACs {executable} in parallel[/cyan]"
+                f"Executing ACs {[idx + 1 for idx in executable]} in parallel[/cyan]"
             )
+            self._flush_console()
 
             # Emit level started event
             await self._emit_level_started(
@@ -418,6 +427,7 @@ class ParallelACExecutor:
                 f"[green]Level {level_num} complete: "
                 f"{level_success} succeeded, {level_failed} failed[/green]"
             )
+            self._flush_console()
 
             # Extract context from this level for next level's ACs
             if level_success > 0:
@@ -542,6 +552,10 @@ class ParallelACExecutor:
 
         # Try decomposition if enabled and not too deep
         if self._enable_decomposition and depth < MAX_DECOMPOSITION_DEPTH:
+            self._console.print(
+                f"  [dim]AC {ac_index + 1}: Analyzing complexity...[/dim]"
+            )
+            self._flush_console()
             sub_acs = await self._try_decompose_ac(
                 ac_content=ac_content,
                 ac_index=ac_index,
@@ -555,6 +569,7 @@ class ParallelACExecutor:
                 self._console.print(
                     f"  [cyan]AC {ac_index + 1} → Decomposed into {len(sub_acs)} Sub-ACs (parallel)[/cyan]"
                 )
+                self._flush_console()
 
                 # Emit decomposition event for TUI
                 for i, sub_ac in enumerate(sub_acs):
@@ -735,34 +750,36 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         sub_results: list[ACExecutionResult | BaseException] = [None] * len(sub_acs)
 
         async def _run_sub_ac(idx: int, sub_ac: str) -> None:
-            async with self._semaphore:
-                try:
-                    # Mark Sub-AC as executing before starting
-                    await self._emit_subtask_event(
-                        execution_id=execution_id,
-                        ac_index=parent_ac_index,
-                        sub_task_index=idx + 1,
-                        sub_task_desc=sub_ac[:50],
-                        status="executing",
-                    )
+            # NOTE: No semaphore here — the parent AC already holds a slot.
+            # Acquiring the same semaphore would deadlock when all AC slots
+            # are occupied (parent waits for Sub-ACs, Sub-ACs wait for slots).
+            try:
+                # Mark Sub-AC as executing before starting
+                await self._emit_subtask_event(
+                    execution_id=execution_id,
+                    ac_index=parent_ac_index,
+                    sub_task_index=idx + 1,
+                    sub_task_desc=sub_ac[:50],
+                    status="executing",
+                )
 
-                    sub_results[idx] = await self._execute_atomic_ac(
-                        ac_index=parent_ac_index * 100 + idx,
-                        ac_content=sub_ac,
-                        session_id=session_id,
-                        tools=tools,
-                        system_prompt=system_prompt,
-                        seed_goal=seed_goal,
-                        depth=depth,
-                        start_time=datetime.now(UTC),
-                        is_sub_ac=True,
-                        parent_ac_index=parent_ac_index,
-                        sub_ac_index=idx,
-                        level_contexts=level_contexts,
-                    )
-                except BaseException as e:
-                    if isinstance(e, anyio.get_cancelled_exc_class()):
-                        raise
+                sub_results[idx] = await self._execute_atomic_ac(
+                    ac_index=parent_ac_index * 100 + idx,
+                    ac_content=sub_ac,
+                    session_id=session_id,
+                    tools=tools,
+                    system_prompt=system_prompt,
+                    seed_goal=seed_goal,
+                    depth=depth,
+                    start_time=datetime.now(UTC),
+                    is_sub_ac=True,
+                    parent_ac_index=parent_ac_index,
+                    sub_ac_index=idx,
+                    level_contexts=level_contexts,
+                )
+            except BaseException as e:
+                if isinstance(e, anyio.get_cancelled_exc_class()):
+                    raise
                 sub_results[idx] = e
 
         async with anyio.create_task_group() as tg:
@@ -909,6 +926,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                     tool_input = message.data.get("tool_input", {})
                     tool_detail = self._format_tool_detail(message.tool_name, tool_input)
                     self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")
+                    self._flush_console()
 
                     # Emit tool started event for TUI
                     ac_id = (
