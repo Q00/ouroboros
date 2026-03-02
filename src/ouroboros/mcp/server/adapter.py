@@ -992,6 +992,7 @@ def create_ouroboros_server(
         ),
         InterviewHandler(
             interview_engine=interview_engine,
+            event_store=event_store,
         ),
         EvaluateHandler(
             event_store=event_store,

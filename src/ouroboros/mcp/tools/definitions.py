@@ -951,6 +951,26 @@ class InterviewHandler:
     """
 
     interview_engine: InterviewEngine | None = field(default=None, repr=False)
+    event_store: EventStore | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Initialize event store."""
+        self._event_store = self.event_store or EventStore()
+        self._initialized = False
+
+    async def _ensure_initialized(self) -> None:
+        """Ensure the event store is initialized."""
+        if not self._initialized:
+            await self._event_store.initialize()
+            self._initialized = True
+
+    async def _emit_event(self, event: Any) -> None:
+        """Emit event to store. Swallows errors to not break interview flow."""
+        try:
+            await self._ensure_initialized()
+            await self._event_store.append(event)
+        except Exception as e:
+            log.warning("mcp.tool.interview.event_emission_failed", error=str(e))
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -1006,6 +1026,8 @@ class InterviewHandler:
             state_dir=Path.home() / ".ouroboros" / "data",
         )
 
+        _interview_id: str | None = None  # Track for error event emission
+
         try:
             # Start new interview
             if initial_context:
@@ -1019,13 +1041,35 @@ class InterviewHandler:
                     )
 
                 state = result.value
+                _interview_id = state.interview_id
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(question_result.error),
-                            tool_name="ouroboros_interview",
+                    error_msg = str(question_result.error)
+                    from ouroboros.events.interview import interview_failed
+
+                    await self._emit_event(interview_failed(
+                        state.interview_id, error_msg, phase="question_generation",
+                    ))
+                    # Return recoverable result with session ID for retry
+                    if "empty response" in error_msg.lower():
+                        return Result.ok(
+                            MCPToolResult(
+                                content=(
+                                    MCPContentItem(
+                                        type=ContentType.TEXT,
+                                        text=(
+                                            f"Interview started but question generation failed after retries. "
+                                            f"Session ID: {state.interview_id}\n\n"
+                                            f"Resume with: session_id=\"{state.interview_id}\""
+                                        ),
+                                    ),
+                                ),
+                                is_error=True,
+                                meta={"session_id": state.interview_id, "recoverable": True},
+                            )
                         )
+                    return Result.err(
+                        MCPToolError(error_msg, tool_name="ouroboros_interview")
                     )
 
                 question = question_result.value
@@ -1049,6 +1093,13 @@ class InterviewHandler:
                         "mcp.tool.interview.save_failed_on_start",
                         error=str(save_result.error),
                     )
+
+                # Emit interview started event
+                from ouroboros.events.interview import interview_started
+
+                await self._emit_event(interview_started(
+                    state.interview_id, initial_context,
+                ))
 
                 log.info(
                     "mcp.tool.interview.started",
@@ -1080,6 +1131,7 @@ class InterviewHandler:
                     )
 
                 state = load_result.value
+                _interview_id = session_id
 
                 # If answer provided, record it first
                 if answer:
@@ -1108,6 +1160,16 @@ class InterviewHandler:
                         )
                     state = record_result.value
 
+                    # Emit response recorded event
+                    from ouroboros.events.interview import interview_response_recorded
+
+                    await self._emit_event(interview_response_recorded(
+                        interview_id=session_id,
+                        round_number=len(state.rounds),
+                        question_preview=last_question,
+                        response_preview=answer,
+                    ))
+
                     log.info(
                         "mcp.tool.interview.response_recorded",
                         session_id=session_id,
@@ -1116,11 +1178,31 @@ class InterviewHandler:
                 # Generate next question (whether resuming or after recording answer)
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            str(question_result.error),
-                            tool_name="ouroboros_interview",
+                    error_msg = str(question_result.error)
+                    from ouroboros.events.interview import interview_failed
+
+                    await self._emit_event(interview_failed(
+                        session_id, error_msg, phase="question_generation",
+                    ))
+                    if "empty response" in error_msg.lower():
+                        return Result.ok(
+                            MCPToolResult(
+                                content=(
+                                    MCPContentItem(
+                                        type=ContentType.TEXT,
+                                        text=(
+                                            f"Question generation failed after retries. "
+                                            f"Session ID: {session_id}\n\n"
+                                            f"Resume with: session_id=\"{session_id}\""
+                                        ),
+                                    ),
+                                ),
+                                is_error=True,
+                                meta={"session_id": session_id, "recoverable": True},
+                            )
                         )
+                    return Result.err(
+                        MCPToolError(error_msg, tool_name="ouroboros_interview")
                     )
 
                 question = question_result.value
@@ -1172,6 +1254,12 @@ class InterviewHandler:
 
         except Exception as e:
             log.error("mcp.tool.interview.error", error=str(e))
+            if _interview_id:
+                from ouroboros.events.interview import interview_failed
+
+                await self._emit_event(interview_failed(
+                    _interview_id, str(e), phase="unexpected_error",
+                ))
             return Result.err(
                 MCPToolError(
                     f"Interview failed: {e}",
