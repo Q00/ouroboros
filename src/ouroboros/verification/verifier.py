@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 50 * 1024  # 50KB per file
 MAX_FILES_PER_HINT = 100
+MAX_PATTERN_LENGTH = 200  # Limit LLM-generated regex length to reduce ReDoS risk
 
 
 @dataclass
@@ -86,6 +87,17 @@ class SpecVerifier:
             project_dir=self.project_dir,
         )
 
+    def _safe_compile(self, pattern: str, flags: int = 0) -> re.Pattern | None:
+        """Compile regex with length guard against ReDoS from LLM-generated patterns."""
+        if len(pattern) > MAX_PATTERN_LENGTH:
+            logger.warning("Regex pattern too long (%d chars), skipping", len(pattern))
+            return None
+        try:
+            return re.compile(pattern, flags)
+        except re.error as e:
+            logger.warning("Invalid regex pattern: %s", e)
+            return None
+
     def _verify_one(self, assertion: SpecAssertion) -> SpecVerificationResult | None:
         """Verify a single assertion. Returns None for skipped tiers."""
         if assertion.tier == VerificationTier.T1_CONSTANT:
@@ -113,13 +125,12 @@ class SpecVerifier:
                 detail=f"No files matched hint: {assertion.file_hint}",
             )
 
-        try:
-            pattern = re.compile(assertion.pattern)
-        except re.error as e:
+        pattern = self._safe_compile(assertion.pattern)
+        if pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
                 verified=True,
-                detail=f"Invalid regex pattern: {e}",
+                detail="Invalid or too-long regex pattern",
             )
 
         for file_path in files:
@@ -174,10 +185,7 @@ class SpecVerifier:
         files = self._find_files(assertion.file_hint)
 
         # First check: does the pattern match any filename?
-        try:
-            name_pattern = re.compile(assertion.pattern, re.IGNORECASE)
-        except re.error:
-            name_pattern = None
+        name_pattern = self._safe_compile(assertion.pattern, re.IGNORECASE)
 
         if name_pattern:
             for file_path in files:
@@ -191,13 +199,12 @@ class SpecVerifier:
                     )
 
         # Second check: search file contents for class/function/interface
-        try:
-            content_pattern = re.compile(assertion.pattern)
-        except re.error as e:
+        content_pattern = self._safe_compile(assertion.pattern)
+        if content_pattern is None:
             return SpecVerificationResult(
                 assertion=assertion,
                 verified=True,
-                detail=f"Invalid regex: {e}",
+                detail="Invalid or too-long regex pattern",
             )
 
         for file_path in files:
@@ -220,17 +227,25 @@ class SpecVerifier:
         )
 
     def _find_files(self, file_hint: str) -> list[str]:
-        """Find project files matching a glob hint."""
+        """Find project files matching a glob hint.
+
+        Validates that all returned paths are within project_dir to prevent
+        path traversal via crafted file_hint patterns (e.g., "../../etc/*").
+        """
         if not file_hint:
             file_hint = "**/*.py"
 
         pattern = os.path.join(self.project_dir, file_hint)
         files = glob.glob(pattern, recursive=True)
 
-        # Filter out common noise
+        # Canonicalize project_dir for path traversal check
+        real_project = os.path.realpath(self.project_dir)
+
+        # Filter: must be within project_dir + exclude noise directories
         filtered = [
             f for f in files
-            if not any(
+            if os.path.realpath(f).startswith(real_project + os.sep)
+            and not any(
                 skip in f
                 for skip in ("__pycache__", ".git", "node_modules", ".venv", ".tox")
             )

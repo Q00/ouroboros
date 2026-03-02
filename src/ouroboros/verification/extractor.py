@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from ouroboros.core.types import Result
@@ -70,8 +71,9 @@ class AssertionExtractor:
 
     llm_adapter: LLMAdapter
     model: str = _EXTRACTION_MODEL
-    _cache: dict[str, tuple[SpecAssertion, ...]] = field(
-        default_factory=dict, repr=False
+    max_cache_size: int = 64
+    _cache: OrderedDict[str, tuple[SpecAssertion, ...]] = field(
+        default_factory=OrderedDict, repr=False
     )
 
     async def extract(
@@ -117,6 +119,9 @@ class AssertionExtractor:
 
         assertions = self._parse_response(result.value.content, acceptance_criteria)
         self._cache[seed_id] = assertions
+        # LRU eviction: remove oldest entry if cache exceeds max size
+        while len(self._cache) > self.max_cache_size:
+            self._cache.popitem(last=False)
         return Result.ok(assertions)
 
     def _parse_response(
