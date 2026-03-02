@@ -138,7 +138,7 @@ class SessionSelectorScreen(Screen[None]):
                 table.add_row(*row_data, key=info["session_id"])
 
         except Exception as e:
-            self.notify(f"Failed to load sessions: {e}", severity="error")
+            self.notify(f"Failed to load sessions: {e}", severity="error", markup=False)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Handle row selection from DataTable."""

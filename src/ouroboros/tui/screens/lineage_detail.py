@@ -465,7 +465,7 @@ class LineageDetailScreen(Screen[None]):
             assert self._event_store is not None
             await self._event_store.append(lineage_rewound(lineage_id, from_gen, to_generation))
         except Exception as e:
-            self.notify(f"Failed to emit rewind event: {e}", severity="error")
+            self.notify(f"Failed to emit rewind event: {e}", severity="error", markup=False)
             return
 
         # 2. Check git dirty state
@@ -534,7 +534,7 @@ class LineageDetailScreen(Screen[None]):
                 self.app.pop_screen()
                 return
         except Exception as e:
-            self.notify(f"Git checkout error: {e}", severity="error")
+            self.notify(f"Git checkout error: {e}", severity="error", markup=False)
             self.app.pop_screen()
             return
 

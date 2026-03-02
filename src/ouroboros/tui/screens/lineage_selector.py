@@ -145,7 +145,7 @@ class LineageSelectorScreen(Screen[None]):
                 table.add_row(*row_data, key=lineage_id)
 
         except Exception as e:
-            self.notify(f"Failed to load lineages: {e}", severity="error")
+            self.notify(f"Failed to load lineages: {e}", severity="error", markup=False)
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         row_key = event.row_key

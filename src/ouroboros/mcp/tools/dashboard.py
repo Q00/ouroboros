@@ -11,7 +11,7 @@ Three display modes:
 
 from __future__ import annotations
 
-from ouroboros.core.lineage import ACResult, EvaluationSummary, OntologyLineage
+from ouroboros.core.lineage import ACResult, OntologyLineage
 
 
 def _extract_ac_history(
@@ -38,9 +38,9 @@ def _extract_ac_history(
 
 
 def _trend_dots(results: list[tuple[int, bool | None]], max_dots: int = 5) -> str:
-    """Render pass/fail trend as dots.
+    """Render pass/fail trend as P/F letters.
 
-    Returns e.g. "●●○●● (4/5)" where ● = pass, ○ = fail.
+    Returns e.g. "PPPFP (4/5)" where P = pass, F = fail.
     """
     recent = results[-max_dots:]
     dots = ""

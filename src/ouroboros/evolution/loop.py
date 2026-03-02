@@ -61,8 +61,8 @@ class EvolutionaryLoopConfig:
     stagnation_window: int = 3
     min_generations: int = 3
     generation_timeout_seconds: int = int(
-        os.environ.get("OUROBOROS_GENERATION_TIMEOUT", "7200")
-    )
+        os.environ.get("OUROBOROS_GENERATION_TIMEOUT", "0")
+    )  # 0 = no timeout
     enable_oscillation_detection: bool = True
     eval_gate_enabled: bool = True
     eval_min_score: float = 0.7
@@ -205,6 +205,7 @@ class EvolutionaryLoop:
             )
 
             # Run generation with timeout
+            loop_timeout = self.config.generation_timeout_seconds or None
             try:
                 gen_result = await asyncio.wait_for(
                     self._run_generation(
@@ -212,7 +213,7 @@ class EvolutionaryLoop:
                         generation_number=generation_number,
                         current_seed=current_seed,
                     ),
-                    timeout=self.config.generation_timeout_seconds,
+                    timeout=loop_timeout,
                 )
             except TimeoutError:
                 logger.error(
@@ -428,7 +429,15 @@ class EvolutionaryLoop:
                 # Caller provided seed explicitly (e.g., after rewind)
                 current_seed = initial_seed
             elif lineage.generations:
-                last_completed = lineage.generations[-1]
+                last_completed = next(
+                    (g for g in reversed(lineage.generations)
+                     if g.phase == GenerationPhase.COMPLETED),
+                    None,
+                )
+                if last_completed is None:
+                    return Result.err(
+                        OuroborosError("Events exist but no completed generations found")
+                    )
                 if last_completed.seed_json:
                     try:
                         current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
@@ -447,6 +456,7 @@ class EvolutionaryLoop:
                 return Result.err(OuroborosError("Events exist but no completed generations found"))
 
         # Step 2: Run one generation
+        timeout = self.config.generation_timeout_seconds or None  # 0 = no timeout
         try:
             gen_result = await asyncio.wait_for(
                 self._run_generation(
@@ -456,7 +466,7 @@ class EvolutionaryLoop:
                     execute=execute,
                     parallel=parallel,
                 ),
-                timeout=self.config.generation_timeout_seconds,
+                timeout=timeout,
             )
         except TimeoutError:
             # Note: _run_generation's CancelledError handler already emits
@@ -472,7 +482,7 @@ class EvolutionaryLoop:
             )
             signal = ConvergenceSignal(
                 converged=False,
-                reason="Generation timed out",
+                reason=f"Generation timed out after {self.config.generation_timeout_seconds}s",
                 ontology_similarity=0.0,
                 generation=generation_number,
             )

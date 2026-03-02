@@ -123,7 +123,16 @@ class ReflectEngine:
             logger.error("ReflectEngine LLM call failed: %s", result.error)
             return Result.err(result.error)
 
-        return Result.ok(self._parse_response(result.value.content, current_seed))
+        raw_content = result.value.content
+        logger.info(
+            "reflect.raw_response",
+            extra={
+                "content_length": len(raw_content),
+                "content_preview": raw_content[:500],
+            },
+        )
+
+        return Result.ok(self._parse_response(raw_content, current_seed))
 
     def _system_prompt(self) -> str:
         return """You are the Reflect Engine of Ouroboros, an evolutionary development system.
@@ -267,7 +276,13 @@ Guidelines:
                 reasoning=data.get("reasoning", ""),
             )
         except (json.JSONDecodeError, KeyError, TypeError) as e:
-            logger.warning("Failed to parse ReflectEngine response: %s", e)
+            logger.warning(
+                "reflect.parse_failed",
+                extra={
+                    "error": str(e),
+                    "raw_content": content[:1000],
+                },
+            )
             # Return current seed values with no mutations (safe fallback)
             return ReflectOutput(
                 refined_goal=current_seed.goal,
