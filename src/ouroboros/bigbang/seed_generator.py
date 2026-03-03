@@ -13,6 +13,7 @@ The SeedGenerator:
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from typing import Any
 
 import structlog
@@ -39,6 +40,7 @@ log = structlog.get_logger()
 # Default model moved to config.models.ClarificationConfig.default_model
 _FALLBACK_MODEL = "claude-opus-4-6"
 EXTRACTION_TEMPERATURE = 0.2
+_MAX_EXTRACTION_RETRIES = 1
 
 
 @dataclass
@@ -290,6 +292,8 @@ class SeedGenerator:
     ) -> Result[dict[str, Any], ProviderError]:
         """Extract structured requirements from interview using LLM.
 
+        Retries once with a clarified prompt on parse failure.
+
         Args:
             state: The interview state.
 
@@ -311,33 +315,94 @@ class SeedGenerator:
             max_tokens=self.max_tokens,
         )
 
-        result = await self.llm_adapter.complete(messages, config)
+        last_error = ""
+        last_response = ""
 
-        if result.is_err:
-            log.warning(
-                "seed.extraction.failed",
-                interview_id=state.interview_id,
-                error=str(result.error),
-            )
-            return Result.err(result.error)
+        for attempt in range(_MAX_EXTRACTION_RETRIES + 1):
+            result = await self.llm_adapter.complete(messages, config)
 
-        # Parse the response
-        try:
-            requirements = self._parse_extraction_response(result.value.content)
-            return Result.ok(requirements)
-        except (ValueError, KeyError) as e:
-            log.warning(
-                "seed.extraction.parse_failed",
-                interview_id=state.interview_id,
-                error=str(e),
-                response=result.value.content[:500],
-            )
-            return Result.err(
-                ProviderError(
-                    f"Failed to parse extraction response: {e}",
-                    details={"response_preview": result.value.content[:200]},
+            if result.is_err:
+                log.warning(
+                    "seed.extraction.failed",
+                    interview_id=state.interview_id,
+                    error=str(result.error),
+                    attempt=attempt + 1,
                 )
+                return Result.err(result.error)
+
+            last_response = result.value.content
+
+            try:
+                requirements = self._parse_extraction_response(last_response)
+                if attempt > 0:
+                    log.info(
+                        "seed.extraction.retry_succeeded",
+                        interview_id=state.interview_id,
+                        attempt=attempt + 1,
+                    )
+                return Result.ok(requirements)
+            except (ValueError, KeyError) as e:
+                last_error = str(e)
+                log.warning(
+                    "seed.extraction.parse_failed",
+                    interview_id=state.interview_id,
+                    error=last_error,
+                    response=last_response[:500],
+                    attempt=attempt + 1,
+                )
+
+                if attempt < _MAX_EXTRACTION_RETRIES:
+                    # Retry with clarified prompt
+                    messages = [
+                        Message(role=MessageRole.SYSTEM, content=system_prompt),
+                        Message(
+                            role=MessageRole.USER,
+                            content=self._build_retry_prompt(context, last_response, last_error),
+                        ),
+                    ]
+
+        return Result.err(
+            ProviderError(
+                f"Failed to parse extraction response after "
+                f"{_MAX_EXTRACTION_RETRIES + 1} attempts: {last_error}",
+                details={"response_preview": last_response[:200]},
             )
+        )
+
+    def _build_retry_prompt(self, context: str, failed_response: str, error: str) -> str:
+        """Build a retry prompt after extraction parse failure.
+
+        Args:
+            context: Original interview context.
+            failed_response: The response that failed to parse.
+            error: The parse error message.
+
+        Returns:
+            Retry prompt string.
+        """
+        return f"""Your previous response could not be parsed. Error: {error}
+
+Your response was:
+---
+{failed_response[:1000]}
+---
+
+Please try again. Extract requirements from this interview:
+---
+{context}
+---
+
+You MUST respond with ONLY the following format, one field per line, no other text:
+
+GOAL: <clear goal statement>
+CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
+ONTOLOGY_NAME: <name>
+ONTOLOGY_DESCRIPTION: <description>
+ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
+EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
+EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+PROJECT_TYPE: greenfield"""
 
     def _build_interview_context(self, state: InterviewState) -> str:
         """Build context string from interview state.
@@ -376,13 +441,65 @@ class SeedGenerator:
         Returns:
             User prompt string.
         """
-        return f"""Please extract structured requirements from the following interview conversation:
+        return f"""Extract structured requirements from the following interview conversation.
 
 ---
 {context}
 ---
 
-Extract all components and provide them in the specified format."""
+Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
+
+GOAL: <clear goal statement>
+CONSTRAINTS: <constraint 1> | <constraint 2> | ...
+ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
+ONTOLOGY_NAME: <name>
+ONTOLOGY_DESCRIPTION: <description>
+ONTOLOGY_FIELDS: <name>:<type>:<description> | ...
+EVALUATION_PRINCIPLES: <name>:<description>:<weight> | ...
+EXIT_CONDITIONS: <name>:<description>:<criteria> | ...
+PROJECT_TYPE: greenfield"""
+
+    _KNOWN_PREFIXES = (
+        "GOAL:",
+        "CONSTRAINTS:",
+        "ACCEPTANCE_CRITERIA:",
+        "ONTOLOGY_NAME:",
+        "ONTOLOGY_DESCRIPTION:",
+        "ONTOLOGY_FIELDS:",
+        "EVALUATION_PRINCIPLES:",
+        "EXIT_CONDITIONS:",
+        "PROJECT_TYPE:",
+        "CONTEXT_REFERENCES:",
+        "EXISTING_PATTERNS:",
+        "EXISTING_DEPENDENCIES:",
+    )
+
+    def _preprocess_response(self, response: str) -> str:
+        """Strip markdown code blocks and conversational preamble.
+
+        Args:
+            response: Raw LLM response text.
+
+        Returns:
+            Cleaned response starting from first recognized prefix.
+        """
+        text = response.strip()
+
+        # Strip markdown code block markers
+        code_block_match = re.search(r"```(?:\w*)\n(.*?)```", text, re.DOTALL)
+        if code_block_match:
+            text = code_block_match.group(1).strip()
+
+        # Find first recognized prefix and discard preamble
+        lines = text.split("\n")
+        start_idx = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if any(stripped.startswith(p) for p in self._KNOWN_PREFIXES):
+                start_idx = i
+                break
+
+        return "\n".join(lines[start_idx:])
 
     def _parse_extraction_response(self, response: str) -> dict[str, Any]:
         """Parse LLM response into requirements dictionary.
@@ -396,7 +513,8 @@ Extract all components and provide them in the specified format."""
         Raises:
             ValueError: If response cannot be parsed.
         """
-        lines = response.strip().split("\n")
+        cleaned = self._preprocess_response(response)
+        lines = cleaned.strip().split("\n")
         requirements: dict[str, Any] = {}
 
         for line in lines:
@@ -404,20 +522,7 @@ Extract all components and provide them in the specified format."""
             if not line:
                 continue
 
-            for prefix in [
-                "GOAL:",
-                "CONSTRAINTS:",
-                "ACCEPTANCE_CRITERIA:",
-                "ONTOLOGY_NAME:",
-                "ONTOLOGY_DESCRIPTION:",
-                "ONTOLOGY_FIELDS:",
-                "EVALUATION_PRINCIPLES:",
-                "EXIT_CONDITIONS:",
-                "PROJECT_TYPE:",
-                "CONTEXT_REFERENCES:",
-                "EXISTING_PATTERNS:",
-                "EXISTING_DEPENDENCIES:",
-            ]:
+            for prefix in self._KNOWN_PREFIXES:
                 if line.startswith(prefix):
                     key = prefix[:-1].lower()  # Remove colon and lowercase
                     value = line[len(prefix) :].strip()
@@ -433,7 +538,11 @@ Extract all components and provide them in the specified format."""
 
         for field_name in required_fields:
             if field_name not in requirements:
-                raise ValueError(f"Missing required field: {field_name}")
+                raise ValueError(
+                    f"Missing required field: {field_name}. "
+                    f"Found: {list(requirements.keys())}. "
+                    f"Response preview: {response[:200]}"
+                )
 
         return requirements
 

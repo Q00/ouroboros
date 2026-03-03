@@ -477,15 +477,14 @@ class TestSeedGeneratorErrorHandling:
 
     @pytest.mark.asyncio
     async def test_generate_handles_malformed_response(self) -> None:
-        """SeedGenerator returns error for malformed LLM response."""
+        """SeedGenerator returns error for malformed LLM response after retries."""
         mock_adapter = AsyncMock()
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
 
-        # Missing required fields
-        mock_adapter.complete = AsyncMock(
-            return_value=Result.ok(create_mock_completion_response("INVALID: missing fields"))
-        )
+        # Missing required fields — both initial and retry return bad data
+        bad_response = Result.ok(create_mock_completion_response("INVALID: missing fields"))
+        mock_adapter.complete = AsyncMock(side_effect=[bad_response, bad_response])
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             generator = SeedGenerator(
@@ -496,6 +495,114 @@ class TestSeedGeneratorErrorHandling:
             result = await generator.generate(state, low_ambiguity)
 
             assert result.is_err
+            assert mock_adapter.complete.call_count == 2
+
+
+class TestSeedGeneratorRobustParsing:
+    """Test SeedGenerator handles non-ideal LLM responses."""
+
+    @pytest.mark.asyncio
+    async def test_parse_response_with_conversational_preamble(self) -> None:
+        """Parser handles LLM response with prose before structured output."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        response_with_preamble = (
+            "Based on the interview, here are the extracted requirements:\n\n"
+            + create_valid_extraction_response()
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(response_with_preamble))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.goal == "Build a CLI task manager with project grouping"
+
+    @pytest.mark.asyncio
+    async def test_parse_response_with_markdown_code_block(self) -> None:
+        """Parser handles structured output wrapped in markdown code blocks."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        response_with_markdown = (
+            "Here are the extracted requirements:\n\n```\n"
+            + create_valid_extraction_response()
+            + "\n```"
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(response_with_markdown))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.goal == "Build a CLI task manager with project grouping"
+
+    @pytest.mark.asyncio
+    async def test_extraction_retries_on_parse_failure(self) -> None:
+        """Extraction retries once with clarification prompt on parse failure."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        conversational = Result.ok(
+            create_mock_completion_response(
+                "Let me explore the codebase to provide accurate context."
+            )
+        )
+        valid = Result.ok(create_mock_completion_response(create_valid_extraction_response()))
+        mock_adapter.complete = AsyncMock(side_effect=[conversational, valid])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert mock_adapter.complete.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_extraction_fails_after_max_retries(self) -> None:
+        """Extraction fails gracefully after all retry attempts exhausted."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds()
+        low_ambiguity = create_low_ambiguity_score()
+
+        bad = Result.ok(
+            create_mock_completion_response("I'd be happy to help! Let me think about this...")
+        )
+        mock_adapter.complete = AsyncMock(side_effect=[bad, bad])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_err
+            assert "after 2 attempts" in str(result.error)
+            assert mock_adapter.complete.call_count == 2
 
 
 class TestSeedGeneratorSaveAndLoad:
