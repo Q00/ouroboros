@@ -63,17 +63,22 @@ When the user invokes this skill:
 
    ```
    while iteration < max_iterations:
-       # Execute with parallel agents
-       result = await execute_parallel(request, context)
+       # Execute with parallel agents via evolve_step
+       # QA is built into ouroboros_evolve_step — the response
+       # includes a "### QA Verdict" section automatically.
+       result = await evolve_step(lineage_id, seed_content, execute=true)
 
-       # Verify the result
-       verification = await verify_result(result, acceptance_criteria)
+       # Parse QA from evolve_step response text
+       # (EvolveStepHandler runs QA internally and appends verdict)
+       verification.passed = (qa_verdict == "pass")
+       verification.score = qa_score
 
        # Record in history
        state.verification_history.append({
            "iteration": iteration,
            "passed": verification.passed,
            "score": verification.score,
+           "verdict": qa_verdict,
            "timestamp": <now>
        })
 
@@ -94,11 +99,15 @@ When the user invokes this skill:
 4. **Report progress** each iteration:
    ```
    [Ralph Iteration <i>/<max>]
-   Execution complete. Verifying...
+   Execution complete. Running QA...
 
-   Verification: <FAILED/PASSED>
-   Score: <score>
-   Issues: <list of issues>
+   QA Verdict: <PASS/REVISE/FAIL> (score: <score>)
+   Differences:
+     - <difference 1>
+     - <difference 2>
+   Suggestions:
+     - <suggestion 1>
+     - <suggestion 2>
 
    The boulder never stops. Continuing...
    ```
@@ -134,32 +143,36 @@ User: ooo ralph fix all failing tests
 [Ralph Iteration 1/10]
 Executing in parallel...
 Fixing test failures...
+Running QA...
 
-Verification: FAILED
-Score: 0.65
-Issues:
-- 3 tests still failing
-- Type errors in src/api.py
+QA Verdict: REVISE (score: 0.65)
+Differences:
+  - 3 tests still failing
+  - Type errors in src/api.py
+Suggestions:
+  - Fix type annotations in api.py before retrying
 
 The boulder never stops. Continuing...
 
 [Ralph Iteration 2/10]
 Executing in parallel...
 Fixing remaining issues...
+Running QA...
 
-Verification: FAILED
-Score: 0.85
-Issues:
-- 1 test edge case failing
+QA Verdict: REVISE (score: 0.85)
+Differences:
+  - 1 test edge case failing
+Suggestions:
+  - Add boundary check in parse_input()
 
 The boulder never stops. Continuing...
 
 [Ralph Iteration 3/10]
 Executing in parallel...
 Fixing edge case...
+Running QA...
 
-Verification: PASSED
-Score: 1.0
+QA Verdict: PASS (score: 1.0)
 
 Ralph COMPLETE
 ==============
@@ -167,10 +180,10 @@ Request: Fix all failing tests
 Duration: 8m 32s
 Iterations: 3
 
-Verification History:
-- Iteration 1: FAILED (0.65)
-- Iteration 2: FAILED (0.85)
-- Iteration 3: PASSED (1.0)
+QA History:
+- Iteration 1: REVISE (0.65)
+- Iteration 2: REVISE (0.85)
+- Iteration 3: PASS (1.0)
 
 All tests passing. Build successful.
 ```

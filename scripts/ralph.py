@@ -41,12 +41,17 @@ _SIMILARITY_RE = re.compile(r"^\*\*Convergence similarity\*\*:\s*([\d.]+)%", re.
 _NEXT_GEN_RE = re.compile(r"^\*\*Next generation\*\*:\s*(\d+)", re.MULTILINE)
 _LINEAGE_RE = re.compile(r"^\*\*Lineage\*\*:\s*(\S+)", re.MULTILINE)
 
+# QA verdict parsing — EvolveStepHandler embeds QA under "### QA Verdict"
+_QA_SECTION_RE = re.compile(r"### QA Verdict\s*\n([\s\S]*)", re.MULTILINE)
+_QA_SCORE_RE = re.compile(r"Score:\s*([\d.]+)")
+_QA_VERDICT_RE = re.compile(r"Verdict:\s*(\w+)")
+
 
 def parse_evolve_text(text: str) -> dict[str, Any]:
     """Parse the markdown text returned by ouroboros_evolve_step.
 
     Returns a dict with keys: generation, action, similarity,
-    next_generation, lineage_id.  Missing fields are None.
+    next_generation, lineage_id, qa.  Missing fields are None.
     """
 
     def _first(pattern: re.Pattern[str]) -> str | None:
@@ -57,12 +62,27 @@ def parse_evolve_text(text: str) -> dict[str, Any]:
     similarity_str = _first(_SIMILARITY_RE)
     next_gen_str = _first(_NEXT_GEN_RE)
 
+    # Parse embedded QA verdict — only from "### QA Verdict" section
+    # to avoid matching Score/Verdict from the Evaluation section
+    qa = None
+    qa_section_match = _QA_SECTION_RE.search(text)
+    if qa_section_match:
+        qa_text = qa_section_match.group(1)
+        score_match = _QA_SCORE_RE.search(qa_text)
+        verdict_match = _QA_VERDICT_RE.search(qa_text)
+        qa = {
+            "verdict": verdict_match.group(1) if verdict_match else "unknown",
+            "score": float(score_match.group(1)) if score_match else None,
+            "error": None,
+        }
+
     return {
         "generation": int(gen_str) if gen_str else None,
         "action": _first(_ACTION_RE),
         "similarity": round(float(similarity_str) / 100, 4) if similarity_str else None,
         "next_generation": int(next_gen_str) if next_gen_str else None,
         "lineage_id": _first(_LINEAGE_RE),
+        "qa": qa,
     }
 
 
@@ -100,6 +120,8 @@ async def _call_evolve(session: Any, args: argparse.Namespace) -> dict[str, Any]
         tool_args["execute"] = False
     if args.no_parallel:
         tool_args["parallel"] = False
+    if args.no_qa:
+        tool_args["skip_qa"] = True
 
     result = await session.call_tool("ouroboros_evolve_step", tool_args)
 
@@ -160,6 +182,7 @@ async def _call_evolve(session: Any, args: argparse.Namespace) -> dict[str, Any]
         "similarity": parsed.get("similarity"),
         "next_generation": parsed.get("next_generation"),
         "lateral_think_applied": lateral_applied,
+        "qa": parsed.get("qa"),
         "error": None,
     }
 
@@ -184,6 +207,7 @@ def _error_result(msg: str) -> dict[str, Any]:
         "similarity": None,
         "next_generation": None,
         "lateral_think_applied": False,
+        "qa": None,
         "error": msg,
     }
 
@@ -212,6 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=2,
         help="Lateral-think retries on stagnation (default: 2)",
     )
+    p.add_argument("--no-qa", action="store_true", help="Skip post-execution QA evaluation")
     p.add_argument(
         "--server-command",
         default="ouroboros",

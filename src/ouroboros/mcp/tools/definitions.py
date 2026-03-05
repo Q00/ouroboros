@@ -99,6 +99,13 @@ class ExecuteSeedHandler:
                     required=False,
                     default=10,
                 ),
+                MCPToolParameter(
+                    name="skip_qa",
+                    type=ToolInputType.BOOLEAN,
+                    description="Skip post-execution QA evaluation. Default: false",
+                    required=False,
+                    default=False,
+                ),
             ),
         )
 
@@ -205,17 +212,45 @@ class ExecuteSeedHandler:
             # Format execution results
             result_text = self._format_execution_result(exec_result, seed)
 
+            # Post-execution QA
+            qa_verdict_text = ""
+            qa_meta = None
+            skip_qa = arguments.get("skip_qa", False)
+            if exec_result.success and not skip_qa:
+                from ouroboros.mcp.tools.qa import QAHandler
+
+                qa_handler = QAHandler(llm_adapter=self.llm_adapter)
+                quality_bar = self._derive_quality_bar(seed)
+                qa_result = await qa_handler.handle(
+                    {
+                        "artifact": exec_result.final_message or "",
+                        "artifact_type": "test_output",
+                        "quality_bar": quality_bar,
+                        "seed_content": seed_content,
+                        "pass_threshold": 0.80,
+                    }
+                )
+                if qa_result.is_ok:
+                    qa_verdict_text = "\n\n" + qa_result.value.content[0].text
+                    qa_meta = qa_result.value.meta
+
+            meta = {
+                "session_id": exec_result.session_id,
+                "execution_id": exec_result.execution_id,
+                "success": exec_result.success,
+                "messages_processed": exec_result.messages_processed,
+                "duration_seconds": exec_result.duration_seconds,
+            }
+            if qa_meta:
+                meta["qa"] = qa_meta
+
             return Result.ok(
                 MCPToolResult(
-                    content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
+                    content=(
+                        MCPContentItem(type=ContentType.TEXT, text=result_text + qa_verdict_text),
+                    ),
                     is_error=not exec_result.success,
-                    meta={
-                        "session_id": exec_result.session_id,
-                        "execution_id": exec_result.execution_id,
-                        "success": exec_result.success,
-                        "messages_processed": exec_result.messages_processed,
-                        "duration_seconds": exec_result.duration_seconds,
-                    },
+                    meta=meta,
                 )
             )
         except Exception as e:
@@ -226,6 +261,12 @@ class ExecuteSeedHandler:
                     tool_name="ouroboros_execute_seed",
                 )
             )
+
+    @staticmethod
+    def _derive_quality_bar(seed: Seed) -> str:
+        """Derive a quality bar string from seed acceptance criteria."""
+        ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
+        return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
 
     def _format_execution_result(self, exec_result, seed: Seed) -> str:
         """Format execution result as human-readable text.
@@ -1801,6 +1842,13 @@ class EvolveStepHandler:
                     required=False,
                     default=True,
                 ),
+                MCPToolParameter(
+                    name="skip_qa",
+                    type=ToolInputType.BOOLEAN,
+                    description="Skip post-execution QA evaluation. Default: false",
+                    required=False,
+                    default=False,
+                ),
             ),
         )
 
@@ -1934,20 +1982,54 @@ class EvolveStepHandler:
             for mf in gen.ontology_delta.modified_fields:
                 text_lines.append(f"- **Modified**: {mf.field_name}: {mf.old_type} → {mf.new_type}")
 
+        # Post-execution QA
+        qa_meta = None
+        skip_qa = arguments.get("skip_qa", False)
+        if step.action.value in ("continue", "converged") and execute and not skip_qa:
+            from ouroboros.mcp.tools.qa import QAHandler
+
+            qa_handler = QAHandler()
+            quality_bar = "Generation must improve upon previous generation."
+            if initial_seed:
+                ac_lines = [f"- {ac}" for ac in initial_seed.acceptance_criteria]
+                quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
+                    ac_lines
+                )
+
+            artifact = gen.execution_output or "\n".join(text_lines)
+            qa_result = await qa_handler.handle(
+                {
+                    "artifact": artifact,
+                    "artifact_type": "test_output",
+                    "quality_bar": quality_bar,
+                    "seed_content": seed_content or "",
+                    "pass_threshold": 0.80,
+                }
+            )
+            if qa_result.is_ok:
+                text_lines.append("")
+                text_lines.append("### QA Verdict")
+                text_lines.append(qa_result.value.content[0].text)
+                qa_meta = qa_result.value.meta
+
+        meta = {
+            "lineage_id": step.lineage.lineage_id,
+            "generation": gen.generation_number,
+            "action": step.action.value,
+            "similarity": sig.ontology_similarity,
+            "converged": sig.converged,
+            "next_generation": step.next_generation,
+            "executed": execute,
+            "has_execution_output": gen.execution_output is not None,
+        }
+        if qa_meta:
+            meta["qa"] = qa_meta
+
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),),
                 is_error=False,
-                meta={
-                    "lineage_id": step.lineage.lineage_id,
-                    "generation": gen.generation_number,
-                    "action": step.action.value,
-                    "similarity": sig.ontology_similarity,
-                    "converged": sig.converged,
-                    "next_generation": step.next_generation,
-                    "executed": execute,
-                    "has_execution_output": gen.execution_output is not None,
-                },
+                meta=meta,
             )
         )
 
@@ -2472,6 +2554,8 @@ def evolve_rewind_handler() -> EvolveRewindHandler:
 
 
 # List of all Ouroboros tools for registration
+from ouroboros.mcp.tools.qa import QAHandler  # noqa: E402
+
 OUROBOROS_TOOLS: tuple[
     ExecuteSeedHandler
     | SessionStatusHandler
@@ -2483,7 +2567,8 @@ OUROBOROS_TOOLS: tuple[
     | LateralThinkHandler
     | EvolveStepHandler
     | LineageStatusHandler
-    | EvolveRewindHandler,
+    | EvolveRewindHandler
+    | QAHandler,
     ...,
 ] = (
     ExecuteSeedHandler(),
@@ -2497,4 +2582,5 @@ OUROBOROS_TOOLS: tuple[
     EvolveStepHandler(),
     LineageStatusHandler(),
     EvolveRewindHandler(),
+    QAHandler(),
 )

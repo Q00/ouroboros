@@ -98,3 +98,6 @@ Then add to Claude Code's MCP configuration.
 - **execute flag**: `true` (default) runs full Execute→Evaluate each generation.
   `false` skips execution for fast ontology exploration. Previous generation's
   execution output is fed into Wonder/Reflect for informed evolution
+- **QA verdict**: Each generation's response includes a QA Verdict section
+  (when `execute=true` and `skip_qa` is not set). Use the QA score to track
+  quality progression across generations. Pass `skip_qa: true` to disable

@@ -23,6 +23,7 @@ MAX_CYCLES=30
 MAX_RETRIES=2
 NO_EXECUTE=false
 NO_PARALLEL=false
+NO_QA=false
 SERVER_COMMAND=""
 SERVER_ARGS=""
 
@@ -38,6 +39,7 @@ Options:
   --max-retries N        Lateral-think retries per stagnation (default: 2)
   --no-execute           Ontology-only evolution (skip execution)
   --no-parallel          Sequential AC execution (slower, more stable)
+  --no-qa                Skip post-execution QA evaluation
   --server-command CMD   MCP server executable (default: ouroboros)
   --server-args ARGS     MCP server arguments (default: mcp)
   -h, --help             Show this help
@@ -61,6 +63,7 @@ while [[ $# -gt 0 ]]; do
         --max-retries)  MAX_RETRIES="$2"; shift 2 ;;
         --no-execute)   NO_EXECUTE=true; shift ;;
         --no-parallel)  NO_PARALLEL=true; shift ;;
+        --no-qa)        NO_QA=true; shift ;;
         --server-command) SERVER_COMMAND="$2"; shift 2 ;;
         --server-args)  shift; SERVER_ARGS="$*"; break ;;
         -h|--help)      usage ;;
@@ -149,6 +152,9 @@ build_py_args() {
     if [[ "$NO_PARALLEL" == "true" ]]; then
         py_args+=("--no-parallel")
     fi
+    if [[ "$NO_QA" == "true" ]]; then
+        py_args+=("--no-qa")
+    fi
     if [[ -n "$SERVER_COMMAND" ]]; then
         py_args+=("--server-command" "$SERVER_COMMAND")
     fi
@@ -200,8 +206,13 @@ while (( cycle < MAX_CYCLES )); do
     generation=$(echo "$output" | python3 -c "import sys,json; print(json.load(sys.stdin).get('generation',''))" 2>/dev/null || echo "")
     similarity=$(echo "$output" | python3 -c "import sys,json; print(json.load(sys.stdin).get('similarity',''))" 2>/dev/null || echo "")
     error_msg=$(echo "$output" | python3 -c "import sys,json; print(json.load(sys.stdin).get('error','') or '')" 2>/dev/null || echo "")
+    qa_verdict=$(echo "$output" | python3 -c "import sys,json; q=json.load(sys.stdin).get('qa'); print(q.get('verdict','') if q else '')" 2>/dev/null || echo "")
+    qa_score=$(echo "$output" | python3 -c "import sys,json; q=json.load(sys.stdin).get('qa'); print(q.get('score','') if q else '')" 2>/dev/null || echo "")
 
     log "  action=${action} gen=${generation} sim=${similarity}"
+    if [[ -n "$qa_verdict" ]]; then
+        log "  QA: verdict=${qa_verdict} score=${qa_score}"
+    fi
 
     # Tag the generation (skip on failure — rollback handles that case)
     if [[ -n "$generation" ]] && [[ "$generation" != "None" ]] && [[ "$action" != "failed" ]]; then

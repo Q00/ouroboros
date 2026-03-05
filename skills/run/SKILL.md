@@ -53,7 +53,16 @@ When the user invokes this skill:
    - Show success/failure status
    - Show session ID (for later status checks)
    - Show execution summary
-   - Suggest `/ouroboros:evaluate` for post-execution verification
+
+5. **Post-execution QA** (automatic):
+   `ouroboros_execute_seed` automatically runs QA after successful execution.
+   The QA verdict is included in the tool response text.
+   To skip: pass `skip_qa: true` to the tool.
+
+   Present QA verdict from the response:
+   - **PASS**: suggest `ooo evaluate` for formal evaluation
+   - **REVISE**: show differences/suggestions, offer to re-run
+   - **FAIL/ESCALATE**: surface to user for manual review
 
 ## Fallback (No MCP Server)
 
