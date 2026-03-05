@@ -19,7 +19,8 @@ ooo interview "Build a task management CLI"
 ooo seed
 ```
 
-> **Important:** `ooo` commands are Claude Code skills. They run inside a Claude Code session (start one with `claude`), not directly in your terminal. `ooo setup` only needs to be run once — it registers the MCP server globally.
+> **Important:** `ooo` commands are Claude Code skills. They run inside a Claude Code session (start one with `claude`), not directly in your terminal.
+> `ooo setup` registers the MCP server globally (one-time) and optionally adds an Ouroboros reference block to your project's CLAUDE.md (per-project).
 
 **Done!** You now have a validated specification ready for execution.
 
@@ -56,7 +57,7 @@ claude plugin install ouroboros@ouroboros
 
 Then start a Claude Code session and run:
 ```
-# One-time setup (inside Claude Code)
+# Setup (inside Claude Code)
 ooo setup
 
 # Verify installation

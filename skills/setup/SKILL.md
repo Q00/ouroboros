@@ -15,9 +15,11 @@ ooo setup
 /ouroboros:setup --uninstall
 ```
 
-> **Note**: Setup is a **one-time global operation** — run it once after installing the plugin.
-> It registers the MCP server in `~/.claude/mcp.json` (user-level), so it applies across all projects.
-> You do not need to run setup again for each new project.
+> **Note**: Setup does two things:
+> 1. **MCP server registration** (`~/.claude/mcp.json`) — one-time, global across all projects
+> 2. **CLAUDE.md integration** (optional) — per-project, adds an Ouroboros command reference block
+>
+> After the first run, you only need to re-run setup in new projects if you want the CLAUDE.md integration.
 
 ---
 

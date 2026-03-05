@@ -91,7 +91,7 @@ ooo setup
 ```
 
 > `ooo` commands are Claude Code skills — they run **inside a Claude Code session**, not in your terminal.
-> Setup is a one-time global operation. You don't need to run it again for each project.
+> Setup registers the MCP server globally (one-time) and optionally adds an Ouroboros reference block to your project's CLAUDE.md.
 
 **Step 3 — Start building:**
 ```
@@ -222,7 +222,7 @@ Two mathematical gates, one philosophy: **don't build until you're clear (Ambigu
 ## Commands
 
 > All `ooo` commands run inside a Claude Code session, not in your terminal.
-> Run `ooo setup` once after installation to register the MCP server.
+> Run `ooo setup` after installation to register the MCP server (one-time) and optionally integrate with your project's CLAUDE.md.
 
 | Command | What It Does |
 |:--------|:-------------|
