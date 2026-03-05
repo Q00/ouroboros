@@ -15,8 +15,9 @@ ooo setup
 /ouroboros:setup --uninstall
 ```
 
-> **Note**: Setup is required for the full Ouroboros experience.
-> Run this after installing the plugin to unlock all features.
+> **Note**: Setup is a **one-time global operation** — run it once after installing the plugin.
+> It registers the MCP server in `~/.claude/mcp.json` (user-level), so it applies across all projects.
+> You do not need to run setup again for each new project.
 
 ---
 

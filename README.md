@@ -78,15 +78,23 @@ The first diamond is **Socratic**: diverge into questions, converge into ontolog
 
 ## Quick Start
 
+**Step 1 — Install the plugin** (in your terminal):
 ```bash
-# Install
 claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
+```
 
-# One-time setup
+**Step 2 — Run setup** (inside a Claude Code session):
+```
+# Start Claude Code, then type:
 ooo setup
+```
 
-# Question everything
+> `ooo` commands are Claude Code skills — they run **inside a Claude Code session**, not in your terminal.
+> Setup is a one-time global operation. You don't need to run it again for each project.
+
+**Step 3 — Start building:**
+```
 ooo interview "I want to build a task management CLI"
 ```
 
@@ -213,7 +221,8 @@ Two mathematical gates, one philosophy: **don't build until you're clear (Ambigu
 
 ## Commands
 
-> Run `ooo setup` first after installation. All commands require it.
+> All `ooo` commands run inside a Claude Code session, not in your terminal.
+> Run `ooo setup` once after installation to register the MCP server.
 
 | Command | What It Does |
 |:--------|:-------------|

@@ -2,18 +2,24 @@
 
 Transform your vague ideas into validated specifications and execute them with confidence.
 
-## Quick Start: 3 Commands in 60 Seconds
+## Quick Start
 
 ### Plugin Mode (No Python Required)
+
+**In your terminal — install the plugin:**
 ```bash
-# Install (2 commands)
 claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
+```
 
-# Your first workflow (2 commands)
+**Inside a Claude Code session — run one-time setup, then start building:**
+```
+ooo setup
 ooo interview "Build a task management CLI"
 ooo seed
 ```
+
+> **Important:** `ooo` commands are Claude Code skills. They run inside a Claude Code session (start one with `claude`), not directly in your terminal. `ooo setup` only needs to be run once — it registers the MCP server globally.
 
 **Done!** You now have a validated specification ready for execution.
 
@@ -43,9 +49,15 @@ ouroboros run --seed ~/.ouroboros/seeds/latest.yaml
 
 ### Option 1: Plugin Mode (Recommended for Beginners)
 ```bash
-# Install via Claude Code marketplace
+# Install via Claude Code marketplace (run in your terminal)
 claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
+```
+
+Then start a Claude Code session and run:
+```
+# One-time setup (inside Claude Code)
+ooo setup
 
 # Verify installation
 ooo help
@@ -130,8 +142,10 @@ export OUROBOROS_MCP_PORT=8000
 
 ## Your First Workflow: Complete Tutorial
 
+> All `ooo` commands below run inside a Claude Code session.
+
 ### Step 1: Start with an Idea
-```bash
+```
 # Launch the Socratic interview
 ooo interview "I want to build a personal finance tracker"
 ```
@@ -146,7 +160,7 @@ The interview will ask questions like:
 Continue until the ambiguity score drops below 0.2.
 
 ### Step 3: Generate the Seed
-```bash
+```
 # Create immutable specification
 ooo seed
 ```
@@ -188,7 +202,7 @@ Watch the TUI dashboard show:
 - Real-time metrics (tokens, cost, drift)
 
 ### Step 6: Evaluate Results
-```bash
+```
 # Run 3-stage evaluation
 ooo evaluate
 ```
@@ -203,7 +217,9 @@ The evaluation checks:
 ## Common Workflows
 
 ### Workflow 1: New Project from Scratch
-```bash
+```
+# All ooo commands run inside a Claude Code session
+
 # 1. Clarify requirements
 ooo interview "Build a REST API for a blog"
 
@@ -211,43 +227,43 @@ ooo interview "Build a REST API for a blog"
 ooo seed
 
 # 3. Execute with visualization
-ouroboros run --seed blog-api.yaml --ui tui
+ooo run
 
 # 4. Evaluate results
 ooo evaluate
 
 # 5. Monitor drift
-ouroboros status drift
+ooo status
 ```
 
 ### Workflow 2: Bug Fixing
-```bash
+```
 # 1. Analyze the problem
-ooo analyze "User registration fails with email validation"
+ooo interview "User registration fails with email validation"
 
 # 2. Generate fix seed
 ooo seed
 
 # 3. Execute
-ouroboros run --seed bugfix-email.yaml
+ooo run
 
 # 4. Verify fix
 ooo evaluate
 ```
 
 ### Workflow 3: Feature Enhancement
-```bash
+```
 # 1. Plan the enhancement
-ooo plan "Add real-time notifications to the chat app"
+ooo interview "Add real-time notifications to the chat app"
 
 # 2. Break into tasks
 ooo seed
 
-# 3. Execute with team coordination
-ouroboros run --seed notifications.yaml --mode swarm
+# 3. Execute
+ooo run
 
 # 4. Review implementation
-ooo review "notifications feature"
+ooo evaluate
 ```
 
 ---
