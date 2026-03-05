@@ -12,7 +12,7 @@ claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
 ```
 
-**Inside a Claude Code session — run one-time setup, then start building:**
+**Inside a Claude Code session — run setup, then start building:**
 ```
 ooo setup
 ooo interview "Build a task management CLI"
@@ -385,11 +385,8 @@ ouroboros cost breakdown
 
 #### Stuck execution
 ```bash
-# Check status
+# Check status (terminal)
 ouroboros status --events
-
-# Use unstuck mode
-ooo unstuck
 
 # Or restart from checkpoint
 ouroboros run --seed project.yaml --resume
