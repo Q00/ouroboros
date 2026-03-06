@@ -328,7 +328,7 @@ class ParallelACExecutor:
             # (anyio manages cancel scopes correctly across concurrent tasks,
             # unlike asyncio.gather which creates separate asyncio Tasks
             # that break the SDK's internal cancel scope tracking)
-            level_results: list[ACExecutionResult | BaseException] = [None] * len(executable)
+            level_results: list[ACExecutionResult | BaseException | None] = [None] * len(executable)
 
             # Capture current contexts for this level's closure
             current_contexts = list(level_contexts)
@@ -389,7 +389,7 @@ class ParallelACExecutor:
                         ac_index=ac_idx,
                         error=error_msg,
                     )
-                else:
+                elif result is not None:
                     ac_result = result
                     if ac_result.success:
                         level_success += 1
@@ -745,7 +745,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         # Execute all Sub-ACs in parallel using anyio task group
         # (preserves cancel scope context for SDK calls)
-        sub_results: list[ACExecutionResult | BaseException] = [None] * len(sub_acs)
+        sub_results: list[ACExecutionResult | BaseException | None] = [None] * len(sub_acs)
 
         async def _run_sub_ac(idx: int, sub_ac: str) -> None:
             # NOTE: No semaphore here — the parent AC already holds a slot.
@@ -797,7 +797,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                         depth=depth,
                     )
                 )
-            else:
+            elif result is not None:
                 final_results.append(result)
 
         success_count = sum(1 for r in final_results if r.success)
@@ -852,7 +852,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
         # Build prompt
         if is_sub_ac:
-            label = f"Sub-AC {sub_ac_index + 1} of AC {parent_ac_index + 1}"
+            label = f"Sub-AC {(sub_ac_index or 0) + 1} of AC {(parent_ac_index or 0) + 1}"
             indent = "    "
         else:
             label = f"AC {ac_index + 1}"

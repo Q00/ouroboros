@@ -206,7 +206,7 @@ def sanitize_for_logging(data: dict[str, Any]) -> dict[str, Any]:
         >>> sanitize_for_logging({"api_key": "sk-secret123", "name": "test"})
         {'api_key': '<REDACTED>', 'name': 'test'}
     """
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in data.items():
         if is_sensitive_field(key):
             result[key] = "<REDACTED>"

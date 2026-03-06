@@ -231,7 +231,7 @@ class ExecuteSeedHandler:
                     }
                 )
                 if qa_result.is_ok:
-                    qa_verdict_text = "\n\n" + qa_result.value.content[0].text
+                    qa_verdict_text = "\n\n" + (qa_result.value.content[0].text or "")
                     qa_meta = qa_result.value.meta
 
             meta = {
@@ -2009,7 +2009,7 @@ class EvolveStepHandler:
             if qa_result.is_ok:
                 text_lines.append("")
                 text_lines.append("### QA Verdict")
-                text_lines.append(qa_result.value.content[0].text)
+                text_lines.append(qa_result.value.content[0].text or "")
                 qa_meta = qa_result.value.meta
 
         meta = {

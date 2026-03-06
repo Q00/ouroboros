@@ -4,12 +4,9 @@ This module implements the interview protocol that refines vague ideas into
 clear requirements through iterative questioning. Users control when to stop.
 """
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-import fcntl
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +14,7 @@ from pydantic import BaseModel, Field
 import structlog
 
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.file_lock import file_lock as _file_lock
 from ouroboros.core.security import InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -25,30 +23,6 @@ from ouroboros.providers.base import (
     Message,
     MessageRole,
 )
-
-
-@contextmanager
-def _file_lock(file_path: Path, exclusive: bool = True) -> Iterator[None]:
-    """Context manager for file locking to prevent race conditions.
-
-    Args:
-        file_path: Path to the file to lock.
-        exclusive: If True, use exclusive lock (for writes).
-                   If False, use shared lock (for reads).
-
-    Yields:
-        None when lock is acquired.
-    """
-    lock_path = file_path.with_suffix(file_path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(lock_path, "w") as lock_file:
-        lock_type = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        try:
-            fcntl.flock(lock_file.fileno(), lock_type)
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 log = structlog.get_logger()

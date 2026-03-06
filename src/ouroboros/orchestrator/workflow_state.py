@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 import re
+from collections.abc import Sequence
 from typing import Any
 
 
@@ -327,7 +328,7 @@ class WorkflowStateTracker:
 
     def __init__(
         self,
-        acceptance_criteria: list[str],
+        acceptance_criteria: Sequence[str],
         goal: str = "",
         session_id: str = "",
         activity_map: dict[str, ActivityType] | None = None,
@@ -335,7 +336,7 @@ class WorkflowStateTracker:
         """Initialize tracker with acceptance criteria.
 
         Args:
-            acceptance_criteria: List of AC descriptions.
+            acceptance_criteria: Sequence of AC descriptions.
             goal: The workflow goal.
             session_id: Session identifier.
             activity_map: Optional tool-to-activity mapping override.

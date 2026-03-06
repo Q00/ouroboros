@@ -444,6 +444,7 @@ class SkillRegistry:
                     value = value.strip()
 
                     # Handle list values (YAML format with - prefix)
+                    parsed_value: str | list[str] = value
                     # Case 1: Inline list like `triggers: - item1`
                     if value.startswith("-"):
                         # This is a list, collect all items
@@ -453,7 +454,7 @@ class SkillRegistry:
                         while j < len(lines) and lines[j].strip().startswith("-"):
                             list_items.append(lines[j].strip().lstrip("-").strip())
                             j += 1
-                        value = list_items
+                        parsed_value = list_items
                         i = j - 1  # Adjust i since we looked ahead
                     # Case 2: Empty value with list on following lines like `triggers:` then `- item1`
                     elif not value:
@@ -476,10 +477,10 @@ class SkillRegistry:
                                 break
                             j += 1
                         if list_items:
-                            value = list_items
+                            parsed_value = list_items
                         i = j - 1  # Adjust i since we looked ahead
 
-                    frontmatter[key] = value
+                    frontmatter[key] = parsed_value
                 i += 1
             content_start = i + 1  # Skip the closing ---
 

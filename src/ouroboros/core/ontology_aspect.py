@@ -32,7 +32,7 @@ from enum import StrEnum
 import logging
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
-from cachetools import TTLCache
+from cachetools import TTLCache  # type: ignore[import-untyped]
 
 from ouroboros.core.errors import OuroborosError
 from ouroboros.core.types import Result
