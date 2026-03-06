@@ -56,12 +56,12 @@ When the user invokes this skill:
      session_id: <existing session ID>
    ```
 
-4. Present the execution results to the user:
+5. Present the execution results to the user:
    - Show success/failure status
    - Show session ID (for later status checks)
    - Show execution summary
 
-5. **Post-execution QA** (automatic):
+6. **Post-execution QA** (automatic):
    `ouroboros_execute_seed` automatically runs QA after successful execution.
    The QA verdict is included in the tool response text.
    To skip: pass `skip_qa: true` to the tool.

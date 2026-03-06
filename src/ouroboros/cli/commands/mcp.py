@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import signal
 from pathlib import Path
 from typing import Annotated
 
@@ -54,10 +53,13 @@ def _check_stale_instance() -> bool:
     try:
         os.kill(old_pid, 0)  # Signal 0 = check existence, don't kill
         return False  # Process is alive — not stale
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         # Process is gone — stale PID file
         _cleanup_pid_file()
         return True
+    except PermissionError:
+        # Process exists but we can't signal it — not stale
+        return False
 
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
@@ -179,8 +181,15 @@ def serve(
         ouroboros mcp serve --transport sse --port 9000
     """
     # Check for stale instances from unclean shutdowns
-    if _check_stale_instance():
+    stale = _check_stale_instance()
+    if stale:
         print_info("Cleaned up stale MCP server PID file from previous session")
+    elif _PID_FILE.exists():
+        try:
+            old_pid = _PID_FILE.read_text(encoding="utf-8").strip()
+            print_info(f"MCP server may already be running (PID {old_pid})")
+        except OSError:
+            pass
 
     try:
         db_path = db if db else None

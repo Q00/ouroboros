@@ -69,7 +69,7 @@ When the user invokes this skill:
    }
    ```
 
-3. **Enter the loop**:
+4. **Enter the loop**:
 
    ```
    while iteration < max_iterations:
@@ -113,7 +113,7 @@ When the user invokes this skill:
            break
    ```
 
-4. **Report progress** each iteration:
+5. **Report progress** each iteration:
    ```
    [Ralph Iteration <i>/<max>]
    Execution complete. Running QA...
@@ -129,7 +129,7 @@ When the user invokes this skill:
    The boulder never stops. Continuing...
    ```
 
-5. **Handle interruption**:
+6. **Handle interruption**:
    - If user says "stop": save checkpoint, exit gracefully
    - If user says "continue": reload from last checkpoint
    - State persists across session resets

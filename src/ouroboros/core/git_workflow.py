@@ -8,7 +8,7 @@ can respect the user's configured workflow.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -96,10 +96,11 @@ def detect_git_workflow(project_root: Path) -> GitWorkflowConfig:
     if use_branches and not protected:
         protected = {"main", "master"}
 
-    # Detect auto-PR preference
+    # Detect explicit auto-PR preference (requires "auto" keyword to avoid
+    # false positives on general "create a PR" workflow instructions)
     auto_pr = bool(
         re.search(
-            r"(?:create|open)\s+(?:a\s+)?(?:pull\s+request|pr)",
+            r"auto(?:matically)?\s+(?:create|open)\s+(?:a\s+)?(?:pull\s+request|pr)",
             claude_md_content,
             re.IGNORECASE,
         )
