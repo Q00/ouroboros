@@ -293,6 +293,17 @@ src/ouroboros/
 
 ---
 
+## Integrations
+
+| Platform | Status | Docs |
+|----------|--------|------|
+| Claude Code | ✅ Native | [Running with Claude Code](./docs/running-with-claude-code.md) |
+| OpenClaw | ✅ Community | [OpenClaw Integration](./docs/integrations/openclaw.md) |
+
+OpenClaw is a personal AI gateway (Telegram, WhatsApp, Discord). The integration lets you run Ouroboros interviews over any messaging channel — no terminal required. See [docs/integrations/openclaw.md](./docs/integrations/openclaw.md).
+
+---
+
 ## Contributing
 
 ```bash
