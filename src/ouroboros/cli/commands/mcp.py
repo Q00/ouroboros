@@ -6,12 +6,58 @@ Start and manage the MCP (Model Context Protocol) server.
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
+from pathlib import Path
 from typing import Annotated
 
 from rich.console import Console
 import typer
 
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+
+# PID file for detecting stale instances
+_PID_DIR = Path.home() / ".ouroboros"
+_PID_FILE = _PID_DIR / "mcp-server.pid"
+
+
+def _write_pid_file() -> None:
+    """Write current PID to file for stale instance detection."""
+    _PID_DIR.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+
+
+def _cleanup_pid_file() -> None:
+    """Remove PID file on clean shutdown."""
+    try:
+        _PID_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _check_stale_instance() -> bool:
+    """Check for and clean up stale MCP server instances.
+
+    Returns:
+        True if a stale instance was cleaned up.
+    """
+    if not _PID_FILE.exists():
+        return False
+
+    try:
+        old_pid = int(_PID_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        _cleanup_pid_file()
+        return True
+
+    # Check if the old process is still running
+    try:
+        os.kill(old_pid, 0)  # Signal 0 = check existence, don't kill
+        return False  # Process is alive — not stale
+    except (ProcessLookupError, PermissionError):
+        # Process is gone — stale PID file
+        _cleanup_pid_file()
+        return True
 
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
@@ -69,8 +115,14 @@ async def _run_mcp_server(
         print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
 
+    # Write PID file and register cleanup
+    _write_pid_file()
+
     # Start serving
-    await server.serve(transport=transport, host=host, port=port)
+    try:
+        await server.serve(transport=transport, host=host, port=port)
+    finally:
+        _cleanup_pid_file()
 
 
 @app.command()
@@ -126,14 +178,28 @@ def serve(
         # Start with SSE transport on custom port
         ouroboros mcp serve --transport sse --port 9000
     """
+    # Check for stale instances from unclean shutdowns
+    if _check_stale_instance():
+        print_info("Cleaned up stale MCP server PID file from previous session")
+
     try:
         db_path = db if db else None
         asyncio.run(_run_mcp_server(host, port, transport, db_path))
     except KeyboardInterrupt:
+        _cleanup_pid_file()
         print_info("\nMCP Server stopped")
     except ImportError as e:
+        _cleanup_pid_file()
         print_error(f"MCP dependencies not installed: {e}")
         print_info("Install with: uv add mcp")
+        raise typer.Exit(1) from e
+    except Exception as e:
+        _cleanup_pid_file()
+        print_error(f"MCP Server error: {e}")
+        print_info("Recovery steps:")
+        print_info("  1. Restart Claude Code (/exit and relaunch)")
+        print_info("  2. Or run: ouroboros mcp serve --transport stdio")
+        print_info("  3. Check ~/.ouroboros/mcp-server.pid for stale processes")
         raise typer.Exit(1) from e
 
 
