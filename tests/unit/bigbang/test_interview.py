@@ -838,9 +838,7 @@ class TestInterviewEngineBrownfieldDetection:
         mock_explore.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_start_interview_exploration_failure_non_blocking(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_start_interview_exploration_failure_non_blocking(self, tmp_path: Path) -> None:
         """start_interview succeeds even when exploration raises."""
         (tmp_path / "go.mod").write_text("module example.com/demo\n")
 

@@ -491,14 +491,10 @@ class TestInterviewHandlerCwd:
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_ok=True, is_err=False, value="First question?")
         )
-        mock_engine.save_state = AsyncMock(
-            return_value=MagicMock(is_ok=True, is_err=False)
-        )
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
 
         handler = InterviewHandler(interview_engine=mock_engine)
-        await handler.handle(
-            {"initial_context": "Add a feature", "cwd": str(tmp_path)}
-        )
+        await handler.handle({"initial_context": "Add a feature", "cwd": str(tmp_path)})
 
         mock_engine.start_interview.assert_awaited_once()
         call_kwargs = mock_engine.start_interview.call_args
