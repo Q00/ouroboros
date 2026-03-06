@@ -7,6 +7,8 @@ This module provides:
 - PeriodicCheckpointer: Background task for automatic checkpointing
 """
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager

@@ -8,6 +8,8 @@ The UnitOfWork pattern ensures that all related persistence operations
 (events and checkpoints) are committed atomically at phase boundaries.
 """
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 
 from ouroboros.core.errors import PersistenceError

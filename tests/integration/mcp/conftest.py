@@ -4,6 +4,8 @@ This module provides mock MCP server infrastructure for testing MCP client
 and server adapters without requiring real external MCP servers.
 """
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field

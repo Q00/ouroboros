@@ -17,6 +17,8 @@ Exception Hierarchy:
             └── MCPToolError              - Tool execution failures
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 from ouroboros.core.errors import OuroborosError

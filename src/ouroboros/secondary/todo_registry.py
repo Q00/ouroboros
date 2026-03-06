@@ -32,6 +32,8 @@ Usage:
             print(f"{todo.priority}: {todo.description}")
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum

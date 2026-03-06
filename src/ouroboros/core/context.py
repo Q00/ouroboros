@@ -11,6 +11,8 @@ Key features:
 - Comprehensive observability with before/after metrics
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any

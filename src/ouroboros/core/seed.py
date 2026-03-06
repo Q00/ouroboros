@@ -14,6 +14,8 @@ This module defines:
 - Supporting types for seed components
 """
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4

@@ -12,6 +12,8 @@ Exception Hierarchy:
     └── ValidationError   - Schema and data validation failures
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 

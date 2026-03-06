@@ -4,6 +4,8 @@ All events in Ouroboros inherit from BaseEvent. Events are immutable
 (frozen Pydantic models) and follow the dot.notation.past_tense naming convention.
 """
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
