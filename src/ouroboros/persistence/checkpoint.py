@@ -8,42 +8,18 @@ This module provides:
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from ouroboros.core.errors import PersistenceError
+from ouroboros.core.file_lock import file_lock as _file_lock
 from ouroboros.core.types import Result
-
-
-@contextmanager
-def _file_lock(file_path: Path, exclusive: bool = True) -> Iterator[None]:
-    """Context manager for file locking to prevent race conditions.
-
-    Args:
-        file_path: Path to the file to lock.
-        exclusive: If True, use exclusive lock (for writes).
-                   If False, use shared lock (for reads).
-
-    Yields:
-        None when lock is acquired.
-    """
-    lock_path = file_path.with_suffix(file_path.suffix + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(lock_path, "w") as lock_file:
-        lock_type = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        try:
-            fcntl.flock(lock_file.fileno(), lock_type)
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,7 +320,7 @@ class CheckpointStore:
             current_path = self._get_checkpoint_path(seed_id, level)
             if current_path.exists():
                 next_path = self._get_checkpoint_path(seed_id, level + 1)
-                current_path.rename(next_path)
+                os.replace(current_path, next_path)
 
     def _get_checkpoint_path(self, seed_id: str, level: int = 0) -> Path:
         """Get file path for checkpoint at specific rollback level.
