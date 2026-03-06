@@ -65,10 +65,11 @@ When the user invokes this skill:
    - Highlight the final approval decision
    - If rejected, explain the failure reason
    - Suggest fixes if evaluation fails
-   - Always end with a 📍 Next suggestion based on the outcome:
-     - **APPROVED**: `📍 Done! Your implementation passes all checks.` (optionally suggest `ooo evolve` for refinement)
+   - Always end with a 📍 suggestion based on the outcome:
+     - **APPROVED**: `📍 Done! Your implementation passes all checks. Optional: ooo evolve to iteratively refine`
      - **REJECTED at Stage 1** (mechanical): `📍 Next: Fix the build/test failures above, then ooo evaluate — or ooo ralph for automated fix loop`
      - **REJECTED at Stage 2** (semantic): `📍 Next: ooo run to re-execute with fixes — or ooo evolve for iterative refinement`
+     - **REJECTED at Stage 3** (consensus): `📍 Next: ooo interview to re-examine requirements — or ooo unstuck to challenge assumptions`
 
 ## Fallback (No MCP Server)
 
@@ -99,6 +100,5 @@ Stage 2: Semantic Evaluation
   Goal Alignment: 0.90
   Drift Score: 0.08
 
-📍 Done! Your implementation passes all checks.
-   Optional: `ooo evolve` to iteratively refine the ontology
+📍 Done! Your implementation passes all checks. Optional: `ooo evolve` to iteratively refine
 ```

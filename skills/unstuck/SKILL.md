@@ -86,5 +86,5 @@ with 2 tables, you haven't found the core feature yet.
 - Can you use a single JSON column instead of normalized tables?
 - What if you started with flat files and added a DB later?
 
-📍 Next: Try the approach above, then `ooo run` to execute — or `ooo ralph` for persistent loop
+📍 Next: Try the approach above, then `ooo run` to execute — or `ooo interview` to re-examine the problem
 ```

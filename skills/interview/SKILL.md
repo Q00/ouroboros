@@ -80,6 +80,8 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 4. Use Read, Glob, Grep, WebFetch to explore context if needed
 5. Continue until the user says "done"
 6. Interview results live in conversation context (not persisted)
+7. After completion, suggest the next step in `📍 Next:` format:
+   `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 ## Interviewer Behavior (Both Modes)
 

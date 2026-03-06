@@ -52,7 +52,8 @@ When the user invokes this skill:
    - Show progress information
    - If drift measured, show the drift report
    - If drift exceeds threshold (0.3), warn and suggest actions
-   - End with a `📍` next-step based on drift:
+   - End with a `📍` next-step based on context:
+     - No drift measured: `📍 Session active — say "am I drifting?" to measure drift, or continue with ooo run`
      - Drift ≤ 0.3: `📍 On track — continue with ooo run or ooo evaluate when ready`
      - Drift > 0.3: `📍 Warning: significant drift detected. Consider ooo interview to re-clarify, or ooo evolve to course-correct`
 
