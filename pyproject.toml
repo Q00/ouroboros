@@ -63,20 +63,15 @@ dev = [
 python_version = "3.14"
 ignore_missing_imports = true
 disable_error_code = [
+    # Remaining: complex generic covariance in evaluation/, providers/
     "union-attr",
     "arg-type",
     "return-value",
     "assignment",
+    # Remaining: fcntl (Unix-only) in persistence/, plugin/, bigbang/ — see PR #63
     "attr-defined",
-    "misc",
+    # Remaining: wrong kwargs in bigbang/seed_generator, events/ontology
     "call-arg",
-    "override",
-    "list-item",
-    "dict-item",
-    "operator",
-    "str-bytes-safe",
-    "no-any-return",
-    "import-untyped",
 ]
 
 [tool.pytest.ini_options]

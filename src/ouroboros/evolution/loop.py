@@ -383,6 +383,7 @@ class EvolutionaryLoop:
         # Step 1: Replay events to reconstruct state
         events = await self.event_store.replay_lineage(lineage_id)
 
+        lineage: OntologyLineage | None = None
         if not events:
             # Gen 1: no events exist yet
             if initial_seed is None:

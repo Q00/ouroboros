@@ -435,7 +435,7 @@ class SelectableACTree(Static):
 
         tree.root.expand()
 
-    def _add_children(
+    def _add_children(  # type: ignore[override]  # intentionally different from DOMNode
         self,
         parent: TreeNode[dict[str, Any]],
         parent_data: dict[str, Any],

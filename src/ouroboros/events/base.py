@@ -8,10 +8,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class BaseEvent(BaseModel, frozen=True):
+class BaseEvent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     """Base class for all Ouroboros events.
 
     Events are immutable records of state changes. They are persisted in the

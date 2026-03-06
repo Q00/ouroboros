@@ -214,7 +214,7 @@ def _mask_dict_sensitive_data(data: dict[str, Any]) -> dict[str, Any]:
     Returns:
         Dictionary with sensitive values masked.
     """
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in data.items():
         if is_sensitive_field(key):
             result[key] = "<REDACTED>"

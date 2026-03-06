@@ -384,7 +384,7 @@ Facts: {compressed_context["key_facts"]}
             "current_ac": context.current_ac,
             "key_facts": context.key_facts[:5],  # Keep top 5 facts only
             "metadata": {
-                **context.metadata,
+                **context.metadata,  # type: ignore[dict-item]
                 "compression_timestamp": datetime.now(UTC).isoformat(),
                 "compression_method": "aggressive_truncation",
                 "compression_reason": "llm_failure",
