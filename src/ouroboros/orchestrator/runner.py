@@ -639,6 +639,77 @@ class OrchestratorRunner:
                 )
             )
 
+        except KeyboardInterrupt:
+            # Ctrl+C: save checkpoint before exiting so session can be resumed
+            duration = (datetime.now(UTC) - start_time).total_seconds()
+            log.info(
+                "orchestrator.runner.interrupted",
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                messages_processed=messages_processed,
+            )
+
+            # Save interruption checkpoint with current AC progress
+            checkpoint_state = {
+                "session_id": tracker.session_id,
+                "execution_id": exec_id,
+                "seed_id": seed.metadata.seed_id,
+                "seed_goal": seed.goal,
+                "acceptance_criteria": seed.acceptance_criteria,
+                "messages_processed": messages_processed,
+                "duration_seconds": duration,
+                "interrupted_at": datetime.now(UTC).isoformat(),
+                "workflow_state": state_tracker.state.to_dict(),
+            }
+
+            try:
+                from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
+
+                checkpoint = CheckpointData.create(
+                    seed_id=seed.metadata.seed_id,
+                    phase="interrupted",
+                    state=checkpoint_state,
+                )
+                store = CheckpointStore()
+                store.save(checkpoint)
+            except Exception:
+                log.warning("orchestrator.runner.checkpoint_save_failed_on_interrupt")
+
+            # Emit interruption event
+            failed_event = create_session_failed_event(
+                session_id=tracker.session_id,
+                error_message="Interrupted by user (Ctrl+C)",
+                error_type="KeyboardInterrupt",
+                messages_processed=messages_processed,
+            )
+            await self._event_store.append(failed_event)
+
+            self._console.print(
+                f"\n[yellow]⚠ Execution interrupted. "
+                f"Progress saved ({messages_processed} messages, "
+                f"{state_tracker.state.completed_count}/{state_tracker.state.total_count} ACs).[/yellow]"
+            )
+            self._console.print(
+                f"[blue]📍 Resume with: ouroboros workflow resume {tracker.session_id}[/blue]"
+            )
+
+            return Result.ok(
+                OrchestratorResult(
+                    success=False,
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    summary={
+                        "goal": seed.goal,
+                        "interrupted": True,
+                        "completed_acs": state_tracker.state.completed_count,
+                        "total_acs": state_tracker.state.total_count,
+                    },
+                    messages_processed=messages_processed,
+                    final_message="Interrupted by user (Ctrl+C). Session saved for resumption.",
+                    duration_seconds=duration,
+                )
+            )
+
         except Exception as e:
             log.exception(
                 "orchestrator.runner.execute_failed",

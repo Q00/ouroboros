@@ -14,7 +14,7 @@ from typing import Annotated
 import typer
 
 from ouroboros import __version__
-from ouroboros.cli.commands import config, init, mcp, run, status, tui
+from ouroboros.cli.commands import config, init, mcp, run, status, tui, workflow
 from ouroboros.cli.formatters import console
 
 # Create the main Typer app
@@ -32,6 +32,7 @@ app.add_typer(config.app, name="config")
 app.add_typer(status.app, name="status")
 app.add_typer(mcp.app, name="mcp")
 app.add_typer(tui.app, name="tui")
+app.add_typer(workflow.app, name="workflow")
 
 
 # Top-level convenience aliases
