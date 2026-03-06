@@ -45,7 +45,17 @@ When the user invokes this skill:
 
 1. **Parse the request**: Extract what needs to be done
 
-2. **Initialize state**: Create `.omc/state/ralph-state.json`:
+2. **Detect git workflow** (before any commits):
+   - Read the project's `CLAUDE.md` (project root and `.claude/CLAUDE.md`)
+   - Look for PR-based workflow indicators:
+     - "PR-based workflow", "never commit directly to main", "always create a branch", "create pull request"
+   - If PR-based workflow detected:
+     - Check current branch — if on `main`/`master`, create a feature branch: `ooo/ralph/<lineage_id>`
+     - Use `git checkout -b ooo/ralph/<lineage_id>` before starting work
+     - All commits go to this branch
+   - If no preference found: use current branch (backward compatible)
+
+3. **Initialize state**: Create `.omc/state/ralph-state.json`:
    ```json
    {
      "mode": "ralph",
@@ -85,6 +95,13 @@ When the user invokes this skill:
        if verification.passed:
            # SUCCESS - persist final checkpoint
            await save_checkpoint("complete")
+
+           # If PR-based workflow: push branch and suggest/create PR
+           if git_workflow.use_branches:
+               git push -u origin <branch_name>
+               suggest: "Create PR with `gh pr create`"
+               # If auto_pr: create PR automatically
+
            break
 
        # Failed - analyze and continue
