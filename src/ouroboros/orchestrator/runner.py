@@ -396,14 +396,8 @@ class OrchestratorRunner:
 
         tracker = session_result.value
 
-        # Emit session started event
-        start_event = create_session_started_event(
-            session_id=tracker.session_id,
-            execution_id=exec_id,
-            seed_id=seed.metadata.seed_id,
-            seed_goal=seed.goal,
-        )
-        await self._event_store.append(start_event)
+        # NOTE: SessionRepository.create_session() already emits
+        # orchestrator.session.started — do NOT emit a second one here.
 
         # Build prompts with strategy
         strategy = get_strategy(seed.task_type)

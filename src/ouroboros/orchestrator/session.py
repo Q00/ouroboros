@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -209,15 +210,40 @@ class SessionRepository:
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
+        Idempotent: if a session with the given session_id already exists,
+        returns the existing tracker instead of creating a duplicate.
+
         Args:
             execution_id: Workflow execution ID.
             seed_id: Seed ID being executed.
             session_id: Optional custom session ID.
 
         Returns:
-            Result containing new SessionTracker.
+            Result containing new or existing SessionTracker.
         """
         tracker = SessionTracker.create(execution_id, seed_id, session_id)
+
+        # Idempotency guard: check for existing session.started event
+        if session_id is not None:
+            try:
+                existing_events = await self._event_store.replay(
+                    "session", session_id
+                )
+                has_start = any(
+                    e.type == "orchestrator.session.started"
+                    for e in existing_events
+                )
+                if has_start:
+                    log.info(
+                        "orchestrator.session.create_idempotent",
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+                    result = await self.reconstruct_session(session_id)
+                    if result.is_ok:
+                        return result
+            except Exception:
+                pass  # Fall through to create
 
         event = BaseEvent(
             type="orchestrator.session.started",
@@ -398,6 +424,7 @@ class SessionRepository:
         Returns:
             Result containing reconstructed SessionTracker.
         """
+        t0 = time.monotonic()
         try:
             events = await self._event_store.replay("session", session_id)
 
@@ -456,20 +483,26 @@ class SessionRepository:
                 messages_processed=messages_processed,
             )
 
+            duration_ms = (time.monotonic() - t0) * 1000
             log.info(
                 "orchestrator.session.reconstructed",
                 session_id=session_id,
                 status=tracker.status.value,
                 messages_processed=messages_processed,
+                event_count_replayed=len(events),
+                duration_ms=round(duration_ms, 2),
+                path="replay",
             )
 
             return Result.ok(tracker)
 
         except Exception as e:
+            duration_ms = (time.monotonic() - t0) * 1000
             log.exception(
                 "orchestrator.session.reconstruct_failed",
                 session_id=session_id,
                 error=str(e),
+                duration_ms=round(duration_ms, 2),
             )
             return Result.err(
                 PersistenceError(

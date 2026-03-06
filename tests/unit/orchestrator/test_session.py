@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -332,3 +332,124 @@ class TestSessionRepository:
 
         assert result.is_ok
         assert result.value.status == SessionStatus.FAILED
+
+
+class TestSessionReplayMetrics:
+    """Tests for P0-AC0: baseline replay-cost metrics."""
+
+    @pytest.fixture
+    def mock_event_store(self) -> AsyncMock:
+        store = AsyncMock()
+        store.append = AsyncMock()
+        store.replay = AsyncMock(return_value=[])
+        return store
+
+    @pytest.fixture
+    def repository(self, mock_event_store: AsyncMock) -> SessionRepository:
+        return SessionRepository(mock_event_store)
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_logs_replay_metrics(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Verify reconstruct_session emits event_count_replayed and duration_ms."""
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.data = {
+            "execution_id": "exec",
+            "seed_id": "seed",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+        progress_events = []
+        for i in range(10):
+            ev = MagicMock()
+            ev.type = "orchestrator.progress.updated"
+            ev.data = {"progress": {"step": i}}
+            progress_events.append(ev)
+
+        mock_event_store.replay.return_value = [start_event, *progress_events]
+
+        with patch("ouroboros.orchestrator.session.log") as mock_log:
+            result = await repository.reconstruct_session("sess_metrics")
+
+        assert result.is_ok
+        assert result.value.messages_processed == 10
+
+        # Verify the info log was called with metrics kwargs
+        mock_log.info.assert_called()
+        call_kwargs = mock_log.info.call_args
+        assert call_kwargs.kwargs["event_count_replayed"] == 11
+        assert "duration_ms" in call_kwargs.kwargs
+        assert call_kwargs.kwargs["path"] == "replay"
+
+
+class TestSessionIdempotencyGuard:
+    """Tests for P0-AC2: duplicate session.started fix + idempotency guard."""
+
+    @pytest.fixture
+    def mock_event_store(self) -> AsyncMock:
+        store = AsyncMock()
+        store.append = AsyncMock()
+        store.replay = AsyncMock(return_value=[])
+        return store
+
+    @pytest.fixture
+    def repository(self, mock_event_store: AsyncMock) -> SessionRepository:
+        return SessionRepository(mock_event_store)
+
+    @pytest.mark.asyncio
+    async def test_create_session_twice_same_id_single_event(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Call create_session() twice with same session_id, verify single event."""
+        # First call: no existing events -> creates normally
+        mock_event_store.replay.return_value = []
+        result1 = await repository.create_session(
+            execution_id="exec_1",
+            seed_id="seed_1",
+            session_id="dedup_session",
+        )
+        assert result1.is_ok
+        assert mock_event_store.append.call_count == 1
+
+        # Second call: existing start event found -> returns existing tracker
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.data = {
+            "execution_id": "exec_1",
+            "seed_id": "seed_1",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+        mock_event_store.replay.return_value = [start_event]
+
+        result2 = await repository.create_session(
+            execution_id="exec_1",
+            seed_id="seed_1",
+            session_id="dedup_session",
+        )
+        assert result2.is_ok
+        # append should NOT have been called again
+        assert mock_event_store.append.call_count == 1
+        assert result2.value.session_id == "dedup_session"
+
+    @pytest.mark.asyncio
+    async def test_create_session_auto_id_no_dedup_check(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Auto-generated session IDs skip the idempotency check (no collision risk)."""
+        mock_event_store.replay.return_value = []
+        result = await repository.create_session(
+            execution_id="exec_1",
+            seed_id="seed_1",
+        )
+        assert result.is_ok
+        # replay should NOT be called for idempotency when session_id is auto-generated
+        # (replay is only called if session_id is explicitly provided)
+        mock_event_store.replay.assert_not_called()
+        mock_event_store.append.assert_called_once()

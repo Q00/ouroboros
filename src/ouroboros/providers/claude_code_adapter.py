@@ -48,6 +48,7 @@ log = structlog.get_logger(__name__)
 # Retry configuration for transient API errors
 _MAX_RETRIES = 5
 _INITIAL_BACKOFF_SECONDS = 2.0  # Increased for custom CLI startup
+_MAX_EMPTY_RESPONSE_WITH_SESSION = 2  # Terminal after this many consecutive empty responses with session_id
 _RETRYABLE_ERROR_PATTERNS = (
     "concurrency",
     "rate",
@@ -231,6 +232,7 @@ class ClaudeCodeAdapter:
         )
 
         last_error: ProviderError | None = None
+        consecutive_empty_with_session = 0
 
         for attempt in range(_MAX_RETRIES):
             try:
@@ -244,8 +246,35 @@ class ClaudeCodeAdapter:
                         )
                     return result
 
-                # Check if error is retryable
+                # Track consecutive empty responses with session_id
                 error_msg = result.error.message
+                error_details = result.error.details or {}
+                has_session_id = error_details.get("session_id") is not None
+
+                if "empty response" in error_msg.lower() and has_session_id:
+                    consecutive_empty_with_session += 1
+                    if consecutive_empty_with_session >= _MAX_EMPTY_RESPONSE_WITH_SESSION:
+                        log.error(
+                            "claude_code_adapter.empty_response_terminal",
+                            session_id=error_details.get("session_id"),
+                            attempt_count=consecutive_empty_with_session,
+                            prompt_preview=prompt[:100],
+                        )
+                        return Result.err(
+                            ProviderError(
+                                message="Terminal empty response - session started but content generation failed",
+                                details={
+                                    "fault_code": "CLAUDE_EMPTY_RESPONSE",
+                                    "session_id": error_details.get("session_id"),
+                                    "attempt_count": consecutive_empty_with_session,
+                                    "prompt_preview": prompt[:100],
+                                },
+                            )
+                        )
+                else:
+                    consecutive_empty_with_session = 0
+
+                # Check if error is retryable
                 if self._is_retryable_error(error_msg) and attempt < _MAX_RETRIES - 1:
                     backoff = _INITIAL_BACKOFF_SECONDS * (2**attempt)
                     log.warning(
