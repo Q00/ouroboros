@@ -66,8 +66,11 @@ If the `ouroboros_interview` MCP tool is available, use it for persistent, struc
    Tool: ouroboros_interview
    Arguments:
      initial_context: <user's topic or idea>
+     cwd: <current working directory>
    ```
-   The tool returns a session ID and the first question.
+   The tool auto-detects brownfield projects from `cwd` and scans the codebase
+   before asking the first question. The first question will cite specific
+   files/patterns found in the project. Returns a session ID and question.
 
 2. **Present the question using AskUserQuestion**:
    After receiving a question from the tool, present it via `AskUserQuestion` with contextually relevant suggested answers:
@@ -112,12 +115,13 @@ If the `ouroboros_interview` MCP tool is available, use it for persistent, struc
 If the MCP tool is NOT available, fall back to agent-based interview:
 
 1. Read `agents/socratic-interviewer.md` and adopt that role
-2. Ask clarifying questions based on the user's topic
-3. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)
-4. Use Read, Glob, Grep, WebFetch to explore context if needed
-5. Continue until the user says "done"
-6. Interview results live in conversation context (not persisted)
-7. After completion, suggest the next step in `📍 Next:` format:
+2. **Pre-scan the codebase**: Use Glob to check for config files (`pyproject.toml`, `package.json`, `go.mod`, etc.). If found, use Read/Grep to scan key files and incorporate findings into your questions as confirmation-style ("I see X. Should I assume Y?") rather than open-ended discovery ("Do you have X?")
+3. Ask clarifying questions based on the user's topic and codebase context
+4. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)
+5. Use Read, Glob, Grep, WebFetch to explore further context if needed
+6. Continue until the user says "done"
+7. Interview results live in conversation context (not persisted)
+8. After completion, suggest the next step in `📍 Next:` format:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 ## Interviewer Behavior (Both Modes)

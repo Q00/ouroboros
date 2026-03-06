@@ -458,3 +458,48 @@ class TestEvaluateHandler:
 
         assert result.is_ok
         assert "Evaluation Results" in result.value.text_content
+
+
+class TestInterviewHandlerCwd:
+    """Test InterviewHandler cwd parameter."""
+
+    def test_interview_definition_has_cwd_param(self) -> None:
+        """Interview tool definition includes the cwd parameter."""
+        handler = InterviewHandler()
+        defn = handler.definition
+
+        param_names = {p.name for p in defn.parameters}
+        assert "cwd" in param_names
+
+        cwd_param = next(p for p in defn.parameters if p.name == "cwd")
+        assert cwd_param.required is False
+        assert cwd_param.type == ToolInputType.STRING
+
+    async def test_interview_handle_passes_cwd(self, tmp_path) -> None:
+        """handle passes cwd to engine.start_interview."""
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+
+        mock_engine = MagicMock()
+        mock_state = MagicMock()
+        mock_state.interview_id = "test-123"
+        mock_state.rounds = []
+        mock_state.mark_updated = MagicMock()
+
+        mock_engine.start_interview = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value=mock_state)
+        )
+        mock_engine.ask_next_question = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value="First question?")
+        )
+        mock_engine.save_state = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False)
+        )
+
+        handler = InterviewHandler(interview_engine=mock_engine)
+        await handler.handle(
+            {"initial_context": "Add a feature", "cwd": str(tmp_path)}
+        )
+
+        mock_engine.start_interview.assert_awaited_once()
+        call_kwargs = mock_engine.start_interview.call_args
+        assert call_kwargs[1]["cwd"] == str(tmp_path)

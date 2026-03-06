@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -785,3 +785,110 @@ class TestInterviewEngineConversationHistory:
         assert history[2].content == "Q2"
         assert history[3].role == MessageRole.USER
         assert history[3].content == "A2"
+
+
+class TestInterviewEngineBrownfieldDetection:
+    """Test brownfield auto-detection in start_interview."""
+
+    @pytest.mark.asyncio
+    async def test_start_interview_detects_brownfield(self, tmp_path: Path) -> None:
+        """start_interview sets is_brownfield when cwd has config files."""
+        (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\n")
+
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        with patch(
+            "ouroboros.bigbang.interview.InterviewEngine._trigger_codebase_exploration",
+            new_callable=AsyncMock,
+        ):
+            result = await engine.start_interview("Add a REST endpoint", cwd=str(tmp_path))
+
+        assert result.is_ok
+        state = result.value
+        assert state.is_brownfield is True
+        assert state.codebase_paths == [{"path": str(tmp_path), "role": "primary"}]
+
+    @pytest.mark.asyncio
+    async def test_start_interview_no_cwd_stays_greenfield(self) -> None:
+        """start_interview without cwd keeps is_brownfield=False."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        result = await engine.start_interview("Build something new")
+
+        assert result.is_ok
+        assert result.value.is_brownfield is False
+
+    @pytest.mark.asyncio
+    async def test_start_interview_brownfield_runs_exploration(self, tmp_path: Path) -> None:
+        """start_interview calls _trigger_codebase_exploration for brownfield."""
+        (tmp_path / "package.json").write_text('{"name":"demo"}')
+
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        with patch.object(
+            engine,
+            "_trigger_codebase_exploration",
+            new_callable=AsyncMock,
+        ) as mock_explore:
+            await engine.start_interview("Add a feature", cwd=str(tmp_path))
+
+        mock_explore.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_interview_exploration_failure_non_blocking(
+        self, tmp_path: Path
+    ) -> None:
+        """start_interview succeeds even when exploration raises."""
+        (tmp_path / "go.mod").write_text("module example.com/demo\n")
+
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        with patch.object(
+            engine,
+            "_trigger_codebase_exploration",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("explore boom"),
+        ):
+            result = await engine.start_interview("Add an endpoint", cwd=str(tmp_path))
+
+        # Interview should still start successfully
+        assert result.is_ok
+        assert result.value.is_brownfield is True
+
+    @pytest.mark.asyncio
+    async def test_start_interview_empty_dir_stays_greenfield(self, tmp_path: Path) -> None:
+        """start_interview with cwd pointing to empty dir stays greenfield."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        result = await engine.start_interview("Build something", cwd=str(tmp_path))
+
+        assert result.is_ok
+        assert result.value.is_brownfield is False
+
+
+class TestSystemPromptBrownfield:
+    """Test brownfield system prompt injection."""
+
+    def test_system_prompt_brownfield_round_1(self) -> None:
+        """System prompt includes confirmation instructions when brownfield context exists."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_bf",
+            initial_context="Add a REST endpoint",
+            is_brownfield=True,
+            codebase_context="Tech: Python\nDeps: flask, sqlalchemy\n",
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "Existing Codebase Context" in prompt
+        assert "CONFIRMATION questions" in prompt
+        assert "I found X. Should I assume Y?" in prompt
+        assert "flask" in prompt

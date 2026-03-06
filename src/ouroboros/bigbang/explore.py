@@ -477,6 +477,24 @@ Output a structured summary with sections: Tech Stack, Key Types, Patterns, Conv
         return result.value.content.strip()
 
 
+def detect_brownfield(cwd: str | Path) -> bool:
+    """Detect whether a directory is a brownfield project.
+
+    Checks for the presence of any recognised config file from ``_CONFIG_FILES``.
+
+    Args:
+        cwd: Directory to inspect.
+
+    Returns:
+        ``True`` if at least one config file is found, ``False`` otherwise.
+    """
+    try:
+        root = Path(cwd)
+        return any((root / name).exists() for name in _CONFIG_FILES)
+    except Exception:
+        return False
+
+
 def format_explore_results(results: list[CodebaseExploreResult]) -> str:
     """Format explore results for injection into interview system prompt.
 

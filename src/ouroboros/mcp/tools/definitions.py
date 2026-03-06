@@ -1042,6 +1042,15 @@ class InterviewHandler:
                     description="Response to the current interview question",
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="cwd",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Working directory for brownfield auto-detection. "
+                        "Defaults to the current working directory if not provided."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -1072,7 +1081,8 @@ class InterviewHandler:
         try:
             # Start new interview
             if initial_context:
-                result = await engine.start_interview(initial_context)
+                cwd = arguments.get("cwd") or os.getcwd()
+                result = await engine.start_interview(initial_context, cwd=cwd)
                 if result.is_err:
                     return Result.err(
                         MCPToolError(
@@ -1499,6 +1509,12 @@ class EvaluateHandler:
             # Build result text
             result_text = self._format_evaluation_result(eval_result)
 
+            # Determine next action based on evaluation outcome
+            if eval_result.final_approved:
+                next_action = "Loop complete — evaluation approved"
+            else:
+                next_action = "Call ouroboros_evolve_step to refine and retry"
+
             # Build metadata
             meta = {
                 "session_id": session_id,
@@ -1516,6 +1532,11 @@ class EvaluateHandler:
                 "stage3_approved": eval_result.stage3_result.approved
                 if eval_result.stage3_result
                 else None,
+                # Progress metadata for consistent loop tracking
+                "current_phase": "evaluate",
+                "step_number": 3,
+                "total_steps": 3,
+                "next_action": next_action,
             }
 
             return Result.ok(
@@ -1775,6 +1796,20 @@ class LateralThinkHandler:
                     tool_name="ouroboros_lateral_think",
                 )
             )
+
+
+def _evolve_step_next_action(action: Any) -> str:
+    """Map a StepAction to a human-readable next-action hint."""
+    from ouroboros.evolution.loop import StepAction
+
+    _ACTION_MAP: dict[StepAction, str] = {
+        StepAction.CONTINUE: "Call ouroboros_evolve_step again with the same lineage_id",
+        StepAction.CONVERGED: "Evolution complete — present final ontology to user",
+        StepAction.STAGNATED: "Consider ouroboros_lateral_think or restart with new context",
+        StepAction.EXHAUSTED: "Max generations reached — present best result to user",
+        StepAction.FAILED: "Inspect error and retry or adjust seed",
+    }
+    return _ACTION_MAP.get(action, str(action))
 
 
 @dataclass

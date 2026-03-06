@@ -189,13 +189,16 @@ class InterviewEngine:
         return self.state_dir / f"interview_{interview_id}.json"
 
     async def start_interview(
-        self, initial_context: str, interview_id: str | None = None
+        self, initial_context: str, interview_id: str | None = None, cwd: str | None = None
     ) -> Result[InterviewState, ValidationError]:
         """Start a new interview session.
 
         Args:
             initial_context: The initial context or idea provided by the user.
             interview_id: Optional interview ID (generated if not provided).
+            cwd: Optional working directory. When provided, auto-detects
+                brownfield projects and runs codebase exploration before the
+                first question.
 
         Returns:
             Result containing the new InterviewState or ValidationError.
@@ -213,10 +216,27 @@ class InterviewEngine:
             initial_context=initial_context,
         )
 
+        # Auto-detect brownfield projects from CWD
+        if cwd:
+            from ouroboros.bigbang.explore import detect_brownfield
+
+            if detect_brownfield(cwd):
+                state.is_brownfield = True
+                state.codebase_paths = [{"path": cwd, "role": "primary"}]
+                try:
+                    await self._trigger_codebase_exploration(state)
+                except Exception as e:
+                    log.warning(
+                        "interview.brownfield_explore_failed",
+                        interview_id=interview_id,
+                        error=str(e),
+                    )
+
         log.info(
             "interview.started",
             interview_id=interview_id,
             initial_context_length=len(initial_context),
+            is_brownfield=state.is_brownfield,
         )
 
         return Result.ok(state)
@@ -509,8 +529,12 @@ class InterviewEngine:
         if state.is_brownfield and state.codebase_context:
             dynamic_header += (
                 f"\n\n## Existing Codebase Context\n{state.codebase_context}"
-                "\n\nIMPORTANT: Ask ontological questions INFORMED by this context."
-                "\nRefer to actual types, patterns, and protocols found in the code."
+                "\n\nCRITICAL: You have codebase context. Ask CONFIRMATION questions "
+                "citing specific files/patterns."
+                '\n- GOOD: "I see Express.js with JWT middleware in src/auth/. '
+                'Should the new feature use this?"'
+                '\n- BAD: "Do you have any authentication set up?"'
+                '\n- Frame as: "I found X. Should I assume Y?" not "Do you have X?"'
             )
 
         return f"{dynamic_header}\n{base_prompt}"
