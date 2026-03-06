@@ -60,7 +60,23 @@ When the user invokes this skill:
      trigger_consensus: false  (true if user requests Stage 3)
    ```
 
-4. Present results clearly:
+4. **Check for code changes** (before presenting Stage 1 failures):
+   - Run `git diff --name-only` and `git diff --cached --name-only` in the project
+   - If code changes exist AND Stage 1 (build/test) failed:
+     ```
+     ⚠ Code changes were detected but build/test failed.
+       This indicates implementation issues that need fixing.
+
+     📍 Next: `ooo ralph` to auto-fix until build passes
+        Or: fix manually and re-run `ooo evaluate`
+     ```
+   - If NO code changes exist AND Stage 1 failed:
+     ```
+     ℹ No code changes detected yet — build/test failures are expected
+       at this stage. Run `ooo run` to execute the seed first.
+     ```
+
+5. Present results clearly:
    - Show each stage's pass/fail status
    - Highlight the final approval decision
    - If rejected, explain the failure reason
