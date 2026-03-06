@@ -86,3 +86,15 @@ with 2 tables, you haven't found the core feature yet.
 - Can you use a single JSON column instead of normalized tables?
 - What if you started with flat files and added a DB later?
 ```
+
+## Next Steps (Always Display)
+
+After presenting lateral thinking results, always show:
+
+```
+📍 Next: Apply the insights above, then retry your previous task
+   Options:
+  - `ooo run` to re-execute with the new approach
+  - `ooo evolve` to let the ontology adapt
+  - `ooo ralph` for persistent loop until it works
+```

@@ -128,3 +128,12 @@ If `star_asked` is already `true`, skip the question and just announce:
 ```
 Your seed has been crystallized! Run `ooo run` to execute (requires `ooo setup` first).
 ```
+
+## Next Steps (Always Display)
+
+After successful seed generation, always show:
+
+```
+📍 Next: `ooo run` to execute this seed (requires `ooo setup` first)
+   Or:   `ooo interview` to refine requirements further
+```

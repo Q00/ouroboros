@@ -95,3 +95,24 @@ Component Breakdown:
 
 You're on track. Goal alignment is strong.
 ```
+
+## Next Steps (Always Display)
+
+After showing status, always suggest the appropriate next step based on drift:
+
+**Drift ≤ 0.15 (Excellent):**
+```
+📍 On track. Continue with `ooo run` or `ooo evolve`
+```
+
+**Drift 0.15–0.30 (Acceptable):**
+```
+📍 Monitor drift. Consider `ooo evaluate` to check AC compliance
+```
+
+**Drift > 0.30 (Exceeded):**
+```
+📍 Drift exceeded threshold!
+   Next: `ooo evaluate` for formal review
+   Or:   `ooo evolve` to course-correct the ontology
+```

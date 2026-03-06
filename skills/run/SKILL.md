@@ -95,3 +95,19 @@ Result:
 
   Next: /ouroboros:evaluate sess-abc-123
 ```
+
+## Next Steps (Always Display)
+
+After execution completes, always show the appropriate next step:
+
+**On success:**
+```
+📍 Next: `ooo evaluate <session_id>` to verify against acceptance criteria
+```
+
+**On failure:**
+```
+📍 Next steps:
+  - Fix the issues identified above, then `ooo run` to retry
+  - `ooo unstuck` if you're blocked on how to fix it
+```

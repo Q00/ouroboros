@@ -101,3 +101,32 @@ Then add to Claude Code's MCP configuration.
 - **QA verdict**: Each generation's response includes a QA Verdict section
   (when `execute=true` and `skip_qa` is not set). Use the QA score to track
   quality progression across generations. Pass `skip_qa: true` to disable
+
+## Next Steps (Always Display)
+
+After each evolution step, show the appropriate next step based on the action:
+
+**On `converged`:**
+```
+📍 Evolution complete! Ontology has converged.
+   Next: `ooo evaluate` for formal verification
+```
+
+**On `stagnated`:**
+```
+📍 Ontology unchanged for 3+ generations.
+   Next: `ooo unstuck` to break through with lateral thinking
+```
+
+**On `exhausted`:**
+```
+📍 Max generations reached. Best result displayed above.
+   Next: `ooo evaluate` to assess the final state
+```
+
+**On `failed`:**
+```
+📍 Evolution step failed. Check the error above.
+   Next: `ooo status <lineage_id>` to inspect state
+   Or:   `ooo unstuck` for a fresh perspective
+```

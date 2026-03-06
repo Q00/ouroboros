@@ -95,3 +95,21 @@ Stage 2: Semantic Evaluation
   Goal Alignment: 0.90
   Drift Score: 0.08
 ```
+
+## Next Steps (Always Display)
+
+After evaluation completes, always show the appropriate next step:
+
+**On APPROVED:**
+```
+📍 Done! Evaluation passed.
+   Or: `ooo evolve` to refine the ontology further
+```
+
+**On REJECTED:**
+```
+📍 Next steps:
+  - `ooo run` to re-execute with fixes
+  - `ooo evolve` to let the ontology evolve iteratively
+  - `ooo ralph` for persistent loop until all AC pass
+```

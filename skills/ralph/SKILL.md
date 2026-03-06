@@ -193,3 +193,22 @@ All tests passing. Build successful.
 Cancel with `/ouroboros:cancel --force` to clear state.
 
 Standard `/ouroboros:cancel` saves checkpoint for resume.
+
+## Next Steps (Always Display)
+
+After Ralph completes (success or max iterations), always show:
+
+**On success:**
+```
+📍 Ralph COMPLETE. All verifications passed.
+   Next: `ooo evaluate` for formal three-stage evaluation
+```
+
+**On max iterations reached:**
+```
+📍 Ralph reached max iterations without full verification.
+   Next steps:
+  - `ooo evaluate` to assess current state
+  - `ooo unstuck` for lateral thinking on remaining issues
+  - `ooo ralph` to resume with fresh iteration budget
+```

@@ -140,6 +140,10 @@ User: Yes, same pattern
 User: ooo seed  [Generate seed from interview]
 ```
 
-## Next Steps
+## Next Steps (Always Display)
 
-After interview completion, use `ooo seed` to generate the Seed specification.
+After interview completion, always show:
+
+```
+📍 Next: `ooo seed` to crystallize requirements into a Seed specification
+```
