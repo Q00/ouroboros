@@ -23,8 +23,7 @@ import shutil
 from threading import RLock
 from typing import Any
 
-from filelock import FileLock
-
+from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 
@@ -195,8 +194,7 @@ class StateStore:
             return None
 
         try:
-            lock = FileLock(str(path) + ".lock")
-            with lock:
+            with file_lock(path):
                 with open(path, encoding="utf-8") as f:
                     loaded = json.load(f)
 
@@ -267,15 +265,14 @@ class StateStore:
 
                 # Atomic write: write to temp file, then rename
                 temp_path = path.with_suffix(".tmp")
-                lock = FileLock(str(temp_path) + ".lock")
-                with lock:
+                with file_lock(path):
                     with open(temp_path, "w", encoding="utf-8") as f:
                         json.dump(data, f, indent=2, ensure_ascii=False)
                         f.flush()
                         os.fsync(f.fileno())
 
-                # Atomic rename
-                os.replace(temp_path, path)
+                    # Atomic rename (inside lock so readers wait)
+                    os.replace(temp_path, path)
 
                 log.debug("state.store.wrote", mode=mode.value, path=str(path))
                 return Result.ok(path)
@@ -348,14 +345,13 @@ class StateStore:
         try:
             # Atomic write to checkpoint file
             temp_path = path.with_suffix(".tmp")
-            lock = FileLock(str(temp_path) + ".lock")
-            with lock:
+            with file_lock(path):
                 with open(temp_path, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2, ensure_ascii=False)
                     f.flush()
                     os.fsync(f.fileno())
 
-            os.replace(temp_path, path)
+                os.replace(temp_path, path)
 
             log.info("state.store.checkpoint_created", checkpoint_id=checkpoint_id)
             return Result.ok(checkpoint_id)
@@ -381,8 +377,7 @@ class StateStore:
             return None
 
         try:
-            lock = FileLock(str(path) + ".lock")
-            with lock:
+            with file_lock(path):
                 with open(path, encoding="utf-8") as f:
                     loaded = json.load(f)
 
