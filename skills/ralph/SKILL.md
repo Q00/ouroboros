@@ -92,7 +92,8 @@ When the user invokes this skill:
        await save_checkpoint("iteration_{iteration}")
 
        if iteration >= max_iterations:
-           # Max iterations reached
+           # Max iterations — show next step
+           # 📍 Next: `ooo unstuck` to try a different approach — or `ooo evolve` for ontology refinement
            break
    ```
 
@@ -186,6 +187,8 @@ QA History:
 - Iteration 3: PASS (1.0)
 
 All tests passing. Build successful.
+
+📍 Next: `ooo evaluate` for formal 3-stage verification
 ```
 
 ## Cancellation

@@ -55,7 +55,7 @@ When the user invokes this skill:
    - Show the persona's approach summary
    - Present the reframing prompt
    - List the questions to consider
-   - Suggest concrete next steps
+   - Suggest concrete next steps with a `📍 Next:` action routing back to the workflow
 
 ## Fallback (No MCP Server)
 
@@ -85,4 +85,6 @@ with 2 tables, you haven't found the core feature yet.
 - What is the ONE query your users will run most?
 - Can you use a single JSON column instead of normalized tables?
 - What if you started with flat files and added a DB later?
+
+📍 Next: Try the approach above, then `ooo run` to execute — or `ooo ralph` for persistent loop
 ```

@@ -126,5 +126,6 @@ Create `~/.ouroboros/` directory if it doesn't exist.
 If `star_asked` is already `true`, skip the question and just announce:
 
 ```
-Your seed has been crystallized! Run `ooo run` to execute (requires `ooo setup` first).
+Your seed has been crystallized!
+📍 Next: `ooo run` to execute this seed (requires `ooo setup` first)
 ```

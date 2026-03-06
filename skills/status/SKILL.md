@@ -52,6 +52,9 @@ When the user invokes this skill:
    - Show progress information
    - If drift measured, show the drift report
    - If drift exceeds threshold (0.3), warn and suggest actions
+   - End with a `📍` next-step based on drift:
+     - Drift ≤ 0.3: `📍 On track — continue with ooo run or ooo evaluate when ready`
+     - Drift > 0.3: `📍 Warning: significant drift detected. Consider ooo interview to re-clarify, or ooo evolve to course-correct`
 
 ## Drift Thresholds
 
@@ -94,4 +97,6 @@ Component Breakdown:
   Ontology Drift: 0.20 (20% weight)
 
 You're on track. Goal alignment is strong.
+
+📍 On track — continue with `ooo run` or `ooo evaluate` when ready
 ```

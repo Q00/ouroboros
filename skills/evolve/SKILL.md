@@ -60,6 +60,11 @@ ooo evolve --rewind <lineage_id> <generation_number>
    - `exhausted` → Max 30 generations reached. Display best result
    - `failed` → Check error, possibly retry
 7. **Repeat step 6** until action ≠ `continue`
+8. When the loop terminates, display a result summary with next step:
+   - `converged`: `📍 Done! Ontology converged. Run ooo evaluate for formal verification`
+   - `stagnated`: `📍 Next: ooo unstuck to break through with lateral thinking, then ooo evolve to resume`
+   - `exhausted`: `📍 Next: ooo evaluate to check best result — or ooo unstuck to try a new approach`
+   - `failed`: `📍 Next: Check the error above. ooo status to inspect session, or ooo unstuck if blocked`
 
 **Checking status:**
 1. Call `ouroboros_lineage_status` with the `lineage_id`

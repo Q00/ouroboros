@@ -59,10 +59,10 @@ When the user invokes this skill:
    The QA verdict is included in the tool response text.
    To skip: pass `skip_qa: true` to the tool.
 
-   Present QA verdict from the response:
-   - **PASS**: suggest `ooo evaluate` for formal evaluation
-   - **REVISE**: show differences/suggestions, offer to re-run
-   - **FAIL/ESCALATE**: surface to user for manual review
+   Present QA verdict with next step:
+   - **PASS**: `📍 Next: ooo evaluate <session_id> for formal 3-stage verification`
+   - **REVISE**: Show differences/suggestions, then `📍 Next: Fix the issues above, then ooo run to retry`
+   - **FAIL/ESCALATE**: `📍 Next: Review failures above, then ooo run to retry — or ooo unstuck if blocked`
 
 ## Fallback (No MCP Server)
 
@@ -93,5 +93,5 @@ Result:
   Duration: 45.2s
   Messages Processed: 12
 
-  Next: /ouroboros:evaluate sess-abc-123
+  📍 Next: `ooo evaluate sess-abc-123` for formal 3-stage verification
 ```

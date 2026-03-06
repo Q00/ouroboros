@@ -65,7 +65,8 @@ If the `ouroboros_interview` MCP tool is available, use it for persistent, struc
 
 4. **Repeat steps 2-3** until the user says "done" or requirements are clear.
 
-5. After completion, suggest `ooo seed` to generate the Seed specification.
+5. After completion, suggest the next step in `📍 Next:` format:
+   `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 **Advantages of MCP mode**: State persists to disk (survives session restarts), ambiguity scoring, direct integration with `ooo seed` via session ID, structured input with AskUserQuestion.
 
@@ -100,6 +101,8 @@ User: Create, read, update, delete
 
 Q3: Will tasks have relationships (e.g., subtasks, tags)?
 User: Yes, tags for organizing
+
+📍 Next: `ooo seed` to crystallize these requirements into a specification
 
 User: ooo seed  [Generate seed from interview]
 ```
