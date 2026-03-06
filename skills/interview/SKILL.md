@@ -18,7 +18,37 @@ ooo interview [topic]
 
 ## Instructions
 
-When the user invokes this skill, choose the execution path:
+When the user invokes this skill:
+
+### Step 0: Pre-Interview Codebase Scan (Both Modes)
+
+**Before asking any questions**, scan the current project to understand what already exists:
+
+1. **Project structure**: Run `Glob` on common patterns to detect the tech stack:
+   - `**/package.json`, `**/pyproject.toml`, `**/go.mod`, `**/Cargo.toml`, `**/*.csproj`
+   - `**/tsconfig.json`, `**/docker-compose.yml`, `**/Dockerfile`
+
+2. **Key files**: Read up to 3 config files found above (first 50 lines each)
+
+3. **Architecture patterns**: Run `Glob` to identify project layout:
+   - `src/**`, `app/**`, `cmd/**`, `internal/**`, `lib/**`
+   - `tests/**`, `test/**`, `__tests__/**`
+   - `api/**`, `routes/**`, `controllers/**`, `models/**`
+
+4. **Build a context summary** (keep under 500 words):
+   ```
+   Project: <name from config>
+   Tech Stack: <detected languages/frameworks>
+   Key Directories: <src layout>
+   Existing Patterns: <auth, DB, API, testing, etc.>
+   Dependencies: <top 10 notable deps>
+   ```
+
+5. **Include this summary** when starting the interview (embed in `initial_context` for MCP mode, or use as internal context for Plugin mode)
+
+**Why**: This transforms open questions ("Do you have auth?") into confirmation questions ("I see JWT auth in `src/auth/`. Should I rely on that?"). The user shouldn't answer questions the codebase already answers.
+
+Then choose the execution path:
 
 ### Path A: MCP Mode (Preferred)
 
@@ -28,7 +58,7 @@ If the `ouroboros_interview` MCP tool is available, use it for persistent, struc
    ```
    Tool: ouroboros_interview
    Arguments:
-     initial_context: <user's topic or idea>
+     initial_context: "<user's topic>\n\n## Codebase Context\n<summary from Step 0>"
    ```
    The tool returns a session ID and the first question.
 
@@ -74,11 +104,12 @@ If the `ouroboros_interview` MCP tool is available, use it for persistent, struc
 If the MCP tool is NOT available, fall back to agent-based interview:
 
 1. Read `agents/socratic-interviewer.md` and adopt that role
-2. Ask clarifying questions based on the user's topic
-3. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)
-4. Use Read, Glob, Grep, WebFetch to explore context if needed
-5. Continue until the user says "done"
-6. Interview results live in conversation context (not persisted)
+2. **Use the codebase context from Step 0** to inform all questions
+3. Ask clarifying questions based on the user's topic — prefer confirmation questions over open questions when codebase evidence exists
+4. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)
+5. Use Read, Glob, Grep, WebFetch to explore further context as needed
+6. Continue until the user says "done"
+7. Interview results live in conversation context (not persisted)
 
 ## Interviewer Behavior (Both Modes)
 
@@ -92,14 +123,19 @@ The interviewer is **ONLY a questioner**:
 ```
 User: ooo interview Build a REST API
 
-Q1: What domain will this REST API serve?
-User: It's for task management
+[Scanning project... Found: Python 3.12, FastAPI, SQLAlchemy, pytest, src/ layout]
 
-Q2: What operations should tasks support?
-User: Create, read, update, delete
+Q1: I see you're using FastAPI with SQLAlchemy in `src/`.
+    Should this new REST API extend the existing app, or be a separate service?
+User: Extend the existing app
 
-Q3: Will tasks have relationships (e.g., subtasks, tags)?
-User: Yes, tags for organizing
+Q2: Your models in `src/models/` use SQLAlchemy ORM with Alembic migrations.
+    What new entities does this API need beyond what's already defined?
+User: Tasks and tags — tasks have a title, status, and tags
+
+Q3: I see pytest in your dev dependencies and existing tests in `tests/api/`.
+    Should the new endpoints follow the same test pattern?
+User: Yes, same pattern
 
 User: ooo seed  [Generate seed from interview]
 ```
