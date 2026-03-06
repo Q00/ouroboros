@@ -110,11 +110,20 @@ class TestCreateDefaultConfig:
 
     def test_create_default_config_credentials_permissions(self, tmp_path: Path) -> None:
         """create_default_config sets chmod 600 on credentials.yaml."""
+        import sys
+
         config_dir = tmp_path / ".ouroboros"
         _, creds_path = create_default_config(config_dir)
 
-        file_mode = creds_path.stat().st_mode
-        assert (file_mode & 0o777) == 0o600
+        if sys.platform == "win32":
+            # Windows NTFS doesn't have POSIX permission bits;
+            # os.chmod only affects the read-only flag, not owner/group/other.
+            # Verify the file exists and is writable (the best we can check).
+            assert creds_path.exists()
+            assert os.access(creds_path, os.R_OK | os.W_OK)
+        else:
+            file_mode = creds_path.stat().st_mode
+            assert (file_mode & 0o777) == 0o600
 
     def test_create_default_config_valid_yaml(self, tmp_path: Path) -> None:
         """create_default_config creates valid YAML files."""
