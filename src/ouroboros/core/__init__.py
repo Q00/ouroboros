@@ -33,6 +33,11 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.core.git_workflow import (
+    GitWorkflowConfig,
+    detect_git_workflow,
+    is_on_protected_branch,
+)
 from ouroboros.core.types import CostUnits, DriftScore, EventPayload, Result
 
 __all__ = [
@@ -65,6 +70,10 @@ __all__ = [
     "compress_context",
     "compress_context_with_llm",
     "create_filtered_context",
+    # Git Workflow
+    "GitWorkflowConfig",
+    "detect_git_workflow",
+    "is_on_protected_branch",
     # Security utilities
     "InputValidator",
     "mask_api_key",
