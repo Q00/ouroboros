@@ -36,7 +36,14 @@ SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
         "uncertainty": {"type": "number", "description": "Evaluation confidence 0.0-1.0"},
         "reasoning": {"type": "string", "description": "Brief explanation of evaluation"},
     },
-    "required": ["score", "ac_compliance", "goal_alignment", "drift_score", "uncertainty", "reasoning"],
+    "required": [
+        "score",
+        "ac_compliance",
+        "goal_alignment",
+        "drift_score",
+        "uncertainty",
+        "reasoning",
+    ],
 }
 
 

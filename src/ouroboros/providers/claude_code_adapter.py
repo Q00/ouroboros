@@ -374,9 +374,9 @@ class ClaudeCodeAdapter:
             model = config.model
             # Strip provider prefixes — the Agent SDK uses Anthropic's API directly
             if model.startswith("openrouter/anthropic/"):
-                model = model[len("openrouter/anthropic/"):]
+                model = model[len("openrouter/anthropic/") :]
             elif model.startswith("anthropic/"):
-                model = model[len("anthropic/"):]
+                model = model[len("anthropic/") :]
             elif model.startswith("openrouter/"):
                 # Non-Anthropic model (e.g., openrouter/openai/gpt-4o) —
                 # Agent SDK only supports Claude, so skip and use SDK default
@@ -447,7 +447,9 @@ class ClaudeCodeAdapter:
                 # Check for structured output first (from json_schema output_format)
                 structured = getattr(sdk_message, "structured_output", None)
                 if structured is not None:
-                    content = json.dumps(structured) if not isinstance(structured, str) else structured
+                    content = (
+                        json.dumps(structured) if not isinstance(structured, str) else structured
+                    )
 
                 # Final result - use result content if we don't have content yet
                 elif not content:

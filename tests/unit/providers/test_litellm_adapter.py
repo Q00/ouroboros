@@ -172,9 +172,7 @@ class TestLiteLLMAdapterBuildCompletionKwargs:
         """Includes response_format when provided."""
         adapter = LiteLLMAdapter()
         messages = [Message(role=MessageRole.USER, content="Hello")]
-        config = CompletionConfig(
-            model="gpt-4", response_format={"type": "json_object"}
-        )
+        config = CompletionConfig(model="gpt-4", response_format={"type": "json_object"})
 
         with patch.dict("os.environ", {}, clear=True):
             kwargs = adapter._build_completion_kwargs(messages, config)
