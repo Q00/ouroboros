@@ -1,0 +1,106 @@
+name: Bug report
+description: Report a reproducible problem in Ouroboros
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Actionable bug issues in Ouroboros should be detailed enough for someone else to reproduce and verify a fix.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the bug in one or two sentences.
+      placeholder: What is broken?
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Explain why this matters and who or what is blocked, broken, or confused by it.
+      placeholder: Why does this bug matter?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the environment details needed to reason about the bug.
+      placeholder: |
+        - OS:
+        - Python version:
+        - Installation method:
+        - Model/provider:
+        - Relevant flags or config:
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide a clear sequence someone else can follow.
+      placeholder: |
+        1. 
+        2. 
+        3. 
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe what should happen.
+      placeholder: What did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Describe what happened instead.
+      placeholder: What actually happened?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Paste the most relevant output here.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest seed, command, or config needed to reproduce the issue if possible.
+      placeholder: Minimal repro steps, config, or seed
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria for fix
+      description: List the concrete conditions that will be true once this bug is fixed.
+      placeholder: |
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues before opening this report.
+          required: true
+        - label: I can reproduce this on the latest main branch or latest release.
+          required: true
+        - label: I included clear reproduction steps.
+          required: true
+        - label: I included enough detail for someone else to verify the fix.
+          required: true
+

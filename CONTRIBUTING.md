@@ -52,6 +52,7 @@ uv run pytest tests/unit/ -q # run tests
 - Check [GitHub Issues](https://github.com/Q00/ouroboros/issues) for open tasks
 - For new features, open an issue first to discuss the approach
 - Label your issue with appropriate tags: `bug`, `enhancement`, `documentation`, etc.
+- Treat actionable issues as structured work artifacts, not casual notes. See [Issue Quality Policy](./docs/contributing/issue-quality-policy.md).
 
 ### 2. Branch
 
@@ -114,13 +115,20 @@ uv run mypy src/ouroboros
 Found a bug? Please open an issue with:
 
 1. **Clear title**: Summarize the bug
-2. **Description**: Steps to reproduce, expected vs actual behavior
-3. **Environment**: Python version, OS, `uv run ouroboros --version`
-4. **Logs**: Relevant error messages or stack traces
+2. **Impact**: Explain what is blocked or broken
+3. **Description**: Steps to reproduce, expected vs actual behavior
+4. **Acceptance criteria**: State what will be true once fixed
+5. **Environment**: Python version, OS, `uv run ouroboros --version`
+6. **Logs**: Relevant error messages or stack traces
+
+See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for the full bug issue standard.
 
 ```markdown
-## Bug Description
-[What went wrong]
+## Summary
+[What is broken]
+
+## Impact
+[Why this matters]
 
 ## Steps to Reproduce
 1. Run `ooo interview "test"`
@@ -129,6 +137,12 @@ Found a bug? Please open an issue with:
 
 ## Expected Behavior
 [What should happen]
+
+## Actual Behavior
+[What happens instead]
+
+## Acceptance Criteria for Fix
+- [ ] [Condition that proves the bug is fixed]
 
 ## Environment
 - Python: 3.12+
@@ -143,12 +157,20 @@ Found a bug? Please open an issue with:
 
 ### Feature Proposals
 
-Have an idea? Open an issue with:
+Have an idea? Open an issue only when it is structured enough to act on.
 
-1. **Problem statement**: What problem does this solve?
-2. **Proposed solution**: How should it work?
-3. **Alternatives considered**: What other approaches did you think about?
-4. **Scope**: Is this a breaking change? Can it be incremental?
+Feature issues should be written in a **PRD-lite** format with:
+
+1. **Problem**: What problem exists today?
+2. **Why now**: Why is this worth doing now?
+3. **User / persona**: Who is affected?
+4. **Current vs desired behavior**: What changes?
+5. **Constraints and non-goals**: What boundaries matter?
+6. **Acceptance criteria**: What would make this done?
+
+If the idea is still fuzzy, use GitHub Discussions or Discord first, then turn it into a structured issue.
+
+See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for the full feature issue standard.
 
 ### Pull Requests
 
@@ -721,10 +743,14 @@ ls skills/*.yaml 2>/dev/null || echo "No skill YAML files found"
 
 - **GitHub Issues**: [Report bugs or request features](https://github.com/Q00/ouroboros/issues)
 - **GitHub Discussions**: [Ask questions or share ideas](https://github.com/Q00/ouroboros/discussions)
+- **Security Reports**: See [SECURITY.md](./SECURITY.md) before reporting vulnerabilities
+- **Community Conduct**: See [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
 
 ---
 
 ## Code of Conduct
+
+The canonical community rules live in [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
 
 ### Our Pledge
 
