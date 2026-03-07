@@ -171,7 +171,7 @@ metadata:
 
 - The bridge uses **one-shot execution** — no long-running process, no daemon
 - State is stored as **plain JSON** files, one per session
-- All LLM calls go through **LiteLLM**, respecting the `top_p` fix for Anthropic models (see PR #XXX)
+- All LLM calls go through **LiteLLM**, respecting the `top_p` fix for Anthropic models (see PR #82)
 - Works with any OpenClaw-compatible agent runtime (main agent, dedicated agents, etc.)
 
 ---
