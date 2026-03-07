@@ -15,6 +15,7 @@ import typer
 import yaml
 
 if TYPE_CHECKING:
+    from ouroboros.core.seed import Seed
     from ouroboros.mcp.client.manager import MCPClientManager
 
 from ouroboros.cli.formatters import console
@@ -43,6 +44,12 @@ app = typer.Typer(
     no_args_is_help=True,
     cls=_DefaultWorkflowGroup,
 )
+
+
+def _derive_quality_bar(seed: Seed) -> str:
+    """Derive a quality bar string from seed acceptance criteria."""
+    ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
+    return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
 
 
 def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
@@ -142,6 +149,7 @@ async def _run_orchestrator(
     mcp_tool_prefix: str = "",
     debug: bool = False,
     parallel: bool = True,
+    no_qa: bool = False,
 ) -> None:
     """Run workflow via orchestrator mode (Claude Agent SDK).
 
@@ -152,6 +160,7 @@ async def _run_orchestrator(
         mcp_tool_prefix: Prefix for MCP tool names.
         debug: Show verbose logs and agent thinking.
         parallel: Execute independent ACs in parallel. Default: True.
+        no_qa: Skip post-execution QA. Default: False.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import ClaudeAgentAdapter, OrchestratorRunner
@@ -218,6 +227,28 @@ async def _run_orchestrator(
                 print_info(f"Session ID: {res.session_id}")
                 print_info(f"Messages processed: {res.messages_processed}")
                 print_info(f"Duration: {res.duration_seconds:.1f}s")
+
+                # Post-execution QA
+                if not no_qa:
+                    from ouroboros.mcp.tools.qa import QAHandler
+
+                    print_info("Running post-execution QA...")
+                    qa_handler = QAHandler()
+                    quality_bar = _derive_quality_bar(seed)
+
+                    qa_result = await qa_handler.handle(
+                        {
+                            "artifact": res.final_message or "",
+                            "artifact_type": "test_output",
+                            "quality_bar": quality_bar,
+                            "seed_content": yaml.dump(seed_data, default_flow_style=False),
+                            "pass_threshold": 0.80,
+                        }
+                    )
+                    if qa_result.is_ok:
+                        console.print(qa_result.value.content[0].text)
+                    else:
+                        print_warning(f"QA evaluation skipped: {qa_result.error}")
             else:
                 print_error("Execution failed")
                 print_info(f"Session ID: {res.session_id}")
@@ -292,6 +323,13 @@ def workflow(
             help="Execute ACs sequentially instead of in parallel (default: parallel).",
         ),
     ] = False,
+    no_qa: Annotated[
+        bool,
+        typer.Option(
+            "--no-qa",
+            help="Skip post-execution QA evaluation.",
+        ),
+    ] = False,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -321,6 +359,9 @@ def workflow(
 
         # Debug output
         ouroboros run seed.yaml --debug
+
+        # Skip post-execution QA
+        ouroboros run seed.yaml --no-qa
     """
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
@@ -342,6 +383,7 @@ def workflow(
                 mcp_tool_prefix,
                 debug,
                 parallel=not sequential,
+                no_qa=no_qa,
             )
         )
     else:

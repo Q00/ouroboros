@@ -499,6 +499,7 @@ def create_ouroboros_server(
         QueryEventsHandler,
         SessionStatusHandler,
     )
+    from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
     from ouroboros.orchestrator.runner import (
@@ -1008,6 +1009,9 @@ def create_ouroboros_server(
         ),
         ACDashboardHandler(
             event_store=event_store,
+        ),
+        QAHandler(
+            llm_adapter=llm_adapter,
         ),
     ]
 
