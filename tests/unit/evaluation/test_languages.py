@@ -2,10 +2,7 @@
 
 from pathlib import Path
 
-import pytest
-
 from ouroboros.evaluation.languages import (
-    LanguagePreset,
     _parse_command,
     build_mechanical_config,
     detect_language,

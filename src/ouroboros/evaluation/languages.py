@@ -9,9 +9,9 @@ Usage:
     verifier = MechanicalVerifier(config)
 """
 
-import shlex
 from dataclasses import dataclass
 from pathlib import Path
+import shlex
 from typing import Any
 
 from ouroboros.evaluation.mechanical import MechanicalConfig
