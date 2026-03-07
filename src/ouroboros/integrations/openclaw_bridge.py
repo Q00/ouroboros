@@ -62,11 +62,7 @@ from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 litellm.modify_params = True
 
 # --- Config ---
-SESSIONS_DIR = Path(
-    os.environ.get(
-        "SOCRATIC_SESSIONS_DIR", Path.home() / "socratic-sessions"
-    )
-)
+SESSIONS_DIR = Path(os.environ.get("SOCRATIC_SESSIONS_DIR", Path.home() / "socratic-sessions"))
 DEFAULT_MODEL = os.environ.get("SOCRATIC_MODEL", "claude-sonnet-4-5")
 
 
