@@ -1081,7 +1081,7 @@ class InterviewHandler:
         try:
             # Start new interview
             if initial_context:
-                cwd = arguments.get("cwd")
+                cwd = arguments.get("cwd") or os.getcwd()
                 result = await engine.start_interview(initial_context, cwd=cwd)
                 if result.is_err:
                     return Result.err(
