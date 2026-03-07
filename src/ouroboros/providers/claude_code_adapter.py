@@ -371,7 +371,18 @@ class ClaudeCodeAdapter:
         # Pass model from CompletionConfig if specified
         # "default" is not a valid SDK model — treat it as None (use SDK default)
         if config.model and config.model != "default":
-            options_kwargs["model"] = config.model
+            model = config.model
+            # Strip provider prefixes — the Agent SDK uses Anthropic's API directly
+            if model.startswith("openrouter/anthropic/"):
+                model = model[len("openrouter/anthropic/"):]
+            elif model.startswith("anthropic/"):
+                model = model[len("anthropic/"):]
+            elif model.startswith("openrouter/"):
+                # Non-Anthropic model (e.g., openrouter/openai/gpt-4o) —
+                # Agent SDK only supports Claude, so skip and use SDK default
+                model = None
+            if model:
+                options_kwargs["model"] = model
 
         # Pass structured output format if requested
         # SDK expects: output_format={"type": "json_schema", "schema": {...}}
