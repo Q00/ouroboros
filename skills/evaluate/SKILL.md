@@ -65,9 +65,6 @@ When the user invokes this skill:
    - Highlight the final approval decision
    - If rejected, explain the failure reason
    - Suggest fixes if evaluation fails
-   - IMPORTANT: if code changes exist in working tree (git diff/other repo files changed), "This is expected" wording is **misleading**.
-     - When code is written and mechanical checks fail, explicitly say this is a real failure to fix.
-     - Only when no filesystem change is detected, mention that the run is a dry-check/expected for spec-only checks.
 
 ## Fallback (No MCP Server)
 

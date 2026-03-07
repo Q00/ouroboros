@@ -15,7 +15,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RALPH_PY="${SCRIPT_DIR}/ralph.py"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ── Defaults ────────────────────────────────────────────────────────────────
 LINEAGE_ID=""
@@ -27,9 +26,6 @@ NO_PARALLEL=false
 NO_QA=false
 SERVER_COMMAND=""
 SERVER_ARGS=""
-PR_WORKFLOW=false
-WORK_BRANCH=""
-BASE_BRANCH=""
 
 # ── Usage ───────────────────────────────────────────────────────────────────
 usage() {
@@ -45,7 +41,6 @@ Options:
   --no-parallel          Sequential AC execution (slower, more stable)
   --no-qa                Skip post-execution QA evaluation
   --server-command CMD   MCP server executable (default: ouroboros)
-  --pr-workflow          Force PR-based workflow (create branch, suggest PR)
   --server-args ARGS     MCP server arguments (default: mcp)
   -h, --help             Show this help
 
@@ -69,7 +64,6 @@ while [[ $# -gt 0 ]]; do
         --no-execute)   NO_EXECUTE=true; shift ;;
         --no-parallel)  NO_PARALLEL=true; shift ;;
         --no-qa)        NO_QA=true; shift ;;
-        --pr-workflow)  PR_WORKFLOW=true; shift ;;
         --server-command) SERVER_COMMAND="$2"; shift 2 ;;
         --server-args)  shift; SERVER_ARGS="$*"; break ;;
         -h|--help)      usage ;;
@@ -85,91 +79,6 @@ fi
 # ── Helpers ─────────────────────────────────────────────────────────────────
 log() {
     echo "[ralph] $(date '+%H:%M:%S') $*" >&2
-}
-
-infer_pr_workflow() {
-    # Skip auto-detection if already set via --pr-workflow flag
-    if [[ "$PR_WORKFLOW" == true ]]; then
-        _resolve_base_branch
-        log "PR workflow enabled via --pr-workflow flag"
-        return
-    fi
-
-    local claude_md="${PROJECT_ROOT}/CLAUDE.md"
-    if [[ ! -f "$claude_md" ]]; then
-        return
-    fi
-
-    if grep -qiE "PR-based workflow|Never commit directly to main|Always create a branch|Create pull request" "$claude_md"; then
-        PR_WORKFLOW=true
-        _resolve_base_branch
-        log "Detected PR workflow in CLAUDE.md; will use branch strategy"
-    fi
-}
-
-_resolve_base_branch() {
-    # Use remote default branch (usually main/master), not current HEAD
-    BASE_BRANCH="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')" || true
-    if [[ -z "$BASE_BRANCH" ]]; then
-        # Fallback: check common default branch names
-        if git rev-parse --verify refs/heads/main >/dev/null 2>&1; then
-            BASE_BRANCH="main"
-        elif git rev-parse --verify refs/heads/master >/dev/null 2>&1; then
-            BASE_BRANCH="master"
-        else
-            BASE_BRANCH="main"
-        fi
-    fi
-}
-
-init_pr_branch() {
-    if [[ "$PR_WORKFLOW" != true ]]; then
-        return
-    fi
-    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        log "Not a git repository; skipping branch setup"
-        return
-    fi
-
-    # Guard: stash uncommitted changes before switching branches
-    local had_stash=false
-    if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-        git stash push -m "ralph: auto-stash before branch switch" >/dev/null 2>&1 && had_stash=true
-        log "Stashed uncommitted changes before branch switch"
-    fi
-
-    WORK_BRANCH="ooo/ralph/${LINEAGE_ID}"
-    if git rev-parse --verify "refs/heads/$WORK_BRANCH" >/dev/null 2>&1; then
-        if git checkout "$WORK_BRANCH" >/dev/null 2>&1; then
-            log "Using existing workflow branch ${WORK_BRANCH}"
-            [[ "$had_stash" == true ]] && git stash pop >/dev/null 2>&1 || true
-            return
-        fi
-        log "Failed to checkout ${WORK_BRANCH}; continuing on current branch"
-        PR_WORKFLOW=false
-        WORK_BRANCH=""
-        [[ "$had_stash" == true ]] && git stash pop >/dev/null 2>&1 || true
-        return
-    fi
-
-    if ! git checkout -b "$WORK_BRANCH" >/dev/null 2>&1; then
-        log "Failed to create workflow branch ${WORK_BRANCH}; continuing on current branch"
-        PR_WORKFLOW=false
-        WORK_BRANCH=""
-    else
-        log "Created workflow branch ${WORK_BRANCH}"
-    fi
-    [[ "$had_stash" == true ]] && git stash pop >/dev/null 2>&1 || true
-}
-
-summarize_pr_next_steps() {
-    if [[ "$PR_WORKFLOW" != true || -z "$WORK_BRANCH" ]]; then
-        return
-    fi
-
-    log "PR workflow active: branch=${WORK_BRANCH}"
-    log "Push branch with: git push -u origin ${WORK_BRANCH}"
-    log "Create PR with: gh pr create --base ${BASE_BRANCH:-main} --head ${WORK_BRANCH} --title \"feat(${LINEAGE_ID}): complete ralph loop\" --body \"Automated changes from ooo ralph\""
 }
 
 # Commit changes and create a git tag for the generation.
@@ -258,10 +167,6 @@ build_py_args() {
 # ── Main loop ───────────────────────────────────────────────────────────────
 cycle=0
 stagnation_count=0
-
-infer_pr_workflow
-init_pr_branch
-trap summarize_pr_next_steps EXIT
 
 log "Starting Ralph loop for lineage=${LINEAGE_ID} max_cycles=${MAX_CYCLES}"
 
