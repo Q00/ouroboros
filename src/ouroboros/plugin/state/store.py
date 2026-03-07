@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import Enum
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -24,6 +23,7 @@ import shutil
 from threading import RLock
 from typing import Any
 
+from ouroboros.core.filelock import _lock_fd, _unlock_fd
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 
@@ -196,11 +196,11 @@ class StateStore:
         try:
             with open(path, encoding="utf-8") as f:
                 # Acquire shared read lock
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                _lock_fd(f.fileno(), exclusive=False)
                 try:
                     loaded = json.load(f)
                 finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    _unlock_fd(f.fileno())
 
             # Type assertion: json.load returns dict for state files
             data: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
@@ -271,16 +271,17 @@ class StateStore:
                 temp_path = path.with_suffix(".tmp")
                 with open(temp_path, "w", encoding="utf-8") as f:
                     # Acquire exclusive write lock
-                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    _lock_fd(f.fileno(), exclusive=True)
                     try:
                         json.dump(data, f, indent=2, ensure_ascii=False)
                         f.flush()
                         os.fsync(f.fileno())
                     finally:
-                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                        _unlock_fd(f.fileno())
 
-                # Atomic rename
-                temp_path.rename(path)
+                # Atomic replace — Path.replace() works on Windows even if
+                # the destination already exists (Path.rename() does not).
+                temp_path.replace(path)
 
                 log.debug("state.store.wrote", mode=mode.value, path=str(path))
                 return Result.ok(path)
@@ -354,15 +355,15 @@ class StateStore:
             # Atomic write to checkpoint file
             temp_path = path.with_suffix(".tmp")
             with open(temp_path, "w", encoding="utf-8") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                _lock_fd(f.fileno(), exclusive=True)
                 try:
                     json.dump(data, f, indent=2, ensure_ascii=False)
                     f.flush()
                     os.fsync(f.fileno())
                 finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    _unlock_fd(f.fileno())
 
-            temp_path.rename(path)
+            temp_path.replace(path)
 
             log.info("state.store.checkpoint_created", checkpoint_id=checkpoint_id)
             return Result.ok(checkpoint_id)
@@ -389,11 +390,11 @@ class StateStore:
 
         try:
             with open(path, encoding="utf-8") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                _lock_fd(f.fileno(), exclusive=False)
                 try:
                     loaded = json.load(f)
                 finally:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    _unlock_fd(f.fileno())
 
             # Type assertion: json.load returns dict for checkpoint files
             data: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
