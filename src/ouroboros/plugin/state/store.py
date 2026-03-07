@@ -23,7 +23,7 @@ import shutil
 from threading import RLock
 from typing import Any
 
-from ouroboros.core.filelock import _lock_fd, _unlock_fd
+from ouroboros.core.filelock import _locked_fd
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 
@@ -195,12 +195,8 @@ class StateStore:
 
         try:
             with open(path, encoding="utf-8") as f:
-                # Acquire shared read lock
-                _lock_fd(f.fileno(), exclusive=False)
-                try:
+                with _locked_fd(f.fileno(), exclusive=False):
                     loaded = json.load(f)
-                finally:
-                    _unlock_fd(f.fileno())
 
             # Type assertion: json.load returns dict for state files
             data: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
@@ -270,14 +266,10 @@ class StateStore:
                 # Atomic write: write to temp file, then rename
                 temp_path = path.with_suffix(".tmp")
                 with open(temp_path, "w", encoding="utf-8") as f:
-                    # Acquire exclusive write lock
-                    _lock_fd(f.fileno(), exclusive=True)
-                    try:
+                    with _locked_fd(f.fileno(), exclusive=True):
                         json.dump(data, f, indent=2, ensure_ascii=False)
                         f.flush()
                         os.fsync(f.fileno())
-                    finally:
-                        _unlock_fd(f.fileno())
 
                 # Atomic replace — Path.replace() works on Windows even if
                 # the destination already exists (Path.rename() does not).
@@ -355,13 +347,10 @@ class StateStore:
             # Atomic write to checkpoint file
             temp_path = path.with_suffix(".tmp")
             with open(temp_path, "w", encoding="utf-8") as f:
-                _lock_fd(f.fileno(), exclusive=True)
-                try:
+                with _locked_fd(f.fileno(), exclusive=True):
                     json.dump(data, f, indent=2, ensure_ascii=False)
                     f.flush()
                     os.fsync(f.fileno())
-                finally:
-                    _unlock_fd(f.fileno())
 
             temp_path.replace(path)
 
@@ -390,11 +379,8 @@ class StateStore:
 
         try:
             with open(path, encoding="utf-8") as f:
-                _lock_fd(f.fileno(), exclusive=False)
-                try:
+                with _locked_fd(f.fileno(), exclusive=False):
                     loaded = json.load(f)
-                finally:
-                    _unlock_fd(f.fileno())
 
             # Type assertion: json.load returns dict for checkpoint files
             data: dict[str, Any] = loaded if isinstance(loaded, dict) else {}

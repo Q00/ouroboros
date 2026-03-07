@@ -5,7 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros.core.filelock import _file_lock, _lock_fd, _unlock_fd
+from ouroboros.core.filelock import _file_lock, _lock_fd, _locked_fd, _unlock_fd
+
+
+@pytest.fixture
+def sentinel_fd(tmp_path: Path):
+    """An open binary file with a sentinel byte, yielding its file descriptor."""
+    path = tmp_path / "sentinel.lock"
+    f = open(path, "wb+")
+    f.write(b"\x00")
+    f.flush()
+    yield f.fileno(), f
+    f.close()
 
 
 class TestFileLockContextManager:
@@ -111,39 +122,46 @@ class TestFileLockContextManager:
         )
 
 
+class TestLockedFdContextManager:
+    """Tests for the _locked_fd() context manager."""
+
+    def test_exclusive_lock_does_not_raise(self, sentinel_fd) -> None:
+        """_locked_fd with exclusive=True acquires and releases without error."""
+        fd, _ = sentinel_fd
+        with _locked_fd(fd, exclusive=True):
+            pass
+
+    def test_shared_lock_does_not_raise(self, sentinel_fd) -> None:
+        """_locked_fd with exclusive=False acquires and releases without error."""
+        fd, _ = sentinel_fd
+        with _locked_fd(fd, exclusive=False):
+            pass
+
+    def test_releases_on_exception(self, sentinel_fd, tmp_path: Path) -> None:
+        """_locked_fd releases the lock even when an exception is raised."""
+        fd, _ = sentinel_fd
+        try:
+            with _locked_fd(fd, exclusive=True):
+                raise ValueError("test")
+        except ValueError:
+            pass
+
+        # Lock must be re-acquirable
+        with _locked_fd(fd, exclusive=True):
+            pass
+
+
 class TestLockFdHelpers:
-    """Tests for _lock_fd() and _unlock_fd() helpers."""
+    """Tests for _lock_fd() and _unlock_fd() primitives."""
 
-    def test_lock_and_unlock_file_descriptor(self, tmp_path: Path) -> None:
+    def test_exclusive_lock_and_unlock(self, sentinel_fd) -> None:
         """_lock_fd / _unlock_fd work on a real file descriptor."""
-        lock_file = tmp_path / "test.lock"
+        fd, _ = sentinel_fd
+        _lock_fd(fd, exclusive=True)
+        _unlock_fd(fd)
 
-        with open(lock_file, "wb+") as f:
-            f.write(b"\x00")
-            f.flush()
-            fd = f.fileno()
-            _lock_fd(fd, exclusive=True)
-            _unlock_fd(fd)
-        # No exception means success
-
-    def test_shared_lock_fd(self, tmp_path: Path) -> None:
+    def test_shared_lock_and_unlock(self, sentinel_fd) -> None:
         """_lock_fd with exclusive=False (shared) does not raise."""
-        lock_file = tmp_path / "test.lock"
-
-        with open(lock_file, "wb+") as f:
-            f.write(b"\x00")
-            f.flush()
-            fd = f.fileno()
-            _lock_fd(fd, exclusive=False)
-            _unlock_fd(fd)
-
-    def test_exclusive_lock_fd(self, tmp_path: Path) -> None:
-        """_lock_fd with exclusive=True does not raise."""
-        lock_file = tmp_path / "test.lock"
-
-        with open(lock_file, "wb+") as f:
-            f.write(b"\x00")
-            f.flush()
-            fd = f.fileno()
-            _lock_fd(fd, exclusive=True)
-            _unlock_fd(fd)
+        fd, _ = sentinel_fd
+        _lock_fd(fd, exclusive=False)
+        _unlock_fd(fd)
