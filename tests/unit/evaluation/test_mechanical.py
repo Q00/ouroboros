@@ -275,7 +275,6 @@ class TestMechanicalVerifier:
             assert mech_result.passed is False
             assert "timed out" in mech_result.checks[0].message.lower()
 
-
     @pytest.mark.asyncio
     async def test_verify_skips_unconfigured_checks(self) -> None:
         """Checks with no command configured are skipped (passed with skip message)."""

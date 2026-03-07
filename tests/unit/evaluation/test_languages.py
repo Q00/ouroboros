@@ -160,8 +160,7 @@ class TestBuildMechanicalConfig:
         ouroboros_dir = tmp_path / ".ouroboros"
         ouroboros_dir.mkdir()
         (ouroboros_dir / "mechanical.toml").write_text(
-            'test = "cargo test --workspace"\n'
-            'lint = ""\n'  # skip lint
+            'test = "cargo test --workspace"\nlint = ""\n'  # skip lint
         )
         config = build_mechanical_config(tmp_path)
         assert config.test_command == ("cargo", "test", "--workspace")
@@ -187,9 +186,7 @@ class TestBuildMechanicalConfig:
         (tmp_path / "Cargo.toml").touch()
         ouroboros_dir = tmp_path / ".ouroboros"
         ouroboros_dir.mkdir()
-        (ouroboros_dir / "mechanical.toml").write_text(
-            'test = "cargo test --workspace"\n'
-        )
+        (ouroboros_dir / "mechanical.toml").write_text('test = "cargo test --workspace"\n')
         config = build_mechanical_config(
             tmp_path,
             overrides={"test": "cargo nextest run"},
