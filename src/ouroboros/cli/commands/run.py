@@ -236,13 +236,15 @@ async def _run_orchestrator(
                     qa_handler = QAHandler()
                     quality_bar = _derive_quality_bar(seed)
 
-                    qa_result = await qa_handler.handle({
-                        "artifact": res.final_message or "",
-                        "artifact_type": "test_output",
-                        "quality_bar": quality_bar,
-                        "seed_content": yaml.dump(seed_data, default_flow_style=False),
-                        "pass_threshold": 0.80,
-                    })
+                    qa_result = await qa_handler.handle(
+                        {
+                            "artifact": res.final_message or "",
+                            "artifact_type": "test_output",
+                            "quality_bar": quality_bar,
+                            "seed_content": yaml.dump(seed_data, default_flow_style=False),
+                            "pass_threshold": 0.80,
+                        }
+                    )
                     if qa_result.is_ok:
                         console.print(qa_result.value.content[0].text)
                     else:
