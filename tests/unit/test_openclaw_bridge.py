@@ -1,10 +1,10 @@
 """Unit tests for the OpenClaw bridge CLI wrapper."""
 
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
@@ -54,7 +54,7 @@ def sample_state(tmp_sessions):
             ),
         ],
     )
-    import openclaw_bridge
+    from ouroboros.integrations import openclaw_bridge
 
     state_file = openclaw_bridge.SESSIONS_DIR / "test_session_001.json"
     state_file.write_text(state.model_dump_json(indent=2))
@@ -84,7 +84,7 @@ class TestStateIO:
 
     def test_save_creates_directory(self, tmp_path, monkeypatch):
         """Save creates the sessions directory if it doesn't exist."""
-        import openclaw_bridge
+        from ouroboros.integrations import openclaw_bridge
 
         nested = tmp_path / "deep" / "nested" / "dir"
         monkeypatch.setattr(openclaw_bridge, "SESSIONS_DIR", nested)
@@ -144,7 +144,7 @@ class TestCmdStart:
 
         with (
             patch(
-                "openclaw_bridge.InterviewEngine.start_interview",
+                "ouroboros.integrations.openclaw_bridge.InterviewEngine.start_interview",
                 new_callable=AsyncMock,
                 return_value=Result.ok(
                     InterviewState(
@@ -154,7 +154,7 @@ class TestCmdStart:
                 ),
             ),
             patch(
-                "openclaw_bridge.InterviewEngine.ask_next_question",
+                "ouroboros.integrations.openclaw_bridge.InterviewEngine.ask_next_question",
                 new_callable=AsyncMock,
                 return_value=mock_result,
             ),
@@ -178,7 +178,7 @@ class TestCmdRespond:
         mock_result = Result.ok("How should errors be handled?")
 
         with patch(
-            "openclaw_bridge.InterviewEngine.ask_next_question",
+            "ouroboros.integrations.openclaw_bridge.InterviewEngine.ask_next_question",
             new_callable=AsyncMock,
             return_value=mock_result,
         ):
