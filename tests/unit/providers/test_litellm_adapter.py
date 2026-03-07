@@ -179,6 +179,34 @@ class TestLiteLLMAdapterBuildCompletionKwargs:
 
         assert kwargs["api_key"] == "test-key"
 
+    def test_excludes_top_p_for_anthropic_models(self) -> None:
+        """Excludes top_p for Anthropic models (API rejects temperature + top_p together)."""
+        adapter = LiteLLMAdapter()
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+
+        anthropic_models = [
+            "claude-sonnet-4-5",
+            "claude-opus-4-6",
+            "anthropic/claude-sonnet-4-5",
+        ]
+        for model in anthropic_models:
+            config = CompletionConfig(model=model)
+            with patch.dict("os.environ", {}, clear=True):
+                kwargs = adapter._build_completion_kwargs(messages, config)
+            assert "top_p" not in kwargs, f"top_p should be excluded for {model}"
+
+    def test_includes_top_p_for_non_anthropic_models(self) -> None:
+        """Includes top_p for non-Anthropic models (OpenAI, OpenRouter, etc.)."""
+        adapter = LiteLLMAdapter()
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+
+        non_anthropic_models = ["gpt-4", "openrouter/openai/gpt-4", "gemini-pro"]
+        for model in non_anthropic_models:
+            config = CompletionConfig(model=model)
+            with patch.dict("os.environ", {}, clear=True):
+                kwargs = adapter._build_completion_kwargs(messages, config)
+            assert kwargs["top_p"] == 1.0, f"top_p should be included for {model}"
+
     def test_includes_api_base_when_set(self) -> None:
         """Includes api_base when set in constructor."""
         adapter = LiteLLMAdapter(api_base="https://custom.api")

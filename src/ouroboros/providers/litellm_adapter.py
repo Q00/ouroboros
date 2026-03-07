@@ -122,9 +122,14 @@ class LiteLLMAdapter:
             "messages": [m.to_dict() for m in messages],
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
-            "top_p": config.top_p,
             "timeout": self._timeout,
         }
+
+        # Anthropic models don't accept both temperature and top_p together
+        # Other providers (OpenAI, OpenRouter) support both
+        model_lower = config.model.lower()
+        if not ("anthropic" in model_lower or "claude" in model_lower):
+            kwargs["top_p"] = config.top_p
 
         if config.stop:
             kwargs["stop"] = config.stop
