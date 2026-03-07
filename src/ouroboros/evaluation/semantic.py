@@ -25,6 +25,20 @@ from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, Mess
 # Can be overridden via SemanticConfig.model
 DEFAULT_SEMANTIC_MODEL = "claude-opus-4-6"
 
+# JSON schema for structured semantic evaluation output
+SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "number", "description": "Overall quality score 0.0-1.0"},
+        "ac_compliance": {"type": "boolean", "description": "Whether acceptance criterion is met"},
+        "goal_alignment": {"type": "number", "description": "Alignment with original goal 0.0-1.0"},
+        "drift_score": {"type": "number", "description": "Deviation from intent 0.0-1.0"},
+        "uncertainty": {"type": "number", "description": "Evaluation confidence 0.0-1.0"},
+        "reasoning": {"type": "string", "description": "Brief explanation of evaluation"},
+    },
+    "required": ["score", "ac_compliance", "goal_alignment", "drift_score", "uncertainty", "reasoning"],
+}
+
 
 @dataclass(frozen=True, slots=True)
 class SemanticConfig:
@@ -95,7 +109,7 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 ```
 {file_section}
 
-Provide your evaluation as a JSON object."""
+Respond with ONLY a JSON object. No explanation, no preamble, no markdown fences."""
 
 
 def extract_json_payload(text: str) -> str | None:
@@ -248,11 +262,15 @@ class SemanticEvaluator:
             Message(role=MessageRole.USER, content=build_evaluation_prompt(context)),
         ]
 
-        # Call LLM
+        # Call LLM with structured JSON output to ensure valid JSON
         completion_config = CompletionConfig(
             model=self._config.model,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": SEMANTIC_RESULT_SCHEMA,
+            },
         )
 
         llm_result = await self._llm.complete(messages, completion_config)

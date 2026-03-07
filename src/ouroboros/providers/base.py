@@ -51,6 +51,9 @@ class CompletionConfig:
         max_tokens: Maximum tokens to generate. Default 4096.
         stop: Optional stop sequences.
         top_p: Nucleus sampling parameter. Default 1.0.
+        response_format: Optional response format constraint.
+            Use {"type": "json_object"} to force JSON output.
+            Use {"type": "json_schema", "json_schema": {...}} for strict schema.
     """
 
     model: str
@@ -58,6 +61,7 @@ class CompletionConfig:
     max_tokens: int = 4096
     stop: list[str] | None = None
     top_p: float = 1.0
+    response_format: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

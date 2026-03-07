@@ -51,6 +51,34 @@ DEFAULT_CONSENSUS_MODELS: tuple[str, ...] = (
 )
 
 
+# JSON schema for consensus vote output
+VOTE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "approved": {"type": "boolean", "description": "Whether the artifact is approved"},
+        "confidence": {"type": "number", "description": "Confidence in vote 0.0-1.0"},
+        "reasoning": {"type": "string", "description": "Explanation for the vote"},
+    },
+    "required": ["approved"],
+}
+
+# JSON schema for consensus judgment output
+JUDGMENT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["approved", "rejected", "conditional"]},
+        "confidence": {"type": "number", "description": "Confidence in judgment 0.0-1.0"},
+        "reasoning": {"type": "string", "description": "Explanation for the judgment"},
+        "conditions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Conditions for conditional verdict",
+        },
+    },
+    "required": ["verdict"],
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ConsensusConfig:
     """Configuration for consensus evaluation.
@@ -353,6 +381,7 @@ class ConsensusEvaluator:
             model=model,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
+            response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
         )
 
         llm_result = await self._llm.complete(messages, config)
@@ -652,6 +681,7 @@ class DeliberativeConsensus:
                 model=model,
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
+                response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
             )
 
             llm_result = await self._llm.complete(messages, config)
@@ -792,6 +822,7 @@ Based on both positions above, make your final judgment."""
             model=self._config.judge_model,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
+            response_format={"type": "json_schema", "json_schema": JUDGMENT_SCHEMA},
         )
 
         llm_result = await self._llm.complete(messages, config)

@@ -35,6 +35,36 @@ log = structlog.get_logger(__name__)
 DEFAULT_PASS_THRESHOLD = 0.80
 FAIL_THRESHOLD = 0.40
 
+# JSON schema for QA verdict output
+QA_VERDICT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "number", "description": "Quality score 0.0-1.0"},
+        "verdict": {
+            "type": "string",
+            "enum": ["pass", "revise", "fail"],
+            "description": "Overall verdict",
+        },
+        "dimensions": {
+            "type": "object",
+            "description": "Per-dimension scores",
+            "additionalProperties": {"type": "number"},
+        },
+        "differences": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Specific differences found",
+        },
+        "suggestions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Actionable improvement suggestions",
+        },
+        "reasoning": {"type": "string", "description": "Explanation of assessment"},
+    },
+    "required": ["score", "verdict"],
+}
+
 VALID_ARTIFACT_TYPES = ("code", "api_response", "document", "screenshot", "test_output", "custom")
 VALID_VERDICTS = ("pass", "revise", "fail")
 
@@ -430,6 +460,7 @@ class QAHandler:
                 model="claude-sonnet-4-20250514",
                 temperature=0.2,
                 max_tokens=2048,
+                response_format={"type": "json_schema", "json_schema": QA_VERDICT_SCHEMA},
             )
 
             llm_result = await llm_adapter.complete(messages, config)
