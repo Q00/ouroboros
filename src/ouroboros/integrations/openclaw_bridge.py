@@ -42,12 +42,6 @@ from pathlib import Path
 import sys
 
 import litellm
-
-# litellm.modify_params allows LiteLLM to silently drop unsupported parameters
-# (e.g. 'top_p' on providers that don't accept it) instead of raising an error.
-# Required for cross-provider compatibility when routing between Anthropic, OpenAI, etc.
-litellm.modify_params = True
-
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
     AmbiguityScorer,
@@ -60,6 +54,11 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+# litellm.modify_params allows LiteLLM to silently drop unsupported parameters
+# (e.g. 'top_p' on providers that don't accept it) instead of raising an error.
+# Required for cross-provider compatibility when routing between Anthropic, OpenAI, etc.
+litellm.modify_params = True
 
 # --- Config ---
 SESSIONS_DIR = Path(

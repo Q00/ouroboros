@@ -2,15 +2,17 @@
 
 import json
 from pathlib import Path
-import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-# Add project root to path for bridge import
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from openclaw_bridge import (
+from ouroboros.bigbang.interview import (
+    InterviewRound,
+    InterviewState,
+    InterviewStatus,
+)
+from ouroboros.core.types import Result
+from ouroboros.integrations import openclaw_bridge
+from ouroboros.integrations.openclaw_bridge import (
     cmd_complete,
     cmd_respond,
     cmd_start,
@@ -18,19 +20,11 @@ from openclaw_bridge import (
     load_state,
     save_state,
 )
-from ouroboros.bigbang.interview import (
-    InterviewRound,
-    InterviewState,
-    InterviewStatus,
-)
-from ouroboros.core.types import Result
 
 
 @pytest.fixture
 def tmp_sessions(tmp_path, monkeypatch):
     """Override SESSIONS_DIR to use a temp directory."""
-    import openclaw_bridge
-
     monkeypatch.setattr(openclaw_bridge, "SESSIONS_DIR", tmp_path)
     return tmp_path
 
