@@ -218,12 +218,9 @@ class AnthropicAdapter:
             if block.type == "text":
                 content += block.text
 
-        # When using JSON prefill, the "{" was sent as assistant content
-        # and is not echoed back in the response. Prepend it.
-        if json_prefill:
-            content = "{" + content
-
-        # Security: Validate response length
+        # Security: Validate response length *before* prepending the JSON
+        # prefill character. Truncating after prepend would cut the JSON
+        # mid-object, producing silently broken output.
         is_valid, _ = InputValidator.validate_llm_response(content)
         if not is_valid:
             log.warning(
@@ -233,6 +230,11 @@ class AnthropicAdapter:
                 max_length=MAX_LLM_RESPONSE_LENGTH,
             )
             content = content[:MAX_LLM_RESPONSE_LENGTH]
+
+        # When using JSON prefill, the "{" was sent as assistant content
+        # and is not echoed back in the response. Prepend it.
+        if json_prefill:
+            content = "{" + content
 
         usage = response.usage
 
