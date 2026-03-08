@@ -13,6 +13,7 @@ import json
 
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
+from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.evaluation.models import EvaluationContext, SemanticResult
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.evaluation import (
@@ -117,24 +118,6 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 {file_section}
 
 Respond with ONLY a JSON object. No explanation, no preamble, no markdown fences."""
-
-
-def extract_json_payload(text: str) -> str | None:
-    """Extract JSON object from text using index-based approach.
-
-    More reliable than regex for handling nested braces in code snippets.
-
-    Args:
-        text: Raw text potentially containing JSON
-
-    Returns:
-        Extracted JSON string or None if not found
-    """
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
-    return None
 
 
 def parse_semantic_response(response_text: str) -> Result[SemanticResult, ValidationError]:

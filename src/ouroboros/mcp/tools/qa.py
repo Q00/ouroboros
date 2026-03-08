@@ -18,6 +18,7 @@ import uuid
 import structlog
 
 from ouroboros.core.types import Result
+from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
     ContentType,
@@ -147,28 +148,6 @@ def _build_qa_user_prompt(
 Provide your evaluation as a JSON object."""
 
 
-def _extract_json_payload(text: str) -> str | None:
-    """Extract JSON object from text.
-
-    Handles common LLM response patterns:
-    - Raw JSON: ``{"score": ...}``
-    - Code-fenced: ``````json\\n{...}\\n``````
-    """
-    import re
-
-    # Strip code fences first (```json ... ```)
-    fence_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-    if fence_match:
-        return fence_match.group(1)
-
-    # Fallback: find outermost braces
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
-    return None
-
-
 def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
     """Unwrap nested verdict objects.
 
@@ -197,7 +176,7 @@ def _parse_qa_response(
     Returns:
         Result containing QAVerdict or error string.
     """
-    json_str = _extract_json_payload(response_text)
+    json_str = extract_json_payload(response_text)
     if not json_str:
         return Result.err("Could not find JSON in QA response")
 

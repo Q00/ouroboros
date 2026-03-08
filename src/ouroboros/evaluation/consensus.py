@@ -24,6 +24,7 @@ import json
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_aspect import AnalysisResult
 from ouroboros.core.types import Result
+from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.evaluation.models import (
     ConsensusResult,
     DeliberationResult,
@@ -135,53 +136,6 @@ def build_consensus_prompt(context: EvaluationContext) -> str:
 ```
 
 Cast your vote as a JSON object with: approved (boolean), confidence (0-1), and reasoning."""
-
-
-def extract_json_payload(text: str) -> str | None:
-    """Extract JSON object from text using bracket-matching approach.
-
-    Uses brace counting to find the first complete JSON object,
-    avoiding issues with multiple disjoint brace blocks (e.g., code snippets).
-
-    Args:
-        text: Raw text potentially containing JSON
-
-    Returns:
-        Extracted JSON string or None if not found
-    """
-    start = text.find("{")
-    if start == -1:
-        return None
-
-    # Count braces to find matching closing brace
-    depth = 0
-    in_string = False
-    escape_next = False
-
-    for i, char in enumerate(text[start:], start=start):
-        if escape_next:
-            escape_next = False
-            continue
-
-        if char == "\\":
-            escape_next = True
-            continue
-
-        if char == '"' and not escape_next:
-            in_string = not in_string
-            continue
-
-        if in_string:
-            continue
-
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-
-    return None
 
 
 def parse_vote_response(response_text: str, model: str) -> Result[Vote, ValidationError]:
