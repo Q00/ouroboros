@@ -40,24 +40,11 @@ class MechanicalConfig:
     """
 
     coverage_threshold: float = 0.7
-    lint_command: tuple[str, ...] = ("uv", "run", "ruff", "check", ".")
-    build_command: tuple[str, ...] = ("uv", "run", "python", "-m", "py_compile")
-    test_command: tuple[str, ...] = ("uv", "run", "pytest", "--tb=short", "-q")
-    static_command: tuple[str, ...] = (
-        "uv",
-        "run",
-        "mypy",
-        "src/ouroboros",
-        "--ignore-missing-imports",
-    )
-    coverage_command: tuple[str, ...] = (
-        "uv",
-        "run",
-        "pytest",
-        "--cov=src/ouroboros",
-        "--cov-report=term-missing",
-        "-q",
-    )
+    lint_command: tuple[str, ...] | None = None
+    build_command: tuple[str, ...] | None = None
+    test_command: tuple[str, ...] | None = None
+    static_command: tuple[str, ...] | None = None
+    coverage_command: tuple[str, ...] | None = None
     timeout_seconds: int = 300
     working_dir: Path | None = None
 

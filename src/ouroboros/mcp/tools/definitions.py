@@ -1396,6 +1396,17 @@ class EvaluateHandler:
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    name="working_dir",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Project working directory for language auto-detection of Stage 1 "
+                        "mechanical verification commands. Auto-detects language from marker "
+                        "files (build.zig, Cargo.toml, go.mod, package.json, etc.). "
+                        "Supports .ouroboros/mechanical.toml for custom overrides."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -1411,10 +1422,13 @@ class EvaluateHandler:
         Returns:
             Result containing evaluation results or error.
         """
+        from pathlib import Path
+
         from ouroboros.evaluation import (
             EvaluationContext,
             EvaluationPipeline,
             PipelineConfig,
+            build_mechanical_config,
         )
 
         session_id = arguments.get("session_id")
@@ -1492,7 +1506,10 @@ class EvaluateHandler:
 
             # Use injected or create services
             llm_adapter = self.llm_adapter or ClaudeCodeAdapter(max_turns=1)
-            config = PipelineConfig()
+            working_dir_str = arguments.get("working_dir")
+            working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
+            mechanical_config = build_mechanical_config(working_dir)
+            config = PipelineConfig(mechanical=mechanical_config)
             pipeline = EvaluationPipeline(llm_adapter, config)
             result = await pipeline.evaluate(context)
 

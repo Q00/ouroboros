@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+import json
 import os
 from pathlib import Path
 
@@ -370,7 +371,26 @@ class ClaudeCodeAdapter:
         # Pass model from CompletionConfig if specified
         # "default" is not a valid SDK model — treat it as None (use SDK default)
         if config.model and config.model != "default":
-            options_kwargs["model"] = config.model
+            model = config.model
+            # Strip provider prefixes — the Agent SDK uses Anthropic's API directly
+            if model.startswith("openrouter/anthropic/"):
+                model = model[len("openrouter/anthropic/") :]
+            elif model.startswith("anthropic/"):
+                model = model[len("anthropic/") :]
+            elif model.startswith("openrouter/"):
+                # Non-Anthropic model (e.g., openrouter/openai/gpt-4o) —
+                # Agent SDK only supports Claude, so skip and use SDK default
+                model = None
+            if model:
+                options_kwargs["model"] = model
+
+        # Pass structured output format if requested
+        # SDK expects: output_format={"type": "json_schema", "schema": {...}}
+        if config.response_format and config.response_format.get("type") == "json_schema":
+            options_kwargs["output_format"] = {
+                "type": "json_schema",
+                "schema": config.response_format.get("json_schema", {}),
+            }
 
         options = ClaudeAgentOptions(**options_kwargs)
 
@@ -424,8 +444,15 @@ class ClaudeCodeAdapter:
                             self._on_message("tool", tool_info)
 
             elif class_name == "ResultMessage":
+                # Check for structured output first (from json_schema output_format)
+                structured = getattr(sdk_message, "structured_output", None)
+                if structured is not None:
+                    content = (
+                        json.dumps(structured) if not isinstance(structured, str) else structured
+                    )
+
                 # Final result - use result content if we don't have content yet
-                if not content:
+                elif not content:
                     content = getattr(sdk_message, "result", "") or ""
 
                 # Check for errors - don't break, just record

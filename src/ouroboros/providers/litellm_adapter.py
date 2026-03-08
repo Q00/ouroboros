@@ -134,6 +134,9 @@ class LiteLLMAdapter:
         if config.stop:
             kwargs["stop"] = config.stop
 
+        if config.response_format:
+            kwargs["response_format"] = config.response_format
+
         api_key = self._get_api_key(config.model)
         if api_key:
             kwargs["api_key"] = api_key

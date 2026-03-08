@@ -24,6 +24,7 @@ import json
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_aspect import AnalysisResult
 from ouroboros.core.types import Result
+from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.evaluation.models import (
     ConsensusResult,
     DeliberationResult,
@@ -49,6 +50,34 @@ DEFAULT_CONSENSUS_MODELS: tuple[str, ...] = (
     "openrouter/anthropic/claude-opus-4-6",
     "openrouter/google/gemini-2.5-pro",
 )
+
+
+# JSON schema for consensus vote output
+VOTE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "approved": {"type": "boolean", "description": "Whether the artifact is approved"},
+        "confidence": {"type": "number", "description": "Confidence in vote 0.0-1.0"},
+        "reasoning": {"type": "string", "description": "Explanation for the vote"},
+    },
+    "required": ["approved"],
+}
+
+# JSON schema for consensus judgment output
+JUDGMENT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["approved", "rejected", "conditional"]},
+        "confidence": {"type": "number", "description": "Confidence in judgment 0.0-1.0"},
+        "reasoning": {"type": "string", "description": "Explanation for the judgment"},
+        "conditions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Conditions for conditional verdict",
+        },
+    },
+    "required": ["verdict"],
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,53 +136,6 @@ def build_consensus_prompt(context: EvaluationContext) -> str:
 ```
 
 Cast your vote as a JSON object with: approved (boolean), confidence (0-1), and reasoning."""
-
-
-def extract_json_payload(text: str) -> str | None:
-    """Extract JSON object from text using bracket-matching approach.
-
-    Uses brace counting to find the first complete JSON object,
-    avoiding issues with multiple disjoint brace blocks (e.g., code snippets).
-
-    Args:
-        text: Raw text potentially containing JSON
-
-    Returns:
-        Extracted JSON string or None if not found
-    """
-    start = text.find("{")
-    if start == -1:
-        return None
-
-    # Count braces to find matching closing brace
-    depth = 0
-    in_string = False
-    escape_next = False
-
-    for i, char in enumerate(text[start:], start=start):
-        if escape_next:
-            escape_next = False
-            continue
-
-        if char == "\\":
-            escape_next = True
-            continue
-
-        if char == '"' and not escape_next:
-            in_string = not in_string
-            continue
-
-        if in_string:
-            continue
-
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-
-    return None
 
 
 def parse_vote_response(response_text: str, model: str) -> Result[Vote, ValidationError]:
@@ -353,6 +335,7 @@ class ConsensusEvaluator:
             model=model,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
+            response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
         )
 
         llm_result = await self._llm.complete(messages, config)
@@ -652,6 +635,7 @@ class DeliberativeConsensus:
                 model=model,
                 temperature=self._config.temperature,
                 max_tokens=self._config.max_tokens,
+                response_format={"type": "json_schema", "json_schema": VOTE_SCHEMA},
             )
 
             llm_result = await self._llm.complete(messages, config)
@@ -792,6 +776,7 @@ Based on both positions above, make your final judgment."""
             model=self._config.judge_model,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
+            response_format={"type": "json_schema", "json_schema": JUDGMENT_SCHEMA},
         )
 
         llm_result = await self._llm.complete(messages, config)

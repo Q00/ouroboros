@@ -168,6 +168,28 @@ class TestLiteLLMAdapterBuildCompletionKwargs:
 
         assert kwargs["stop"] == ["###", "END"]
 
+    def test_includes_response_format_when_set(self) -> None:
+        """Includes response_format when provided."""
+        adapter = LiteLLMAdapter()
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+        config = CompletionConfig(model="gpt-4", response_format={"type": "json_object"})
+
+        with patch.dict("os.environ", {}, clear=True):
+            kwargs = adapter._build_completion_kwargs(messages, config)
+
+        assert kwargs["response_format"] == {"type": "json_object"}
+
+    def test_omits_response_format_when_none(self) -> None:
+        """Does not include response_format when not set."""
+        adapter = LiteLLMAdapter()
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+        config = CompletionConfig(model="gpt-4")
+
+        with patch.dict("os.environ", {}, clear=True):
+            kwargs = adapter._build_completion_kwargs(messages, config)
+
+        assert "response_format" not in kwargs
+
     def test_includes_api_key_when_available(self) -> None:
         """Includes api_key when available from environment."""
         adapter = LiteLLMAdapter()

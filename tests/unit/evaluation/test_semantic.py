@@ -236,6 +236,41 @@ class TestSemanticEvaluator:
         assert events[1].data["score"] == 0.8
 
     @pytest.mark.asyncio
+    async def test_evaluate_passes_json_response_format(
+        self,
+        mock_llm: AsyncMock,
+        sample_context: EvaluationContext,
+    ) -> None:
+        """Evaluator requests JSON response format from LLM."""
+        mock_llm.complete.return_value = Result.ok(
+            CompletionResponse(
+                content="""{
+                    "score": 0.85,
+                    "ac_compliance": true,
+                    "goal_alignment": 0.9,
+                    "drift_score": 0.1,
+                    "uncertainty": 0.15,
+                    "reasoning": "Good"
+                }""",
+                model="test",
+                usage=UsageInfo(0, 0, 0),
+            )
+        )
+
+        evaluator = SemanticEvaluator(mock_llm)
+        await evaluator.evaluate(sample_context)
+
+        # Verify response_format was passed in the CompletionConfig
+        call_args = mock_llm.complete.call_args
+        config = call_args[0][1]  # second positional arg
+        assert config.response_format is not None
+        assert config.response_format["type"] == "json_schema"
+        assert "json_schema" in config.response_format
+        schema = config.response_format["json_schema"]
+        assert "score" in schema["required"]
+        assert "ac_compliance" in schema["required"]
+
+    @pytest.mark.asyncio
     async def test_evaluate_llm_error(
         self,
         mock_llm: AsyncMock,

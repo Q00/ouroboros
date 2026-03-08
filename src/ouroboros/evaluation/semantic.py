@@ -13,6 +13,7 @@ import json
 
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
+from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.evaluation.models import EvaluationContext, SemanticResult
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.evaluation import (
@@ -24,6 +25,27 @@ from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, Mess
 # Default model for semantic evaluation (Standard tier)
 # Can be overridden via SemanticConfig.model
 DEFAULT_SEMANTIC_MODEL = "claude-opus-4-6"
+
+# JSON schema for structured semantic evaluation output
+SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "number", "description": "Overall quality score 0.0-1.0"},
+        "ac_compliance": {"type": "boolean", "description": "Whether acceptance criterion is met"},
+        "goal_alignment": {"type": "number", "description": "Alignment with original goal 0.0-1.0"},
+        "drift_score": {"type": "number", "description": "Deviation from intent 0.0-1.0"},
+        "uncertainty": {"type": "number", "description": "Evaluation confidence 0.0-1.0"},
+        "reasoning": {"type": "string", "description": "Brief explanation of evaluation"},
+    },
+    "required": [
+        "score",
+        "ac_compliance",
+        "goal_alignment",
+        "drift_score",
+        "uncertainty",
+        "reasoning",
+    ],
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,25 +117,7 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 ```
 {file_section}
 
-Provide your evaluation as a JSON object."""
-
-
-def extract_json_payload(text: str) -> str | None:
-    """Extract JSON object from text using index-based approach.
-
-    More reliable than regex for handling nested braces in code snippets.
-
-    Args:
-        text: Raw text potentially containing JSON
-
-    Returns:
-        Extracted JSON string or None if not found
-    """
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
-    return None
+Respond with ONLY a JSON object. No explanation, no preamble, no markdown fences."""
 
 
 def parse_semantic_response(response_text: str) -> Result[SemanticResult, ValidationError]:
@@ -248,11 +252,15 @@ class SemanticEvaluator:
             Message(role=MessageRole.USER, content=build_evaluation_prompt(context)),
         ]
 
-        # Call LLM
+        # Call LLM with structured JSON output to ensure valid JSON
         completion_config = CompletionConfig(
             model=self._config.model,
             temperature=self._config.temperature,
             max_tokens=self._config.max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": SEMANTIC_RESULT_SCHEMA,
+            },
         )
 
         llm_result = await self._llm.complete(messages, completion_config)

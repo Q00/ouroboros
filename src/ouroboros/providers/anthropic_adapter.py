@@ -158,6 +158,16 @@ class AnthropicAdapter:
         if not api_messages:
             api_messages.append({"role": "user", "content": "(empty)"})
 
+        # Anthropic doesn't support response_format natively.
+        # Use assistant prefill to nudge JSON output when requested.
+        json_prefill = False
+        if config.response_format and config.response_format.get("type") in (
+            "json_object",
+            "json_schema",
+        ):
+            api_messages.append({"role": "assistant", "content": "{"})
+            json_prefill = True
+
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": api_messages,
@@ -181,7 +191,7 @@ class AnthropicAdapter:
 
         try:
             response = await client.messages.create(**kwargs)
-            return Result.ok(self._parse_response(response, model))
+            return Result.ok(self._parse_response(response, model, json_prefill))
 
         except Exception as e:
             return self._handle_error(e, model)
@@ -190,12 +200,14 @@ class AnthropicAdapter:
         self,
         response: Any,
         model: str,
+        json_prefill: bool = False,
     ) -> CompletionResponse:
         """Parse the Anthropic API response into CompletionResponse.
 
         Args:
             response: The raw Anthropic Message response.
             model: The model identifier used for the request.
+            json_prefill: If True, prepend "{" to content (assistant prefill).
 
         Returns:
             Parsed CompletionResponse.
@@ -206,7 +218,9 @@ class AnthropicAdapter:
             if block.type == "text":
                 content += block.text
 
-        # Security: Validate response length
+        # Security: Validate response length *before* prepending the JSON
+        # prefill character. Truncating after prepend would cut the JSON
+        # mid-object, producing silently broken output.
         is_valid, _ = InputValidator.validate_llm_response(content)
         if not is_valid:
             log.warning(
@@ -216,6 +230,11 @@ class AnthropicAdapter:
                 max_length=MAX_LLM_RESPONSE_LENGTH,
             )
             content = content[:MAX_LLM_RESPONSE_LENGTH]
+
+        # When using JSON prefill, the "{" was sent as assistant content
+        # and is not echoed back in the response. Prepend it.
+        if json_prefill:
+            content = "{" + content
 
         usage = response.usage
 

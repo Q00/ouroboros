@@ -14,6 +14,15 @@ from ouroboros.evaluation.mechanical import (
 )
 from ouroboros.evaluation.models import CheckType
 
+# Config with commands set for tests that need real/mocked command execution
+_TEST_CONFIG = MechanicalConfig(
+    lint_command=("echo", "lint-ok"),
+    build_command=("echo", "build-ok"),
+    test_command=("echo", "test-ok"),
+    static_command=("echo", "static-ok"),
+    coverage_command=("echo", "coverage-ok"),
+)
+
 
 class TestParseCoverageFromOutput:
     """Tests for coverage parsing."""
@@ -58,6 +67,11 @@ class TestMechanicalConfig:
         assert config.coverage_threshold == 0.7
         assert config.timeout_seconds == 300
         assert config.working_dir is None
+        assert config.lint_command is None
+        assert config.build_command is None
+        assert config.test_command is None
+        assert config.static_command is None
+        assert config.coverage_command is None
 
     def test_custom_values(self) -> None:
         """Create config with custom values."""
@@ -134,7 +148,7 @@ class TestMechanicalVerifier:
         ) as mock_run:
             mock_run.return_value = CommandResult(0, "OK", "")
 
-            verifier = MechanicalVerifier()
+            verifier = MechanicalVerifier(_TEST_CONFIG)
             result = await verifier.verify("exec-1", checks=[CheckType.LINT])
 
             assert result.is_ok
@@ -152,7 +166,7 @@ class TestMechanicalVerifier:
         ) as mock_run:
             mock_run.return_value = CommandResult(0, "All OK", "")
 
-            verifier = MechanicalVerifier()
+            verifier = MechanicalVerifier(_TEST_CONFIG)
             result = await verifier.verify(
                 "exec-1",
                 checks=[CheckType.LINT, CheckType.BUILD],
@@ -177,7 +191,7 @@ class TestMechanicalVerifier:
                 CommandResult(1, "", "Error"),
             ]
 
-            verifier = MechanicalVerifier()
+            verifier = MechanicalVerifier(_TEST_CONFIG)
             result = await verifier.verify(
                 "exec-1",
                 checks=[CheckType.LINT, CheckType.BUILD],
@@ -202,7 +216,10 @@ class TestMechanicalVerifier:
                 "",
             )
 
-            config = MechanicalConfig(coverage_threshold=0.7)
+            config = MechanicalConfig(
+                coverage_threshold=0.7,
+                coverage_command=("echo", "coverage"),
+            )
             verifier = MechanicalVerifier(config)
             result = await verifier.verify("exec-1", checks=[CheckType.COVERAGE])
 
@@ -224,7 +241,10 @@ class TestMechanicalVerifier:
                 "",
             )
 
-            config = MechanicalConfig(coverage_threshold=0.7)
+            config = MechanicalConfig(
+                coverage_threshold=0.7,
+                coverage_command=("echo", "coverage"),
+            )
             verifier = MechanicalVerifier(config)
             result = await verifier.verify("exec-1", checks=[CheckType.COVERAGE])
 
@@ -247,13 +267,29 @@ class TestMechanicalVerifier:
                 timed_out=True,
             )
 
-            verifier = MechanicalVerifier()
+            verifier = MechanicalVerifier(_TEST_CONFIG)
             result = await verifier.verify("exec-1", checks=[CheckType.TEST])
 
             assert result.is_ok
             mech_result, _ = result.value
             assert mech_result.passed is False
             assert "timed out" in mech_result.checks[0].message.lower()
+
+    @pytest.mark.asyncio
+    async def test_verify_skips_unconfigured_checks(self) -> None:
+        """Checks with no command configured are skipped (passed with skip message)."""
+        config = MechanicalConfig()  # All commands are None
+        verifier = MechanicalVerifier(config)
+        result = await verifier.verify(
+            "exec-1",
+            checks=[CheckType.LINT, CheckType.BUILD, CheckType.TEST],
+        )
+
+        assert result.is_ok
+        mech_result, _ = result.value
+        assert mech_result.passed is True
+        assert all(c.passed for c in mech_result.checks)
+        assert all("skipped" in c.message.lower() for c in mech_result.checks)
 
 
 class TestRunMechanicalVerification:

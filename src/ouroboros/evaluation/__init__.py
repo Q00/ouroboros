@@ -40,6 +40,11 @@ from ouroboros.evaluation.consensus import (
     run_consensus_evaluation,
     run_deliberative_evaluation,
 )
+from ouroboros.evaluation.languages import (
+    LanguagePreset,
+    build_mechanical_config,
+    detect_language,
+)
 from ouroboros.evaluation.mechanical import (
     MechanicalConfig,
     MechanicalVerifier,
@@ -94,8 +99,11 @@ __all__ = [
     "Vote",
     "VoterRole",
     # Stage 1
+    "LanguagePreset",
     "MechanicalConfig",
     "MechanicalVerifier",
+    "build_mechanical_config",
+    "detect_language",
     "run_mechanical_verification",
     # Stage 2
     "DEFAULT_SEMANTIC_MODEL",

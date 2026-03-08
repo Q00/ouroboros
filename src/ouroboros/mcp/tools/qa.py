@@ -18,6 +18,7 @@ import uuid
 import structlog
 
 from ouroboros.core.types import Result
+from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
     ContentType,
@@ -34,6 +35,36 @@ log = structlog.get_logger(__name__)
 # Verdict thresholds
 DEFAULT_PASS_THRESHOLD = 0.80
 FAIL_THRESHOLD = 0.40
+
+# JSON schema for QA verdict output
+QA_VERDICT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "number", "description": "Quality score 0.0-1.0"},
+        "verdict": {
+            "type": "string",
+            "enum": ["pass", "revise", "fail"],
+            "description": "Overall verdict",
+        },
+        "dimensions": {
+            "type": "object",
+            "description": "Per-dimension scores",
+            "additionalProperties": {"type": "number"},
+        },
+        "differences": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Specific differences found",
+        },
+        "suggestions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Actionable improvement suggestions",
+        },
+        "reasoning": {"type": "string", "description": "Explanation of assessment"},
+    },
+    "required": ["score", "verdict"],
+}
 
 VALID_ARTIFACT_TYPES = ("code", "api_response", "document", "screenshot", "test_output", "custom")
 VALID_VERDICTS = ("pass", "revise", "fail")
@@ -117,28 +148,6 @@ def _build_qa_user_prompt(
 Provide your evaluation as a JSON object."""
 
 
-def _extract_json_payload(text: str) -> str | None:
-    """Extract JSON object from text.
-
-    Handles common LLM response patterns:
-    - Raw JSON: ``{"score": ...}``
-    - Code-fenced: ``````json\\n{...}\\n``````
-    """
-    import re
-
-    # Strip code fences first (```json ... ```)
-    fence_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
-    if fence_match:
-        return fence_match.group(1)
-
-    # Fallback: find outermost braces
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return text[start : end + 1]
-    return None
-
-
 def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
     """Unwrap nested verdict objects.
 
@@ -167,7 +176,7 @@ def _parse_qa_response(
     Returns:
         Result containing QAVerdict or error string.
     """
-    json_str = _extract_json_payload(response_text)
+    json_str = extract_json_payload(response_text)
     if not json_str:
         return Result.err("Could not find JSON in QA response")
 
@@ -430,6 +439,7 @@ class QAHandler:
                 model="claude-sonnet-4-20250514",
                 temperature=0.2,
                 max_tokens=2048,
+                response_format={"type": "json_schema", "json_schema": QA_VERDICT_SCHEMA},
             )
 
             llm_result = await llm_adapter.complete(messages, config)
