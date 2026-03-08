@@ -24,7 +24,6 @@ from ouroboros.providers.base import (
     MessageRole,
 )
 
-
 log = structlog.get_logger()
 
 # Interview round constants

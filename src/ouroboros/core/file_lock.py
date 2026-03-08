@@ -18,7 +18,7 @@ from filelock import FileLock
 
 
 @contextmanager
-def file_lock(file_path: Path, exclusive: bool = True) -> Iterator[None]:
+def file_lock(file_path: Path, exclusive: bool = True) -> Iterator[None]:  # noqa: ARG001
     """Context manager for cross-platform file locking.
 
     Creates a .lock file alongside the target file. Both shared and exclusive
