@@ -10,11 +10,16 @@ Usage:
 """
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import shlex
 from typing import Any
 
+import structlog
+
 from ouroboros.evaluation.mechanical import MechanicalConfig
+
+log = structlog.get_logger()
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,8 +181,12 @@ def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
 
     import tomllib
 
-    with open(config_path, "rb") as f:
-        return tomllib.load(f)
+    try:
+        with open(config_path, "rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        log.warning("mechanical.toml_parse_error", path=str(config_path), error=str(e))
+        return None
 
 
 def _parse_command(value: str) -> tuple[str, ...] | None:
@@ -193,7 +202,29 @@ def _parse_command(value: str) -> tuple[str, ...] | None:
     value = value.strip()
     if not value:
         return None
-    return tuple(shlex.split(value))
+    return tuple(shlex.split(value, posix=(os.name != "nt")))
+
+
+def _apply_overrides(
+    current: dict[str, Any],
+    source: dict[str, Any],
+) -> None:
+    """Apply command overrides from a source dict onto current config values.
+
+    Mutates current in place. Handles command keys (parsed via shlex),
+    timeout (int), and coverage_threshold (float).
+
+    Args:
+        current: Mutable dict of current config values
+        source: Override source (TOML file or explicit overrides)
+    """
+    for key in ("lint", "build", "test", "static", "coverage"):
+        if key in source:
+            current[key] = _parse_command(str(source[key]))
+    if "timeout" in source:
+        current["timeout"] = int(source["timeout"])
+    if "coverage_threshold" in source:
+        current["coverage_threshold"] = float(source["coverage_threshold"])
 
 
 def build_mechanical_config(
@@ -219,56 +250,32 @@ def build_mechanical_config(
     preset = detect_language(working_dir)
 
     # Base command values from preset (or all None)
-    lint = preset.lint_command if preset else None
-    build = preset.build_command if preset else None
-    test = preset.test_command if preset else None
-    static = preset.static_command if preset else None
-    coverage = preset.coverage_command if preset else None
-    timeout = 300
-    coverage_threshold = 0.7
+    current: dict[str, Any] = {
+        "lint": preset.lint_command if preset else None,
+        "build": preset.build_command if preset else None,
+        "test": preset.test_command if preset else None,
+        "static": preset.static_command if preset else None,
+        "coverage": preset.coverage_command if preset else None,
+        "timeout": 300,
+        "coverage_threshold": 0.7,
+    }
 
     # Layer on .ouroboros/mechanical.toml
     file_overrides = _load_project_overrides(working_dir)
     if file_overrides:
-        if "lint" in file_overrides:
-            lint = _parse_command(str(file_overrides["lint"]))
-        if "build" in file_overrides:
-            build = _parse_command(str(file_overrides["build"]))
-        if "test" in file_overrides:
-            test = _parse_command(str(file_overrides["test"]))
-        if "static" in file_overrides:
-            static = _parse_command(str(file_overrides["static"]))
-        if "coverage" in file_overrides:
-            coverage = _parse_command(str(file_overrides["coverage"]))
-        if "timeout" in file_overrides:
-            timeout = int(file_overrides["timeout"])
-        if "coverage_threshold" in file_overrides:
-            coverage_threshold = float(file_overrides["coverage_threshold"])
+        _apply_overrides(current, file_overrides)
 
     # Layer on explicit overrides (from caller / MCP params)
     if overrides:
-        if "lint" in overrides:
-            lint = _parse_command(str(overrides["lint"]))
-        if "build" in overrides:
-            build = _parse_command(str(overrides["build"]))
-        if "test" in overrides:
-            test = _parse_command(str(overrides["test"]))
-        if "static" in overrides:
-            static = _parse_command(str(overrides["static"]))
-        if "coverage" in overrides:
-            coverage = _parse_command(str(overrides["coverage"]))
-        if "timeout" in overrides:
-            timeout = int(overrides["timeout"])
-        if "coverage_threshold" in overrides:
-            coverage_threshold = float(overrides["coverage_threshold"])
+        _apply_overrides(current, overrides)
 
     return MechanicalConfig(
-        lint_command=lint,
-        build_command=build,
-        test_command=test,
-        static_command=static,
-        coverage_command=coverage,
-        timeout_seconds=timeout,
-        coverage_threshold=coverage_threshold,
+        lint_command=current["lint"],
+        build_command=current["build"],
+        test_command=current["test"],
+        static_command=current["static"],
+        coverage_command=current["coverage"],
+        timeout_seconds=current["timeout"],
+        coverage_threshold=current["coverage_threshold"],
         working_dir=working_dir,
     )
