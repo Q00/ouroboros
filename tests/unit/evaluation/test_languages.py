@@ -121,7 +121,13 @@ class TestParseCommand:
         assert _parse_command("   ") is None
 
     def test_quoted_arguments(self) -> None:
-        assert _parse_command('echo "hello world"') == ("echo", "hello world")
+        assert _parse_command('echo "hello world"', trusted=True) == ("echo", "hello world")
+
+    def test_blocked_executable(self) -> None:
+        assert _parse_command("rm -rf /") is None
+
+    def test_allowed_executable(self) -> None:
+        assert _parse_command("cargo test") == ("cargo", "test")
 
 
 class TestBuildMechanicalConfig:

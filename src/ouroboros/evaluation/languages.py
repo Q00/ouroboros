@@ -189,20 +189,99 @@ def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
         return None
 
 
-def _parse_command(value: str) -> tuple[str, ...] | None:
+# Executables allowed in .ouroboros/mechanical.toml overrides.
+# Presets (hardcoded) are trusted and bypass this check.
+# This prevents untrusted repos from running arbitrary commands
+# when evaluated in CI/CD environments.
+_ALLOWED_EXECUTABLES: frozenset[str] = frozenset(
+    {
+        # Python
+        "python",
+        "python3",
+        "uv",
+        "pip",
+        "ruff",
+        "mypy",
+        "pytest",
+        "pyright",
+        "black",
+        "isort",
+        "flake8",
+        "pylint",
+        "bandit",
+        # Zig
+        "zig",
+        # Rust
+        "cargo",
+        "rustc",
+        "clippy-driver",
+        # Go
+        "go",
+        "golangci-lint",
+        # Node.js
+        "npm",
+        "npx",
+        "pnpm",
+        "yarn",
+        "bun",
+        "node",
+        # General build tools
+        "make",
+        "cmake",
+        "gradle",
+        "mvn",
+        "ant",
+        # Other languages
+        "cabal",
+        "stack",
+        "ghc",
+        "dotnet",
+        "mix",
+        "elixir",
+        "swift",
+        "swiftc",
+        "xcodebuild",
+        "javac",
+        "java",
+        "kotlinc",
+        "clang",
+        "clang-tidy",
+        "gcc",
+        "g++",
+        "deno",
+    }
+)
+
+
+def _parse_command(value: str, *, trusted: bool = False) -> tuple[str, ...] | None:
     """Parse a command string into a tuple, or None if empty.
 
     Args:
         value: Shell command string (e.g. "cargo test --workspace")
                Empty string means "skip this check"
+        trusted: If True, skip executable validation (for hardcoded presets)
 
     Returns:
         Tuple of command parts, or None to skip
+
+    Raises:
+        ValueError: If the executable is not in the allowlist and trusted=False
     """
     value = value.strip()
     if not value:
         return None
-    return tuple(shlex.split(value, posix=(os.name != "nt")))
+    parts = tuple(shlex.split(value, posix=(os.name != "nt")))
+    if not trusted and parts:
+        executable = Path(parts[0]).name
+        if executable not in _ALLOWED_EXECUTABLES:
+            log.warning(
+                "mechanical.blocked_executable",
+                executable=executable,
+                command=value,
+                hint="Add to _ALLOWED_EXECUTABLES or use a preset language",
+            )
+            return None
+    return parts
 
 
 def _apply_overrides(

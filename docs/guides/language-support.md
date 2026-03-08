@@ -49,6 +49,14 @@ coverage_threshold = 0.5    # minimum coverage ratio (default: 0.7)
 2. **Auto-detected preset** — based on marker files
 3. **Skip** — if neither exists, checks are skipped
 
+### Security: Executable Allowlist
+
+Commands from `.ouroboros/mechanical.toml` are validated against an allowlist of known build/test/lint executables before execution. If a command uses an executable not on the list, it is silently skipped and a warning is logged.
+
+This prevents untrusted repositories from running arbitrary commands when evaluated in CI/CD environments. Hardcoded language presets bypass this check since they are trusted.
+
+If your tool is blocked, check the `_ALLOWED_EXECUTABLES` set in `src/ouroboros/evaluation/languages.py` and submit a PR to add it.
+
 ### Examples
 
 **Zig project with custom build flags:**
