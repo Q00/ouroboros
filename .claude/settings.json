@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/keyword-detector.mjs",
+            "command": "python3 scripts/keyword-detector.py",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/drift-monitor.mjs",
+            "command": "python3 scripts/drift-monitor.py",
             "timeout": 3
           }
         ]
