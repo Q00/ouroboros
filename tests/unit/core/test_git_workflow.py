@@ -47,7 +47,9 @@ class TestDetectGitWorkflow:
 
         config = detect_git_workflow(tmp_path)
 
-        assert config.use_branches is False  # "Don't push to master" doesn't match PR workflow patterns
+        assert (
+            config.use_branches is False
+        )  # "Don't push to master" doesn't match PR workflow patterns
         assert "master" in config.protected_branches
 
     def test_always_create_branch(self, tmp_path: Path) -> None:

@@ -83,9 +83,7 @@ def detect_git_workflow(project_root: Path) -> GitWorkflowConfig:
         return GitWorkflowConfig()
 
     # Detect PR-based workflow
-    use_branches = any(
-        pattern.search(claude_md_content) for pattern in _PR_WORKFLOW_PATTERNS
-    )
+    use_branches = any(pattern.search(claude_md_content) for pattern in _PR_WORKFLOW_PATTERNS)
 
     # Detect protected branches
     protected = set()
