@@ -214,6 +214,128 @@ class TestEventStoreReplay:
         assert events_2[0].data["id"] == "2"
 
 
+class TestEventStoreGetEventsAfter:
+    """Test EventStore.get_events_after() incremental fetching."""
+
+    async def test_get_events_after_returns_all_when_last_row_id_is_zero(
+        self, event_store: EventStore
+    ) -> None:
+        """get_events_after() with last_row_id=0 returns all matching events."""
+        for i in range(3):
+            await event_store.append(
+                BaseEvent(
+                    type="test.event.created",
+                    aggregate_type="execution",
+                    aggregate_id="exec-1",
+                    data={"order": i},
+                )
+            )
+
+        events, last_row_id = await event_store.get_events_after("execution", "exec-1", 0)
+        assert len(events) == 3
+        assert last_row_id > 0
+
+    async def test_get_events_after_returns_only_new_events(
+        self, event_store: EventStore
+    ) -> None:
+        """get_events_after() only returns events inserted after last_row_id."""
+        # Insert first batch
+        for i in range(3):
+            await event_store.append(
+                BaseEvent(
+                    type="test.event.created",
+                    aggregate_type="execution",
+                    aggregate_id="exec-1",
+                    data={"batch": 1, "order": i},
+                )
+            )
+
+        # Get initial cursor
+        _, last_row_id = await event_store.get_events_after("execution", "exec-1", 0)
+
+        # Insert second batch
+        for i in range(2):
+            await event_store.append(
+                BaseEvent(
+                    type="test.event.created",
+                    aggregate_type="execution",
+                    aggregate_id="exec-1",
+                    data={"batch": 2, "order": i},
+                )
+            )
+
+        # Should only get the 2 new events
+        new_events, new_row_id = await event_store.get_events_after(
+            "execution", "exec-1", last_row_id
+        )
+        assert len(new_events) == 2
+        assert all(e.data["batch"] == 2 for e in new_events)
+        assert new_row_id > last_row_id
+
+    async def test_get_events_after_returns_empty_when_no_new_events(
+        self, event_store: EventStore
+    ) -> None:
+        """get_events_after() returns empty list when no new events exist."""
+        await event_store.append(
+            BaseEvent(
+                type="test.event.created",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={},
+            )
+        )
+
+        _, last_row_id = await event_store.get_events_after("execution", "exec-1", 0)
+
+        # No new events
+        events, same_row_id = await event_store.get_events_after(
+            "execution", "exec-1", last_row_id
+        )
+        assert events == []
+        assert same_row_id == last_row_id
+
+    async def test_get_events_after_filters_by_aggregate(
+        self, event_store: EventStore
+    ) -> None:
+        """get_events_after() only returns events for the specified aggregate."""
+        await event_store.append(
+            BaseEvent(
+                type="test.event.created",
+                aggregate_type="execution",
+                aggregate_id="exec-1",
+                data={"target": True},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="test.event.created",
+                aggregate_type="execution",
+                aggregate_id="exec-2",
+                data={"target": False},
+            )
+        )
+
+        events, _ = await event_store.get_events_after("execution", "exec-1", 0)
+        assert len(events) == 1
+        assert events[0].data["target"] is True
+
+    async def test_get_events_after_returns_empty_for_nonexistent_aggregate(
+        self, event_store: EventStore
+    ) -> None:
+        """get_events_after() returns empty list for nonexistent aggregate."""
+        events, last_row_id = await event_store.get_events_after("execution", "no-such-id", 0)
+        assert events == []
+        assert last_row_id == 0
+
+    async def test_get_events_after_raises_when_not_initialized(self) -> None:
+        """get_events_after() raises PersistenceError when store not initialized."""
+        from ouroboros.core.errors import PersistenceError
+
+        store = EventStore("sqlite+aiosqlite:///test.db")
+        with pytest.raises(PersistenceError, match="not initialized"):
+            await store.get_events_after("test", "test-123", 0)
+
+
 class TestEventStoreErrorHandling:
     """Test error handling in EventStore."""
 
