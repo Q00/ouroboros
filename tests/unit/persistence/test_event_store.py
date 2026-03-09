@@ -235,9 +235,7 @@ class TestEventStoreGetEventsAfter:
         assert len(events) == 3
         assert last_row_id > 0
 
-    async def test_get_events_after_returns_only_new_events(
-        self, event_store: EventStore
-    ) -> None:
+    async def test_get_events_after_returns_only_new_events(self, event_store: EventStore) -> None:
         """get_events_after() only returns events inserted after last_row_id."""
         # Insert first batch
         for i in range(3):
@@ -288,15 +286,11 @@ class TestEventStoreGetEventsAfter:
         _, last_row_id = await event_store.get_events_after("execution", "exec-1", 0)
 
         # No new events
-        events, same_row_id = await event_store.get_events_after(
-            "execution", "exec-1", last_row_id
-        )
+        events, same_row_id = await event_store.get_events_after("execution", "exec-1", last_row_id)
         assert events == []
         assert same_row_id == last_row_id
 
-    async def test_get_events_after_filters_by_aggregate(
-        self, event_store: EventStore
-    ) -> None:
+    async def test_get_events_after_filters_by_aggregate(self, event_store: EventStore) -> None:
         """get_events_after() only returns events for the specified aggregate."""
         await event_store.append(
             BaseEvent(
