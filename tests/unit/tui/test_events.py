@@ -406,6 +406,38 @@ class TestCreateMessageFromEvent:
         assert msg.total_cost_usd == 0.0
         assert msg.tokens_this_phase == 0
 
+    def test_session_cancelled_event(self) -> None:
+        """Test converting session.cancelled event to ExecutionUpdated with cancelled status."""
+        event = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id="sess_123",
+            data={"execution_id": "exec_456", "reason": "user_request"},
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, ExecutionUpdated)
+        assert msg.execution_id == "exec_456"
+        assert msg.session_id == "sess_123"
+        assert msg.status == "cancelled"
+        assert msg.data["reason"] == "user_request"
+
+    def test_session_cancelled_event_without_execution_id(self) -> None:
+        """Test cancelled event falls back to aggregate_id when execution_id missing."""
+        event = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id="sess_123",
+            data={"reason": "stale_cleanup"},
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, ExecutionUpdated)
+        assert msg.execution_id == "sess_123"
+        assert msg.status == "cancelled"
+
     def test_unhandled_event_returns_none(self) -> None:
         """Test that unhandled event types return None."""
         event = BaseEvent(

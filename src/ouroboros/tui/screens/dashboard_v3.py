@@ -74,6 +74,7 @@ STATUS_ICONS = {
     "completed": "[bold green]●[/]",
     "complete": "[bold green]●[/]",
     "failed": "[bold red]✖[/]",
+    "cancelled": "[bold yellow]⊘[/]",
 }
 
 

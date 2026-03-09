@@ -84,12 +84,29 @@ async def _run_mcp_server(
         db_path: Optional path to EventStore database.
     """
     from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
 
     # Create EventStore with custom path if provided
-    event_store = None
     if db_path:
         event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+    else:
+        event_store = EventStore()
+
+    # Auto-cancel orphaned sessions on startup.
+    # Sessions left in RUNNING/PAUSED state for >1 hour are considered orphaned
+    # (e.g., from a previous crash). Cancel them before accepting new requests.
+    try:
+        await event_store.initialize()
+        repo = SessionRepository(event_store)
+        cancelled = await repo.cancel_orphaned_sessions()
+        if cancelled:
+            _stderr_console.print(
+                f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
+            )
+    except Exception as e:
+        # Auto-cleanup is best-effort — don't prevent server from starting
+        _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
 
     # Create server with all tools pre-registered via dependency injection.
     # Do NOT re-register OUROBOROS_TOOLS here — create_ouroboros_server already

@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
+    CancelExecutionHandler,
     EvaluateHandler,
     EvolveRewindHandler,
     EvolveStepHandler,
@@ -195,7 +196,7 @@ class TestOuroborosTools:
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
         """OUROBOROS_TOOLS contains all standard handlers."""
-        assert len(OUROBOROS_TOOLS) == 12
+        assert len(OUROBOROS_TOOLS) == 13
 
         handler_types = {type(h) for h in OUROBOROS_TOOLS}
         assert ExecuteSeedHandler in handler_types
@@ -209,6 +210,7 @@ class TestOuroborosTools:
         assert EvolveStepHandler in handler_types
         assert LineageStatusHandler in handler_types
         assert EvolveRewindHandler in handler_types
+        assert CancelExecutionHandler in handler_types
 
     def test_all_tools_have_unique_names(self) -> None:
         """All tools have unique names."""
@@ -613,3 +615,297 @@ class TestInterviewHandlerCwd:
         mock_engine.start_interview.assert_awaited_once()
         call_kwargs = mock_engine.start_interview.call_args
         assert call_kwargs[1]["cwd"] == str(tmp_path)
+
+
+class TestCancelExecutionHandler:
+    """Test CancelExecutionHandler class."""
+
+    def test_definition_name(self) -> None:
+        """CancelExecutionHandler has correct tool name."""
+        handler = CancelExecutionHandler()
+        assert handler.definition.name == "ouroboros_cancel_execution"
+
+    def test_definition_requires_execution_id(self) -> None:
+        """CancelExecutionHandler requires execution_id parameter."""
+        handler = CancelExecutionHandler()
+        defn = handler.definition
+
+        param_names = {p.name for p in defn.parameters}
+        assert "execution_id" in param_names
+
+        exec_param = next(p for p in defn.parameters if p.name == "execution_id")
+        assert exec_param.required is True
+        assert exec_param.type == ToolInputType.STRING
+
+    def test_definition_has_optional_reason(self) -> None:
+        """CancelExecutionHandler has optional reason parameter."""
+        handler = CancelExecutionHandler()
+        defn = handler.definition
+
+        param_names = {p.name for p in defn.parameters}
+        assert "reason" in param_names
+
+        reason_param = next(p for p in defn.parameters if p.name == "reason")
+        assert reason_param.required is False
+
+    def test_definition_description_mentions_cancel(self) -> None:
+        """CancelExecutionHandler description mentions cancellation."""
+        handler = CancelExecutionHandler()
+        assert "cancel" in handler.definition.description.lower()
+
+    async def test_handle_requires_execution_id(self) -> None:
+        """handle returns error when execution_id is missing."""
+        handler = CancelExecutionHandler()
+        result = await handler.handle({})
+
+        assert result.is_err
+        assert "execution_id is required" in str(result.error)
+
+    async def test_handle_requires_execution_id_nonempty(self) -> None:
+        """handle returns error when execution_id is empty string."""
+        handler = CancelExecutionHandler()
+        result = await handler.handle({"execution_id": ""})
+
+        assert result.is_err
+        assert "execution_id is required" in str(result.error)
+
+    async def test_handle_not_found(self) -> None:
+        """handle returns error when execution does not exist."""
+        handler = CancelExecutionHandler()
+        result = await handler.handle({"execution_id": "nonexistent-id"})
+
+        assert result.is_err
+        assert "not found" in str(result.error).lower() or "no events" in str(result.error).lower()
+
+    async def test_handle_cancels_running_session(self) -> None:
+        """handle successfully cancels a running session."""
+        from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+
+        # Create a running session via the repository
+        repo = SessionRepository(event_store)
+        create_result = await repo.create_session(
+            execution_id="test-exec-cancel",
+            seed_id="test-seed",
+            session_id="test-exec-cancel",
+        )
+        assert create_result.is_ok
+
+        # Now cancel via handler
+        handler = CancelExecutionHandler(event_store=event_store)
+        result = await handler.handle(
+            {
+                "execution_id": "test-exec-cancel",
+                "reason": "Test cancellation",
+            }
+        )
+
+        assert result.is_ok
+        assert "cancelled" in result.value.text_content.lower()
+        assert result.value.meta["execution_id"] == "test-exec-cancel"
+        assert result.value.meta["previous_status"] == "running"
+        assert result.value.meta["new_status"] == "cancelled"
+        assert result.value.meta["reason"] == "Test cancellation"
+        assert result.value.meta["cancelled_by"] == "mcp_tool"
+
+        # Verify session is now cancelled
+        reconstructed = await repo.reconstruct_session("test-exec-cancel")
+        assert reconstructed.is_ok
+        assert reconstructed.value.status == SessionStatus.CANCELLED
+
+    async def test_handle_rejects_completed_session(self) -> None:
+        """handle returns error when session is already completed."""
+        from ouroboros.orchestrator.session import SessionRepository
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+
+        repo = SessionRepository(event_store)
+        await repo.create_session(
+            execution_id="test-completed",
+            seed_id="test-seed",
+            session_id="test-completed",
+        )
+        await repo.mark_completed("test-completed")
+
+        handler = CancelExecutionHandler(event_store=event_store)
+        result = await handler.handle({"execution_id": "test-completed"})
+
+        assert result.is_err
+        assert "terminal state" in str(result.error).lower()
+        assert "completed" in str(result.error).lower()
+
+    async def test_handle_rejects_failed_session(self) -> None:
+        """handle returns error when session has already failed."""
+        from ouroboros.orchestrator.session import SessionRepository
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+
+        repo = SessionRepository(event_store)
+        await repo.create_session(
+            execution_id="test-failed",
+            seed_id="test-seed",
+            session_id="test-failed",
+        )
+        await repo.mark_failed("test-failed", error_message="some error")
+
+        handler = CancelExecutionHandler(event_store=event_store)
+        result = await handler.handle({"execution_id": "test-failed"})
+
+        assert result.is_err
+        assert "terminal state" in str(result.error).lower()
+        assert "failed" in str(result.error).lower()
+
+    async def test_handle_rejects_already_cancelled_session(self) -> None:
+        """handle returns error when session is already cancelled."""
+        from ouroboros.orchestrator.session import SessionRepository
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+
+        repo = SessionRepository(event_store)
+        await repo.create_session(
+            execution_id="test-cancelled",
+            seed_id="test-seed",
+            session_id="test-cancelled",
+        )
+        await repo.mark_cancelled("test-cancelled", reason="first cancel")
+
+        handler = CancelExecutionHandler(event_store=event_store)
+        result = await handler.handle({"execution_id": "test-cancelled"})
+
+        assert result.is_err
+        assert "terminal state" in str(result.error).lower()
+        assert "cancelled" in str(result.error).lower()
+
+    async def test_handle_default_reason(self) -> None:
+        """handle uses default reason when none provided."""
+        from ouroboros.orchestrator.session import SessionRepository
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+
+        repo = SessionRepository(event_store)
+        await repo.create_session(
+            execution_id="test-default-reason",
+            seed_id="test-seed",
+            session_id="test-default-reason",
+        )
+
+        handler = CancelExecutionHandler(event_store=event_store)
+        result = await handler.handle({"execution_id": "test-default-reason"})
+
+        assert result.is_ok
+        assert result.value.meta["reason"] == "Cancelled by user"
+
+    async def test_handle_cancel_idempotent_state_after_cancel(self) -> None:
+        """Cancellation is reflected in event store; second cancel attempt rejected."""
+        from ouroboros.orchestrator.session import SessionRepository
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+
+        repo = SessionRepository(event_store)
+        await repo.create_session(
+            execution_id="test-double-cancel",
+            seed_id="test-seed",
+            session_id="test-double-cancel",
+        )
+
+        handler = CancelExecutionHandler(event_store=event_store)
+
+        # First cancel succeeds
+        result1 = await handler.handle(
+            {
+                "execution_id": "test-double-cancel",
+                "reason": "first attempt",
+            }
+        )
+        assert result1.is_ok
+
+        # Second cancel is rejected (already in terminal state)
+        result2 = await handler.handle(
+            {
+                "execution_id": "test-double-cancel",
+                "reason": "second attempt",
+            }
+        )
+        assert result2.is_err
+        assert "terminal state" in str(result2.error).lower()
+
+    async def test_handle_cancel_preserves_execution_id_in_response(self) -> None:
+        """Cancellation response meta contains all expected fields."""
+        from ouroboros.orchestrator.session import SessionRepository
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+
+        repo = SessionRepository(event_store)
+        await repo.create_session(
+            execution_id="test-meta-fields",
+            seed_id="test-seed",
+            session_id="test-meta-fields",
+        )
+
+        handler = CancelExecutionHandler(event_store=event_store)
+        result = await handler.handle(
+            {
+                "execution_id": "test-meta-fields",
+                "reason": "checking meta",
+            }
+        )
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert "execution_id" in meta
+        assert "previous_status" in meta
+        assert "new_status" in meta
+        assert "reason" in meta
+        assert "cancelled_by" in meta
+
+    async def test_handle_cancel_event_store_error_graceful(self) -> None:
+        """Handler gracefully handles event store errors during cancellation."""
+        from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
+
+        # Use a mock to simulate event store failure during mark_cancelled
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+
+        handler = CancelExecutionHandler(event_store=mock_event_store)
+        handler._initialized = True
+
+        # Mock reconstruct to return a running session
+        mock_tracker = MagicMock(spec=SessionTracker)
+        mock_tracker.status = SessionStatus.RUNNING
+        mock_repo = AsyncMock(spec=SessionRepository)
+        mock_repo.reconstruct_session = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value=mock_tracker)
+        )
+        mock_repo.mark_cancelled = AsyncMock(
+            return_value=MagicMock(
+                is_ok=False,
+                is_err=True,
+                error=MagicMock(message="Database write failed"),
+            )
+        )
+        handler._session_repo = mock_repo
+
+        result = await handler.handle(
+            {
+                "execution_id": "test-error",
+                "reason": "testing error handling",
+            }
+        )
+
+        assert result.is_err
+        assert "failed to cancel" in str(result.error).lower()

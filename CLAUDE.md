@@ -25,6 +25,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo tutorial` | Read `skills/tutorial/SKILL.md` and follow it |
 | `ooo setup` | Read `skills/setup/SKILL.md` and follow it |
 | `ooo welcome` | Read `skills/welcome/SKILL.md` and follow it |
+| `ooo cancel` | Read `skills/cancel/SKILL.md` and follow it |
 | `ooo qa` or `ooo qa ...` | Read `skills/qa/SKILL.md` and follow it |
 | `ooo help` | Read `skills/help/SKILL.md` and follow it |
 

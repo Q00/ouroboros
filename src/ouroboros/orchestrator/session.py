@@ -23,7 +23,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -51,6 +51,7 @@ class SessionStatus(StrEnum):
     PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 # =============================================================================
@@ -190,6 +191,7 @@ class SessionRepository:
         - orchestrator.progress.updated: Progress update
         - orchestrator.session.completed: Session finished successfully
         - orchestrator.session.failed: Session failed
+        - orchestrator.session.cancelled: Session cancelled
         - orchestrator.session.paused: Session paused for resumption
     """
 
@@ -383,6 +385,55 @@ class SessionRepository:
                 )
             )
 
+    async def mark_cancelled(
+        self,
+        session_id: str,
+        reason: str,
+        cancelled_by: str = "user",
+    ) -> Result[None, PersistenceError]:
+        """Mark session as cancelled.
+
+        Args:
+            session_id: Session to cancel.
+            reason: Why the session was cancelled.
+            cancelled_by: Who/what initiated cancellation ("user", "auto_cleanup").
+
+        Returns:
+            Result indicating success or failure.
+        """
+        event = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id=session_id,
+            data={
+                "reason": reason,
+                "cancelled_by": cancelled_by,
+                "cancelled_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+        try:
+            await self._event_store.append(event)
+            log.info(
+                "orchestrator.session.cancelled",
+                session_id=session_id,
+                reason=reason,
+                cancelled_by=cancelled_by,
+            )
+            return Result.ok(None)
+        except Exception as e:
+            log.exception(
+                "orchestrator.session.cancel_failed",
+                session_id=session_id,
+                error=str(e),
+            )
+            return Result.err(
+                PersistenceError(
+                    message=f"Failed to mark session cancelled: {e}",
+                    details={"session_id": session_id},
+                )
+            )
+
     async def reconstruct_session(
         self,
         session_id: str,
@@ -448,6 +499,8 @@ class SessionRepository:
                     tracker = tracker.with_status(SessionStatus.FAILED)
                 elif event.type == "orchestrator.session.paused":
                     tracker = tracker.with_status(SessionStatus.PAUSED)
+                elif event.type == "orchestrator.session.cancelled":
+                    tracker = tracker.with_status(SessionStatus.CANCELLED)
 
             # Apply accumulated progress
             tracker = replace(
@@ -477,6 +530,168 @@ class SessionRepository:
                     details={"session_id": session_id},
                 )
             )
+
+    async def find_orphaned_sessions(
+        self,
+        staleness_threshold: timedelta = timedelta(hours=1),
+    ) -> list[SessionTracker]:
+        """Find orphaned sessions that are still running but have gone stale.
+
+        A session is considered orphaned if:
+        1. Its current status is RUNNING (or PAUSED)
+        2. Its last activity timestamp (last event) is older than the staleness threshold
+
+        This is used by auto-cleanup on MCP server startup to detect and cancel
+        executions that were left in a running state (e.g., due to a crash).
+
+        Args:
+            staleness_threshold: How long since last activity before a session
+                is considered orphaned. Defaults to 1 hour.
+
+        Returns:
+            List of SessionTracker instances for orphaned sessions.
+        """
+        now = datetime.now(UTC)
+        orphaned: list[SessionTracker] = []
+
+        try:
+            # Get all session start events to enumerate sessions
+            start_events = await self._event_store.get_all_sessions()
+
+            for start_event in start_events:
+                session_id = start_event.aggregate_id
+
+                # Replay all events for this session
+                try:
+                    events = await self._event_store.replay("session", session_id)
+                except Exception:
+                    log.warning(
+                        "orchestrator.orphan_detection.replay_failed",
+                        session_id=session_id,
+                    )
+                    continue
+
+                if not events:
+                    continue
+
+                # Determine current status by replaying events
+                status = SessionStatus.RUNNING
+                for event in events:
+                    if event.type == "orchestrator.session.completed":
+                        status = SessionStatus.COMPLETED
+                    elif event.type == "orchestrator.session.failed":
+                        status = SessionStatus.FAILED
+                    elif event.type == "orchestrator.session.paused":
+                        status = SessionStatus.PAUSED
+                    elif event.type == "orchestrator.session.cancelled":
+                        status = SessionStatus.CANCELLED
+
+                # Only consider active sessions (RUNNING or PAUSED)
+                if status not in (SessionStatus.RUNNING, SessionStatus.PAUSED):
+                    continue
+
+                # Check the last event's timestamp for staleness
+                last_event = events[-1]
+                last_activity = last_event.timestamp
+                if last_activity is None:
+                    # If no timestamp, use start_time from event data as fallback
+                    start_time_str = start_event.data.get("start_time")
+                    if start_time_str:
+                        last_activity = datetime.fromisoformat(start_time_str)
+                    else:
+                        continue
+
+                # Ensure timezone-aware comparison
+                if last_activity.tzinfo is None:
+                    last_activity = last_activity.replace(tzinfo=UTC)
+
+                if (now - last_activity) > staleness_threshold:
+                    # Reconstruct full tracker for the orphaned session
+                    result = await self.reconstruct_session(session_id)
+                    if result.is_ok:
+                        orphaned.append(result.value)
+
+            log.info(
+                "orchestrator.orphan_detection.complete",
+                total_sessions=len(start_events),
+                orphaned_count=len(orphaned),
+            )
+
+        except Exception as e:
+            log.exception(
+                "orchestrator.orphan_detection.failed",
+                error=str(e),
+            )
+
+        return orphaned
+
+    async def cancel_orphaned_sessions(
+        self,
+        staleness_threshold: timedelta = timedelta(hours=1),
+    ) -> list[SessionTracker]:
+        """Detect and cancel orphaned sessions.
+
+        This is the auto-cleanup routine intended to run during MCP server
+        startup. It finds all sessions that are still active (RUNNING/PAUSED)
+        but have had no activity for longer than the staleness threshold,
+        cancels each one, and logs the cancellations to stderr.
+
+        Args:
+            staleness_threshold: How long since last activity before a session
+                is considered orphaned. Defaults to 1 hour.
+
+        Returns:
+            List of SessionTracker instances that were cancelled.
+        """
+        import sys
+
+        orphaned = await self.find_orphaned_sessions(staleness_threshold)
+
+        if not orphaned:
+            log.info("orchestrator.auto_cleanup.no_orphans")
+            return []
+
+        cancelled: list[SessionTracker] = []
+
+        for tracker in orphaned:
+            result = await self.mark_cancelled(
+                session_id=tracker.session_id,
+                reason=(
+                    f"Auto-cancelled on startup: session was {tracker.status.value} "
+                    f"with no activity for over {staleness_threshold}"
+                ),
+                cancelled_by="auto_cleanup",
+            )
+
+            if result.is_ok:
+                cancelled.append(tracker)
+                # Log to stderr so it's visible in MCP stdio mode
+                print(
+                    f"[ouroboros] Auto-cancelled orphaned session "
+                    f"{tracker.session_id} (execution={tracker.execution_id}, "
+                    f"status={tracker.status.value})",
+                    file=sys.stderr,
+                )
+                log.info(
+                    "orchestrator.auto_cleanup.cancelled",
+                    session_id=tracker.session_id,
+                    execution_id=tracker.execution_id,
+                    previous_status=tracker.status.value,
+                )
+            else:
+                log.warning(
+                    "orchestrator.auto_cleanup.cancel_failed",
+                    session_id=tracker.session_id,
+                    error=str(result.error),
+                )
+
+        log.info(
+            "orchestrator.auto_cleanup.complete",
+            orphaned_count=len(orphaned),
+            cancelled_count=len(cancelled),
+        )
+
+        return cancelled
 
 
 __all__ = [

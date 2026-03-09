@@ -654,6 +654,14 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             data=data,
         )
 
+    elif event_type == "orchestrator.session.cancelled":
+        return ExecutionUpdated(
+            execution_id=data.get("execution_id", event.aggregate_id),
+            session_id=event.aggregate_id,
+            status="cancelled",
+            data=data,
+        )
+
     elif event_type == "execution.phase.completed":
         return PhaseChanged(
             execution_id=event.aggregate_id,

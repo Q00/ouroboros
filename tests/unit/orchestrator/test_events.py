@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ouroboros.orchestrator.events import (
     create_progress_event,
+    create_session_cancelled_event,
     create_session_completed_event,
     create_session_failed_event,
     create_session_paused_event,
@@ -75,6 +76,41 @@ class TestSessionEvents:
         assert event.data["error"] == "Unknown error"
         assert event.data["error_type"] is None
         assert event.data["messages_processed"] == 0
+
+    def test_create_session_cancelled_event(self) -> None:
+        """Test creating session cancelled event."""
+        event = create_session_cancelled_event(
+            session_id="sess_123",
+            reason="User requested cancellation",
+            cancelled_by="user",
+        )
+
+        assert event.type == "orchestrator.session.cancelled"
+        assert event.aggregate_type == "session"
+        assert event.aggregate_id == "sess_123"
+        assert event.data["reason"] == "User requested cancellation"
+        assert event.data["cancelled_by"] == "user"
+        assert "cancelled_at" in event.data
+
+    def test_create_session_cancelled_event_auto_cleanup(self) -> None:
+        """Test creating session cancelled event from auto-cleanup."""
+        event = create_session_cancelled_event(
+            session_id="sess_123",
+            reason="Stale execution detected (>1 hour)",
+            cancelled_by="auto_cleanup",
+        )
+
+        assert event.data["cancelled_by"] == "auto_cleanup"
+        assert event.data["reason"] == "Stale execution detected (>1 hour)"
+
+    def test_create_session_cancelled_event_default_cancelled_by(self) -> None:
+        """Test creating session cancelled event with default cancelled_by."""
+        event = create_session_cancelled_event(
+            session_id="sess_123",
+            reason="No longer needed",
+        )
+
+        assert event.data["cancelled_by"] == "user"
 
     def test_create_session_paused_event(self) -> None:
         """Test creating session paused event."""
@@ -226,6 +262,7 @@ class TestEventAggregateTypes:
             create_session_started_event("s", "e", "sd", "g"),
             create_session_completed_event("s", {}, 0),
             create_session_failed_event("s", "error"),
+            create_session_cancelled_event("s", "reason"),
             create_session_paused_event("s", "reason"),
             create_progress_event("s", "type", "content"),
             create_task_started_event("s", "desc", "ac"),

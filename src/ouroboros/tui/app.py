@@ -256,6 +256,8 @@ class OuroborosTUI(App[None]):
             self._state.status = "completed"
         elif event_type == "orchestrator.session.failed":
             self._state.status = "failed"
+        elif event_type == "orchestrator.session.cancelled":
+            self._state.status = "cancelled"
         elif event_type == "orchestrator.session.paused":
             self._state.status = "paused"
             self._state.is_paused = True

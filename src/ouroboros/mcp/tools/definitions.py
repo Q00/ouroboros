@@ -44,7 +44,7 @@ from ouroboros.observability.drift import (
 )
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.runner import OrchestratorRunner
-from ouroboros.orchestrator.session import SessionRepository
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 
@@ -2572,6 +2572,171 @@ class ACDashboardHandler:
         )
 
 
+@dataclass
+class CancelExecutionHandler:
+    """Handler for the cancel_execution tool.
+
+    Cancels a running or paused Ouroboros execution session.
+    Validates that the execution exists and is not already in a terminal state
+    (completed, failed, or cancelled) before performing cancellation.
+    """
+
+    event_store: EventStore | None = field(default=None, repr=False)
+
+    # Terminal statuses that cannot be cancelled
+    TERMINAL_STATUSES: tuple[SessionStatus, ...] = (
+        SessionStatus.COMPLETED,
+        SessionStatus.FAILED,
+        SessionStatus.CANCELLED,
+    )
+
+    def __post_init__(self) -> None:
+        """Initialize the session repository after dataclass creation."""
+        self._event_store = self.event_store or EventStore()
+        self._session_repo = SessionRepository(self._event_store)
+        self._initialized = False
+
+    async def _ensure_initialized(self) -> None:
+        """Ensure the event store is initialized."""
+        if not self._initialized:
+            await self._event_store.initialize()
+            self._initialized = True
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        """Return the tool definition."""
+        return MCPToolDefinition(
+            name="ouroboros_cancel_execution",
+            description=(
+                "Cancel a running or paused Ouroboros execution. "
+                "Validates that the execution exists and is not already in a "
+                "terminal state (completed, failed, cancelled) before cancelling."
+            ),
+            parameters=(
+                MCPToolParameter(
+                    name="execution_id",
+                    type=ToolInputType.STRING,
+                    description="The execution/session ID to cancel",
+                    required=True,
+                ),
+                MCPToolParameter(
+                    name="reason",
+                    type=ToolInputType.STRING,
+                    description="Reason for cancellation",
+                    required=False,
+                    default="Cancelled by user",
+                ),
+            ),
+        )
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle a cancel execution request.
+
+        Validates the execution exists and is not in a terminal state,
+        then marks it as cancelled.
+
+        Args:
+            arguments: Tool arguments including execution_id and optional reason.
+
+        Returns:
+            Result containing cancellation confirmation or error.
+        """
+        execution_id = arguments.get("execution_id")
+        if not execution_id:
+            return Result.err(
+                MCPToolError(
+                    "execution_id is required",
+                    tool_name="ouroboros_cancel_execution",
+                )
+            )
+
+        reason = arguments.get("reason", "Cancelled by user")
+
+        log.info(
+            "mcp.tool.cancel_execution",
+            execution_id=execution_id,
+            reason=reason,
+        )
+
+        try:
+            await self._ensure_initialized()
+
+            # Reconstruct session to validate it exists and check status
+            result = await self._session_repo.reconstruct_session(execution_id)
+
+            if result.is_err:
+                error = result.error
+                return Result.err(
+                    MCPToolError(
+                        f"Execution not found: {error.message}",
+                        tool_name="ouroboros_cancel_execution",
+                    )
+                )
+
+            tracker = result.value
+
+            # Check if already in a terminal state
+            if tracker.status in self.TERMINAL_STATUSES:
+                return Result.err(
+                    MCPToolError(
+                        f"Execution {execution_id} is already in terminal state: "
+                        f"{tracker.status.value}. Cannot cancel.",
+                        tool_name="ouroboros_cancel_execution",
+                    )
+                )
+
+            # Perform cancellation
+            cancel_result = await self._session_repo.mark_cancelled(
+                session_id=execution_id,
+                reason=reason,
+                cancelled_by="mcp_tool",
+            )
+
+            if cancel_result.is_err:
+                cancel_error = cancel_result.error
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to cancel execution: {cancel_error.message}",
+                        tool_name="ouroboros_cancel_execution",
+                    )
+                )
+
+            status_text = (
+                f"Execution {execution_id} has been cancelled.\n"
+                f"Previous status: {tracker.status.value}\n"
+                f"Reason: {reason}\n"
+            )
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=status_text),),
+                    is_error=False,
+                    meta={
+                        "execution_id": execution_id,
+                        "previous_status": tracker.status.value,
+                        "new_status": SessionStatus.CANCELLED.value,
+                        "reason": reason,
+                        "cancelled_by": "mcp_tool",
+                    },
+                )
+            )
+        except Exception as e:
+            log.error(
+                "mcp.tool.cancel_execution.error",
+                execution_id=execution_id,
+                error=str(e),
+            )
+            return Result.err(
+                MCPToolError(
+                    f"Failed to cancel execution: {e}",
+                    tool_name="ouroboros_cancel_execution",
+                )
+            )
+
+
 # Convenience functions for handler access
 def execute_seed_handler() -> ExecuteSeedHandler:
     """Create an ExecuteSeedHandler instance."""
@@ -2628,6 +2793,11 @@ def evolve_rewind_handler() -> EvolveRewindHandler:
     return EvolveRewindHandler()
 
 
+def cancel_execution_handler() -> CancelExecutionHandler:
+    """Create a CancelExecutionHandler instance."""
+    return CancelExecutionHandler()
+
+
 # List of all Ouroboros tools for registration
 from ouroboros.mcp.tools.qa import QAHandler  # noqa: E402
 
@@ -2643,6 +2813,7 @@ OUROBOROS_TOOLS: tuple[
     | EvolveStepHandler
     | LineageStatusHandler
     | EvolveRewindHandler
+    | CancelExecutionHandler
     | QAHandler,
     ...,
 ] = (
@@ -2657,5 +2828,6 @@ OUROBOROS_TOOLS: tuple[
     EvolveStepHandler(),
     LineageStatusHandler(),
     EvolveRewindHandler(),
+    CancelExecutionHandler(),
     QAHandler(),
 )

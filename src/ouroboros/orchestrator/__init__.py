@@ -49,6 +49,7 @@ from ouroboros.orchestrator.dependency_analyzer import (
 from ouroboros.orchestrator.events import (
     create_mcp_tools_loaded_event,
     create_progress_event,
+    create_session_cancelled_event,
     create_session_completed_event,
     create_session_failed_event,
     create_session_paused_event,
@@ -130,6 +131,7 @@ __all__ = [
     # Events
     "create_mcp_tools_loaded_event",
     "create_progress_event",
+    "create_session_cancelled_event",
     "create_session_completed_event",
     "create_session_failed_event",
     "create_session_paused_event",

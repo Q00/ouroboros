@@ -100,6 +100,8 @@ class SessionSelectorScreen(Screen[None]):
                     self._session_info[agg_id]["status"] = "completed"
                 elif "failed" in event.type:
                     self._session_info[agg_id]["status"] = "failed"
+                elif "cancelled" in event.type:
+                    self._session_info[agg_id]["status"] = "cancelled"
                 elif "paused" in event.type:
                     self._session_info[agg_id]["status"] = "paused"
 
@@ -126,6 +128,7 @@ class SessionSelectorScreen(Screen[None]):
                     "started": "[yellow]running[/yellow]",
                     "completed": "[green]done[/green]",
                     "failed": "[red]failed[/red]",
+                    "cancelled": "[yellow]cancelled[/yellow]",
                     "paused": "[cyan]paused[/cyan]",
                 }.get(status, status)
 

@@ -554,3 +554,432 @@ class TestOrchestratorRunnerWithMCP:
         assert result.is_ok
         # MCP tools loaded event should have been emitted
         assert mock_event_store.append.called
+
+
+class TestCancellationPolling:
+    """Tests for cancellation detection in execution loops."""
+
+    @pytest.fixture
+    def mock_adapter(self) -> MagicMock:
+        """Create a mock Claude agent adapter."""
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_event_store(self) -> AsyncMock:
+        """Create a mock event store."""
+        store = AsyncMock()
+        store.append = AsyncMock()
+        store.replay = AsyncMock(return_value=[])
+        store.query_events = AsyncMock(return_value=[])
+        return store
+
+    @pytest.fixture
+    def mock_console(self) -> MagicMock:
+        """Create a mock Rich console."""
+        return MagicMock()
+
+    @pytest.fixture
+    def runner(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> OrchestratorRunner:
+        """Create a runner with mocked dependencies."""
+        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+    @pytest.mark.asyncio
+    async def test_check_cancellation_returns_false_when_no_event(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Test _check_cancellation returns False when no cancellation event exists."""
+        mock_event_store.query_events = AsyncMock(return_value=[])
+        result = await runner._check_cancellation("session_123")
+        assert result is False
+        mock_event_store.query_events.assert_called_once_with(
+            aggregate_id="session_123",
+            event_type="orchestrator.session.cancelled",
+            limit=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_cancellation_returns_true_when_event_exists(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Test _check_cancellation returns True when cancellation event exists."""
+        from ouroboros.orchestrator.events import create_session_cancelled_event
+
+        cancel_event = create_session_cancelled_event("session_123", "User requested")
+        mock_event_store.query_events = AsyncMock(return_value=[cancel_event])
+        result = await runner._check_cancellation("session_123")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_check_cancellation_graceful_on_error(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Test _check_cancellation returns False on event store error (graceful degradation)."""
+        mock_event_store.query_events = AsyncMock(side_effect=Exception("DB unavailable"))
+        result = await runner._check_cancellation("session_123")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_handle_cancellation_returns_result(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Test _handle_cancellation returns a proper OrchestratorResult."""
+        from datetime import UTC, datetime
+
+        start_time = datetime.now(UTC)
+
+        with patch.object(runner._session_repo, "mark_cancelled", AsyncMock(return_value=None)):
+            result = await runner._handle_cancellation(
+                session_id="sess_123",
+                execution_id="exec_456",
+                messages_processed=10,
+                start_time=start_time,
+            )
+
+        assert result.is_ok
+        assert result.value.success is False
+        assert result.value.session_id == "sess_123"
+        assert result.value.execution_id == "exec_456"
+        assert result.value.messages_processed == 10
+        assert "cancelled" in result.value.final_message.lower()
+        assert result.value.summary.get("cancelled") is True
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_stops_on_cancellation(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Test that execute_seed detects cancellation and stops execution."""
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.events import create_session_cancelled_event
+        from ouroboros.orchestrator.runner import CANCELLATION_CHECK_INTERVAL
+
+        messages_yielded = 0
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            nonlocal messages_yielded
+            # Yield enough messages to trigger a cancellation check
+            for i in range(CANCELLATION_CHECK_INTERVAL + 5):
+                messages_yielded += 1
+                yield AgentMessage(type="assistant", content=f"Message {i}")
+            # This final message should never be reached
+            yield AgentMessage(
+                type="result",
+                content="Should not reach here",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        # Return no cancellation initially, then return a cancellation event
+        cancel_event = create_session_cancelled_event("session_123", "User requested")
+        mock_event_store.query_events = AsyncMock(return_value=[cancel_event])
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_cancelled(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_cancelled", mock_mark_cancelled),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+        assert result.value.success is False
+        assert "cancelled" in result.value.final_message.lower()
+        # Should have stopped at the cancellation check interval
+        assert result.value.messages_processed == CANCELLATION_CHECK_INTERVAL
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_no_cancellation_proceeds_normally(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Test that execute_seed runs normally when no cancellation is issued."""
+        from ouroboros.core.types import Result
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            yield AgentMessage(type="assistant", content="Working...")
+            yield AgentMessage(type="tool", content="Reading", tool_name="Read")
+            yield AgentMessage(
+                type="result",
+                content="Task completed successfully",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        # No cancellation events
+        mock_event_store.query_events = AsyncMock(return_value=[])
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+        assert result.value.success is True
+
+    @pytest.mark.asyncio
+    async def test_resume_session_stops_on_cancellation(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Test that resume_session detects cancellation and stops."""
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.events import create_session_cancelled_event
+        from ouroboros.orchestrator.runner import CANCELLATION_CHECK_INTERVAL
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            for i in range(CANCELLATION_CHECK_INTERVAL + 5):
+                yield AgentMessage(type="assistant", content=f"Message {i}")
+            yield AgentMessage(
+                type="result",
+                content="Should not reach",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        cancel_event = create_session_cancelled_event("sess_resume", "User requested")
+        mock_event_store.query_events = AsyncMock(return_value=[cancel_event])
+
+        running_tracker = SessionTracker.create("exec_resume", "seed_1").with_status(
+            SessionStatus.RUNNING
+        )
+
+        async def mock_reconstruct(*args: Any, **kwargs: Any):
+            return Result.ok(running_tracker)
+
+        async def mock_mark_cancelled(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "reconstruct_session", mock_reconstruct),
+            patch.object(runner._session_repo, "mark_cancelled", mock_mark_cancelled),
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_ok
+        assert result.value.success is False
+        assert "cancelled" in result.value.final_message.lower()
+
+    @pytest.mark.asyncio
+    async def test_cancellation_check_interval_constant(self) -> None:
+        """Test that CANCELLATION_CHECK_INTERVAL is defined and reasonable."""
+        from ouroboros.orchestrator.runner import CANCELLATION_CHECK_INTERVAL
+
+        assert isinstance(CANCELLATION_CHECK_INTERVAL, int)
+        assert CANCELLATION_CHECK_INTERVAL > 0
+        assert CANCELLATION_CHECK_INTERVAL <= 20  # Reasonable upper bound
+
+    @pytest.mark.asyncio
+    async def test_check_cancellation_detects_in_memory_registry(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Test _check_cancellation returns True when session is in the in-memory registry."""
+        from ouroboros.orchestrator.runner import (
+            _cancellation_registry,
+            clear_cancellation,
+            request_cancellation,
+        )
+
+        # Ensure clean state
+        _cancellation_registry.discard("sess_inmem")
+
+        request_cancellation("sess_inmem")
+        try:
+            # Should return True without even querying the event store
+            result = await runner._check_cancellation("sess_inmem")
+            assert result is True
+            # Event store query should NOT have been called (fast path)
+            mock_event_store.query_events.assert_not_called()
+        finally:
+            clear_cancellation("sess_inmem")
+
+    @pytest.mark.asyncio
+    async def test_handle_cancellation_clears_in_memory_registry(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Test _handle_cancellation clears the in-memory registry entry."""
+        from datetime import UTC, datetime
+
+        from ouroboros.orchestrator.runner import (
+            is_cancellation_requested,
+            request_cancellation,
+        )
+
+        request_cancellation("sess_clear")
+
+        with patch.object(runner._session_repo, "mark_cancelled", AsyncMock(return_value=None)):
+            await runner._handle_cancellation(
+                session_id="sess_clear",
+                execution_id="exec_clear",
+                messages_processed=5,
+                start_time=datetime.now(UTC),
+            )
+
+        assert is_cancellation_requested("sess_clear") is False
+
+
+class TestCancellationRegistry:
+    """Tests for the module-level in-memory cancellation registry functions."""
+
+    def setup_method(self) -> None:
+        """Clear the registry before each test."""
+        from ouroboros.orchestrator.runner import _cancellation_registry
+
+        _cancellation_registry.clear()
+
+    def teardown_method(self) -> None:
+        """Clear the registry after each test."""
+        from ouroboros.orchestrator.runner import _cancellation_registry
+
+        _cancellation_registry.clear()
+
+    def test_request_cancellation_adds_session(self) -> None:
+        """Test that request_cancellation adds the session ID to the registry."""
+        from ouroboros.orchestrator.runner import (
+            is_cancellation_requested,
+            request_cancellation,
+        )
+
+        assert is_cancellation_requested("sess_1") is False
+        request_cancellation("sess_1")
+        assert is_cancellation_requested("sess_1") is True
+
+    def test_clear_cancellation_removes_session(self) -> None:
+        """Test that clear_cancellation removes the session ID."""
+        from ouroboros.orchestrator.runner import (
+            clear_cancellation,
+            is_cancellation_requested,
+            request_cancellation,
+        )
+
+        request_cancellation("sess_2")
+        assert is_cancellation_requested("sess_2") is True
+        clear_cancellation("sess_2")
+        assert is_cancellation_requested("sess_2") is False
+
+    def test_clear_cancellation_is_idempotent(self) -> None:
+        """Test that clearing a non-existent session does not raise."""
+        from ouroboros.orchestrator.runner import clear_cancellation
+
+        # Should not raise
+        clear_cancellation("nonexistent_session")
+
+    def test_get_pending_cancellations_returns_frozenset(self) -> None:
+        """Test that get_pending_cancellations returns a frozenset snapshot."""
+        from ouroboros.orchestrator.runner import (
+            get_pending_cancellations,
+            request_cancellation,
+        )
+
+        request_cancellation("sess_a")
+        request_cancellation("sess_b")
+
+        pending = get_pending_cancellations()
+        assert isinstance(pending, frozenset)
+        assert pending == frozenset({"sess_a", "sess_b"})
+
+    def test_get_pending_cancellations_is_snapshot(self) -> None:
+        """Test that the returned frozenset is a snapshot, not a live view."""
+        from ouroboros.orchestrator.runner import (
+            clear_cancellation,
+            get_pending_cancellations,
+            request_cancellation,
+        )
+
+        request_cancellation("sess_snap")
+        snapshot = get_pending_cancellations()
+        clear_cancellation("sess_snap")
+
+        # Snapshot should still contain the session
+        assert "sess_snap" in snapshot
+        # But the registry should not
+        new_snapshot = get_pending_cancellations()
+        assert "sess_snap" not in new_snapshot
+
+    def test_multiple_sessions_tracked_independently(self) -> None:
+        """Test that multiple sessions can be tracked independently."""
+        from ouroboros.orchestrator.runner import (
+            clear_cancellation,
+            is_cancellation_requested,
+            request_cancellation,
+        )
+
+        request_cancellation("sess_x")
+        request_cancellation("sess_y")
+
+        assert is_cancellation_requested("sess_x") is True
+        assert is_cancellation_requested("sess_y") is True
+
+        clear_cancellation("sess_x")
+        assert is_cancellation_requested("sess_x") is False
+        assert is_cancellation_requested("sess_y") is True
+
+    def test_request_cancellation_is_idempotent(self) -> None:
+        """Test that requesting cancellation twice is safe."""
+        from ouroboros.orchestrator.runner import (
+            get_pending_cancellations,
+            request_cancellation,
+        )
+
+        request_cancellation("sess_dup")
+        request_cancellation("sess_dup")
+
+        assert len(get_pending_cancellations()) == 1
+
+
+class TestExecutionCancelledError:
+    """Tests for ExecutionCancelledError."""
+
+    def test_create_with_defaults(self) -> None:
+        """Test creating error with default reason."""
+        from ouroboros.orchestrator.runner import ExecutionCancelledError
+
+        error = ExecutionCancelledError(session_id="sess_123")
+        assert error.session_id == "sess_123"
+        assert error.reason == "Cancelled by user"
+        assert "sess_123" in str(error)
+
+    def test_create_with_custom_reason(self) -> None:
+        """Test creating error with custom reason."""
+        from ouroboros.orchestrator.runner import ExecutionCancelledError
+
+        error = ExecutionCancelledError(session_id="sess_456", reason="Auto-cleanup: stale")
+        assert error.session_id == "sess_456"
+        assert error.reason == "Auto-cleanup: stale"
+        assert "Auto-cleanup: stale" in str(error)

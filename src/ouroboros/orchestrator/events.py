@@ -7,6 +7,7 @@ Event Types:
     - orchestrator.session.started: Session began execution
     - orchestrator.session.completed: Session finished successfully
     - orchestrator.session.failed: Session encountered fatal error
+    - orchestrator.session.cancelled: Session was cancelled by user/auto-cleanup
     - orchestrator.session.paused: Session paused for resumption
     - orchestrator.progress.updated: Progress checkpoint
     - orchestrator.task.started: Individual task started
@@ -105,6 +106,35 @@ def create_session_failed_event(
             "error_type": error_type,
             "messages_processed": messages_processed,
             "failed_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_session_cancelled_event(
+    session_id: str,
+    reason: str,
+    cancelled_by: str = "user",
+) -> BaseEvent:
+    """Create session cancelled event.
+
+    Emitted when a session is cancelled by user request or auto-cleanup.
+
+    Args:
+        session_id: Session being cancelled.
+        reason: Why the session was cancelled.
+        cancelled_by: Who/what initiated cancellation ("user", "auto_cleanup").
+
+    Returns:
+        BaseEvent for session cancellation.
+    """
+    return BaseEvent(
+        type="orchestrator.session.cancelled",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "reason": reason,
+            "cancelled_by": cancelled_by,
+            "cancelled_at": datetime.now(UTC).isoformat(),
         },
     )
 
@@ -413,6 +443,7 @@ __all__ = [
     "create_drift_measured_event",
     "create_mcp_tools_loaded_event",
     "create_progress_event",
+    "create_session_cancelled_event",
     "create_session_completed_event",
     "create_session_failed_event",
     "create_session_paused_event",

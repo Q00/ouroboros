@@ -101,6 +101,11 @@ class StatusPanel(Static):
         color: $primary;
         text-style: bold;
     }
+
+    StatusPanel .status.cancelled {
+        color: $warning;
+        text-style: bold;
+    }
     """
 
     execution_id: reactive[str] = reactive("")
@@ -176,6 +181,7 @@ class StatusPanel(Static):
             "paused": "[||] Paused",
             "completed": "[OK] Completed",
             "failed": "[X] Failed",
+            "cancelled": "[!!] Cancelled",
         }
         return status_icons.get(status, status)
 
