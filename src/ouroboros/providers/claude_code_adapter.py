@@ -360,7 +360,6 @@ class ClaudeCodeAdapter:
             disallowed = dangerous_tools
 
         options_kwargs: dict = {
-            "allowed_tools": self._allowed_tools if self._allowed_tools else [],
             "disallowed_tools": disallowed,
             "max_turns": self._max_turns,
             # Allow MCP and other ~/.claude/ settings to be inherited
@@ -368,6 +367,13 @@ class ClaudeCodeAdapter:
             "cwd": os.getcwd(),
             "cli_path": self._cli_path,
         }
+        # Only set allowed_tools when explicitly specified (strict mode).
+        # An empty list tells the SDK "allow nothing", which silently blocks
+        # all tools — including Read/Glob/Grep that the interviewer prompt
+        # claims are available.  Omitting the key lets the SDK fall back to
+        # its default behaviour: allow every tool not in disallowed_tools.
+        if self._allowed_tools:
+            options_kwargs["allowed_tools"] = self._allowed_tools
         # Pass model from CompletionConfig if specified
         # "default" is not a valid SDK model — treat it as None (use SDK default)
         if config.model and config.model != "default":
