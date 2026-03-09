@@ -388,7 +388,7 @@ class TestSessionResumption:
         result = await runner.resume_session("completed_session", sample_seed)
 
         assert result.is_err
-        assert "already completed" in str(result.error).lower()
+        assert "cannot resume" in str(result.error).lower()
 
     async def test_resume_nonexistent_session(
         self,
