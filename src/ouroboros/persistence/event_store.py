@@ -6,7 +6,7 @@ with aiosqlite backend.
 
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ouroboros.core.errors import PersistenceError
@@ -181,6 +181,66 @@ class EventStore:
                 details={
                     "aggregate_type": aggregate_type,
                     "aggregate_id": aggregate_id,
+                },
+            ) from e
+
+    async def get_events_after(
+        self,
+        aggregate_type: str,
+        aggregate_id: str,
+        last_row_id: int = 0,
+    ) -> tuple[list[BaseEvent], int]:
+        """Get events for an aggregate after a given row ID.
+
+        Incremental fetch that only returns new events since the last poll,
+        avoiding the O(n) cost of replaying the full event history.
+
+        Args:
+            aggregate_type: The type of aggregate (e.g., "execution").
+            aggregate_id: The unique identifier of the aggregate.
+            last_row_id: The SQLite rowid of the last event processed.
+                         Pass 0 to get all events from the beginning.
+
+        Returns:
+            Tuple of (list of new events, max rowid seen).
+            The max rowid should be passed back as last_row_id on the next call.
+
+        Raises:
+            PersistenceError: If the query fails.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="get_events_after",
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                # Use SQLite's implicit rowid for efficient cursor-based pagination.
+                # This avoids deserializing all prior events just to slice the tail.
+                rowid_col = text("rowid")
+                result = await conn.execute(
+                    select(events_table, rowid_col)
+                    .where(events_table.c.aggregate_type == aggregate_type)
+                    .where(events_table.c.aggregate_id == aggregate_id)
+                    .where(text("rowid > :last_id").bindparams(last_id=last_row_id))
+                    .order_by(events_table.c.timestamp, events_table.c.id)
+                )
+                rows = result.mappings().all()
+                if not rows:
+                    return [], last_row_id
+                events = [BaseEvent.from_db_row(dict(row)) for row in rows]
+                max_rowid = max(row["rowid"] for row in rows)
+                return events, max_rowid
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to get events after rowid {last_row_id}: {e}",
+                operation="select",
+                table="events",
+                details={
+                    "aggregate_type": aggregate_type,
+                    "aggregate_id": aggregate_id,
+                    "last_row_id": last_row_id,
                 },
             ) from e
 

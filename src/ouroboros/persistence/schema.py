@@ -53,4 +53,5 @@ events_table = Table(
     Index("ix_events_aggregate_type_id", "aggregate_type", "aggregate_id"),
     Index("ix_events_event_type", "event_type"),
     Index("ix_events_timestamp", "timestamp"),
+    Index("ix_events_agg_type_id_timestamp", "aggregate_type", "aggregate_id", "timestamp"),
 )

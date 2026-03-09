@@ -170,18 +170,25 @@ class OuroborosTUI(App[None]):
         self._subscription_task = asyncio.create_task(self._subscribe_to_events())
 
     async def _subscribe_to_events(self) -> None:
-        """Subscribe to EventStore for live updates."""
+        """Subscribe to EventStore for live updates.
+
+        Uses incremental fetching via get_events_after() to avoid replaying
+        the full event history on every poll cycle. This keeps each poll at
+        O(new_events) instead of O(total_events).
+        """
         if self._event_store is None or self._execution_id is None:
             return
 
-        last_event_count = 0
+        last_row_id = 0
         poll_interval = 0.5
 
         while True:
             try:
                 await asyncio.sleep(poll_interval)
-                events = await self._event_store.replay("execution", self._execution_id)
-                for event in events[last_event_count:]:
+                new_events, last_row_id = await self._event_store.get_events_after(
+                    "execution", self._execution_id, last_row_id
+                )
+                for event in new_events:
                     # Log event reception
                     self._state.add_log(
                         "info",
@@ -223,7 +230,6 @@ class OuroborosTUI(App[None]):
                     except Exception:
                         pass  # Screen might not be installed yet
 
-                last_event_count = len(events)
             except asyncio.CancelledError:
                 break
             except Exception as e:
