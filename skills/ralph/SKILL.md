@@ -45,7 +45,17 @@ When the user invokes this skill:
 
 1. **Parse the request**: Extract what needs to be done
 
-2. **Initialize state**: Create `.omc/state/ralph-state.json`:
+2. **Detect git workflow** (before any commits):
+   - Read the project's `CLAUDE.md` (project root and `.claude/CLAUDE.md`)
+   - Look for PR-based workflow indicators:
+     - "PR-based workflow", "never commit directly to main", "always create a branch", "create pull request"
+   - If PR-based workflow detected:
+     - Check current branch — if on `main`/`master`, create a feature branch: `ooo/ralph/<lineage_id>`
+     - Use `git checkout -b ooo/ralph/<lineage_id>` before starting work
+     - All commits go to this branch
+   - If no preference found: use current branch (backward compatible)
+
+3. **Initialize state**: Create `.omc/state/ralph-state.json`:
    ```json
    {
      "mode": "ralph",
@@ -59,7 +69,7 @@ When the user invokes this skill:
    }
    ```
 
-3. **Enter the loop**:
+4. **Enter the loop**:
 
    ```
    while iteration < max_iterations:
@@ -85,6 +95,13 @@ When the user invokes this skill:
        if verification.passed:
            # SUCCESS - persist final checkpoint
            await save_checkpoint("complete")
+
+           # If PR-based workflow: push branch and suggest/create PR
+           if git_workflow.use_branches:
+               git push -u origin <branch_name>
+               suggest: "Create PR with `gh pr create`"
+               # If auto_pr: create PR automatically
+
            break
 
        # Failed - analyze and continue
@@ -96,11 +113,11 @@ When the user invokes this skill:
            break
    ```
 
-4. **On termination**, display a 📍 next-step:
+5. **On termination**, display a 📍 next-step:
    - **Success** (QA passed): `📍 Next: ooo evaluate for formal 3-stage verification`
    - **Max iterations reached**: `📍 Next: ooo interview to re-examine the problem — or ooo unstuck to try a different approach`
 
-5. **Report progress** each iteration:
+6. **Report progress** each iteration:
    ```
    [Ralph Iteration <i>/<max>]
    Execution complete. Running QA...
@@ -116,7 +133,7 @@ When the user invokes this skill:
    The boulder never stops. Continuing...
    ```
 
-6. **Handle interruption**:
+7. **Handle interruption**:
    - If user says "stop": save checkpoint, exit gracefully
    - If user says "continue": reload from last checkpoint
    - State persists across session resets

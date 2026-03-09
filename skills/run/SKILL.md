@@ -27,19 +27,26 @@ Execute a Seed specification through the Ouroboros workflow engine.
 
 When the user invokes this skill:
 
-1. Check if the user provided seed content or a file path:
+1. **Detect git workflow** (before any code changes):
+   - Read the project's `CLAUDE.md` for git workflow preferences
+   - If PR-based workflow detected and currently on `main`/`master`:
+     - Create a feature branch: `ooo/run/<session_id>`
+     - All code changes go to this branch
+   - If no preference: use current branch (backward compatible)
+
+2. Check if the user provided seed content or a file path:
    - If a file path: Read the file with the Read tool
    - If inline YAML: Use directly
    - If neither: Check conversation history for a recently generated seed
 
-2. **Suggest TUI monitoring** (before execution starts):
+3. **Suggest TUI monitoring** (before execution starts):
    ```
    💡 For real-time monitoring, open a separate terminal and run:
       uvx --from ouroboros-ai ouroboros tui monitor
    Press 1-4 to switch screens (Dashboard, Execution, Logs, Debug).
    ```
 
-3. Call the `ouroboros_execute_seed` MCP tool:
+4. Call the `ouroboros_execute_seed` MCP tool:
    ```
    Tool: ouroboros_execute_seed
    Arguments:
@@ -48,7 +55,7 @@ When the user invokes this skill:
      max_iterations: 10    (or as specified by user)
    ```
 
-4. If resuming an existing session, include `session_id`:
+5. If resuming an existing session, include `session_id`:
    ```
    Tool: ouroboros_execute_seed
    Arguments:
@@ -56,12 +63,12 @@ When the user invokes this skill:
      session_id: <existing session ID>
    ```
 
-5. Present the execution results to the user:
+6. Present the execution results to the user:
    - Show success/failure status
    - Show session ID (for later status checks)
    - Show execution summary
 
-6. **Post-execution QA** (automatic):
+7. **Post-execution QA** (automatic):
    `ouroboros_execute_seed` automatically runs QA after successful execution.
    The QA verdict is included in the tool response text.
    To skip: pass `skip_qa: true` to the tool.
