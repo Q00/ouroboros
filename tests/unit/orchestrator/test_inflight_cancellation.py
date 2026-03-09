@@ -431,11 +431,14 @@ class TestCancellationErrorScenarios:
         request_cancellation("sess_fail")
         self._mock_running_session(runner, "sess_fail")
 
-        with patch.object(
-            runner._session_repo,
-            "mark_cancelled",
-            return_value=Result.err(PersistenceError("DB write failed")),
-        ), patch("ouroboros.orchestrator.runner.log") as mock_log:
+        with (
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                return_value=Result.err(PersistenceError("DB write failed")),
+            ),
+            patch("ouroboros.orchestrator.runner.log") as mock_log,
+        ):
             result = await runner._handle_cancellation(
                 session_id="sess_fail",
                 execution_id="exec_fail",
