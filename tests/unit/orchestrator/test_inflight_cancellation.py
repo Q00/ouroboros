@@ -49,6 +49,7 @@ def mock_event_store() -> AsyncMock:
     store = AsyncMock()
     store.append = AsyncMock()
     store.replay = AsyncMock(return_value=[])
+    store.get_all_sessions = AsyncMock(return_value=[])
     store.query_events = AsyncMock(return_value=[])
     return store
 
@@ -229,6 +230,14 @@ class TestCancellationSignalHandling:
 class TestCancellationCleanup:
     """Tests for state cleanup during and after cancellation handling."""
 
+    def _mock_running_session(self, runner: OrchestratorRunner, session_id: str) -> None:
+        """Mock reconstruct_session to return a RUNNING session."""
+        from ouroboros.orchestrator.session import SessionStatus
+
+        mock_tracker = MagicMock(spec=SessionTracker)
+        mock_tracker.status = SessionStatus.RUNNING
+        runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(mock_tracker))
+
     @pytest.mark.asyncio
     async def test_handle_cancellation_clears_all_state(
         self,
@@ -238,6 +247,7 @@ class TestCancellationCleanup:
         """_handle_cancellation clears registry, unregisters session, and marks repo."""
         runner._register_session("exec_clean", "sess_clean")
         request_cancellation("sess_clean")
+        self._mock_running_session(runner, "sess_clean")
 
         with patch.object(
             runner._session_repo, "mark_cancelled", return_value=Result.ok(None)
@@ -266,6 +276,7 @@ class TestCancellationCleanup:
     ) -> None:
         """Calling _handle_cancellation when registry is already clear does not raise."""
         runner._register_session("exec_idem", "sess_idem")
+        self._mock_running_session(runner, "sess_idem")
         # Don't request_cancellation — registry is already empty for this session
 
         with patch.object(runner._session_repo, "mark_cancelled", return_value=Result.ok(None)):
@@ -287,6 +298,7 @@ class TestCancellationCleanup:
     ) -> None:
         """Cancellation result accurately reports messages processed before stopping."""
         runner._register_session("exec_cnt", "sess_cnt")
+        self._mock_running_session(runner, "sess_cnt")
 
         with patch.object(runner._session_repo, "mark_cancelled", return_value=Result.ok(None)):
             result = await runner._handle_cancellation(
@@ -308,6 +320,7 @@ class TestCancellationCleanup:
     ) -> None:
         """Cancellation result has a positive duration."""
         runner._register_session("exec_dur", "sess_dur")
+        self._mock_running_session(runner, "sess_dur")
         start = datetime.now(UTC)
 
         with patch.object(runner._session_repo, "mark_cancelled", return_value=Result.ok(None)):
@@ -344,6 +357,7 @@ class TestCancellationCleanup:
     ) -> None:
         """After handle_cancellation unregisters, a second cancel goes to direct path."""
         runner._register_session("exec_unreg", "sess_unreg")
+        self._mock_running_session(runner, "sess_unreg")
 
         with patch.object(runner._session_repo, "mark_cancelled", return_value=Result.ok(None)):
             await runner._handle_cancellation(
@@ -357,9 +371,9 @@ class TestCancellationCleanup:
         assert "exec_unreg" not in runner.active_sessions
 
         # Second cancel goes to _cancel_session_directly (not in-flight)
-        mock_event_store.replay = AsyncMock(return_value=[])
+        mock_event_store.get_all_sessions = AsyncMock(return_value=[])
         result = await runner.cancel_execution("exec_unreg")
-        assert result.is_err  # No session found in replay (mock returns [])
+        assert result.is_err  # No session found in get_all_sessions (mock returns [])
 
 
 # =============================================================================
@@ -369,6 +383,14 @@ class TestCancellationCleanup:
 
 class TestCancellationErrorScenarios:
     """Tests for graceful degradation when errors occur during cancellation."""
+
+    def _mock_running_session(self, runner: OrchestratorRunner, session_id: str) -> None:
+        """Mock reconstruct_session to return a RUNNING session."""
+        from ouroboros.orchestrator.session import SessionStatus
+
+        mock_tracker = MagicMock(spec=SessionTracker)
+        mock_tracker.status = SessionStatus.RUNNING
+        runner._session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(mock_tracker))
 
     @pytest.mark.asyncio
     async def test_check_cancellation_event_store_timeout_returns_false(
@@ -408,6 +430,7 @@ class TestCancellationErrorScenarios:
         """
         runner._register_session("exec_fail", "sess_fail")
         request_cancellation("sess_fail")
+        self._mock_running_session(runner, "sess_fail")
 
         with patch.object(
             runner._session_repo,
@@ -442,6 +465,7 @@ class TestCancellationErrorScenarios:
         already stopping.
         """
         runner._register_session("exec_raise", "sess_raise")
+        self._mock_running_session(runner, "sess_raise")
 
         with patch.object(
             runner._session_repo,
@@ -467,8 +491,8 @@ class TestCancellationErrorScenarios:
         runner: OrchestratorRunner,
         mock_event_store: AsyncMock,
     ) -> None:
-        """Direct cancellation gracefully handles event store replay errors."""
-        mock_event_store.replay = AsyncMock(side_effect=Exception("DB connection lost"))
+        """Direct cancellation gracefully handles event store get_all_sessions errors."""
+        mock_event_store.get_all_sessions = AsyncMock(side_effect=Exception("DB connection lost"))
 
         result = await runner.cancel_execution("exec_lost")
         assert result.is_err
@@ -481,7 +505,7 @@ class TestCancellationErrorScenarios:
         mock_event_store: AsyncMock,
     ) -> None:
         """Direct cancellation reports error when mark_cancelled fails."""
-        mock_event_store.replay = AsyncMock(
+        mock_event_store.get_all_sessions = AsyncMock(
             return_value=[
                 BaseEvent(
                     type="orchestrator.session.started",

@@ -304,7 +304,7 @@ class TestOrchestratorRunner:
             result = await runner.resume_session("sess_123", sample_seed)
 
         assert result.is_err
-        assert "already completed" in str(result.error).lower()
+        assert "terminal state" in str(result.error).lower()
 
     @pytest.mark.asyncio
     async def test_resume_session_not_found(

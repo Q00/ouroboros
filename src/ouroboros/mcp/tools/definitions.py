@@ -2602,6 +2602,14 @@ class CancelExecutionHandler:
             await self._event_store.initialize()
             self._initialized = True
 
+    async def _resolve_session_id(self, execution_id: str) -> str | None:
+        """Resolve an execution_id to its session_id via event store lookup."""
+        events = await self._event_store.get_all_sessions()
+        for event in events:
+            if event.data.get("execution_id") == execution_id:
+                return event.aggregate_id
+        return None
+
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition."""
@@ -2664,17 +2672,27 @@ class CancelExecutionHandler:
         try:
             await self._ensure_initialized()
 
-            # Reconstruct session to validate it exists and check status
+            # Try direct lookup first (user may have passed session_id)
             result = await self._session_repo.reconstruct_session(execution_id)
 
             if result.is_err:
-                error = result.error
-                return Result.err(
-                    MCPToolError(
-                        f"Execution not found: {error.message}",
-                        tool_name="ouroboros_cancel_execution",
+                # Try resolving as execution_id
+                session_id = await self._resolve_session_id(execution_id)
+                if session_id is None:
+                    return Result.err(
+                        MCPToolError(
+                            f"Execution not found: {execution_id}",
+                            tool_name="ouroboros_cancel_execution",
+                        )
                     )
-                )
+                result = await self._session_repo.reconstruct_session(session_id)
+                if result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            f"Execution not found: {result.error.message}",
+                            tool_name="ouroboros_cancel_execution",
+                        )
+                    )
 
             tracker = result.value
 
@@ -2690,7 +2708,7 @@ class CancelExecutionHandler:
 
             # Perform cancellation
             cancel_result = await self._session_repo.mark_cancelled(
-                session_id=execution_id,
+                session_id=tracker.session_id,
                 reason=reason,
                 cancelled_by="mcp_tool",
             )

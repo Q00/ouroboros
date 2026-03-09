@@ -452,9 +452,7 @@ class OrchestratorRunner:
         session_id: str | None = None
         # Try to find session_id from event store
         try:
-            events = await self._event_store.replay(
-                aggregate_type="session",
-            )
+            events = await self._event_store.get_all_sessions()
             for event in events:
                 if (
                     event.type == "orchestrator.session.started"
@@ -668,12 +666,14 @@ class OrchestratorRunner:
         # Clean up session tracking
         self._unregister_session(execution_id, session_id)
 
-        # Mark session as cancelled in the repository
-        await self._session_repo.mark_cancelled(
-            session_id,
-            reason="Cancellation detected during execution",
-            cancelled_by="runner",
-        )
+        # Only mark cancelled if not already cancelled by another path
+        session_result = await self._session_repo.reconstruct_session(session_id)
+        if session_result.is_ok and session_result.value.status != SessionStatus.CANCELLED:
+            await self._session_repo.mark_cancelled(
+                session_id,
+                reason="Cancellation detected during execution",
+                cancelled_by="runner",
+            )
 
         # Display cancellation notice
         self._console.print(
@@ -939,9 +939,6 @@ class OrchestratorRunner:
             # Calculate duration
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
-            # Unregister session from cancellation tracking
-            self._unregister_session(exec_id, tracker.session_id)
-
             # Emit completion event
             if success:
                 completed_event = create_session_completed_event(
@@ -1123,6 +1120,15 @@ class OrchestratorRunner:
             enable_decomposition=self._enable_decomposition,
         )
 
+        # Check for cancellation before starting parallel execution
+        if await self._check_cancellation(tracker.session_id):
+            return await self._handle_cancellation(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                messages_processed=0,
+                start_time=start_time,
+            )
+
         parallel_result = await parallel_executor.execute_parallel(
             seed=seed,
             dependency_graph=dependency_graph,
@@ -1131,6 +1137,15 @@ class OrchestratorRunner:
             tools=merged_tools,
             system_prompt=system_prompt,
         )
+
+        # Check for cancellation after parallel execution
+        if await self._check_cancellation(tracker.session_id):
+            return await self._handle_cancellation(
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                messages_processed=parallel_result.total_messages,
+                start_time=start_time,
+            )
 
         # Calculate duration
         duration = (datetime.now(UTC) - start_time).total_seconds()
@@ -1224,6 +1239,7 @@ class OrchestratorRunner:
 
         # Clean up session tracking
         self._unregister_session(exec_id, tracker.session_id)
+        clear_cancellation(tracker.session_id)
 
         return Result.ok(
             OrchestratorResult(
@@ -1284,10 +1300,14 @@ class OrchestratorRunner:
         tracker = session_result.value
 
         # Check if session can be resumed
-        if tracker.status == SessionStatus.COMPLETED:
+        if tracker.status in (
+            SessionStatus.COMPLETED,
+            SessionStatus.CANCELLED,
+            SessionStatus.FAILED,
+        ):
             return Result.err(
                 OrchestratorError(
-                    message="Session already completed, cannot resume",
+                    message=f"Session is in terminal state {tracker.status.value}, cannot resume",
                     details={"session_id": session_id, "status": tracker.status.value},
                 )
             )

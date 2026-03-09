@@ -688,31 +688,31 @@ class TestCancelExecutionHandler:
         # Create a running session via the repository
         repo = SessionRepository(event_store)
         create_result = await repo.create_session(
-            execution_id="test-exec-cancel",
+            execution_id="exec_cancel_123",
             seed_id="test-seed",
-            session_id="test-exec-cancel",
+            session_id="orch_cancel_123",
         )
         assert create_result.is_ok
 
-        # Now cancel via handler
+        # Now cancel via handler (passing execution_id, not session_id)
         handler = CancelExecutionHandler(event_store=event_store)
         result = await handler.handle(
             {
-                "execution_id": "test-exec-cancel",
+                "execution_id": "exec_cancel_123",
                 "reason": "Test cancellation",
             }
         )
 
         assert result.is_ok
         assert "cancelled" in result.value.text_content.lower()
-        assert result.value.meta["execution_id"] == "test-exec-cancel"
+        assert result.value.meta["execution_id"] == "exec_cancel_123"
         assert result.value.meta["previous_status"] == "running"
         assert result.value.meta["new_status"] == "cancelled"
         assert result.value.meta["reason"] == "Test cancellation"
         assert result.value.meta["cancelled_by"] == "mcp_tool"
 
         # Verify session is now cancelled
-        reconstructed = await repo.reconstruct_session("test-exec-cancel")
+        reconstructed = await repo.reconstruct_session("orch_cancel_123")
         assert reconstructed.is_ok
         assert reconstructed.value.status == SessionStatus.CANCELLED
 
@@ -726,14 +726,14 @@ class TestCancelExecutionHandler:
 
         repo = SessionRepository(event_store)
         await repo.create_session(
-            execution_id="test-completed",
+            execution_id="exec_completed_123",
             seed_id="test-seed",
-            session_id="test-completed",
+            session_id="orch_completed_123",
         )
-        await repo.mark_completed("test-completed")
+        await repo.mark_completed("orch_completed_123")
 
         handler = CancelExecutionHandler(event_store=event_store)
-        result = await handler.handle({"execution_id": "test-completed"})
+        result = await handler.handle({"execution_id": "exec_completed_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
@@ -749,14 +749,14 @@ class TestCancelExecutionHandler:
 
         repo = SessionRepository(event_store)
         await repo.create_session(
-            execution_id="test-failed",
+            execution_id="exec_failed_123",
             seed_id="test-seed",
-            session_id="test-failed",
+            session_id="orch_failed_123",
         )
-        await repo.mark_failed("test-failed", error_message="some error")
+        await repo.mark_failed("orch_failed_123", error_message="some error")
 
         handler = CancelExecutionHandler(event_store=event_store)
-        result = await handler.handle({"execution_id": "test-failed"})
+        result = await handler.handle({"execution_id": "exec_failed_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
@@ -772,14 +772,14 @@ class TestCancelExecutionHandler:
 
         repo = SessionRepository(event_store)
         await repo.create_session(
-            execution_id="test-cancelled",
+            execution_id="exec_cancelled_123",
             seed_id="test-seed",
-            session_id="test-cancelled",
+            session_id="orch_cancelled_123",
         )
-        await repo.mark_cancelled("test-cancelled", reason="first cancel")
+        await repo.mark_cancelled("orch_cancelled_123", reason="first cancel")
 
         handler = CancelExecutionHandler(event_store=event_store)
-        result = await handler.handle({"execution_id": "test-cancelled"})
+        result = await handler.handle({"execution_id": "exec_cancelled_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
@@ -795,13 +795,13 @@ class TestCancelExecutionHandler:
 
         repo = SessionRepository(event_store)
         await repo.create_session(
-            execution_id="test-default-reason",
+            execution_id="exec_default_reason_123",
             seed_id="test-seed",
-            session_id="test-default-reason",
+            session_id="orch_default_reason_123",
         )
 
         handler = CancelExecutionHandler(event_store=event_store)
-        result = await handler.handle({"execution_id": "test-default-reason"})
+        result = await handler.handle({"execution_id": "exec_default_reason_123"})
 
         assert result.is_ok
         assert result.value.meta["reason"] == "Cancelled by user"
@@ -816,9 +816,9 @@ class TestCancelExecutionHandler:
 
         repo = SessionRepository(event_store)
         await repo.create_session(
-            execution_id="test-double-cancel",
+            execution_id="exec_double_cancel_123",
             seed_id="test-seed",
-            session_id="test-double-cancel",
+            session_id="orch_double_cancel_123",
         )
 
         handler = CancelExecutionHandler(event_store=event_store)
@@ -826,7 +826,7 @@ class TestCancelExecutionHandler:
         # First cancel succeeds
         result1 = await handler.handle(
             {
-                "execution_id": "test-double-cancel",
+                "execution_id": "exec_double_cancel_123",
                 "reason": "first attempt",
             }
         )
@@ -835,7 +835,7 @@ class TestCancelExecutionHandler:
         # Second cancel is rejected (already in terminal state)
         result2 = await handler.handle(
             {
-                "execution_id": "test-double-cancel",
+                "execution_id": "exec_double_cancel_123",
                 "reason": "second attempt",
             }
         )
@@ -852,15 +852,15 @@ class TestCancelExecutionHandler:
 
         repo = SessionRepository(event_store)
         await repo.create_session(
-            execution_id="test-meta-fields",
+            execution_id="exec_meta_fields_123",
             seed_id="test-seed",
-            session_id="test-meta-fields",
+            session_id="orch_meta_fields_123",
         )
 
         handler = CancelExecutionHandler(event_store=event_store)
         result = await handler.handle(
             {
-                "execution_id": "test-meta-fields",
+                "execution_id": "exec_meta_fields_123",
                 "reason": "checking meta",
             }
         )

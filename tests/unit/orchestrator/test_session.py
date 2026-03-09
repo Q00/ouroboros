@@ -713,6 +713,36 @@ class TestFindOrphanedSessions:
 
         assert result == []
 
+    @pytest.mark.asyncio
+    async def test_session_at_exact_threshold_not_orphaned(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Test that a session at exactly the threshold boundary is NOT orphaned.
+
+        The comparison uses strict > so a session whose last activity is exactly
+        staleness_threshold ago should not be considered orphaned.
+        """
+        from unittest.mock import patch as mock_patch
+
+        fixed_now = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
+        threshold = timedelta(hours=1)
+        # Last activity exactly at the threshold boundary
+        start_event = self._make_start_event("sess_boundary", timestamp=fixed_now - threshold)
+
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event]
+
+        # Freeze time so find_orphaned_sessions sees the same 'now'
+        with mock_patch("ouroboros.orchestrator.session.datetime") as mock_dt:
+            mock_dt.now.return_value = fixed_now
+            mock_dt.fromisoformat = datetime.fromisoformat
+            result = await repository.find_orphaned_sessions(staleness_threshold=threshold)
+
+        # Strict > means exactly-at-threshold is NOT orphaned
+        assert result == []
+
 
 class TestCancelOrphanedSessions:
     """Tests for auto-cancel-on-startup routine."""

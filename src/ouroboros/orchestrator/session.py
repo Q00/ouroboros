@@ -669,7 +669,7 @@ class SessionRepository:
                 print(
                     f"[ouroboros] Auto-cancelled orphaned session "
                     f"{tracker.session_id} (execution={tracker.execution_id}, "
-                    f"status={tracker.status.value})",
+                    f"previous_status={tracker.status.value})",
                     file=sys.stderr,
                 )
                 log.info(
