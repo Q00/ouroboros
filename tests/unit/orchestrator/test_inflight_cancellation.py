@@ -424,9 +424,8 @@ class TestCancellationErrorScenarios:
     ) -> None:
         """If mark_cancelled fails during handling, the result is still returned.
 
-        The _handle_cancellation method doesn't check the return value of
-        mark_cancelled — it always returns an OrchestratorResult. This ensures
-        the execution stops even if persistence fails.
+        The _handle_cancellation method logs a warning but still returns an
+        OrchestratorResult. This ensures the execution stops even if persistence fails.
         """
         runner._register_session("exec_fail", "sess_fail")
         request_cancellation("sess_fail")
@@ -436,12 +435,19 @@ class TestCancellationErrorScenarios:
             runner._session_repo,
             "mark_cancelled",
             return_value=Result.err(PersistenceError("DB write failed")),
-        ):
+        ), patch("ouroboros.orchestrator.runner.log") as mock_log:
             result = await runner._handle_cancellation(
                 session_id="sess_fail",
                 execution_id="exec_fail",
                 messages_processed=7,
                 start_time=datetime.now(UTC),
+            )
+
+            # Should log a warning about the failed mark_cancelled
+            mock_log.warning.assert_any_call(
+                "orchestrator.runner.mark_cancelled_failed",
+                session_id="sess_fail",
+                error=str(PersistenceError("DB write failed")),
             )
 
         # Should still return a valid cancellation result

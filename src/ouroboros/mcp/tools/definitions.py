@@ -2811,11 +2811,6 @@ def evolve_rewind_handler() -> EvolveRewindHandler:
     return EvolveRewindHandler()
 
 
-def cancel_execution_handler() -> CancelExecutionHandler:
-    """Create a CancelExecutionHandler instance."""
-    return CancelExecutionHandler()
-
-
 # List of all Ouroboros tools for registration
 from ouroboros.mcp.tools.qa import QAHandler  # noqa: E402
 

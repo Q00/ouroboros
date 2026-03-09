@@ -19,7 +19,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -316,8 +315,6 @@ class OrchestratorRunner:
         self._mcp_tool_prefix = mcp_tool_prefix
         self._debug = debug
         self._enable_decomposition = enable_decomposition
-        # Cancellation support: maps session_id -> asyncio.Event
-        self._cancellation_events: dict[str, asyncio.Event] = {}
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
 
@@ -357,7 +354,6 @@ class OrchestratorRunner:
             execution_id: Execution ID for external lookup.
             session_id: Session ID for internal tracking.
         """
-        self._cancellation_events[session_id] = asyncio.Event()
         self._active_sessions[execution_id] = session_id
 
     def _unregister_session(self, execution_id: str, session_id: str) -> None:
@@ -370,7 +366,6 @@ class OrchestratorRunner:
             execution_id: Execution ID to remove.
             session_id: Session ID to remove.
         """
-        self._cancellation_events.pop(session_id, None)
         self._active_sessions.pop(execution_id, None)
 
     async def cancel_execution(
@@ -669,11 +664,17 @@ class OrchestratorRunner:
         # Only mark cancelled if not already cancelled by another path
         session_result = await self._session_repo.reconstruct_session(session_id)
         if session_result.is_ok and session_result.value.status != SessionStatus.CANCELLED:
-            await self._session_repo.mark_cancelled(
+            cancel_result = await self._session_repo.mark_cancelled(
                 session_id,
                 reason="Cancellation detected during execution",
                 cancelled_by="runner",
             )
+            if cancel_result.is_err:
+                log.warning(
+                    "orchestrator.runner.mark_cancelled_failed",
+                    session_id=session_id,
+                    error=str(cancel_result.error),
+                )
 
         # Display cancellation notice
         self._console.print(
