@@ -36,6 +36,7 @@ KEYWORD_MAP = [
     {"patterns": ["ooo setup"], "skill": "/ouroboros:setup"},
     {"patterns": ["ooo help"], "skill": "/ouroboros:help"},
     {"patterns": ["ooo qa"], "skill": "/ouroboros:qa"},
+    {"patterns": ["ooo update", "ooo upgrade"], "skill": "/ouroboros:update"},
     # Natural language triggers
     {
         "patterns": [
@@ -90,6 +91,10 @@ KEYWORD_MAP = [
     },
     {"patterns": ["ouroboros setup", "setup ouroboros"], "skill": "/ouroboros:setup"},
     {"patterns": ["ouroboros help"], "skill": "/ouroboros:help"},
+    {
+        "patterns": ["update ouroboros", "upgrade ouroboros"],
+        "skill": "/ouroboros:update",
+    },
 ]
 
 

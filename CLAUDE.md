@@ -27,6 +27,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo welcome` | Read `skills/welcome/SKILL.md` and follow it |
 | `ooo qa` or `ooo qa ...` | Read `skills/qa/SKILL.md` and follow it |
 | `ooo help` | Read `skills/help/SKILL.md` and follow it |
+| `ooo update` | Read `skills/update/SKILL.md` and follow it |
 
 **Important**: Do NOT use the Skill tool. Read the file with the Read tool and execute its instructions directly.
 
@@ -74,6 +75,7 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 | `ooo tutorial` | Interactive hands-on learning |
 | `ooo setup` | — |
 | `ooo help` | — |
+| `ooo update` | PyPI version check + upgrade |
 
 ## Agents
 
