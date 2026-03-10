@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.core.errors import OuroborosError, ProviderError
@@ -235,7 +235,7 @@ Deliver the solution. Select the best approach and provide implementation detail
 # =============================================================================
 
 
-class Phase(str, Enum):
+class Phase(StrEnum):
     """Double Diamond phase enumeration.
 
     Four phases with alternating diverge/converge pattern:

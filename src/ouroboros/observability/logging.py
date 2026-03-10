@@ -40,7 +40,7 @@ Usage:
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
@@ -57,7 +57,7 @@ from ouroboros.core.security import (
 )
 
 
-class LogMode(str, Enum):
+class LogMode(StrEnum):
     """Logging output mode."""
 
     DEV = "dev"

@@ -39,7 +39,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 import hashlib
 from typing import Any
 
@@ -55,7 +55,7 @@ log = get_logger(__name__)
 # =============================================================================
 
 
-class StagnationPattern(str, Enum):
+class StagnationPattern(StrEnum):
     """Four stagnation patterns detected in execution loops.
 
     Attributes:

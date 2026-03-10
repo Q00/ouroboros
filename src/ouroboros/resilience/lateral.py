@@ -32,7 +32,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
@@ -47,7 +47,7 @@ log = get_logger(__name__)
 # =============================================================================
 
 
-class ThinkingPersona(str, Enum):
+class ThinkingPersona(StrEnum):
     """Five lateral thinking personas for breaking through stagnation.
 
     Each persona approaches problems from a fundamentally different angle,

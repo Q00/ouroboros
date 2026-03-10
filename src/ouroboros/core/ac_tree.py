@@ -13,12 +13,12 @@ Key concepts:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
 
-class ACStatus(str, Enum):
+class ACStatus(StrEnum):
     """Lifecycle status of an Acceptance Criterion."""
 
     PENDING = "pending"  # Not yet analyzed

@@ -24,7 +24,7 @@ Usage:
         print(f"Cost factor: {tier_config.cost_factor}x")
 """
 
-from enum import Enum
+from enum import StrEnum
 import random
 
 from ouroboros.config.models import ModelConfig, OuroborosConfig, TierConfig
@@ -35,7 +35,7 @@ from ouroboros.observability.logging import get_logger
 log = get_logger(__name__)
 
 
-class Tier(str, Enum):
+class Tier(StrEnum):
     """Model tier enumeration.
 
     Three tiers with different cost/capability tradeoffs:
