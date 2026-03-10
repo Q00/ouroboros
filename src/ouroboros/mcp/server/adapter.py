@@ -689,6 +689,15 @@ def create_ouroboros_server(
                     break
                 candidate = candidate.parent
 
+        # Fallback: use CWD if it looks like a project root
+        cwd = Path.cwd()
+        if (
+            (cwd / "pyproject.toml").exists()
+            or (cwd / "setup.py").exists()
+            or (cwd / "package.json").exists()
+        ):
+            return str(cwd)
+
         return None
 
     async def _verify_spec_compliance(
@@ -876,7 +885,7 @@ def create_ouroboros_server(
                 seed_meta, "working_directory", None
             )
 
-        # Fallback: extract from execution output (brittle regex parsing)
+        # Fallback 1: extract from execution output (regex parsing)
         if not project_dir:
             write_matches = re.findall(r"Write: (/[^\s]+)", execution_output or "")
             if write_matches:
@@ -888,6 +897,16 @@ def create_ouroboros_server(
                         project_dir = str(candidate)
                         break
                     candidate = candidate.parent
+
+        # Fallback 2: use CWD if it looks like a project root
+        if not project_dir:
+            cwd = Path.cwd()
+            if (
+                (cwd / "pyproject.toml").exists()
+                or (cwd / "setup.py").exists()
+                or (cwd / "package.json").exists()
+            ):
+                project_dir = str(cwd)
 
         if not project_dir:
             log.warning(
