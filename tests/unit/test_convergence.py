@@ -262,7 +262,7 @@ class TestConvergenceGating:
 
         Gen 1→2: B→A = genuine evolution (similarity < threshold).
         Gen 2→3: A→A = stable (similarity = 1.0).
-        This passes the false-convergence gate because evolution DID occur.
+        This passes the evolution gate because evolution DID occur.
         """
         return _lineage_with_schemas(SCHEMA_B, SCHEMA_A, SCHEMA_A)
 
@@ -403,15 +403,15 @@ class TestConvergenceGating:
         assert "unsatisfactory" in signal.reason
 
 
-class TestFalseConvergenceDetection:
-    """Tests for false convergence detection (P1-5).
+class TestEvolutionGateDetection:
+    """Tests for evolution gate detection (P1-5).
 
     When the ontology never changes across generations, the system should
     block convergence — whether due to conservative Reflect or errors.
     """
 
     def test_blocks_when_ontology_never_evolved(self) -> None:
-        """Identical ontology across all generations -> false convergence blocked."""
+        """Identical ontology across all generations -> convergence withheld."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
@@ -420,7 +420,7 @@ class TestFalseConvergenceDetection:
         )
         signal = criteria.evaluate(lineage)
         assert not signal.converged
-        assert "Convergence deferred" in signal.reason
+        assert "Convergence withheld" in signal.reason
 
     def test_allows_when_ontology_evolved_at_least_once(self) -> None:
         """Ontology evolved once then stabilized -> genuine convergence."""
@@ -444,10 +444,10 @@ class TestFalseConvergenceDetection:
         )
         signal = criteria.evaluate(lineage)
         assert not signal.converged
-        assert "Convergence deferred" in signal.reason
+        assert "Convergence withheld" in signal.reason
 
-    def test_max_generations_overrides_false_convergence(self) -> None:
-        """Hard cap still terminates even with false convergence."""
+    def test_max_generations_overrides_withheld_convergence(self) -> None:
+        """Hard cap still terminates even with withheld convergence."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,

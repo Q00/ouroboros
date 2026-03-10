@@ -142,18 +142,18 @@ class ConvergenceCriteria:
                         failed_acs=regressed,
                     )
 
-            # False convergence gate: block if ontology never actually evolved.
+            # Evolution gate: withhold convergence if ontology never actually evolved.
             # When ontology never changes, either Reflect is conservatively
-            # preserving a well-performing ontology, or Wonder→Reflect encountered
-            # errors. Either way, defer convergence until genuine evolution occurs.
+            # preserving a well-performing ontology, or Wonder/Reflect encountered
+            # errors. Either way, withhold convergence until genuine evolution occurs.
             evolved_count = self._count_evolved_generations(lineage)
             if evolved_count == 0:
                 return ConvergenceSignal(
                     converged=False,
                     reason=(
-                        f"Convergence deferred: similarity {latest_sim:.3f} "
+                        f"Convergence withheld: similarity {latest_sim:.3f} "
                         f"but ontology unchanged across {num_gens} generations "
-                        f"(Reflect may be conservatively stable — not necessarily an error)"
+                        f"(evolution required before convergence is accepted)"
                     ),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
@@ -224,11 +224,11 @@ class ConvergenceCriteria:
         return delta.similarity
 
     def _count_evolved_generations(self, lineage: OntologyLineage) -> int:
-        """Count how many consecutive generation pairs show actual ontology evolution.
+        """Count how many generation pairs show actual ontology evolution.
 
         Returns the number of transitions where similarity < convergence_threshold,
         indicating Wonder→Reflect successfully mutated the ontology.
-        A return of 0 means the ontology never changed — either because Reflect
+        A return of 0 means the ontology never changed -- either because Reflect
         conservatively preserved a well-performing ontology, or because
         Wonder/Reflect encountered errors preventing mutation.
         """
