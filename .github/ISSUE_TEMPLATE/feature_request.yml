@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Actionable feature issues in Ouroboros should be written like a lightweight PRD.
+        Lightweight structure helps both humans and tooling understand a proposal quickly.
   - type: textarea
     id: problem
     attributes:
@@ -23,7 +23,7 @@ body:
       description: Explain why this is worth doing now.
       placeholder: Why is this worth doing now?
     validations:
-      required: true
+      required: false
   - type: textarea
     id: persona
     attributes:
@@ -31,7 +31,7 @@ body:
       description: Describe who is affected by this problem.
       placeholder: Who is affected?
     validations:
-      required: true
+      required: false
   - type: textarea
     id: current
     attributes:
@@ -39,7 +39,7 @@ body:
       description: Describe what happens today.
       placeholder: What happens today?
     validations:
-      required: true
+      required: false
   - type: textarea
     id: desired
     attributes:
@@ -55,7 +55,7 @@ body:
       description: Explain how you think this should work.
       placeholder: What is your proposed solution?
     validations:
-      required: true
+      required: false
   - type: textarea
     id: constraints
     attributes:
@@ -63,7 +63,7 @@ body:
       description: List technical, UX, policy, cost, or compatibility constraints.
       placeholder: What boundaries or constraints matter here?
     validations:
-      required: true
+      required: false
   - type: textarea
     id: non-goals
     attributes:
@@ -71,7 +71,7 @@ body:
       description: Explain what is explicitly out of scope for this issue.
       placeholder: What is this issue not trying to solve?
     validations:
-      required: true
+      required: false
   - type: textarea
     id: alternatives
     attributes:
@@ -79,7 +79,7 @@ body:
       description: List other approaches you considered.
       placeholder: What other approaches did you consider?
     validations:
-      required: true
+      required: false
   - type: textarea
     id: acceptance
     attributes:
@@ -107,9 +107,8 @@ body:
         - label: I searched existing issues and discussions first.
           required: true
         - label: I explained the problem, not just the solution.
-          required: true
+          required: false
         - label: I included clear scope boundaries and non-goals.
-          required: true
+          required: false
         - label: I listed concrete acceptance criteria.
-          required: true
-
+          required: false

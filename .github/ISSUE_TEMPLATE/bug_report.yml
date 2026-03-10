@@ -89,7 +89,7 @@ body:
         - [ ] 
         - [ ] 
     validations:
-      required: true
+      required: false
   - type: checkboxes
     id: checklist
     attributes:
@@ -103,4 +103,3 @@ body:
           required: true
         - label: I included enough detail for someone else to verify the fix.
           required: true
-

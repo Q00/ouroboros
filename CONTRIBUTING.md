@@ -101,61 +101,21 @@ uv run mypy src/ouroboros
 
 ### Bug Reports
 
-Found a bug? Please open an issue with:
+Found a bug? Please use the bug report form and include enough detail for someone else to reproduce the problem and verify a fix.
 
-1. **Clear title**: Summarize the bug
-2. **Impact**: Explain what is blocked or broken
-3. **Description**: Steps to reproduce, expected vs actual behavior
-4. **Acceptance criteria**: State what will be true once fixed
-5. **Environment**: Python version, OS, `uv run ouroboros --version`
-6. **Logs**: Relevant error messages or stack traces
-
-See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for the full bug issue standard.
-
-```markdown
-## Summary
-[What is broken]
-
-## Impact
-[Why this matters]
-
-## Steps to Reproduce
-1. Run `ooo interview "test"`
-2. Enter X when prompted
-3. Observe error
-
-## Expected Behavior
-[What should happen]
-
-## Actual Behavior
-[What happens instead]
-
-## Acceptance Criteria for Fix
-- [ ] [Condition that proves the bug is fixed]
-
-## Environment
-- Python: 3.14.0
-- Ouroboros: v0.9.0
-- OS: macOS 15.2
-
-## Logs
-```
-[paste error output]
-```
-```
+See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for the rationale behind structured bug reports.
 
 ### Feature Proposals
 
 Have an idea? Open an issue only when it is structured enough to act on.
 
-Feature issues should be written in a **PRD-lite** format with:
+Feature issues should focus on:
 
 1. **Problem**: What problem exists today?
-2. **Why now**: Why is this worth doing now?
-3. **User / persona**: Who is affected?
-4. **Current vs desired behavior**: What changes?
-5. **Constraints and non-goals**: What boundaries matter?
-6. **Acceptance criteria**: What would make this done?
+2. **Desired behavior**: What should happen instead?
+3. **Acceptance criteria**: What would make this done?
+
+Additional context like timing, constraints, and non-goals is welcome when it helps maintainers or tooling understand the proposal.
 
 If the idea is still fuzzy, use GitHub Discussions or Discord first, then turn it into a structured issue.
 
@@ -458,32 +418,7 @@ class ExecutionStrategy(Protocol):
 
 ## Code of Conduct
 
-The canonical community rules live in [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
-
-### Our Pledge
-
-We pledge to make participation in our community a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, gender identity and expression, level of experience, nationality, personal appearance, race, religion, or sexual identity and orientation.
-
-### Our Standards
-
-**Positive behavior includes**:
-- Being respectful and inclusive
-- Gracefully accepting constructive criticism
-- Focusing on what is best for the community
-- Showing empathy towards other community members
-
-**Unacceptable behavior includes**:
-- Harassment, trolling, or derogatory comments
-- Personal or political attacks
-- Public or private harassment
-- Publishing private information without permission
-- Any other conduct which could reasonably be considered inappropriate
-
-### Enforcement
-
-Project maintainers may remove, edit, or reject comments, commits, code, wiki edits, issues, and other contributions that are not aligned with this Code of Conduct.
-
-**Contact**: For any questions or concerns, please open a GitHub issue with the `conduct` label.
+The canonical community rules live in [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md). Please read that file before participating.
 
 ---
 
