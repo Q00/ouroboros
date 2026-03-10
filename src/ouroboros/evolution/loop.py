@@ -14,6 +14,7 @@ and autonomously evolves through Wonder → Reflect cycles for Gen 2+.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from enum import StrEnum
 import json
@@ -153,7 +154,10 @@ class EvolutionaryLoop:
         self.executor = executor
         self.evaluator = evaluator
         self.validator = validator
-        self.project_dir: str | None = None
+        self._project_dir_context: ContextVar[str | None] = ContextVar(
+            "evolutionary_loop_project_dir",
+            default=None,
+        )
         self._convergence = ConvergenceCriteria(
             convergence_threshold=self.config.convergence_threshold,
             stagnation_window=self.config.stagnation_window,
@@ -163,6 +167,18 @@ class EvolutionaryLoop:
             eval_gate_enabled=self.config.eval_gate_enabled,
             eval_min_score=self.config.eval_min_score,
         )
+
+    def set_project_dir(self, project_dir: str | None) -> Token[str | None]:
+        """Set task-local project directory context for the current generation."""
+        return self._project_dir_context.set(project_dir)
+
+    def get_project_dir(self) -> str | None:
+        """Return the task-local project directory for the current execution."""
+        return self._project_dir_context.get()
+
+    def reset_project_dir(self, token: Token[str | None]) -> None:
+        """Restore the previous task-local project directory context."""
+        self._project_dir_context.reset(token)
 
     async def run(
         self,

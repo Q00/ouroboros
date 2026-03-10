@@ -1976,10 +1976,11 @@ class EvolveStepHandler:
         execute = arguments.get("execute", True)
         parallel = arguments.get("parallel", True)
         project_dir = arguments.get("project_dir")
+        normalized_project_dir = (
+            project_dir if isinstance(project_dir, str) and project_dir else None
+        )
 
-        # Pass project_dir to the evolutionary loop for validation
-        if project_dir:
-            self.evolutionary_loop.project_dir = project_dir
+        project_dir_token = self.evolutionary_loop.set_project_dir(normalized_project_dir)
 
         try:
             # Ensure event store is initialized before evolve_step accesses it
@@ -1996,6 +1997,8 @@ class EvolveStepHandler:
                     tool_name="ouroboros_evolve_step",
                 )
             )
+        finally:
+            self.evolutionary_loop.reset_project_dir(project_dir_token)
 
         if result.is_err:
             return Result.err(

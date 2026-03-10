@@ -730,6 +730,37 @@ class TestEvolveStepHandler:
         assert result.value.meta["action"] == "continue"
 
     @pytest.mark.asyncio
+    async def test_handler_resets_project_dir_after_call(self) -> None:
+        """Handler should not leak project_dir between evolve_step calls."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed()
+
+        gen_result = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        loop = make_loop(store, gen_result=gen_result)
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+
+        import yaml
+
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_handler_project_dir",
+                "seed_content": yaml.dump(seed.to_dict()),
+                "project_dir": "/tmp/test-project",
+            }
+        )
+
+        assert result.is_ok
+        assert loop.get_project_dir() is None
+
+    @pytest.mark.asyncio
     async def test_handler_no_loop_returns_error(self) -> None:
         """Handler without evolutionary_loop returns error."""
         from ouroboros.mcp.tools.definitions import EvolveStepHandler

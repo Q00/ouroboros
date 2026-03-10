@@ -1,11 +1,16 @@
 """Tests for MCP server adapter."""
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
-from ouroboros.mcp.server.adapter import MCPServerAdapter
+from ouroboros.mcp.server.adapter import (
+    MCPServerAdapter,
+    _project_dir_from_artifact,
+    _project_dir_from_seed,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -86,6 +91,30 @@ class TestMCPServerAdapter:
         adapter = MCPServerAdapter(name="custom-server", version="2.0.0")
         assert adapter.info.name == "custom-server"
         assert adapter.info.version == "2.0.0"
+
+    def test_project_dir_from_seed_uses_primary_brownfield_reference(self, tmp_path) -> None:
+        """Brownfield primary context should be treated as the project directory."""
+        seed = SimpleNamespace(
+            metadata=SimpleNamespace(project_dir=None, working_directory=None),
+            brownfield_context=SimpleNamespace(
+                context_references=(
+                    SimpleNamespace(path=str(tmp_path), role="primary"),
+                )
+            ),
+        )
+
+        assert _project_dir_from_seed(seed) == str(tmp_path)
+
+    def test_project_dir_from_artifact_detects_package_json_root(self, tmp_path) -> None:
+        """Artifact path discovery should support package.json-based projects."""
+        project_dir = tmp_path / "web-app"
+        nested_dir = project_dir / "src" / "components"
+        nested_dir.mkdir(parents=True)
+        (project_dir / "package.json").write_text('{"name":"web-app"}')
+
+        artifact = f"Write: {nested_dir / 'app.tsx'}"
+
+        assert _project_dir_from_artifact(artifact) == str(project_dir)
 
 
 class TestMCPServerAdapterTools:

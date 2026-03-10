@@ -311,6 +311,8 @@ class TestEvolveStepHandlerQA:
         mock_loop = AsyncMock()
         mock_loop.event_store.initialize = AsyncMock()
         mock_loop.evolve_step = AsyncMock(return_value=Result.ok(FakeStepResult()))
+        mock_loop.set_project_dir = MagicMock(return_value="project-dir-token")
+        mock_loop.reset_project_dir = MagicMock()
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
@@ -344,6 +346,8 @@ class TestEvolveStepHandlerQA:
         mock_loop = AsyncMock()
         mock_loop.event_store.initialize = AsyncMock()
         mock_loop.evolve_step = AsyncMock(return_value=Result.ok(FakeStepResult()))
+        mock_loop.set_project_dir = MagicMock(return_value="project-dir-token")
+        mock_loop.reset_project_dir = MagicMock()
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
@@ -368,6 +372,8 @@ class TestEvolveStepHandlerQA:
         mock_loop = AsyncMock()
         mock_loop.event_store.initialize = AsyncMock()
         mock_loop.evolve_step = AsyncMock(return_value=Result.ok(FakeStepResult()))
+        mock_loop.set_project_dir = MagicMock(return_value="project-dir-token")
+        mock_loop.reset_project_dir = MagicMock()
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
@@ -390,6 +396,8 @@ class TestEvolveStepHandlerQA:
         mock_loop = AsyncMock()
         mock_loop.event_store.initialize = AsyncMock()
         mock_loop.evolve_step = AsyncMock(return_value=Result.ok(FakeStepResult()))
+        mock_loop.set_project_dir = MagicMock(return_value="project-dir-token")
+        mock_loop.reset_project_dir = MagicMock()
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
@@ -415,6 +423,8 @@ class TestEvolveStepHandlerQA:
         mock_loop = AsyncMock()
         mock_loop.event_store.initialize = AsyncMock()
         mock_loop.evolve_step = AsyncMock(return_value=Result.ok(FakeStepResult()))
+        mock_loop.set_project_dir = MagicMock(return_value="project-dir-token")
+        mock_loop.reset_project_dir = MagicMock()
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
