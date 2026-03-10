@@ -877,15 +877,18 @@ def create_ouroboros_server(
         import re
         import subprocess  # noqa: S404  # nosec
 
-        # Try to get project directory from seed metadata first
-        project_dir = None
-        seed_meta = getattr(seed, "metadata", None)
-        if seed_meta:
-            project_dir = getattr(seed_meta, "project_dir", None) or getattr(
-                seed_meta, "working_directory", None
-            )
+        # Try to get project directory from explicit configuration first
+        project_dir = getattr(evolutionary_loop, "project_dir", None)
 
-        # Fallback 1: extract from execution output (regex parsing)
+        # Fallback 1: seed metadata (future-proofing for when SeedMetadata adds project_dir)
+        if not project_dir:
+            seed_meta = getattr(seed, "metadata", None)
+            if seed_meta:
+                project_dir = getattr(seed_meta, "project_dir", None) or getattr(
+                    seed_meta, "working_directory", None
+                )
+
+        # Fallback 2: extract from execution output (regex parsing)
         if not project_dir:
             write_matches = re.findall(r"Write: (/[^\s]+)", execution_output or "")
             if write_matches:

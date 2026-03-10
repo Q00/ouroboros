@@ -1924,6 +1924,15 @@ class EvolveStepHandler:
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    name="project_dir",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Project root directory for validation (pytest collection check). "
+                        "If omitted, auto-detected from execution output or CWD."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -1966,6 +1975,11 @@ class EvolveStepHandler:
 
         execute = arguments.get("execute", True)
         parallel = arguments.get("parallel", True)
+        project_dir = arguments.get("project_dir")
+
+        # Pass project_dir to the evolutionary loop for validation
+        if project_dir:
+            self.evolutionary_loop.project_dir = project_dir
 
         try:
             # Ensure event store is initialized before evolve_step accesses it
