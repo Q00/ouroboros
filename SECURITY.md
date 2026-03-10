@@ -25,10 +25,10 @@ Please include as much of the following as you can:
 
 When a valid report is received, maintainers will aim to:
 
-- acknowledge receipt
-- assess severity and scope
-- work on a fix or mitigation
-- coordinate disclosure timing when appropriate
+- Acknowledge receipt
+- Assess severity and scope
+- Work on a fix or mitigation
+- Coordinate disclosure timing when appropriate
 
 Please keep reports confidential until maintainers confirm that public disclosure is safe.
 
@@ -57,4 +57,3 @@ Do not post the following in public issues, PRs, or Discord:
 - private keys or tokens
 - step-by-step abuse instructions
 - personal data
-
