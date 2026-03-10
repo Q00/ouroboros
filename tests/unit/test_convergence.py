@@ -406,8 +406,8 @@ class TestConvergenceGating:
 class TestFalseConvergenceDetection:
     """Tests for false convergence detection (P1-5).
 
-    When Wonder->Reflect repeatedly fails, the same seed is re-executed and
-    ontology stays identical. The system should block convergence in this case.
+    When the ontology never changes across generations, the system should
+    block convergence — whether due to conservative Reflect or errors.
     """
 
     def test_blocks_when_ontology_never_evolved(self) -> None:
@@ -420,7 +420,7 @@ class TestFalseConvergenceDetection:
         )
         signal = criteria.evaluate(lineage)
         assert not signal.converged
-        assert "False convergence" in signal.reason
+        assert "Convergence deferred" in signal.reason
 
     def test_allows_when_ontology_evolved_at_least_once(self) -> None:
         """Ontology evolved once then stabilized -> genuine convergence."""
@@ -444,7 +444,7 @@ class TestFalseConvergenceDetection:
         )
         signal = criteria.evaluate(lineage)
         assert not signal.converged
-        assert "False convergence" in signal.reason
+        assert "Convergence deferred" in signal.reason
 
     def test_max_generations_overrides_false_convergence(self) -> None:
         """Hard cap still terminates even with false convergence."""
