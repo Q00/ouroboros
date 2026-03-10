@@ -669,7 +669,9 @@ def create_ouroboros_server(
         # Try seed metadata first
         seed_meta = getattr(seed, "metadata", None)
         if seed_meta:
-            project_dir = getattr(seed_meta, "project_dir", None) or getattr(seed_meta, "working_directory", None)
+            project_dir = getattr(seed_meta, "project_dir", None) or getattr(
+                seed_meta, "working_directory", None
+            )
             if project_dir:
                 return str(project_dir)
 
@@ -870,7 +872,9 @@ def create_ouroboros_server(
         project_dir = None
         seed_meta = getattr(seed, "metadata", None)
         if seed_meta:
-            project_dir = getattr(seed_meta, "project_dir", None) or getattr(seed_meta, "working_directory", None)
+            project_dir = getattr(seed_meta, "project_dir", None) or getattr(
+                seed_meta, "working_directory", None
+            )
 
         # Fallback: extract from execution output (brittle regex parsing)
         if not project_dir:

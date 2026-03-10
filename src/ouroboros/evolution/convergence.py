@@ -166,9 +166,7 @@ class ConvergenceCriteria:
                 if "skipped" in validation_output.lower() or "error" in validation_output.lower():
                     return ConvergenceSignal(
                         converged=False,
-                        reason=(
-                            f"Validation gate blocked: {validation_output}"
-                        ),
+                        reason=(f"Validation gate blocked: {validation_output}"),
                         ontology_similarity=latest_sim,
                         generation=current_gen,
                     )
