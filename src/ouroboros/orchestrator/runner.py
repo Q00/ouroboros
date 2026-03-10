@@ -701,6 +701,7 @@ class OrchestratorRunner:
         self,
         seed: Seed,
         execution_id: str | None = None,
+        session_id: str | None = None,
         parallel: bool = True,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed via Claude Agent.
@@ -712,6 +713,7 @@ class OrchestratorRunner:
         Args:
             seed: Seed specification to execute.
             execution_id: Optional execution ID. Generated if not provided.
+            session_id: Optional session ID to preallocate for external tracking.
             parallel: Enable parallel AC execution. When True, independent ACs
                      run concurrently. Default: True (parallel execution).
 
@@ -737,6 +739,7 @@ class OrchestratorRunner:
         session_result = await self._session_repo.create_session(
             execution_id=exec_id,
             seed_id=seed.metadata.seed_id,
+            session_id=session_id,
         )
 
         if session_result.is_err:

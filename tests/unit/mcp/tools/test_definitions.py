@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
+    CancelJobHandler,
     CancelExecutionHandler,
     EvaluateHandler,
     EvolveRewindHandler,
@@ -12,11 +13,16 @@ from ouroboros.mcp.tools.definitions import (
     ExecuteSeedHandler,
     GenerateSeedHandler,
     InterviewHandler,
+    JobResultHandler,
+    JobStatusHandler,
+    JobWaitHandler,
     LateralThinkHandler,
     LineageStatusHandler,
     MeasureDriftHandler,
     QueryEventsHandler,
     SessionStatusHandler,
+    StartEvolveStepHandler,
+    StartExecuteSeedHandler,
 )
 from ouroboros.mcp.types import ToolInputType
 
@@ -196,11 +202,16 @@ class TestOuroborosTools:
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
         """OUROBOROS_TOOLS contains all standard handlers."""
-        assert len(OUROBOROS_TOOLS) == 13
+        assert len(OUROBOROS_TOOLS) == 19
 
         handler_types = {type(h) for h in OUROBOROS_TOOLS}
         assert ExecuteSeedHandler in handler_types
+        assert StartExecuteSeedHandler in handler_types
         assert SessionStatusHandler in handler_types
+        assert JobStatusHandler in handler_types
+        assert JobWaitHandler in handler_types
+        assert JobResultHandler in handler_types
+        assert CancelJobHandler in handler_types
         assert QueryEventsHandler in handler_types
         assert GenerateSeedHandler in handler_types
         assert MeasureDriftHandler in handler_types
@@ -208,6 +219,7 @@ class TestOuroborosTools:
         assert EvaluateHandler in handler_types
         assert LateralThinkHandler in handler_types
         assert EvolveStepHandler in handler_types
+        assert StartEvolveStepHandler in handler_types
         assert LineageStatusHandler in handler_types
         assert EvolveRewindHandler in handler_types
         assert CancelExecutionHandler in handler_types
@@ -222,6 +234,35 @@ class TestOuroborosTools:
         for handler in OUROBOROS_TOOLS:
             assert handler.definition.description
             assert len(handler.definition.description) > 10
+
+
+class TestAsyncJobHandlers:
+    """Test async background job MCP handler definitions."""
+
+    def test_start_execute_seed_definition_name(self) -> None:
+        handler = StartExecuteSeedHandler()
+        assert handler.definition.name == "ouroboros_start_execute_seed"
+
+    def test_job_status_definition_name(self) -> None:
+        handler = JobStatusHandler()
+        assert handler.definition.name == "ouroboros_job_status"
+
+    def test_job_wait_definition_has_expected_params(self) -> None:
+        handler = JobWaitHandler()
+        param_names = {p.name for p in handler.definition.parameters}
+        assert param_names == {"job_id", "cursor", "timeout_seconds"}
+
+    def test_job_result_definition_name(self) -> None:
+        handler = JobResultHandler()
+        assert handler.definition.name == "ouroboros_job_result"
+
+    def test_cancel_job_definition_name(self) -> None:
+        handler = CancelJobHandler()
+        assert handler.definition.name == "ouroboros_cancel_job"
+
+    def test_start_evolve_step_definition_name(self) -> None:
+        handler = StartEvolveStepHandler()
+        assert handler.definition.name == "ouroboros_start_evolve_step"
 
 
 VALID_SEED_YAML = """\

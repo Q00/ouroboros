@@ -485,8 +485,10 @@ def create_ouroboros_server(
         EvaluationPipeline,
         PipelineConfig,
     )
+    from ouroboros.mcp.job_manager import JobManager
     from ouroboros.mcp.tools.definitions import (
         ACDashboardHandler,
+        CancelJobHandler,
         CancelExecutionHandler,
         EvaluateHandler,
         EvolveRewindHandler,
@@ -494,11 +496,16 @@ def create_ouroboros_server(
         ExecuteSeedHandler,
         GenerateSeedHandler,
         InterviewHandler,
+        JobResultHandler,
+        JobStatusHandler,
+        JobWaitHandler,
         LateralThinkHandler,
         LineageStatusHandler,
         MeasureDriftHandler,
         QueryEventsHandler,
         SessionStatusHandler,
+        StartEvolveStepHandler,
+        StartExecuteSeedHandler,
     )
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
@@ -966,18 +973,44 @@ def create_ouroboros_server(
         evaluator=_evolution_evaluator,
         validator=_evolution_validator,
     )
+    job_manager = JobManager(event_store)
 
     # Create tool registry for dependency injection
     registry = ToolRegistry()
 
     # Create and register tool handlers with injected dependencies
+    execute_seed = ExecuteSeedHandler(
+        event_store=event_store,
+        llm_adapter=llm_adapter,
+    )
+    evolve_step = EvolveStepHandler(
+        evolutionary_loop=evolutionary_loop,
+    )
     tool_handlers = [
-        ExecuteSeedHandler(
+        execute_seed,
+        StartExecuteSeedHandler(
+            execute_handler=execute_seed,
             event_store=event_store,
-            llm_adapter=llm_adapter,
+            job_manager=job_manager,
         ),
         SessionStatusHandler(
             event_store=event_store,
+        ),
+        JobStatusHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+        ),
+        JobWaitHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+        ),
+        JobResultHandler(
+            event_store=event_store,
+            job_manager=job_manager,
+        ),
+        CancelJobHandler(
+            event_store=event_store,
+            job_manager=job_manager,
         ),
         QueryEventsHandler(
             event_store=event_store,
@@ -999,8 +1032,11 @@ def create_ouroboros_server(
             llm_adapter=llm_adapter,
         ),
         LateralThinkHandler(),
-        EvolveStepHandler(
-            evolutionary_loop=evolutionary_loop,
+        evolve_step,
+        StartEvolveStepHandler(
+            evolve_handler=evolve_step,
+            event_store=event_store,
+            job_manager=job_manager,
         ),
         LineageStatusHandler(
             event_store=event_store,
