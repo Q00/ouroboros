@@ -13,13 +13,12 @@ Examples:
     python tools/sync_github_project.py 22 done
 """
 
-import os
-import sys
 import json
+import os
 import subprocess
-import urllib.request
+import sys
 import urllib.error
-from typing import Optional, Dict
+import urllib.request
 
 
 def get_github_token() -> str:
@@ -81,9 +80,9 @@ class GitHubProjectSync:
             "Authorization": f"Bearer {GITHUB_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
         }
-        self._cache: Dict[str, str] = {}
+        self._cache: dict[str, str] = {}
 
-    def _query_graphql(self, query: str, variables: Dict) -> Dict:
+    def _query_graphql(self, query: str, variables: dict) -> dict:
         """Execute GraphQL query"""
         payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
 
@@ -107,7 +106,7 @@ class GitHubProjectSync:
         except urllib.error.URLError as e:
             raise RuntimeError(f"URL Error: {e.reason}")
 
-    def get_project_item_id(self, issue_number: int) -> Optional[str]:
+    def get_project_item_id(self, issue_number: int) -> str | None:
         """
         Get Project Item ID from Issue Number
 
@@ -157,7 +156,7 @@ class GitHubProjectSync:
 
         return None
 
-    def update_status(self, issue_number: int, status: str) -> Dict:
+    def update_status(self, issue_number: int, status: str) -> dict:
         """
         Update GitHub Project Status for a Story
 
@@ -204,9 +203,7 @@ class GitHubProjectSync:
                 "projectId": self.project_id,
                 "itemId": item_id,
                 "fieldId": STATUS_FIELD_ID,
-                "value": {
-                    "singleSelectOptionId": status_option_id
-                }
+                "value": {"singleSelectOptionId": status_option_id},
             }
         }
 

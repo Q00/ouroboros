@@ -3,11 +3,11 @@
 This module provides the command-line interface for the task manager.
 """
 
-from typing import Annotated, Optional
+from typing import Annotated
 
-import typer
 from rich.console import Console
 from rich.table import Table
+import typer
 
 from .models import Task, TaskStatus
 from .storage import TaskStorage
@@ -44,7 +44,7 @@ def create(
     """
     task = Task(title=title, description=description)
     storage.create(task)
-    console.print(f"[green]Task created successfully![/]")
+    console.print("[green]Task created successfully![/]")
     console.print(f"  [bold]ID:[/] {task.id}")
     console.print(f"  [bold]Title:[/] {task.title}")
     if task.description:
@@ -54,7 +54,7 @@ def create(
 @app.command(name="list")
 def list_tasks(
     status: Annotated[
-        Optional[TaskStatus],
+        TaskStatus | None,
         typer.Option(
             "--status",
             "-s",
@@ -119,7 +119,7 @@ def show(
         raise typer.Exit(1)
 
     if len(matching_tasks) > 1:
-        console.print(f"[yellow]Multiple tasks match. Please be more specific.[/]")
+        console.print("[yellow]Multiple tasks match. Please be more specific.[/]")
         for task in matching_tasks:
             console.print(f"  {task.id}: {task.title}")
         raise typer.Exit(1)
@@ -137,15 +137,15 @@ def show(
 def update(
     task_id: Annotated[str, typer.Argument(help="The ID of the task to update (can be partial)")],
     title: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--title", "-t", help="New title for the task"),
     ] = None,
     description: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--description", "-d", help="New description for the task"),
     ] = None,
     status: Annotated[
-        Optional[TaskStatus],
+        TaskStatus | None,
         typer.Option("--status", "-s", help="New status for the task"),
     ] = None,
 ) -> None:
@@ -165,7 +165,7 @@ def update(
         raise typer.Exit(1)
 
     if len(matching_tasks) > 1:
-        console.print(f"[yellow]Multiple tasks match. Please be more specific.[/]")
+        console.print("[yellow]Multiple tasks match. Please be more specific.[/]")
         for task in matching_tasks:
             console.print(f"  {task.id}: {task.title}")
         raise typer.Exit(1)
@@ -182,14 +182,16 @@ def update(
     task.updated_at = datetime.now()
     storage.update(task)
 
-    console.print(f"[green]Task updated successfully![/]")
+    console.print("[green]Task updated successfully![/]")
     console.print(f"  [bold]ID:[/] {task.id}")
     console.print(f"  [bold]Title:[/] {task.title}")
 
 
 @app.command()
 def complete(
-    task_id: Annotated[str, typer.Argument(help="The ID of the task to mark as complete (can be partial)")],
+    task_id: Annotated[
+        str, typer.Argument(help="The ID of the task to mark as complete (can be partial)")
+    ],
 ) -> None:
     """Mark a task as complete.
 
@@ -206,7 +208,7 @@ def complete(
         raise typer.Exit(1)
 
     if len(matching_tasks) > 1:
-        console.print(f"[yellow]Multiple tasks match. Please be more specific.[/]")
+        console.print("[yellow]Multiple tasks match. Please be more specific.[/]")
         for task in matching_tasks:
             console.print(f"  {task.id}: {task.title}")
         raise typer.Exit(1)
@@ -221,7 +223,7 @@ def complete(
     task.updated_at = datetime.now()
     storage.update(task)
 
-    console.print(f"[green]✓ Task completed![/]")
+    console.print("[green]✓ Task completed![/]")
     console.print(f"  [bold]ID:[/] {task.id[:8]}")
     console.print(f"  [bold]Title:[/] {task.title}")
 
@@ -248,7 +250,7 @@ def delete(
         raise typer.Exit(1)
 
     if len(matching_tasks) > 1:
-        console.print(f"[yellow]Multiple tasks match. Please be more specific.[/]")
+        console.print("[yellow]Multiple tasks match. Please be more specific.[/]")
         for task in matching_tasks:
             console.print(f"  {task.id}: {task.title}")
         raise typer.Exit(1)
@@ -262,7 +264,7 @@ def delete(
             raise typer.Exit(0)
 
     storage.delete(task.id)
-    console.print(f"[green]Task deleted successfully![/]")
+    console.print("[green]Task deleted successfully![/]")
 
 
 def main() -> None:

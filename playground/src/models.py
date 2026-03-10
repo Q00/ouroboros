@@ -1,9 +1,8 @@
 """
 Data models for the microservice.
 """
-from dataclasses import dataclass
 
-from .config import Config
+from dataclasses import dataclass
 
 
 @dataclass

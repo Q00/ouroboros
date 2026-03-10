@@ -97,9 +97,7 @@ class TestMCPServerAdapter:
         seed = SimpleNamespace(
             metadata=SimpleNamespace(project_dir=None, working_directory=None),
             brownfield_context=SimpleNamespace(
-                context_references=(
-                    SimpleNamespace(path=str(tmp_path), role="primary"),
-                )
+                context_references=(SimpleNamespace(path=str(tmp_path), role="primary"),)
             ),
         )
 

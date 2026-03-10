@@ -5,13 +5,11 @@ Run with: uv run python examples/test_display.py
 """
 
 import asyncio
-import random
 from datetime import UTC, datetime
+import random
 
 from ouroboros.cli.formatters.workflow_display import WorkflowDisplay
 from ouroboros.orchestrator.workflow_state import (
-    ACStatus,
-    ActivityType,
     WorkflowStateTracker,
 )
 
@@ -38,8 +36,6 @@ async def simulate_workflow() -> None:
     print("Press Ctrl+C to stop\n")
 
     with WorkflowDisplay(tracker, refresh_per_second=4) as display:
-        current_ac = 1
-
         for i in range(100):  # Simulate 100 messages
             await asyncio.sleep(0.3)  # Delay between messages
 
