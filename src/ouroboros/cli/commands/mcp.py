@@ -6,8 +6,12 @@ Start and manage the MCP (Model Context Protocol) server.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import os
 from pathlib import Path
+import sys
+import threading
+import time
 from typing import Annotated
 
 from rich.console import Console
@@ -78,6 +82,204 @@ def _check_stale_instance() -> bool:
         # since signal 0 is not supported. Treat as stale.
         _cleanup_pid_file()
         return True
+
+
+def _pid_exists(pid: int) -> bool:
+    """Return True when the process id currently exists.
+
+    Windows does not support ``os.kill(pid, 0)`` reliably for existence
+    checks, so use a kernel32 handle probe there instead.
+    """
+    if pid <= 0:
+        return False
+
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    process_query_limited_information = 0x1000
+    still_active = 259
+
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        error_code = ctypes.get_last_error()
+        return error_code == 5  # Access denied → process exists
+    try:
+        exit_code = ctypes.c_ulong()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) == 0:
+            return True
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _get_parent_pid_of(pid: int) -> int:
+    """Get the parent PID of a process using the Windows Toolhelp API.
+
+    On non-Windows platforms, falls back to 0 (unknown).
+    """
+    if sys.platform != "win32":
+        return 0
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    TH32CS_SNAPPROCESS = 0x00000002  # noqa: N806
+
+    class PROCESSENTRY32(ctypes.Structure):  # noqa: N801
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == -1:
+        return 0
+
+    entry = PROCESSENTRY32()
+    entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+
+    parent_pid = 0
+    try:
+        if kernel32.Process32First(snapshot, ctypes.byref(entry)):
+            while True:
+                if entry.th32ProcessID == pid:
+                    parent_pid = entry.th32ParentProcessID
+                    break
+                if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
+                    break
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    return parent_pid
+
+
+def _get_ancestor_pids() -> list[int]:
+    """Build the ancestor PID chain (parent, grandparent, ...).
+
+    Stops at PID 0/4 (System) or when the chain loops.
+    """
+    ancestors: list[int] = []
+    seen: set[int] = set()
+    pid = os.getpid()
+
+    while True:
+        ppid = _get_parent_pid_of(pid) if sys.platform == "win32" else os.getppid()
+        if ppid <= 4 or ppid in seen:
+            break
+        ancestors.append(ppid)
+        seen.add(ppid)
+        pid = ppid
+        # Only walk the chain on Windows; on Unix os.getppid() is our direct parent
+        if sys.platform != "win32":
+            break
+
+    return ancestors
+
+
+def _get_process_creation_time(pid: int) -> int:
+    """Get process creation time as FILETIME ticks (Windows only).
+
+    Returns 0 if the process cannot be queried.
+    """
+    if sys.platform != "win32" or pid <= 0:
+        return 0
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return 0
+    try:
+        creation = ctypes.c_ulonglong()
+        exit_t = ctypes.c_ulonglong()
+        kernel_t = ctypes.c_ulonglong()
+        user_t = ctypes.c_ulonglong()
+        if kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_t),
+            ctypes.byref(kernel_t),
+            ctypes.byref(user_t),
+        ):
+            return creation.value
+        return 0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _ancestor_still_same(pid: int, expected_creation: int) -> bool:
+    """Check if a PID still belongs to the same process (handles PID recycling).
+
+    Returns False if the process died or got recycled to a different process.
+    """
+    if not _pid_exists(pid):
+        return False
+    if expected_creation == 0:
+        return True  # Can't verify creation time, trust PID check
+    current_creation = _get_process_creation_time(pid)
+    if current_creation == 0:
+        return True  # Can't read creation time, trust PID check
+    return current_creation == expected_creation
+
+
+def _start_orphan_watchdog() -> None:
+    """Start a daemon thread that force-exits when any ancestor process dies.
+
+    The MCP server process chain is typically: Host App -> uv -> ouroboros.
+    On Windows, when the host app closes, intermediate processes (uv.exe)
+    may linger because they inherit pipe handles. This watchdog tracks both
+    PID existence and creation time to reliably detect ancestor death even
+    when PIDs are recycled.
+
+    Runs in a daemon THREAD (not asyncio) so it cannot be blocked by the
+    event loop. Calls ``os._exit()`` when any ancestor dies.
+    """
+    raw_pids = _get_ancestor_pids()
+    # Build fingerprints: (pid, creation_time) for PID-recycling detection
+    ancestors = [
+        (pid, _get_process_creation_time(pid))
+        for pid in raw_pids
+        if _pid_exists(pid)
+    ]
+
+    if not ancestors:
+        return
+
+    _stderr_console.print(
+        f"[dim]Watchdog monitoring {len(ancestors)} ancestor(s): "
+        f"{[pid for pid, _ in ancestors]}[/dim]"
+    )
+
+    def _watch() -> None:
+        try:
+            while all(_ancestor_still_same(pid, ct) for pid, ct in ancestors):
+                time.sleep(2)
+
+            dead = [
+                pid for pid, ct in ancestors if not _ancestor_still_same(pid, ct)
+            ]
+            _stderr_console.print(
+                f"[yellow]Ancestor(s) {dead} exited/recycled "
+                f"— forcing MCP server shutdown[/yellow]"
+            )
+        except Exception as exc:
+            _stderr_console.print(f"[red]Watchdog error: {exc}[/red]")
+        os._exit(0)
+
+    thread = threading.Thread(target=_watch, daemon=True, name="orphan-watchdog")
+    thread.start()
 
 
 app = typer.Typer(
@@ -158,6 +360,11 @@ async def _run_mcp_server(
             print_info("Cleaned up stale MCP server PID file")
 
     _write_pid_file()
+
+    # Start orphan watchdog BEFORE serving.  Runs in a daemon thread
+    # (not asyncio) so it can't be blocked by the event loop or MCP SDK.
+    # When any ancestor process dies, the thread calls os._exit(0).
+    _start_orphan_watchdog()
 
     # Start serving
     try:
