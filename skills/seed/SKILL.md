@@ -18,11 +18,24 @@ ooo seed [session_id]
 
 ## Instructions
 
-When the user invokes this skill, choose the execution path:
+When the user invokes this skill:
+
+### Load MCP Tools (Required before Path A/B decision)
+
+The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
+
+1. Use the `ToolSearch` tool to find and load the seed generation MCP tool:
+   ```
+   ToolSearch query: "+ouroboros seed"
+   ```
+2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_generate_seed` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
+3. If ToolSearch finds the tool → proceed to **Path A**. If not → proceed to **Path B**.
+
+**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
 
 ### Path A: MCP Mode (Preferred)
 
-If the `ouroboros_generate_seed` MCP tool is available:
+If the `ouroboros_generate_seed` MCP tool is available (loaded via ToolSearch above):
 
 1. Determine the interview session:
    - If `session_id` provided: Use it directly

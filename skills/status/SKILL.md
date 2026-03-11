@@ -24,6 +24,21 @@ Check session status and measure goal drift.
 
 When the user invokes this skill:
 
+### Load MCP Tools (Required first)
+
+The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before proceeding.**
+
+1. Use the `ToolSearch` tool to find and load the status MCP tools:
+   ```
+   ToolSearch query: "+ouroboros session status"
+   ```
+2. The tools will typically be named with prefix `mcp__plugin_ouroboros_ouroboros__` (e.g., `ouroboros_session_status`, `ouroboros_measure_drift`). After ToolSearch returns, the tools become callable.
+3. If ToolSearch finds the tools → proceed with the steps below. If not → skip to **Fallback** section.
+
+**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
+
+### Status Steps
+
 1. Determine the session to check:
    - If `session_id` provided: Use it directly
    - If no session_id: Check conversation for recent session IDs
