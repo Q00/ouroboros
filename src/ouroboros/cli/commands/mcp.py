@@ -60,6 +60,11 @@ def _check_stale_instance() -> bool:
         return True
     except PermissionError:
         return False  # Process exists but we can't signal it
+    except OSError:
+        # Windows: os.kill(pid, 0) raises OSError (WinError 87)
+        # since signal 0 is not supported. Treat as stale.
+        _cleanup_pid_file()
+        return True
 
 
 app = typer.Typer(
