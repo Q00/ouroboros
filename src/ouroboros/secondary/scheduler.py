@@ -14,7 +14,7 @@ Usage:
     from ouroboros.secondary import SecondaryLoopScheduler, TodoRegistry
     from ouroboros.persistence import EventStore
 
-    store = EventStore("sqlite+aiosqlite:///ouroboros.db")
+    store = EventStore()  # defaults to ~/.ouroboros/ouroboros.db
     registry = TodoRegistry(store)
     scheduler = SecondaryLoopScheduler(registry)
 

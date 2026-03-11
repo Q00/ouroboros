@@ -149,15 +149,22 @@ class CheckpointStore:
 
     MAX_ROLLBACK_DEPTH = 3
 
-    def __init__(self, base_path: Path | None = None) -> None:
+    def __init__(self, base_path: Path | None = None, session_id: str | None = None) -> None:
         """Initialize checkpoint store.
 
         Args:
             base_path: Base directory for checkpoints.
                       Defaults to ~/.ouroboros/data/checkpoints/
+            session_id: Optional session ID for namespace isolation.
+                       When provided, checkpoints are stored under
+                       ~/.ouroboros/sessions/{session_id}/checkpoints/
+                       to prevent collisions between concurrent sessions.
         """
         if base_path is None:
-            base_path = Path.home() / ".ouroboros" / "data" / "checkpoints"
+            if session_id:
+                base_path = Path.home() / ".ouroboros" / "sessions" / session_id / "checkpoints"
+            else:
+                base_path = Path.home() / ".ouroboros" / "data" / "checkpoints"
         self._base_path = base_path
 
     def initialize(self) -> None:

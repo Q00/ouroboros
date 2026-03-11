@@ -138,16 +138,27 @@ class InterviewEngine:
     Note:
         The model can be configured via OuroborosConfig.clarification.default_model
         or passed directly to the constructor.
+
+        For concurrent session isolation, pass a session_id to scope state
+        files under ~/.ouroboros/sessions/{session_id}/data/.
     """
 
     llm_adapter: LLMAdapter
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
+    session_id: str | None = None
     model: str = _FALLBACK_MODEL
     temperature: float = 0.7
     max_tokens: int = 2048
 
     def __post_init__(self) -> None:
-        """Ensure state directory exists."""
+        """Ensure state directory exists.
+
+        If session_id is set and state_dir is the default, scopes state
+        under ~/.ouroboros/sessions/{session_id}/data/ for isolation.
+        """
+        default_dir = Path.home() / ".ouroboros" / "data"
+        if self.session_id and self.state_dir == default_dir:
+            self.state_dir = Path.home() / ".ouroboros" / "sessions" / self.session_id / "data"
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
     def _state_file_path(self, interview_id: str) -> Path:
