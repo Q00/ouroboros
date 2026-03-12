@@ -381,6 +381,27 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert captured_kwargs["resume_handle"] == runtime_handle
 
+    def test_safe_console_text_replaces_unencodable_characters(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Console sanitization should protect Windows cp1252 output."""
+
+        class _Cp1252File:
+            encoding = "cp1252"
+
+            def flush(self) -> None:
+                return None
+
+        console = MagicMock()
+        console.file = _Cp1252File()
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, console)
+
+        safe = runner._safe_console_text("✅ done")
+
+        assert safe == "? done"
+
 
 class TestOrchestratorError:
     """Tests for OrchestratorError."""

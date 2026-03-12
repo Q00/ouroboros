@@ -363,6 +363,24 @@ class OrchestratorRunner:
         """
         self._active_sessions[execution_id] = session_id
 
+    def _safe_console_text(self, text: str) -> str:
+        """Return console-safe text for the active output encoding.
+
+        Rich on Windows may target a legacy cp1252 console. Agent output can
+        contain emoji or other Unicode characters that would otherwise crash the
+        runner while printing progress or final summaries.
+        """
+        console_file = getattr(self._console, "file", None)
+        encoding = getattr(console_file, "encoding", None)
+        if not isinstance(encoding, str) or not encoding:
+            return text
+
+        try:
+            text.encode(encoding)
+        except UnicodeEncodeError:
+            return text.encode(encoding, errors="replace").decode(encoding)
+        return text
+
     def _unregister_session(self, execution_id: str, session_id: str) -> None:
         """Unregister a session after execution completes.
 
@@ -912,21 +930,23 @@ class OrchestratorRunner:
                     # Print log-style output for tool calls and agent messages
                     if message.tool_name and message.tool_name != last_tool:
                         status.stop()
-                        self._console.print(f"  [yellow]🔧 {message.tool_name}[/yellow]")
+                        self._console.print(f"  [yellow][tool] {message.tool_name}[/yellow]")
                         status.start()
                         last_tool = message.tool_name
                     elif message.type == "assistant" and message.content and not message.tool_name:
                         # Show agent thinking/reasoning
                         content = message.content.strip()
                         status.stop()
-                        self._console.print(f"  [dim]💭 {content}[/dim]")
+                        self._console.print(
+                            f"  [dim][thought] {self._safe_console_text(content)}[/dim]"
+                        )
                         status.start()
 
                     # Print when AC is completed
                     current_completed = state_tracker.state.completed_count
                     if current_completed > last_completed_count:
                         status.stop()
-                        self._console.print(f"  [green]✓ AC {current_completed} completed[/green]")
+                        self._console.print(f"  [green][done] AC {current_completed} completed[/green]")
                         status.start()
                         last_completed_count = current_completed
 
@@ -1022,7 +1042,7 @@ class OrchestratorRunner:
                 # Display success
                 self._console.print(
                     Panel(
-                        Text(final_message[:1000], style="green"),
+                        Text(self._safe_console_text(final_message[:1000]), style="green"),
                         title="[green]Execution Completed[/green]",
                         border_style="green",
                     )
@@ -1042,7 +1062,7 @@ class OrchestratorRunner:
                 # Display failure
                 self._console.print(
                     Panel(
-                        Text(final_message[:1000], style="red"),
+                        Text(self._safe_console_text(final_message[:1000]), style="red"),
                         title="[red]Execution Failed[/red]",
                         border_style="red",
                     )
@@ -1267,7 +1287,7 @@ class OrchestratorRunner:
 
             self._console.print(
                 Panel(
-                    Text(final_message, style="green"),
+                    Text(self._safe_console_text(final_message), style="green"),
                     title="[green]Parallel Execution Completed[/green]",
                     border_style="green",
                 )
@@ -1286,7 +1306,7 @@ class OrchestratorRunner:
 
             self._console.print(
                 Panel(
-                    Text(final_message, style="yellow"),
+                    Text(self._safe_console_text(final_message), style="yellow"),
                     title="[yellow]Partial Success[/yellow]",
                     border_style="yellow",
                 )
@@ -1480,21 +1500,23 @@ Note: This is a resumed session. Please continue from where execution was interr
                     # Print log-style output for tool calls and agent messages
                     if message.tool_name and message.tool_name != last_tool:
                         status.stop()
-                        self._console.print(f"  [yellow]🔧 {message.tool_name}[/yellow]")
+                        self._console.print(f"  [yellow][tool] {message.tool_name}[/yellow]")
                         status.start()
                         last_tool = message.tool_name
                     elif message.type == "assistant" and message.content and not message.tool_name:
                         # Show agent thinking/reasoning
                         content = message.content.strip()
                         status.stop()
-                        self._console.print(f"  [dim]💭 {content}[/dim]")
+                        self._console.print(
+                            f"  [dim][thought] {self._safe_console_text(content)}[/dim]"
+                        )
                         status.start()
 
                     # Print when AC is completed
                     current_completed = state_tracker.state.completed_count
                     if current_completed > last_completed_count:
                         status.stop()
-                        self._console.print(f"  [green]✓ AC {current_completed} completed[/green]")
+                        self._console.print(f"  [green][done] AC {current_completed} completed[/green]")
                         status.start()
                         last_completed_count = current_completed
 
@@ -1560,7 +1582,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                 )
                 self._console.print(
                     Panel(
-                        Text(final_message[:1000], style="green"),
+                        Text(self._safe_console_text(final_message[:1000]), style="green"),
                         title="[green]Resumed Execution Completed[/green]",
                         border_style="green",
                     )
@@ -1569,7 +1591,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                 await self._session_repo.mark_failed(session_id, final_message)
                 self._console.print(
                     Panel(
-                        Text(final_message[:1000], style="red"),
+                        Text(self._safe_console_text(final_message[:1000]), style="red"),
                         title="[red]Resumed Execution Failed[/red]",
                         border_style="red",
                     )

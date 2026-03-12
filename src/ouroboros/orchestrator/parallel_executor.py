@@ -166,6 +166,19 @@ class ParallelACExecutor:
             except (OSError, ValueError):
                 pass
 
+    def _safe_console_text(self, text: str) -> str:
+        """Return console-safe text for the active output encoding."""
+        console_file = getattr(self._console, "file", None)
+        encoding = getattr(console_file, "encoding", None)
+        if not isinstance(encoding, str) or not encoding:
+            return text
+
+        try:
+            text.encode(encoding)
+        except UnicodeEncodeError:
+            return text.encode(encoding, errors="replace").decode(encoding)
+        return text
+
     async def execute_parallel(
         self,
         seed: Seed,
@@ -565,7 +578,9 @@ class ParallelACExecutor:
             if sub_acs and len(sub_acs) >= MIN_SUB_ACS:
                 # Decomposition successful - execute Sub-ACs in parallel
                 self._console.print(
-                    f"  [cyan]AC {ac_index + 1} → Decomposed into {len(sub_acs)} Sub-ACs (parallel)[/cyan]"
+                    self._safe_console_text(
+                        f"  [cyan]AC {ac_index + 1} -> Decomposed into {len(sub_acs)} Sub-ACs (parallel)[/cyan]"
+                    )
                 )
                 self._flush_console()
 
@@ -929,7 +944,11 @@ When complete, explicitly state: [TASK_COMPLETE]
                 if message.tool_name:
                     tool_input = message.data.get("tool_input", {})
                     tool_detail = self._format_tool_detail(message.tool_name, tool_input)
-                    self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")
+                    self._console.print(
+                        self._safe_console_text(
+                            f"{indent}[yellow]{label} -> {tool_detail}[/yellow]"
+                        )
+                    )
                     self._flush_console()
 
                     # Emit tool started event for TUI
