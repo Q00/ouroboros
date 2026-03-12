@@ -156,6 +156,10 @@ def _resolve_server_profile(profile: MCPServerProfile) -> tuple[Literal["full", 
     In ``auto`` mode, a Codex-targeted environment request downgrades to the
     desktop-safe profile automatically.
     """
+    if profile not in ("auto", "full", "desktop-safe"):
+        msg = f"Invalid MCP server profile: {profile}"
+        raise ValueError(msg)
+
     if profile == "full":
         return "full", ()
     if profile == "desktop-safe":

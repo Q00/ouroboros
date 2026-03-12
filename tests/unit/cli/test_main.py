@@ -172,8 +172,15 @@ class TestMCPCommands:
         result = runner.invoke(app, ["mcp", "info", "--profile", "desktop-safe"])
         assert result.exit_code == 0
         assert "ouroboros-mcp" in result.output
-        assert "ouroboros_start_execute_seed" in result.output
+        assert "ouroboros_session_status" in result.output
+        assert "ouroboros_start_execute_seed" not in result.output
         assert "ouroboros_evolve_step" not in result.output
+
+    def test_mcp_info_invalid_profile_fails(self) -> None:
+        """Test mcp info fails fast on invalid profile names."""
+        result = runner.invoke(app, ["mcp", "info", "--profile", "nope"])
+        assert result.exit_code == 1
+        assert "Invalid MCP server profile" in result.output
 
 
 class TestTUICommands:

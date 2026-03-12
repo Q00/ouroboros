@@ -267,6 +267,9 @@ def serve(
         asyncio.run(_run_mcp_server(host, port, transport, db_path, profile))
     except KeyboardInterrupt:
         print_info("\nMCP Server stopped")
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(1) from e
     except ImportError as e:
         print_error(f"MCP dependencies not installed: {e}")
         print_info("Install with: uv add mcp")
@@ -297,12 +300,15 @@ def info(
     from ouroboros.cli.formatters import console
     from ouroboros.mcp.server.adapter import create_ouroboros_server
 
-    # Create server with all tools pre-registered
-    server = create_ouroboros_server(
-        name="ouroboros-mcp",
-        version="1.0.0",
-        profile=profile,
-    )
+    try:
+        server = create_ouroboros_server(
+            name="ouroboros-mcp",
+            version="1.0.0",
+            profile=profile,
+        )
+    except ValueError as e:
+        print_error(str(e))
+        raise typer.Exit(1) from e
 
     server_info = server.info
 

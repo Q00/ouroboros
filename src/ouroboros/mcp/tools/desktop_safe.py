@@ -49,33 +49,7 @@ def build_desktop_safe_tool_handlers(event_store: Any) -> list[_LazyToolHandler]
     """Create the reduced desktop-safe handler set."""
     job_manager = JobManager(event_store)
 
-    execute_seed_proxy: _LazyToolHandler
-
-    execute_seed_proxy = _LazyToolHandler(
-        MCPToolDefinition(
-            name="ouroboros_start_execute_seed",
-            description=(
-                "Start a seed execution in the background and return a job ID immediately. "
-                "Use ouroboros_job_status, ouroboros_job_wait, and ouroboros_job_result to monitor progress."
-            ),
-            parameters=(
-                MCPToolParameter("seed_content", ToolInputType.STRING, "The seed content describing the task to execute", required=True),
-                MCPToolParameter("session_id", ToolInputType.STRING, "Optional session ID to resume. If not provided, a new session is created.", required=False),
-                MCPToolParameter("model_tier", ToolInputType.STRING, "Model tier to use (small, medium, large). Default: medium", required=False, default="medium", enum=("small", "medium", "large")),
-                MCPToolParameter("max_iterations", ToolInputType.INTEGER, "Maximum number of execution iterations. Default: 10", required=False, default=10),
-                MCPToolParameter("skip_qa", ToolInputType.BOOLEAN, "Skip post-execution QA evaluation. Default: false", required=False, default=False),
-            ),
-        ),
-        lambda: _load_handler(
-            "StartExecuteSeedHandler",
-            execute_handler=_load_handler("ExecuteSeedHandler", event_store=event_store),
-            event_store=event_store,
-            job_manager=job_manager,
-        ),
-    )
-
     return [
-        execute_seed_proxy,
         _LazyToolHandler(
             MCPToolDefinition(
                 name="ouroboros_session_status",
@@ -143,17 +117,6 @@ def build_desktop_safe_tool_handlers(event_store: Any) -> list[_LazyToolHandler]
         ),
         _LazyToolHandler(
             MCPToolDefinition(
-                name="ouroboros_generate_seed",
-                description="Generate an immutable Seed from a completed interview session. The seed contains structured requirements extracted from the interview conversation.",
-                parameters=(
-                    MCPToolParameter("session_id", ToolInputType.STRING, "Interview session ID to convert to a seed", required=True),
-                    MCPToolParameter("ambiguity_score", ToolInputType.NUMBER, "Ambiguity score for the interview.", required=False),
-                ),
-            ),
-            lambda: _load_handler("GenerateSeedHandler"),
-        ),
-        _LazyToolHandler(
-            MCPToolDefinition(
                 name="ouroboros_measure_drift",
                 description="Measure drift from the original seed goal and constraints.",
                 parameters=(
@@ -165,35 +128,6 @@ def build_desktop_safe_tool_handlers(event_store: Any) -> list[_LazyToolHandler]
                 ),
             ),
             lambda: _load_handler("MeasureDriftHandler", event_store=event_store),
-        ),
-        _LazyToolHandler(
-            MCPToolDefinition(
-                name="ouroboros_interview",
-                description="Interactive interview for requirement clarification. Start a new interview with initial_context, resume with session_id, or record an answer to the current question.",
-                parameters=(
-                    MCPToolParameter("initial_context", ToolInputType.STRING, "Initial context to start a new interview session", required=False),
-                    MCPToolParameter("session_id", ToolInputType.STRING, "Session ID to resume an existing interview", required=False),
-                    MCPToolParameter("answer", ToolInputType.STRING, "Response to the current interview question", required=False),
-                    MCPToolParameter("cwd", ToolInputType.STRING, "Working directory for brownfield auto-detection", required=False),
-                ),
-            ),
-            lambda: _load_handler("InterviewHandler", event_store=event_store),
-        ),
-        _LazyToolHandler(
-            MCPToolDefinition(
-                name="ouroboros_evaluate",
-                description="Evaluate an Ouroboros execution session using the three-stage evaluation pipeline.",
-                parameters=(
-                    MCPToolParameter("session_id", ToolInputType.STRING, "The execution session ID to evaluate", required=True),
-                    MCPToolParameter("artifact", ToolInputType.STRING, "The execution output/artifact to evaluate", required=True),
-                    MCPToolParameter("seed_content", ToolInputType.STRING, "Original seed YAML for goal/constraints extraction", required=False),
-                    MCPToolParameter("acceptance_criterion", ToolInputType.STRING, "Specific acceptance criterion to evaluate against", required=False),
-                    MCPToolParameter("artifact_type", ToolInputType.STRING, "Type of artifact: code, docs, config. Default: code", required=False, default="code", enum=("code", "docs", "config")),
-                    MCPToolParameter("trigger_consensus", ToolInputType.BOOLEAN, "Force Stage 3 consensus evaluation. Default: False", required=False, default=False),
-                    MCPToolParameter("working_dir", ToolInputType.STRING, "Project working directory for language auto-detection of Stage 1 mechanical verification commands.", required=False),
-                ),
-            ),
-            lambda: _load_handler("EvaluateHandler", event_store=event_store),
         ),
         _LazyToolHandler(
             MCPToolDefinition(

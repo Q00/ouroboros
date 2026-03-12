@@ -517,11 +517,16 @@ class TestCreateOuroborosServer:
 
         tool_names = {tool.name for tool in server.info.tools}
 
-        assert "ouroboros_start_execute_seed" in tool_names
-        assert "ouroboros_interview" in tool_names
-        assert "ouroboros_generate_seed" in tool_names
-        assert "ouroboros_evaluate" in tool_names
+        assert "ouroboros_session_status" in tool_names
+        assert "ouroboros_query_events" in tool_names
+        assert "ouroboros_measure_drift" in tool_names
+        assert "ouroboros_lateral_think" in tool_names
+        assert "ouroboros_cancel_execution" in tool_names
         assert "ouroboros_execute_seed" not in tool_names
+        assert "ouroboros_start_execute_seed" not in tool_names
+        assert "ouroboros_interview" not in tool_names
+        assert "ouroboros_generate_seed" not in tool_names
+        assert "ouroboros_evaluate" not in tool_names
         assert "ouroboros_evolve_step" not in tool_names
         assert "ouroboros_start_evolve_step" not in tool_names
         assert "ouroboros_evolve_rewind" not in tool_names
@@ -567,8 +572,14 @@ class TestCreateOuroborosServer:
             server = create_ouroboros_server(profile="auto")
 
         tool_names = {tool.name for tool in server.info.tools}
-        assert "ouroboros_start_execute_seed" in tool_names
+        assert "ouroboros_session_status" in tool_names
+        assert "ouroboros_start_execute_seed" not in tool_names
         assert "ouroboros_evolve_step" not in tool_names
+
+    def test_invalid_profile_raises_value_error(self) -> None:
+        """Unknown MCP server profiles should fail fast instead of falling back to full."""
+        with pytest.raises(ValueError, match="Invalid MCP server profile"):
+            create_ouroboros_server(profile="desktop_safe_typo")  # type: ignore[arg-type]
 
 
 class TestMCPServerAdapterConcurrency:
