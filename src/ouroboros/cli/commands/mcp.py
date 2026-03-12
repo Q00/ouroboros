@@ -105,7 +105,7 @@ async def _run_mcp_server(
     port: int,
     transport: str,
     db_path: str | None = None,
-    profile: str = "auto",
+    profile: MCPServerProfile = "auto",
 ) -> None:
     """Run the MCP server.
 
@@ -116,7 +116,7 @@ async def _run_mcp_server(
         db_path: Optional path to EventStore database.
         profile: MCP server profile (auto, full, or desktop-safe).
     """
-    from ouroboros.mcp.server.adapter import _resolve_server_profile, create_ouroboros_server
+    from ouroboros.mcp.server.adapter import MCPServerProfile, resolve_server_profile, create_ouroboros_server
     from ouroboros.observability.logging import (
         LoggingConfig,
         configure_logging,
@@ -125,7 +125,7 @@ async def _run_mcp_server(
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
 
-    effective_profile, _profile_warnings = _resolve_server_profile(profile)
+    effective_profile, _profile_warnings = resolve_server_profile(profile)
 
     if transport == "stdio":
         configure_logging(

@@ -149,7 +149,7 @@ def _project_dir_from_artifact(artifact: str) -> str | None:
     return None
 
 
-def _resolve_server_profile(
+def resolve_server_profile(
     profile: MCPServerProfile,
 ) -> tuple[Literal["full", "desktop-safe"], tuple[str, ...]]:
     """Resolve the effective MCP server profile.
@@ -588,7 +588,7 @@ def create_ouroboros_server(
     # max_turns=1 prevented multi-turn tool use (codebase exploration).
     # bypassPermissions is safe here: only read-only tools (Read/Glob/Grep)
     # are used for interview question generation and brownfield exploration.
-    effective_profile, profile_warnings = _resolve_server_profile(profile)
+    effective_profile, profile_warnings = resolve_server_profile(profile)
 
     # Create or use provided EventStore after validating profile so invalid
     # values fail fast without side effects.
@@ -598,7 +598,6 @@ def create_ouroboros_server(
         event_store = EventStore()
 
     if effective_profile == "desktop-safe":
-        registry = ToolRegistry()
         tool_handlers = build_desktop_safe_tool_handlers(event_store=event_store)
 
         server = MCPServerAdapter(
@@ -611,7 +610,6 @@ def create_ouroboros_server(
             log.warning("mcp.server.profile_warning", warning=warning, profile=effective_profile)
         for handler in tool_handlers:
             server.register_tool(handler)
-            registry.register(handler, category="ouroboros")
 
         log.info(
             "mcp.server.composition_root_complete",
