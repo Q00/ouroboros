@@ -9,6 +9,7 @@ import asyncio
 from collections.abc import Sequence
 import inspect
 import os
+from typing import Literal
 from typing import Any
 
 import structlog
@@ -34,6 +35,8 @@ from ouroboros.mcp.types import (
 )
 
 log = structlog.get_logger(__name__)
+
+MCPServerProfile = Literal["auto", "full", "desktop-safe"]
 
 # Map MCPToolParameter types to Python annotations for FastMCP schema inference.
 _TOOL_TYPE_MAP: dict[ToolInputType, type] = {
@@ -131,7 +134,10 @@ def _project_dir_from_artifact(artifact: str) -> str | None:
     from pathlib import Path
     import re
 
-    write_matches = re.findall(r"(?:Write|Edit): (/[^\s]+)", artifact)
+    write_matches = re.findall(
+        r"(?:Write|Edit): ((?:[A-Za-z]:\\[^\r\n]+)|(?:/[^\r\n]+))",
+        artifact,
+    )
     for path_str in write_matches:
         candidate = Path(path_str).parent
         for _ in range(10):
@@ -142,6 +148,31 @@ def _project_dir_from_artifact(artifact: str) -> str | None:
             candidate = candidate.parent
 
     return None
+
+
+def _resolve_server_profile(profile: MCPServerProfile) -> tuple[Literal["full", "desktop-safe"], tuple[str, ...]]:
+    """Resolve the effective MCP server profile.
+
+    In ``auto`` mode, a Codex-targeted environment request downgrades to the
+    desktop-safe profile automatically.
+    """
+    if profile == "full":
+        return "full", ()
+    if profile == "desktop-safe":
+        return "desktop-safe", ()
+
+    agent_runtime = os.environ.get("OUROBOROS_AGENT_RUNTIME", "").strip().lower()
+    llm_runtime = os.environ.get("OUROBOROS_LLM_RUNTIME", "").strip().lower()
+    if agent_runtime == "codex" or llm_runtime == "codex":
+        return (
+            "desktop-safe",
+            (
+                "Codex runtime env detected; using desktop-safe MCP profile. "
+                "Codex-native Ouroboros runtimes are not implemented in this build.",
+            ),
+        )
+
+    return "full", ()
 
 
 class MCPServerAdapter:
@@ -507,6 +538,7 @@ def create_ouroboros_server(
     rate_limit_config: RateLimitConfig | None = None,
     event_store: Any | None = None,
     state_dir: Any | None = None,
+    profile: MCPServerProfile = "auto",
 ) -> MCPServerAdapter:
     """Create an Ouroboros MCP server with all tools and dependencies wired.
 
@@ -529,9 +561,11 @@ def create_ouroboros_server(
         event_store: Optional EventStore instance. If not provided, creates default.
         state_dir: Optional pathlib.Path for interview state directory.
                    If not provided, uses ~/.ouroboros/data.
+        profile: MCP server profile. ``auto`` selects ``desktop-safe`` when
+            Codex runtime env vars are present, otherwise ``full``.
 
     Returns:
-        Configured MCPServerAdapter with all 10 tools registered.
+        Configured MCPServerAdapter with the selected tool profile registered.
 
     Raises:
         ImportError: If MCP SDK is not installed.
@@ -541,7 +575,54 @@ def create_ouroboros_server(
 
     from rich.console import Console
 
-    # Import service dependencies
+    from ouroboros.mcp.tools.desktop_safe import build_desktop_safe_tool_handlers
+    from ouroboros.mcp.tools.registry import ToolRegistry
+
+    # Create LLM adapter (shared across services)
+    # Use ClaudeAgentAdapter for interview/explore — ClaudeCodeAdapter with
+    # max_turns=1 prevented multi-turn tool use (codebase exploration).
+    # bypassPermissions is safe here: only read-only tools (Read/Glob/Grep)
+    # are used for interview question generation and brownfield exploration.
+    # Create or use provided EventStore
+    if event_store is None:
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore()
+
+    # Create state directory for interviews
+    if state_dir is None:
+        state_dir = Path.home() / ".ouroboros" / "data"
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+    effective_profile, profile_warnings = _resolve_server_profile(profile)
+
+    if effective_profile == "desktop-safe":
+        registry = ToolRegistry()
+        tool_handlers = build_desktop_safe_tool_handlers(event_store=event_store)
+
+        server = MCPServerAdapter(
+            name=name,
+            version=version,
+            auth_config=auth_config,
+            rate_limit_config=rate_limit_config,
+        )
+        for warning in profile_warnings:
+            log.warning("mcp.server.profile_warning", warning=warning, profile=effective_profile)
+        for handler in tool_handlers:
+            server.register_tool(handler)
+            registry.register(handler, category="ouroboros")
+
+        log.info(
+            "mcp.server.composition_root_complete",
+            name=name,
+            version=version,
+            profile=effective_profile,
+            tools_registered=len(tool_handlers),
+            tool_names=[h.definition.name for h in tool_handlers],
+        )
+        return server
+
+    # Import full-profile dependencies only when needed.
     from ouroboros.bigbang.interview import InterviewEngine
     from ouroboros.bigbang.seed_generator import SeedGenerator
     from ouroboros.evaluation import (
@@ -572,29 +653,12 @@ def create_ouroboros_server(
         StartExecuteSeedHandler,
     )
     from ouroboros.mcp.tools.qa import QAHandler
-    from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
     )
 
-    # Create LLM adapter (shared across services)
-    # Use ClaudeAgentAdapter for interview/explore — ClaudeCodeAdapter with
-    # max_turns=1 prevented multi-turn tool use (codebase exploration).
-    # bypassPermissions is safe here: only read-only tools (Read/Glob/Grep)
-    # are used for interview question generation and brownfield exploration.
     llm_adapter = ClaudeAgentAdapter(permission_mode="bypassPermissions")
-
-    # Create or use provided EventStore
-    if event_store is None:
-        from ouroboros.persistence.event_store import EventStore
-
-        event_store = EventStore()
-
-    # Create state directory for interviews
-    if state_dir is None:
-        state_dir = Path.home() / ".ouroboros" / "data"
-        state_dir.mkdir(parents=True, exist_ok=True)
 
     # Create core service instances
     interview_engine = InterviewEngine(
@@ -1124,6 +1188,8 @@ def create_ouroboros_server(
     )
 
     # Register all tools with the server
+    for warning in profile_warnings:
+        log.warning("mcp.server.profile_warning", warning=warning, profile=effective_profile)
     for handler in tool_handlers:
         server.register_tool(handler)
         registry.register(handler, category="ouroboros")
@@ -1132,6 +1198,7 @@ def create_ouroboros_server(
         "mcp.server.composition_root_complete",
         name=name,
         version=version,
+        profile=effective_profile,
         tools_registered=len(tool_handlers),
         tool_names=[h.definition.name for h in tool_handlers],
     )

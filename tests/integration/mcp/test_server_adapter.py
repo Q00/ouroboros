@@ -5,6 +5,8 @@ registration, resource handling, and the full server lifecycle.
 """
 
 import asyncio
+import os
+from unittest.mock import patch
 
 import pytest
 
@@ -508,6 +510,65 @@ class TestCreateOuroborosServer:
 
         # Server should be created without error
         assert server.info.name == "ouroboros-mcp"
+
+    def test_creates_desktop_safe_server_with_reduced_tool_surface(self) -> None:
+        """Desktop-safe profile should expose a smaller, startup-safe tool set."""
+        server = create_ouroboros_server(profile="desktop-safe")
+
+        tool_names = {tool.name for tool in server.info.tools}
+
+        assert "ouroboros_start_execute_seed" in tool_names
+        assert "ouroboros_interview" in tool_names
+        assert "ouroboros_generate_seed" in tool_names
+        assert "ouroboros_evaluate" in tool_names
+        assert "ouroboros_execute_seed" not in tool_names
+        assert "ouroboros_evolve_step" not in tool_names
+        assert "ouroboros_start_evolve_step" not in tool_names
+        assert "ouroboros_evolve_rewind" not in tool_names
+        assert "ouroboros_lineage_status" not in tool_names
+        assert len(tool_names) < 20
+
+    def test_desktop_safe_server_avoids_eager_heavy_runtime_construction(self) -> None:
+        """Desktop-safe profile should not build heavy runtime/evolution services at startup."""
+        with (
+            patch(
+                "ouroboros.orchestrator.adapter.ClaudeAgentAdapter",
+                side_effect=AssertionError("should not instantiate ClaudeAgentAdapter"),
+            ),
+            patch(
+                "ouroboros.evolution.wonder.WonderEngine",
+                side_effect=AssertionError("should not instantiate WonderEngine"),
+            ),
+            patch(
+                "ouroboros.evolution.reflect.ReflectEngine",
+                side_effect=AssertionError("should not instantiate ReflectEngine"),
+            ),
+        ):
+            server = create_ouroboros_server(profile="desktop-safe")
+
+        assert server.info.name == "ouroboros-mcp"
+
+    def test_auto_profile_switches_to_desktop_safe_for_codex_runtime(self) -> None:
+        """Auto profile should downgrade to desktop-safe when Codex runtime env is requested."""
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "OUROBOROS_AGENT_RUNTIME": "codex",
+                    "OUROBOROS_LLM_RUNTIME": "codex",
+                },
+                clear=False,
+            ),
+            patch(
+                "ouroboros.orchestrator.adapter.ClaudeAgentAdapter",
+                side_effect=AssertionError("auto profile should not instantiate ClaudeAgentAdapter"),
+            ),
+        ):
+            server = create_ouroboros_server(profile="auto")
+
+        tool_names = {tool.name for tool in server.info.tools}
+        assert "ouroboros_start_execute_seed" in tool_names
+        assert "ouroboros_evolve_step" not in tool_names
 
 
 class TestMCPServerAdapterConcurrency:

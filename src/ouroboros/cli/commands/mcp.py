@@ -23,6 +23,19 @@ _PID_FILE = _PID_DIR / "mcp-server.pid"
 _stderr_console = Console(stderr=True)
 
 
+def _safe_console_text(console: Console, text: str) -> str:
+    """Return text that can be safely written to the console encoding."""
+    encoding = getattr(getattr(console, "file", None), "encoding", None)
+    if not isinstance(encoding, str) or not encoding:
+        return text
+
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        return text.encode(encoding, errors="replace").decode(encoding)
+    return text
+
+
 def _write_pid_file() -> bool:
     """Write current PID to file for stale instance detection.
 
@@ -92,6 +105,7 @@ async def _run_mcp_server(
     port: int,
     transport: str,
     db_path: str | None = None,
+    profile: str = "auto",
 ) -> None:
     """Run the MCP server.
 
@@ -100,10 +114,26 @@ async def _run_mcp_server(
         port: Port to bind to.
         transport: Transport type (stdio or sse).
         db_path: Optional path to EventStore database.
+        profile: MCP server profile (auto, full, or desktop-safe).
     """
-    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.mcp.server.adapter import _resolve_server_profile, create_ouroboros_server
+    from ouroboros.observability.logging import (
+        LoggingConfig,
+        configure_logging,
+        set_console_logging,
+    )
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
+
+    effective_profile, _profile_warnings = _resolve_server_profile(profile)
+
+    if transport == "stdio":
+        configure_logging(
+            LoggingConfig(
+                log_level="WARNING" if effective_profile == "desktop-safe" else "INFO",
+                enable_file_logging=False,
+            )
+        )
 
     # Create EventStore with custom path if provided
     if db_path:
@@ -126,6 +156,9 @@ async def _run_mcp_server(
         # Auto-cleanup is best-effort — don't prevent server from starting
         _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
 
+    if transport == "stdio" and effective_profile == "desktop-safe":
+        set_console_logging(False)
+
     # Create server with all tools pre-registered via dependency injection.
     # Do NOT re-register OUROBOROS_TOOLS here — create_ouroboros_server already
     # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
@@ -133,6 +166,7 @@ async def _run_mcp_server(
         name="ouroboros-mcp",
         version="1.0.0",
         event_store=event_store,
+        profile=effective_profile,
     )
 
     tool_count = len(server.info.tools)
@@ -140,12 +174,14 @@ async def _run_mcp_server(
     if transport == "stdio":
         # In stdio mode, stdout is the JSON-RPC channel.
         # All human-readable output must go to stderr.
-        _stderr_console.print(f"[green]MCP Server starting on {transport}...[/green]")
+        _stderr_console.print(
+            f"[green]MCP Server starting on {transport} ({effective_profile})...[/green]"
+        )
         _stderr_console.print(f"[blue]Registered {tool_count} tools[/blue]")
         _stderr_console.print("[blue]Reading from stdin, writing to stdout[/blue]")
         _stderr_console.print("[blue]Press Ctrl+C to stop[/blue]")
     else:
-        print_success(f"MCP Server starting on {transport}...")
+        print_success(f"MCP Server starting on {transport} ({effective_profile})...")
         print_info(f"Registered {tool_count} tools")
         print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
@@ -199,6 +235,13 @@ def serve(
             help="Path to EventStore database (default: ~/.ouroboros/ouroboros.db)",
         ),
     ] = "",
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            help="MCP server profile: auto, full, or desktop-safe.",
+        ),
+    ] = "auto",
 ) -> None:
     """Start the MCP server.
 
@@ -221,7 +264,7 @@ def serve(
     """
     try:
         db_path = db if db else None
-        asyncio.run(_run_mcp_server(host, port, transport, db_path))
+        asyncio.run(_run_mcp_server(host, port, transport, db_path, profile))
     except KeyboardInterrupt:
         print_info("\nMCP Server stopped")
     except ImportError as e:
@@ -241,7 +284,15 @@ def serve(
 
 
 @app.command()
-def info() -> None:
+def info(
+    profile: Annotated[
+        str,
+        typer.Option(
+            "--profile",
+            help="MCP server profile to inspect: auto, full, or desktop-safe.",
+        ),
+    ] = "auto",
+) -> None:
     """Show MCP server information and available tools."""
     from ouroboros.cli.formatters import console
     from ouroboros.mcp.server.adapter import create_ouroboros_server
@@ -250,6 +301,7 @@ def info() -> None:
     server = create_ouroboros_server(
         name="ouroboros-mcp",
         version="1.0.0",
+        profile=profile,
     )
 
     server_info = server.info
@@ -269,12 +321,15 @@ def info() -> None:
     console.print("[bold]Available Tools[/bold]")
     for tool in server_info.tools:
         console.print(f"  [green]{tool.name}[/green]")
-        console.print(f"    {tool.description}")
+        console.print(f"    {_safe_console_text(console, tool.description)}")
         if tool.parameters:
             console.print("    Parameters:")
             for param in tool.parameters:
                 required = "[red]*[/red]" if param.required else ""
-                console.print(f"      - {param.name}{required}: {param.description}")
+                console.print(
+                    f"      - {param.name}{required}: "
+                    f"{_safe_console_text(console, param.description)}"
+                )
         console.print()
 
 

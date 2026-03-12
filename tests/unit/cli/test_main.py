@@ -158,6 +158,7 @@ class TestMCPCommands:
         assert result.exit_code == 0
         assert "transport" in result.output.lower()
         assert "port" in result.output.lower()
+        assert "profile" in result.output.lower()
 
     def test_mcp_info(self) -> None:
         """Test mcp info command."""
@@ -165,6 +166,14 @@ class TestMCPCommands:
         assert result.exit_code == 0
         assert "ouroboros-mcp" in result.output
         assert "ouroboros_execute_seed" in result.output
+
+    def test_mcp_info_desktop_safe(self) -> None:
+        """Test mcp info command for desktop-safe profile."""
+        result = runner.invoke(app, ["mcp", "info", "--profile", "desktop-safe"])
+        assert result.exit_code == 0
+        assert "ouroboros-mcp" in result.output
+        assert "ouroboros_start_execute_seed" in result.output
+        assert "ouroboros_evolve_step" not in result.output
 
 
 class TestTUICommands:
