@@ -9,8 +9,7 @@ import asyncio
 from collections.abc import Sequence
 import inspect
 import os
-from typing import Literal
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 
