@@ -12,12 +12,13 @@ Reflect handles all subsequent generations autonomously.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 
 from pydantic import BaseModel, Field
 
+from ouroboros.config import get_reflect_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, MutationAction, OntologyDelta, OntologyLineage
 from ouroboros.core.seed import Seed
@@ -33,9 +34,6 @@ from ouroboros.providers.base import (
 )
 
 logger = logging.getLogger(__name__)
-
-_FALLBACK_MODEL = "claude-opus-4-6"
-
 
 class OntologyMutation(BaseModel, frozen=True):
     """A specific proposed change to the ontology schema."""
@@ -76,7 +74,7 @@ class ReflectEngine:
     """
 
     llm_adapter: LLMAdapter
-    model: str = _FALLBACK_MODEL
+    model: str = field(default_factory=get_reflect_model)
 
     async def reflect(
         self,

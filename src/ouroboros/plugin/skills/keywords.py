@@ -70,13 +70,6 @@ class MagicKeywordDetector:
     4. No match (fallback)
     """
 
-    # Common magic prefix patterns
-    PREFIX_PATTERNS = [
-        r"^/?(ouroboros|ooo):(\w+)",  # /ouroboros:run, ooo:interview
-        r"^(\w+)\s+(ouroboros|ooo)\s+(\w+)",  # "please ouroboros run"
-        r"^(?:/?)?ooo\s+(\w+)",  # "ooo run", "ooo interview" (ooo without colon)
-    ]
-
     def __init__(self, registry: SkillRegistry | None = None) -> None:
         """Initialize the keyword detector.
 
@@ -84,9 +77,6 @@ class MagicKeywordDetector:
             registry: Optional skill registry. Uses global singleton if not provided.
         """
         self._registry = registry or get_registry()
-        self._compiled_patterns = [
-            re.compile(pattern, re.IGNORECASE) for pattern in self.PREFIX_PATTERNS
-        ]
 
     def detect(self, user_input: str) -> list[KeywordMatch]:
         """Detect magic keywords in user input.
@@ -135,47 +125,65 @@ class MagicKeywordDetector:
             List of prefix matches.
         """
         matches: list[KeywordMatch] = []
+        stripped_input = user_input.strip()
+        if not stripped_input:
+            return matches
 
-        # Try each compiled pattern
-        for pattern in self._compiled_patterns:
-            for match in pattern.finditer(user_input):
-                groups = match.groups()
-                # Extract skill name from match
-                skill_name = None
-                for group in groups:
-                    if group and group.isalpha():
-                        # Check if this is a registered skill
-                        if self._registry.get_skill(group):
-                            skill_name = group
-                            break
+        normalized_input = stripped_input.lower()
+        for prefix, skill_name in self._iter_exact_prefix_variants():
+            if not self._matches_exact_prefix(normalized_input, prefix):
+                continue
 
-                if skill_name:
-                    skill = self._registry.get_skill(skill_name)
-                    if skill:
-                        matches.append(
-                            KeywordMatch(
-                                skill_name=skill_name,
-                                match_type=MatchType.EXACT_PREFIX,
-                                matched_text=match.group(0),
-                                confidence=1.0,  # Exact prefix = highest confidence
-                                metadata={"pattern": pattern.pattern},
-                            )
-                        )
-
-        # Check for "ooo" bare command (welcome skill)
-        if user_input.strip().lower() in ("ooo", "/ouroboros", "ouroboros"):
-            welcome_skill = self._registry.get_skill("welcome")
-            if welcome_skill:
-                matches.append(
-                    KeywordMatch(
-                        skill_name="welcome",
-                        match_type=MatchType.EXACT_PREFIX,
-                        matched_text=user_input.strip(),
-                        confidence=1.0,
-                    )
+            matches.append(
+                KeywordMatch(
+                    skill_name=skill_name,
+                    match_type=MatchType.EXACT_PREFIX,
+                    matched_text=stripped_input[: len(prefix)],
+                    confidence=1.0,
+                    metadata={"prefix": prefix},
                 )
+            )
 
         return matches
+
+    def _iter_exact_prefix_variants(self) -> list[tuple[str, str]]:
+        """Build the exact prefix variants that are eligible for intercept."""
+        candidates: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for skill_name, metadata in self._registry.get_all_metadata().items():
+            prefixes = [prefix.strip() for prefix in metadata.magic_prefixes if prefix.strip()]
+            prefixes.append(f"ooo {skill_name}")
+            if skill_name == "welcome":
+                prefixes.extend(("ooo", "/ouroboros", "ouroboros"))
+
+            for prefix in prefixes:
+                key = (prefix.lower(), skill_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append((prefix, skill_name))
+
+        candidates.sort(key=lambda item: len(item[0]), reverse=True)
+        return candidates
+
+    @staticmethod
+    def _matches_exact_prefix(normalized_input: str, prefix: str) -> bool:
+        """Check whether user input begins with an exact deterministic prefix."""
+        normalized_prefix = prefix.lower()
+        if normalized_input == normalized_prefix:
+            return True
+
+        if ":" not in normalized_prefix and " " not in normalized_prefix:
+            return False
+
+        if not normalized_input.startswith(normalized_prefix):
+            return False
+
+        if len(normalized_input) == len(normalized_prefix):
+            return True
+
+        return normalized_input[len(normalized_prefix)].isspace()
 
     def _detect_triggers(self, user_input: str) -> list[KeywordMatch]:
         """Detect trigger keyword matches in user input.
@@ -290,22 +298,60 @@ def route_to_skill(
     return None, MatchType.FALLBACK
 
 
-def is_magic_command(user_input: str) -> bool:
+def is_magic_command(
+    user_input: str,
+    registry: SkillRegistry | None = None,
+) -> bool:
     """Check if user input is a magic command.
 
     Args:
         user_input: The user's input text.
+        registry: Optional skill registry used to validate exact prefixes.
 
     Returns:
         True if input appears to be a magic command.
     """
-    # Quick check for common patterns
-    input_lower = user_input.strip().lower()
-    magic_indicators = [
-        "ooo:",
-        "/ouroboros:",
-        "ouroboros:",
-        "ooo ",  # "ooo run"
-    ]
+    stripped_input = user_input.strip()
+    if not stripped_input:
+        return False
 
-    return any(indicator in input_lower for indicator in magic_indicators)
+    active_registry = registry or get_registry()
+    if active_registry.get_all_metadata():
+        detector = MagicKeywordDetector(active_registry)
+        return bool(detector._detect_prefixes(stripped_input))
+
+    if active_registry.skill_dir.exists():
+        skill_names = sorted(
+            skill_path.parent.name
+            for skill_path in active_registry.skill_dir.glob("*/SKILL.md")
+        )
+        if skill_names:
+            prefixes: list[str] = []
+            for skill_name in skill_names:
+                prefixes.extend(
+                    [
+                        f"ooo {skill_name}",
+                        f"ooo:{skill_name}",
+                        f"ouroboros:{skill_name}",
+                        f"/ouroboros:{skill_name}",
+                    ]
+                )
+                if skill_name == "welcome":
+                    prefixes.extend(("ooo", "/ouroboros", "ouroboros"))
+
+            normalized_input = stripped_input.lower()
+            return any(
+                MagicKeywordDetector._matches_exact_prefix(normalized_input, prefix)
+                for prefix in prefixes
+            )
+
+    input_lower = stripped_input.lower()
+    if input_lower in ("ooo", "/ouroboros", "ouroboros"):
+        return True
+
+    exact_patterns = (
+        r"^ooo:[a-z0-9_-]+(?:\s+.*)?$",
+        r"^ooo\s+[a-z0-9_-]+(?:\s+.*)?$",
+        r"^(?:/ouroboros|ouroboros):[a-z0-9_-]+(?:\s+.*)?$",
+    )
+    return any(re.match(pattern, input_lower) for pattern in exact_patterns)

@@ -11,8 +11,10 @@ from ouroboros.config.models import (
     EconomicsConfig,
     EvaluationConfig,
     ExecutionConfig,
+    LLMConfig,
     LoggingConfig,
     ModelConfig,
+    OrchestratorConfig,
     OuroborosConfig,
     PersistenceConfig,
     ProviderCredentials,
@@ -175,6 +177,37 @@ class TestClarificationConfig:
             ClarificationConfig(ambiguity_threshold=1.5)
 
 
+class TestLLMConfig:
+    """Test LLMConfig for shared LLM-only defaults."""
+
+    def test_llm_config_creation(self) -> None:
+        """LLMConfig stores backend and model defaults."""
+        config = LLMConfig(
+            backend="codex",
+            qa_model="gpt-5-mini",
+            dependency_analysis_model="gpt-5",
+        )
+        assert config.backend == "codex"
+        assert config.qa_model == "gpt-5-mini"
+        assert config.dependency_analysis_model == "gpt-5"
+
+    def test_llm_config_defaults(self) -> None:
+        """LLMConfig has sensible defaults."""
+        config = LLMConfig()
+        assert config.backend == "claude_code"
+        assert config.permission_mode == "default"
+        assert config.qa_model == "claude-sonnet-4-20250514"
+        assert config.dependency_analysis_model == "claude-opus-4-6"
+        assert config.ontology_analysis_model == "claude-opus-4-6"
+        assert config.context_compression_model == "gpt-4"
+
+
+    def test_llm_config_accepts_claude_shorthand(self) -> None:
+        """LLMConfig accepts 'claude' as a backend alias."""
+        config = LLMConfig(backend="claude")
+        assert config.backend == "claude"
+
+
 class TestExecutionConfig:
     """Test ExecutionConfig for Phase 2 settings."""
 
@@ -192,6 +225,9 @@ class TestExecutionConfig:
         config = ExecutionConfig()
         assert config.max_iterations_per_ac == 10
         assert config.retrospective_interval == 3
+        assert config.atomicity_model == "claude-opus-4-6"
+        assert config.decomposition_model == "claude-opus-4-6"
+        assert config.double_diamond_model == "claude-opus-4-6"
 
 
 class TestResilienceConfig:
@@ -217,6 +253,8 @@ class TestResilienceConfig:
         assert config.lateral_thinking_enabled is True
         assert config.lateral_model_tier == "frontier"
         assert config.lateral_temperature == 0.8
+        assert config.wonder_model == "claude-opus-4-6"
+        assert config.reflect_model == "claude-opus-4-6"
 
     def test_resilience_temperature_bounds(self) -> None:
         """ResilienceConfig lateral_temperature must be in [0, 2]."""
@@ -237,12 +275,14 @@ class TestEvaluationConfig:
             stage3_enabled=True,
             satisfaction_threshold=0.9,
             uncertainty_threshold=0.2,
+            semantic_model="gpt-5",
         )
         assert config.stage1_enabled is True
         assert config.stage2_enabled is False
         assert config.stage3_enabled is True
         assert config.satisfaction_threshold == 0.9
         assert config.uncertainty_threshold == 0.2
+        assert config.semantic_model == "gpt-5"
 
     def test_evaluation_config_defaults(self) -> None:
         """EvaluationConfig has sensible defaults."""
@@ -252,6 +292,8 @@ class TestEvaluationConfig:
         assert config.stage3_enabled is True
         assert config.satisfaction_threshold == 0.8
         assert config.uncertainty_threshold == 0.3
+        assert config.semantic_model == "claude-opus-4-6"
+        assert config.assertion_extraction_model == "claude-sonnet-4-6"
 
 
 class TestConsensusConfig:
@@ -274,6 +316,10 @@ class TestConsensusConfig:
         assert config.min_models == 3
         assert config.threshold == 0.67
         assert config.diversity_required is True
+        assert len(config.models) == 3
+        assert config.advocate_model == "openrouter/anthropic/claude-opus-4-6"
+        assert config.devil_model == "openrouter/openai/gpt-4o"
+        assert config.judge_model == "openrouter/google/gemini-2.5-pro"
 
     def test_consensus_min_models_minimum(self) -> None:
         """ConsensusConfig min_models must be >= 2."""
@@ -367,6 +413,7 @@ class TestOuroborosConfig:
         """OuroborosConfig has all default sections."""
         config = OuroborosConfig()
         assert config.economics is not None
+        assert config.llm is not None
         assert config.clarification is not None
         assert config.execution is not None
         assert config.resilience is not None
@@ -381,6 +428,23 @@ class TestOuroborosConfig:
         config = OuroborosConfig()
         with pytest.raises(ValidationError):
             config.economics = EconomicsConfig()  # type: ignore[misc]
+
+
+class TestOrchestratorConfig:
+    """Test OrchestratorConfig runtime settings."""
+
+    def test_orchestrator_config_defaults(self) -> None:
+        """Defaults to the Claude runtime."""
+        config = OrchestratorConfig()
+        assert config.runtime_backend == "claude"
+        assert config.permission_mode == "acceptEdits"
+        assert config.codex_cli_path is None
+
+    def test_orchestrator_config_expands_codex_cli_path(self) -> None:
+        """Expands ~ in codex_cli_path."""
+        config = OrchestratorConfig(runtime_backend="codex", codex_cli_path="~/bin/codex")
+        assert config.runtime_backend == "codex"
+        assert "~" not in config.codex_cli_path
 
 
 class TestGetDefaultConfig:

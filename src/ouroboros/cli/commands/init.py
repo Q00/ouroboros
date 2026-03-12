@@ -26,9 +26,10 @@ from ouroboros.bigbang.interview import (
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.config import get_clarification_model
 from ouroboros.observability import LoggingConfig, configure_logging
+from ouroboros.providers import create_llm_adapter
 from ouroboros.providers.base import LLMAdapter
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
 
 class SeedGenerationResult(Enum):
@@ -37,6 +38,21 @@ class SeedGenerationResult(Enum):
     SUCCESS = auto()
     CANCELLED = auto()
     CONTINUE_INTERVIEW = auto()
+
+
+class AgentRuntimeBackend(str, Enum):
+    """Supported orchestrator runtime backends for workflow handoff."""
+
+    CLAUDE = "claude"
+    CODEX = "codex"
+
+
+class LLMBackend(str, Enum):
+    """Supported interview/seed LLM backends."""
+
+    CLAUDE_CODE = "claude_code"
+    LITELLM = "litellm"
+    CODEX = "codex"
 
 
 class _DefaultStartGroup(typer.core.TyperGroup):
@@ -130,34 +146,36 @@ async def _multiline_prompt_async(prompt_text: str) -> str:
 
 def _get_adapter(
     use_orchestrator: bool,
+    backend: str | None = None,
     for_interview: bool = False,
     debug: bool = False,
 ) -> LLMAdapter:
     """Get the appropriate LLM adapter.
 
     Args:
-        use_orchestrator: If True, use Claude Code (Max Plan). Otherwise LiteLLM.
+        use_orchestrator: If True, default to Claude Code for compatibility.
+        backend: Optional explicit LLM backend override.
         for_interview: If True, enable Read/Glob/Grep tools for codebase exploration.
         debug: If True, show streaming messages (thinking, tool use).
 
     Returns:
         LLM adapter instance.
     """
-    if use_orchestrator:
-        from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
+    resolved_backend = backend or ("claude_code" if use_orchestrator else "litellm")
 
-        if for_interview:
-            # Interview mode: permissive - allow MCP, read tools, etc.
-            # Only dangerous tools (Write, Edit, Bash, Task) are blocked
-            return ClaudeCodeAdapter(
-                permission_mode="bypassPermissions",  # Auto-approve tool use
-                allowed_tools=None,  # Permissive mode: MCP + read-only tools
-                max_turns=5,  # Allow more turns for MCP tool use
-                on_message=_make_message_callback(debug),
-            )
-        return ClaudeCodeAdapter()
-    else:
-        return LiteLLMAdapter()
+    if for_interview:
+        # Interview mode: request the interview-specific permission policy and
+        # debug/tool callback behavior across all backends that support it.
+        return create_llm_adapter(
+            backend=resolved_backend,
+            use_case="interview",
+            allowed_tools=None,
+            max_turns=5,
+            on_message=_make_message_callback(debug),
+            cwd=Path.cwd(),
+        )
+
+    return create_llm_adapter(backend=resolved_backend, cwd=Path.cwd())
 
 
 async def _run_interview_loop(
@@ -251,6 +269,8 @@ async def _run_interview(
     state_dir: Path | None = None,
     use_orchestrator: bool = False,
     debug: bool = False,
+    workflow_runtime_backend: str | None = None,
+    llm_backend: str | None = None,
 ) -> None:
     """Run the interview process.
 
@@ -259,12 +279,20 @@ async def _run_interview(
         resume_id: Optional interview ID to resume.
         state_dir: Optional custom state directory.
         use_orchestrator: If True, use Claude Code (Max Plan) instead of LiteLLM.
+        workflow_runtime_backend: Optional agent runtime backend for the workflow handoff.
+        llm_backend: Optional LLM backend override for interview and seed generation.
     """
     # Initialize components
-    llm_adapter = _get_adapter(use_orchestrator, for_interview=True, debug=debug)
+    llm_adapter = _get_adapter(
+        use_orchestrator,
+        backend=llm_backend,
+        for_interview=True,
+        debug=debug,
+    )
     engine = InterviewEngine(
         llm_adapter=llm_adapter,
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",
+        model=get_clarification_model(llm_backend),
     )
 
     # Load or start interview
@@ -320,7 +348,7 @@ async def _run_interview(
             return
 
         # Generate Seed
-        seed_path, result = await _generate_seed_from_interview(state, llm_adapter)
+        seed_path, result = await _generate_seed_from_interview(state, llm_adapter, llm_backend)
 
         if result == SeedGenerationResult.CONTINUE_INTERVIEW:
             # Re-open interview for more questions
@@ -347,12 +375,17 @@ async def _run_interview(
     )
 
     if should_start_workflow:
-        await _start_workflow(seed_path, use_orchestrator)
+        await _start_workflow(
+            seed_path,
+            use_orchestrator,
+            runtime_backend=workflow_runtime_backend,
+        )
 
 
 async def _generate_seed_from_interview(
     state: InterviewState,
     llm_adapter: LLMAdapter,
+    llm_backend: str | None = None,
 ) -> tuple[Path | None, SeedGenerationResult]:
     """Generate Seed from completed interview.
 
@@ -368,7 +401,10 @@ async def _generate_seed_from_interview(
 
     # Step 1: Calculate ambiguity score
     with console.status("[cyan]Calculating ambiguity score...[/]", spinner="dots"):
-        scorer = AmbiguityScorer(llm_adapter=llm_adapter)
+        scorer = AmbiguityScorer(
+            llm_adapter=llm_adapter,
+            model=get_clarification_model(llm_backend),
+        )
         score_result = await scorer.score(state)
 
     if score_result.is_err:
@@ -404,7 +440,10 @@ async def _generate_seed_from_interview(
 
     # Step 2: Generate Seed
     with console.status("[cyan]Generating Seed from interview...[/]", spinner="dots"):
-        generator = SeedGenerator(llm_adapter=llm_adapter)
+        generator = SeedGenerator(
+            llm_adapter=llm_adapter,
+            model=get_clarification_model(llm_backend),
+        )
         # For forced generation, we need to bypass the threshold check
         if ambiguity_score.is_ready_for_seed:
             seed_result = await generator.generate(state, ambiguity_score)
@@ -439,7 +478,10 @@ async def _generate_seed_from_interview(
 
 
 async def _start_workflow(
-    seed_path: Path, use_orchestrator: bool = False, parallel: bool = True
+    seed_path: Path,
+    use_orchestrator: bool = False,
+    parallel: bool = True,
+    runtime_backend: str | None = None,
 ) -> None:
     """Start workflow from generated seed.
 
@@ -447,6 +489,7 @@ async def _start_workflow(
         seed_path: Path to the seed YAML file.
         use_orchestrator: Whether to use Claude Code orchestrator.
         parallel: Execute independent ACs in parallel. Default: True.
+        runtime_backend: Optional runtime backend for orchestrator execution.
     """
     console.print()
     console.print("[bold cyan]Starting workflow...[/]")
@@ -456,7 +499,12 @@ async def _start_workflow(
         from ouroboros.cli.commands.run import _run_orchestrator
 
         try:
-            await _run_orchestrator(seed_path, resume_session=None, parallel=parallel)
+            await _run_orchestrator(
+                seed_path,
+                resume_session=None,
+                parallel=parallel,
+                runtime_backend=runtime_backend,
+            )
         except typer.Exit:
             pass  # Normal exit
         except KeyboardInterrupt:
@@ -499,6 +547,28 @@ def start(
             help="Use Claude Code (Max Plan) instead of LiteLLM. No API key required.",
         ),
     ] = False,
+    runtime: Annotated[
+        AgentRuntimeBackend | None,
+        typer.Option(
+            "--runtime",
+            help=(
+                "Agent runtime backend for the workflow execution step after seed generation "
+                "(claude or codex)."
+            ),
+            case_sensitive=False,
+        ),
+    ] = None,
+    llm_backend: Annotated[
+        LLMBackend | None,
+        typer.Option(
+            "--llm-backend",
+            help=(
+                "LLM backend for interview, ambiguity scoring, and seed generation "
+                "(claude_code, litellm, or codex)."
+            ),
+            case_sensitive=False,
+        ),
+    ] = None,
     debug: Annotated[
         bool,
         typer.Option(
@@ -517,6 +587,10 @@ def start(
         ouroboros init start "I want to build a task management CLI tool"
 
         ouroboros init start --orchestrator "Build a REST API"
+
+        ouroboros init start --orchestrator --runtime codex "Build a REST API"
+
+        ouroboros init start --llm-backend codex "Build a REST API"
 
         ouroboros init start --resume interview_20260116_120000
 
@@ -545,15 +619,35 @@ def start(
         configure_logging(LoggingConfig(log_level="DEBUG"))
         print_info("Debug mode enabled - showing verbose logs")
 
+    if runtime and not orchestrator:
+        print_warning(
+            "--runtime only affects the workflow execution step when --orchestrator is enabled."
+        )
+
     # Show mode info
     if orchestrator:
         print_info("Using Claude Code (Max Plan) - no API key required")
+        if runtime:
+            print_info(f"Workflow runtime backend: {runtime.value}")
     else:
         print_info("Using LiteLLM - API key required")
 
+    if llm_backend:
+        print_info(f"Interview LLM backend: {llm_backend.value}")
+
     # Run interview
     try:
-        asyncio.run(_run_interview(context or "", resume, state_dir, orchestrator, debug))
+        asyncio.run(
+            _run_interview(
+                context or "",
+                resume,
+                state_dir,
+                orchestrator,
+                debug,
+                runtime.value if runtime else None,
+                llm_backend.value if llm_backend else None,
+            )
+        )
     except KeyboardInterrupt:
         console.print()
         print_info("Interview interrupted. Progress has been saved.")
@@ -577,7 +671,7 @@ def list_interviews(
     ] = None,
 ) -> None:
     """List all interview sessions."""
-    llm_adapter = LiteLLMAdapter()
+    llm_adapter = create_llm_adapter(backend="litellm")
     engine = InterviewEngine(
         llm_adapter=llm_adapter,
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",

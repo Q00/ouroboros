@@ -11,13 +11,16 @@ This module provides a skill registry that:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+import re
 from threading import RLock
 from typing import Any
 
 import structlog
+import yaml
 
 from ouroboros.core.types import Result
 
@@ -39,6 +42,7 @@ except ImportError:
 
 
 log = structlog.get_logger()
+_MCP_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SkillMode(Enum):
@@ -61,6 +65,10 @@ class SkillMetadata:
         version: Skill version
         mode: Execution mode (plugin or mcp)
         requires_mcp: Whether MCP server is required
+        intercept_eligible: Whether exact-prefix interception can dispatch to MCP
+        mcp_tool: Backing MCP tool name for exact-prefix interception
+        mcp_args: MCP argument template mapping from frontmatter
+        intercept_validation_error: Validation failure reason when not eligible
     """
 
     name: str
@@ -71,6 +79,10 @@ class SkillMetadata:
     version: str = "1.0.0"
     mode: SkillMode = SkillMode.PLUGIN
     requires_mcp: bool = False
+    intercept_eligible: bool = False
+    mcp_tool: str | None = None
+    mcp_args: dict[str, Any] | None = None
+    intercept_validation_error: str | None = None
 
 
 @dataclass
@@ -392,15 +404,30 @@ class SkillRegistry:
 
         # Extract metadata
         frontmatter = spec.get("frontmatter", {})
+        (
+            intercept_eligible,
+            mcp_tool,
+            mcp_args,
+            intercept_validation_error,
+        ) = self._extract_intercept_metadata(
+            frontmatter,
+            spec.get("frontmatter_error"),
+        )
         metadata = SkillMetadata(
             name=skill_name,
             path=skill_dir,
-            trigger_keywords=tuple(frontmatter.get("triggers", [])),
+            trigger_keywords=self._extract_trigger_keywords(frontmatter),
             magic_prefixes=self._extract_magic_prefixes(frontmatter, skill_name),
             description=frontmatter.get("description", spec.get("first_line", "")),
             version=frontmatter.get("version", "1.0.0"),
-            mode=SkillMode.MCP if frontmatter.get("mode") == "mcp" else SkillMode.PLUGIN,
-            requires_mcp=frontmatter.get("requires_mcp", False),
+            mode=SkillMode.MCP
+            if frontmatter.get("mode") == "mcp" or intercept_eligible
+            else SkillMode.PLUGIN,
+            requires_mcp=bool(frontmatter.get("requires_mcp", False) or intercept_eligible),
+            intercept_eligible=intercept_eligible,
+            mcp_tool=mcp_tool,
+            mcp_args=mcp_args,
+            intercept_validation_error=intercept_validation_error,
         )
 
         instance = SkillInstance(
@@ -430,58 +457,48 @@ class SkillRegistry:
 
         # Extract frontmatter (YAML-like metadata at top)
         frontmatter: dict[str, Any] = {}
+        frontmatter_error: str | None = None
         content_start = 0
 
         # Check for YAML frontmatter
         if lines and lines[0].strip() == "---":
-            i = 1  # Start after the first ---
-            while i < len(lines) and lines[i].strip() != "---":
-                line = lines[i]
-                # Parse simple key: value pairs
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    key = key.strip().lower()
-                    value = value.strip()
-
-                    # Handle list values (YAML format with - prefix)
-                    # Case 1: Inline list like `triggers: - item1`
-                    if value.startswith("-"):
-                        # This is a list, collect all items
-                        list_items = [value.lstrip("-").strip()]
-                        # Look for more list items on following lines
-                        j = i + 1
-                        while j < len(lines) and lines[j].strip().startswith("-"):
-                            list_items.append(lines[j].strip().lstrip("-").strip())
-                            j += 1
-                        value = list_items
-                        i = j - 1  # Adjust i since we looked ahead
-                    # Case 2: Empty value with list on following lines like `triggers:` then `- item1`
-                    elif not value:
-                        # Look ahead to see if next lines have list items
-                        j = i + 1
-                        list_items = []
-                        while j < len(lines):
-                            next_line = lines[j].strip()
-                            # Stop if we hit another key: value pair or closing ---
-                            if (
-                                not next_line
-                                or next_line == "---"
-                                or (":" in next_line and not next_line.strip().startswith("-"))
-                            ):
-                                break
-                            if next_line.startswith("-"):
-                                list_items.append(next_line.lstrip("-").strip())
-                            elif next_line and not next_line.startswith("#"):
-                                # Non-list, non-comment line - stop collecting
-                                break
-                            j += 1
-                        if list_items:
-                            value = list_items
-                        i = j - 1  # Adjust i since we looked ahead
-
-                    frontmatter[key] = value
-                i += 1
-            content_start = i + 1  # Skip the closing ---
+            closing_index = next(
+                (i for i in range(1, len(lines)) if lines[i].strip() == "---"),
+                None,
+            )
+            if closing_index is None:
+                frontmatter_error = "Unterminated frontmatter block"
+                log.warning(
+                    "plugin.skill.frontmatter_parse_failed",
+                    error=frontmatter_error,
+                )
+                content_start = 1
+            else:
+                frontmatter_block = "\n".join(lines[1:closing_index])
+                if frontmatter_block.strip():
+                    try:
+                        parsed_frontmatter = yaml.safe_load(frontmatter_block)
+                    except yaml.YAMLError as exc:
+                        frontmatter_error = str(exc)
+                        log.warning(
+                            "plugin.skill.frontmatter_parse_failed",
+                            error=frontmatter_error,
+                        )
+                    else:
+                        if parsed_frontmatter is None:
+                            frontmatter = {}
+                        elif isinstance(parsed_frontmatter, dict):
+                            frontmatter = {
+                                str(key).lower(): value
+                                for key, value in parsed_frontmatter.items()
+                            }
+                        else:
+                            frontmatter_error = "Frontmatter must parse to a mapping"
+                            log.warning(
+                                "plugin.skill.frontmatter_parse_failed",
+                                error=frontmatter_error,
+                            )
+                content_start = closing_index + 1
 
         # Get first line of actual content
         first_line = ""
@@ -514,10 +531,120 @@ class SkillRegistry:
 
         return {
             "frontmatter": frontmatter,
+            "frontmatter_error": frontmatter_error,
             "sections": sections,
             "first_line": first_line,
             "raw": content,
         }
+
+    def _extract_trigger_keywords(
+        self,
+        frontmatter: dict[str, Any],
+    ) -> tuple[str, ...]:
+        """Extract trigger keywords from frontmatter."""
+        return self._normalize_string_sequence(frontmatter.get("triggers"))
+
+    def _extract_intercept_metadata(
+        self,
+        frontmatter: dict[str, Any],
+        frontmatter_error: str | None,
+    ) -> tuple[bool, str | None, dict[str, Any] | None, str | None]:
+        """Extract and validate MCP interception metadata from frontmatter."""
+        if frontmatter_error:
+            return (
+                False,
+                None,
+                None,
+                f"frontmatter parse failed: {frontmatter_error}",
+            )
+
+        raw_mcp_tool = frontmatter.get("mcp_tool")
+        if raw_mcp_tool is None:
+            return False, None, None, "missing required frontmatter key: mcp_tool"
+        if not isinstance(raw_mcp_tool, str) or not raw_mcp_tool.strip():
+            return False, None, None, "mcp_tool must be a non-empty string"
+
+        mcp_tool = raw_mcp_tool.strip()
+        if _MCP_TOOL_NAME_PATTERN.fullmatch(mcp_tool) is None:
+            return (
+                False,
+                None,
+                None,
+                "mcp_tool must contain only letters, digits, and underscores",
+            )
+
+        if "mcp_args" not in frontmatter:
+            return False, None, None, "missing required frontmatter key: mcp_args"
+
+        raw_mcp_args = frontmatter.get("mcp_args")
+        if not self._is_valid_dispatch_mapping(raw_mcp_args):
+            return (
+                False,
+                None,
+                None,
+                "mcp_args must be a mapping with string keys and YAML-safe values",
+            )
+
+        return True, mcp_tool, self._clone_dispatch_value(raw_mcp_args), None
+
+    def _is_valid_dispatch_mapping(self, value: Any) -> bool:
+        """Validate dispatch args are mapping-shaped and recursively serializable."""
+        if not isinstance(value, Mapping):
+            return False
+
+        return all(
+            isinstance(key, str) and bool(key.strip()) and self._is_valid_dispatch_value(item)
+            for key, item in value.items()
+        )
+
+    def _is_valid_dispatch_value(self, value: Any) -> bool:
+        """Validate a dispatch template value recursively."""
+        if value is None or isinstance(value, str | int | float | bool):
+            return True
+
+        if isinstance(value, Mapping):
+            return self._is_valid_dispatch_mapping(value)
+
+        if isinstance(value, list | tuple):
+            return all(self._is_valid_dispatch_value(item) for item in value)
+
+        return False
+
+    def _clone_dispatch_value(self, value: Any) -> Any:
+        """Clone validated dispatch metadata into plain Python containers."""
+        if isinstance(value, Mapping):
+            return {key: self._clone_dispatch_value(item) for key, item in value.items()}
+
+        if isinstance(value, list | tuple):
+            return [self._clone_dispatch_value(item) for item in value]
+
+        return value
+
+    def _normalize_string_sequence(self, raw: Any) -> tuple[str, ...]:
+        """Normalize a frontmatter field into a de-duplicated string tuple."""
+        values: list[str] = []
+
+        if isinstance(raw, str):
+            candidates: list[Any] = raw.split(",")
+        elif isinstance(raw, list | tuple):
+            candidates = list(raw)
+        elif raw is None:
+            candidates = []
+        else:
+            candidates = [raw]
+
+        for candidate in candidates:
+            if isinstance(candidate, str):
+                parts = candidate.split(",")
+            else:
+                parts = [str(candidate)]
+
+            for part in parts:
+                normalized = part.strip()
+                if normalized:
+                    values.append(normalized)
+
+        return tuple(dict.fromkeys(values))
 
     def _extract_magic_prefixes(
         self,
@@ -533,22 +660,14 @@ class SkillRegistry:
         Returns:
             Tuple of magic prefix strings.
         """
-        prefixes: list[str] = []
-
-        # Check for explicit magic_prefixes
-        if "magic_prefixes" in frontmatter:
-            raw = frontmatter["magic_prefixes"]
-            if isinstance(raw, list):
-                prefixes.extend(raw)
-            elif isinstance(raw, str):
-                prefixes.append(raw)
+        prefixes = list(self._normalize_string_sequence(frontmatter.get("magic_prefixes")))
 
         # Auto-generate from skill name
         prefixes.append(f"ouroboros:{skill_name}")
         prefixes.append(f"ooo:{skill_name}")
         prefixes.append(f"/ouroboros:{skill_name}")
 
-        return tuple(prefixes)
+        return tuple(dict.fromkeys(prefixes))
 
     def _index_skill(self, skill_name: str, metadata: SkillMetadata) -> None:
         """Index a skill's triggers and prefixes for fast lookup.

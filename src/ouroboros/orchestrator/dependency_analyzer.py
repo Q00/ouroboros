@@ -21,8 +21,10 @@ from dataclasses import dataclass, field
 import json
 from typing import TYPE_CHECKING
 
+from ouroboros.config import get_dependency_analysis_model
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
+from ouroboros.providers import create_llm_adapter
 
 if TYPE_CHECKING:
     from ouroboros.providers.base import LLMAdapter
@@ -146,12 +148,12 @@ class DependencyAnalyzer:
         """Initialize analyzer.
 
         Args:
-            llm_adapter: LLM adapter for dependency analysis (LiteLLMAdapter or ClaudeCodeAdapter).
-                        If None, creates default ClaudeCodeAdapter.
+            llm_adapter: LLM adapter for dependency analysis.
+                        If None, creates a configured default adapter.
             model: Model to use for analysis. If None, uses adapter's default.
         """
         self._llm = llm_adapter
-        self._model = model
+        self._model = model or get_dependency_analysis_model()
 
     async def analyze(
         self,
@@ -249,10 +251,7 @@ class DependencyAnalyzer:
         from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 
         if self._llm is None:
-            # Default to ClaudeCodeAdapter (orchestrator mode)
-            from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
-
-            self._llm = ClaudeCodeAdapter(max_turns=1)
+            self._llm = create_llm_adapter(max_turns=1)
 
         # Build prompt
         ac_list = "\n".join(f"AC {i}: {ac}" for i, ac in enumerate(criteria))
@@ -261,10 +260,8 @@ class DependencyAnalyzer:
         # Call LLM with proper interface
         messages = [Message(role=MessageRole.USER, content=prompt)]
 
-        # Build config - use provided model or default
-        # Note: ClaudeCodeAdapter ignores the model and uses Claude Code's default
         config = CompletionConfig(
-            model=self._model or "claude-opus-4-6",
+            model=self._model,
             temperature=0.0,  # Deterministic
             max_tokens=1000,
         )

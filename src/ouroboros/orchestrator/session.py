@@ -114,6 +114,11 @@ class SessionTracker:
     def with_progress(self, update: dict[str, Any]) -> SessionTracker:
         """Return new tracker with updated progress.
 
+        The ``messages_processed`` counter is set from the update dict when
+        present, otherwise it is incremented by one.  This avoids the double-
+        increment that would occur when the caller also tracks a separate
+        counter and stores it in the update.
+
         Args:
             update: Progress data to merge.
 
@@ -121,10 +126,15 @@ class SessionTracker:
             New SessionTracker with merged progress.
         """
         merged_progress = {**self.progress, **update}
+        new_count = update.get("messages_processed")
+        if isinstance(new_count, int):
+            messages_processed = new_count
+        else:
+            messages_processed = self.messages_processed + 1
         return replace(
             self,
             progress=merged_progress,
-            messages_processed=self.messages_processed + 1,
+            messages_processed=messages_processed,
             last_message_time=datetime.now(UTC),
         )
 

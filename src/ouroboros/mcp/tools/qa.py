@@ -17,6 +17,7 @@ import uuid
 
 import structlog
 
+from ouroboros.config import get_qa_model
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -28,7 +29,8 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
+from ouroboros.providers import create_llm_adapter
+from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
@@ -295,7 +297,8 @@ class QAHandler:
     Supports iterative loop until pass or max_iterations reached.
     """
 
-    llm_adapter: ClaudeCodeAdapter | None = field(default=None, repr=False)
+    llm_adapter: LLMAdapter | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -434,9 +437,12 @@ class QAHandler:
                 Message(role=MessageRole.USER, content=user_prompt),
             ]
 
-            llm_adapter = self.llm_adapter or ClaudeCodeAdapter(max_turns=1)
+            llm_adapter = self.llm_adapter or create_llm_adapter(
+                backend=self.llm_backend,
+                max_turns=1,
+            )
             config = CompletionConfig(
-                model="claude-sonnet-4-20250514",
+                model=get_qa_model(),
                 temperature=0.2,
                 max_tokens=2048,
                 response_format={"type": "json_schema", "json_schema": QA_VERDICT_SCHEMA},

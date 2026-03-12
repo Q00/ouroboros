@@ -10,12 +10,13 @@ The WonderEngine asks: "Given what we learned, what do we still not know?"
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 
 from pydantic import BaseModel, Field
 
+from ouroboros.config import get_wonder_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.lineage import EvaluationSummary, OntologyLineage
 from ouroboros.core.seed import OntologySchema
@@ -30,10 +31,6 @@ from ouroboros.providers.base import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Wonder requires divergent, creative thinking — Opus excels here
-_FALLBACK_MODEL = "claude-opus-4-6"
-
 
 class WonderOutput(BaseModel, frozen=True):
     """Output of the Wonder phase.
@@ -60,7 +57,7 @@ class WonderEngine:
     """
 
     llm_adapter: LLMAdapter
-    model: str = _FALLBACK_MODEL
+    model: str = field(default_factory=get_wonder_model)
 
     async def wonder(
         self,

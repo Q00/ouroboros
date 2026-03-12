@@ -1,6 +1,10 @@
 ---
 name: run
 description: "Execute a Seed specification through the workflow engine"
+mcp_tool: ouroboros_execute_seed
+mcp_args:
+  seed_path: "$1"
+  cwd: "$CWD"
 ---
 
 # /ouroboros:run

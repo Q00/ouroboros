@@ -146,6 +146,12 @@ class TestClaudeAgentAdapter:
         adapter = ClaudeAgentAdapter(permission_mode="bypassPermissions")
         assert adapter._permission_mode == "bypassPermissions"
 
+    def test_init_with_custom_cwd_and_cli_path(self) -> None:
+        """Test initialization stores backend-neutral runtime construction data."""
+        adapter = ClaudeAgentAdapter(cwd="/tmp/project", cli_path="/tmp/claude")
+        assert adapter._cwd == "/tmp/project"
+        assert adapter._cli_path == "/tmp/claude"
+
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "env_key"})
     def test_init_from_environment(self) -> None:
         """Test initialization from environment variable."""

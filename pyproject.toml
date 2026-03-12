@@ -48,6 +48,9 @@ path = "src/ouroboros/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ouroboros"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "ouroboros/codex/skills"
+
 [dependency-groups]
 dev = [
     "mypy>=1.19.1",

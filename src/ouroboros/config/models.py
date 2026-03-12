@@ -8,6 +8,7 @@ Classes:
     TierConfig: Tier configuration with cost factor and models
     ProviderCredentials: API credentials for a single provider
     CredentialsConfig: All provider credentials
+    LLMConfig: Shared LLM backend/model defaults
     EconomicsConfig: Economic model with tier definitions
     ClarificationConfig: Phase 0 configuration
     ExecutionConfig: Phase 2 configuration
@@ -100,6 +101,26 @@ class EconomicsConfig(BaseModel, frozen=True):
     downgrade_success_streak: int = Field(default=5, ge=1)
 
 
+class LLMConfig(BaseModel, frozen=True):
+    """Shared LLM backend and model defaults.
+
+    Attributes:
+        backend: Default backend for LLM-only flows
+        permission_mode: Default permission mode for local CLI-backed LLM flows
+        qa_model: Default model for QA verdict generation
+        dependency_analysis_model: Default model for AC dependency analysis
+        ontology_analysis_model: Default model for ontological analysis
+        context_compression_model: Default model for workflow context compression
+    """
+
+    backend: Literal["claude", "claude_code", "litellm", "codex"] = "claude_code"
+    permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
+    qa_model: str = "claude-sonnet-4-20250514"
+    dependency_analysis_model: str = "claude-opus-4-6"
+    ontology_analysis_model: str = "claude-opus-4-6"
+    context_compression_model: str = "gpt-4"
+
+
 class ClarificationConfig(BaseModel, frozen=True):
     """Phase 0 (Big Bang) configuration.
 
@@ -122,10 +143,16 @@ class ExecutionConfig(BaseModel, frozen=True):
     Attributes:
         max_iterations_per_ac: Maximum iterations per acceptance criteria
         retrospective_interval: Iterations between retrospectives
+        atomicity_model: Default model for atomicity analysis
+        decomposition_model: Default model for AC decomposition
+        double_diamond_model: Default model for Double Diamond phases
     """
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
     retrospective_interval: int = Field(default=3, ge=1)
+    atomicity_model: str = "claude-opus-4-6"
+    decomposition_model: str = "claude-opus-4-6"
+    double_diamond_model: str = "claude-opus-4-6"
 
 
 class ResilienceConfig(BaseModel, frozen=True):
@@ -136,12 +163,16 @@ class ResilienceConfig(BaseModel, frozen=True):
         lateral_thinking_enabled: Whether lateral thinking is enabled
         lateral_model_tier: Tier for lateral thinking
         lateral_temperature: Temperature for lateral thinking LLM calls
+        wonder_model: Default model for Wonder phase
+        reflect_model: Default model for Reflect phase
     """
 
     stagnation_enabled: bool = True
     lateral_thinking_enabled: bool = True
     lateral_model_tier: Literal["frugal", "standard", "frontier"] = "frontier"
     lateral_temperature: float = Field(default=0.8, ge=0.0, le=2.0)
+    wonder_model: str = "claude-opus-4-6"
+    reflect_model: str = "claude-opus-4-6"
 
 
 class EvaluationConfig(BaseModel, frozen=True):
@@ -153,6 +184,8 @@ class EvaluationConfig(BaseModel, frozen=True):
         stage3_enabled: Whether consensus evaluation is enabled
         satisfaction_threshold: Minimum satisfaction score
         uncertainty_threshold: Threshold above which to trigger consensus
+        semantic_model: Default model for semantic evaluation
+        assertion_extraction_model: Default model for verification assertion extraction
     """
 
     stage1_enabled: bool = True
@@ -160,6 +193,8 @@ class EvaluationConfig(BaseModel, frozen=True):
     stage3_enabled: bool = True
     satisfaction_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     uncertainty_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    semantic_model: str = "claude-opus-4-6"
+    assertion_extraction_model: str = "claude-sonnet-4-6"
 
 
 class ConsensusConfig(BaseModel, frozen=True):
@@ -169,11 +204,23 @@ class ConsensusConfig(BaseModel, frozen=True):
         min_models: Minimum number of models for consensus
         threshold: Agreement threshold for consensus
         diversity_required: Whether different providers are required
+        models: Default model roster for stage 3 voting
+        advocate_model: Default model for deliberative advocate role
+        devil_model: Default model for deliberative devil role
+        judge_model: Default model for deliberative judge role
     """
 
     min_models: int = Field(default=3, ge=2)
     threshold: float = Field(default=0.67, ge=0.0, le=1.0)
     diversity_required: bool = True
+    models: tuple[str, ...] = (
+        "openrouter/openai/gpt-4o",
+        "openrouter/anthropic/claude-opus-4-6",
+        "openrouter/google/gemini-2.5-pro",
+    )
+    advocate_model: str = "openrouter/anthropic/claude-opus-4-6"
+    devil_model: str = "openrouter/openai/gpt-4o"
+    judge_model: str = "openrouter/google/gemini-2.5-pro"
 
 
 class PersistenceConfig(BaseModel, frozen=True):
@@ -226,20 +273,29 @@ class LoggingConfig(BaseModel, frozen=True):
 
 
 class OrchestratorConfig(BaseModel, frozen=True):
-    """Orchestrator configuration for Claude Agent SDK.
+    """Orchestrator runtime configuration.
 
     Attributes:
+        runtime_backend: Agent runtime backend to use for orchestrator execution.
+        permission_mode: Default permission mode for local agent runtimes.
         cli_path: Path to Claude CLI binary. Supports:
             - Absolute path: /path/to/my-claude-wrapper
             - ~ expansion: ~/.my-claude-wrapper/bin/my-claude-wrapper
             - None: Use SDK bundled CLI
+        codex_cli_path: Path to Codex CLI binary. Supports:
+            - Absolute path: /path/to/codex
+            - ~ expansion: ~/.local/bin/codex
+            - None: Resolve from PATH at runtime
         default_max_turns: Default max turns for agent execution
     """
 
+    runtime_backend: Literal["claude", "codex"] = "claude"
+    permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     cli_path: str | None = None
+    codex_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
 
-    @field_validator("cli_path")
+    @field_validator("cli_path", "codex_cli_path")
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:
         """Expand ~ in cli_path."""
@@ -256,6 +312,7 @@ class OuroborosConfig(BaseModel, frozen=True):
 
     Attributes:
         economics: Economic model and tier configuration
+        llm: Shared LLM backend and model configuration
         clarification: Phase 0 (Big Bang) configuration
         execution: Phase 2 configuration
         resilience: Phase 3 configuration
@@ -267,6 +324,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     """
 
     economics: EconomicsConfig = Field(default_factory=EconomicsConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
     clarification: ClarificationConfig = Field(default_factory=ClarificationConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)

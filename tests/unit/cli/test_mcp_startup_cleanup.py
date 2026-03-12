@@ -239,6 +239,58 @@ class TestMCPStartupAutoCleanup:
         assert call_order == ["initialize", "cancel_orphaned"]
 
     @pytest.mark.asyncio
+    async def test_runtime_backend_is_forwarded_to_server_factory(self) -> None:
+        """Runtime override is passed through to the MCP composition root."""
+        mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=[])
+
+        with (
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=mock_es,
+            ),
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ) as mock_create_server,
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            await _run_mcp_server("localhost", 8080, "stdio", runtime_backend="codex")
+
+        mock_create_server.assert_called_once()
+        assert mock_create_server.call_args.kwargs["runtime_backend"] == "codex"
+
+    @pytest.mark.asyncio
+    async def test_llm_backend_is_forwarded_to_server_factory(self) -> None:
+        """LLM backend override is passed through to the MCP composition root."""
+        mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=[])
+
+        with (
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=mock_es,
+            ),
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ) as mock_create_server,
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            await _run_mcp_server("localhost", 8080, "stdio", llm_backend="codex")
+
+        mock_create_server.assert_called_once()
+        assert mock_create_server.call_args.kwargs["llm_backend"] == "codex"
+
+    @pytest.mark.asyncio
     async def test_custom_db_path_used_for_cleanup(self) -> None:
         """Test that custom db_path is passed to EventStore for cleanup."""
         mock_es = AsyncMock()

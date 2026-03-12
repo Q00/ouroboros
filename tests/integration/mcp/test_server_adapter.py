@@ -5,6 +5,7 @@ registration, resource handling, and the full server lifecycle.
 """
 
 import asyncio
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -508,6 +509,37 @@ class TestCreateOuroborosServer:
 
         # Server should be created without error
         assert server.info.name == "ouroboros-mcp"
+
+    def test_codex_runtime_uses_backend_without_claude_model_defaults(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex runtime wiring does not inject Claude-only default models."""
+        monkeypatch.delenv("OUROBOROS_EXECUTION_MODEL", raising=False)
+        monkeypatch.delenv("OUROBOROS_VALIDATION_MODEL", raising=False)
+
+        with patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime:
+            mock_create_runtime.return_value = MagicMock()
+
+            create_ouroboros_server(runtime_backend="codex")
+
+        mock_create_runtime.assert_called_once()
+        assert mock_create_runtime.call_args.kwargs["backend"] == "codex"
+        assert mock_create_runtime.call_args.kwargs["model"] is None
+
+    def test_codex_llm_backend_is_forwarded_to_adapter_factory(self) -> None:
+        """LLM-only backend selection is routed through the shared adapter factory."""
+        with (
+            patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
+            patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
+        ):
+            mock_create_llm_adapter.return_value = MagicMock()
+            mock_create_runtime.return_value = MagicMock()
+
+            create_ouroboros_server(runtime_backend="codex", llm_backend="codex")
+
+        mock_create_llm_adapter.assert_called_once()
+        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
+        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 1
 
 
 class TestMCPServerAdapterConcurrency:

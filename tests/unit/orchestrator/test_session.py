@@ -70,6 +70,21 @@ class TestSessionTracker:
         assert tracker.progress == {"a": 1, "b": 2}
         assert tracker.messages_processed == 2
 
+    def test_with_progress_uses_explicit_messages_processed(self) -> None:
+        """When update dict contains messages_processed, use that value instead of +1."""
+        tracker = SessionTracker.create("exec", "seed")
+        tracker = tracker.with_progress({"messages_processed": 5, "step": "exec"})
+
+        assert tracker.messages_processed == 5
+        assert tracker.progress["messages_processed"] == 5
+
+    def test_with_progress_increments_when_messages_processed_absent(self) -> None:
+        """Without explicit messages_processed, auto-increment by 1."""
+        tracker = SessionTracker.create("exec", "seed")
+        tracker = tracker.with_progress({"step": "exec"})
+
+        assert tracker.messages_processed == 1
+
     def test_with_status(self) -> None:
         """Test changing session status."""
         tracker = SessionTracker.create("exec", "seed")

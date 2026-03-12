@@ -34,6 +34,7 @@ from ouroboros.observability.drift import DriftMeasurement
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
+    AgentMessage,
     AgentRuntime,
     RuntimeHandle,
 )
@@ -49,7 +50,7 @@ from ouroboros.orchestrator.events import (
 )
 from ouroboros.orchestrator.execution_strategy import ExecutionStrategy, get_strategy
 from ouroboros.orchestrator.mcp_tools import MCPToolProvider
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -383,7 +384,11 @@ class OrchestratorRunner:
 
         legacy_session_id = progress.get("agent_session_id")
         if isinstance(legacy_session_id, str) and legacy_session_id:
-            return RuntimeHandle(backend="claude", native_session_id=legacy_session_id)
+            # Legacy sessions predate multi-runtime; infer backend from context
+            legacy_backend = progress.get("runtime_backend", "claude")
+            if not isinstance(legacy_backend, str):
+                legacy_backend = "claude"
+            return RuntimeHandle(backend=legacy_backend, native_session_id=legacy_session_id)
 
         return None
 
@@ -405,6 +410,42 @@ class OrchestratorRunner:
                 progress["agent_session_id"] = runtime_handle.native_session_id
 
         return progress
+
+    async def _update_and_persist_progress(
+        self,
+        tracker: SessionTracker,
+        message: AgentMessage,
+        messages_processed: int,
+        session_id: str,
+    ) -> SessionTracker:
+        """Update tracker progress and persist when needed.
+
+        Persists on: final message, every N messages, or runtime handle change.
+        Returns updated tracker.
+        """
+        previous_runtime = tracker.progress.get("runtime")
+        progress_update = self._build_progress_update(
+            message_type=message.type,
+            messages_processed=messages_processed,
+            runtime_handle=message.resume_handle,
+        )
+        tracker = tracker.with_progress(progress_update)
+
+        # Compare runtime dicts ignoring the volatile updated_at field
+        def _stable_runtime(rt: Any) -> Any:
+            if isinstance(rt, dict):
+                return {k: v for k, v in rt.items() if k != "updated_at"}
+            return rt
+
+        should_persist = (
+            message.is_final
+            or messages_processed % SESSION_PROGRESS_PERSIST_INTERVAL == 0
+            or _stable_runtime(progress_update.get("runtime"))
+            != _stable_runtime(previous_runtime)
+        )
+        if should_persist:
+            await self._persist_session_progress(session_id, progress_update)
+        return tracker
 
     async def _persist_session_progress(
         self,
@@ -880,23 +921,9 @@ class OrchestratorRunner:
                                 start_time=start_time,
                             )
 
-                    previous_runtime = tracker.progress.get("runtime")
-                    progress_update = self._build_progress_update(
-                        message_type=message.type,
-                        messages_processed=messages_processed,
-                        runtime_handle=message.resume_handle,
+                    tracker = await self._update_and_persist_progress(
+                        tracker, message, messages_processed, tracker.session_id,
                     )
-                    tracker = tracker.with_progress(progress_update)
-                    should_persist_progress = (
-                        message.is_final
-                        or messages_processed % SESSION_PROGRESS_PERSIST_INTERVAL == 0
-                        or progress_update.get("runtime") != previous_runtime
-                    )
-                    if should_persist_progress:
-                        await self._persist_session_progress(
-                            tracker.session_id,
-                            progress_update,
-                        )
 
                     # Update workflow state tracker
                     state_tracker.process_message(
@@ -1448,23 +1475,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                                 start_time=start_time,
                             )
 
-                    previous_runtime = tracker.progress.get("runtime")
-                    progress_update = self._build_progress_update(
-                        message_type=message.type,
-                        messages_processed=messages_processed,
-                        runtime_handle=message.resume_handle,
+                    tracker = await self._update_and_persist_progress(
+                        tracker, message, messages_processed, session_id,
                     )
-                    tracker = tracker.with_progress(progress_update)
-                    should_persist_progress = (
-                        message.is_final
-                        or messages_processed % SESSION_PROGRESS_PERSIST_INTERVAL == 0
-                        or progress_update.get("runtime") != previous_runtime
-                    )
-                    if should_persist_progress:
-                        await self._persist_session_progress(
-                            session_id,
-                            progress_update,
-                        )
 
                     # Update workflow state tracker
                     state_tracker.process_message(
@@ -1579,6 +1592,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                 messages_processed=messages_processed,
                 duration_seconds=duration,
             )
+
+            # Clear the in-memory cancellation flag so it doesn't linger
+            clear_cancellation(session_id)
 
             # Clean up session tracking
             self._unregister_session(tracker.execution_id, session_id)

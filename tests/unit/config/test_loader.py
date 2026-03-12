@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import stat
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -12,12 +13,38 @@ from ouroboros.config.loader import (
     create_default_config,
     credentials_file_secure,
     ensure_config_dir,
+    get_agent_permission_mode,
+    get_agent_runtime_backend,
+    get_assertion_extraction_model,
+    get_atomicity_model,
+    get_clarification_model,
+    get_codex_cli_path,
+    get_consensus_advocate_model,
+    get_consensus_models,
+    get_context_compression_model,
+    get_decomposition_model,
+    get_dependency_analysis_model,
+    get_double_diamond_model,
+    get_llm_backend,
+    get_llm_permission_mode,
+    get_ontology_analysis_model,
+    get_qa_model,
+    get_reflect_model,
+    get_semantic_model,
+    get_wonder_model,
     load_config,
     load_credentials,
 )
 from ouroboros.config.models import (
+    ClarificationConfig,
+    ConsensusConfig,
     CredentialsConfig,
+    EvaluationConfig,
+    ExecutionConfig,
+    LLMConfig,
+    OrchestratorConfig,
     OuroborosConfig,
+    ResilienceConfig,
 )
 from ouroboros.core.errors import ConfigError
 
@@ -323,6 +350,240 @@ class TestConfigExists:
         # This is a conceptual test - in practice we can't easily
         # mock get_config_dir. The function checks for both files.
         pass
+
+
+class TestRuntimeHelperLookups:
+    """Tests for orchestrator runtime helper lookups."""
+
+    def test_get_agent_runtime_backend_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for runtime backend."""
+        monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "codex")
+        assert get_agent_runtime_backend() == "codex"
+
+    def test_get_agent_runtime_backend_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(runtime_backend="codex")
+                ),
+            ),
+        ):
+            assert get_agent_runtime_backend() == "codex"
+
+    def test_get_codex_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for Codex CLI path."""
+        monkeypatch.setenv("OUROBOROS_CODEX_CLI_PATH", "~/bin/codex")
+        assert get_codex_cli_path() == str(Path("~/bin/codex").expanduser())
+
+    def test_get_codex_cli_path_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(codex_cli_path="/tmp/codex")
+                ),
+            ),
+        ):
+            assert get_codex_cli_path() == "/tmp/codex"
+
+    def test_get_agent_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for agent permission mode."""
+        monkeypatch.setenv("OUROBOROS_AGENT_PERMISSION_MODE", "bypassPermissions")
+        assert get_agent_permission_mode() == "bypassPermissions"
+
+    def test_get_agent_permission_mode_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent for agent permissions."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(permission_mode="default")
+                ),
+            ),
+        ):
+            assert get_agent_permission_mode() == "default"
+
+
+class TestLLMHelperLookups:
+    """Tests for LLM backend and model helper lookups."""
+
+    def test_get_llm_backend_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for llm backend."""
+        monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "litellm")
+        assert get_llm_backend() == "litellm"
+
+    def test_get_llm_backend_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    llm=LLMConfig(backend="litellm"),
+                ),
+            ),
+        ):
+            assert get_llm_backend() == "litellm"
+
+    def test_get_llm_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for llm permission mode."""
+        monkeypatch.setenv("OUROBOROS_LLM_PERMISSION_MODE", "acceptEdits")
+        assert get_llm_permission_mode() == "acceptEdits"
+
+    def test_get_llm_permission_mode_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent for llm permissions."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    llm=LLMConfig(permission_mode="bypassPermissions"),
+                ),
+            ),
+        ):
+            assert get_llm_permission_mode() == "bypassPermissions"
+
+    def test_get_clarification_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for clarification model."""
+        monkeypatch.setenv("OUROBOROS_CLARIFICATION_MODEL", "gpt-5")
+        assert get_clarification_model() == "gpt-5"
+
+    def test_get_clarification_model_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    clarification=ClarificationConfig(default_model="gpt-5-mini"),
+                ),
+            ),
+        ):
+            assert get_clarification_model() == "gpt-5-mini"
+
+    def test_codex_backend_uses_default_model_sentinel(self) -> None:
+        """Backend-aware defaults avoid Claude model names for Codex."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                side_effect=ConfigError("missing config"),
+            ),
+        ):
+            assert get_clarification_model(backend="codex") == "default"
+            assert get_wonder_model(backend="codex") == "default"
+            assert get_reflect_model(backend="codex") == "default"
+            assert get_semantic_model(backend="codex") == "default"
+            assert get_assertion_extraction_model(backend="codex") == "default"
+
+    def test_get_qa_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for QA model."""
+        monkeypatch.setenv("OUROBOROS_QA_MODEL", "gpt-5-nano")
+        assert get_qa_model() == "gpt-5-nano"
+
+    def test_get_qa_model_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    llm=LLMConfig(qa_model="gpt-5-nano"),
+                ),
+            ),
+        ):
+            assert get_qa_model() == "gpt-5-nano"
+
+    def test_get_dependency_analysis_model_prefers_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Environment variable overrides config for dependency analysis model."""
+        monkeypatch.setenv("OUROBOROS_DEPENDENCY_ANALYSIS_MODEL", "gpt-5-coder")
+        assert get_dependency_analysis_model() == "gpt-5-coder"
+
+    def test_get_dependency_analysis_model_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    llm=LLMConfig(dependency_analysis_model="gpt-5-coder"),
+                ),
+            ),
+        ):
+            assert get_dependency_analysis_model() == "gpt-5-coder"
+
+    def test_get_semantic_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for semantic evaluation model."""
+        monkeypatch.setenv("OUROBOROS_SEMANTIC_MODEL", "gpt-5")
+        assert get_semantic_model() == "gpt-5"
+
+    def test_get_semantic_model_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    evaluation=EvaluationConfig(semantic_model="gpt-5"),
+                ),
+            ),
+        ):
+            assert get_semantic_model() == "gpt-5"
+
+    def test_extended_model_helpers_fall_back_to_config(self) -> None:
+        """Additional helper lookups use the configured section defaults."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    llm=LLMConfig(
+                        ontology_analysis_model="gpt-5-ontology",
+                        context_compression_model="gpt-5-mini",
+                    ),
+                    execution=ExecutionConfig(
+                        atomicity_model="gpt-5-atomic",
+                        decomposition_model="gpt-5-decompose",
+                        double_diamond_model="gpt-5-diamond",
+                    ),
+                    resilience=ResilienceConfig(
+                        wonder_model="gpt-5-wonder",
+                        reflect_model="gpt-5-reflect",
+                    ),
+                    evaluation=EvaluationConfig(
+                        semantic_model="gpt-5-semantic",
+                        assertion_extraction_model="gpt-5-assert",
+                    ),
+                    consensus=ConsensusConfig(
+                        models=("gpt-5-a", "gpt-5-b", "gpt-5-c"),
+                        advocate_model="gpt-5-advocate",
+                    ),
+                ),
+            ),
+        ):
+            assert get_ontology_analysis_model() == "gpt-5-ontology"
+            assert get_context_compression_model() == "gpt-5-mini"
+            assert get_atomicity_model() == "gpt-5-atomic"
+            assert get_decomposition_model() == "gpt-5-decompose"
+            assert get_double_diamond_model() == "gpt-5-diamond"
+            assert get_wonder_model() == "gpt-5-wonder"
+            assert get_reflect_model() == "gpt-5-reflect"
+            assert get_assertion_extraction_model() == "gpt-5-assert"
+            assert get_consensus_models() == ("gpt-5-a", "gpt-5-b", "gpt-5-c")
+            assert get_consensus_advocate_model() == "gpt-5-advocate"
+
+    def test_consensus_model_list_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Consensus roster can be overridden from a comma-separated env var."""
+        monkeypatch.setenv("OUROBOROS_CONSENSUS_MODELS", "gpt-5-a, gpt-5-b ,gpt-5-c")
+        assert get_consensus_models() == ("gpt-5-a", "gpt-5-b", "gpt-5-c")
 
 
 class TestCredentialsFileSecure:

@@ -13,11 +13,13 @@ The explorer:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
+
+from ouroboros.config import get_clarification_model
 
 if TYPE_CHECKING:
     from ouroboros.providers.base import LLMAdapter
@@ -106,9 +108,6 @@ _TYPE_DEF_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
-_FALLBACK_MODEL = "claude-opus-4-6"
-
-
 @dataclass(frozen=True, slots=True)
 class CodebaseExploreResult:
     """Result of codebase exploration for a single directory.
@@ -149,7 +148,7 @@ class CodebaseExplorer:
     """
 
     llm_adapter: LLMAdapter
-    model: str = _FALLBACK_MODEL
+    model: str = field(default_factory=get_clarification_model)
     max_files_per_scan: int = 200
     max_type_defs: int = 100
 

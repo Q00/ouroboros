@@ -23,7 +23,7 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
-from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message, UsageInfo
 
 # =============================================================================
@@ -320,6 +320,7 @@ class MockClaudeAgentAdapter:
         prompt: str,
         tools: list[str] | None = None,
         system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Simulate Claude Agent execution."""
@@ -328,6 +329,7 @@ class MockClaudeAgentAdapter:
                 "prompt": prompt,
                 "tools": tools,
                 "system_prompt": system_prompt,
+                "resume_handle": resume_handle,
                 "resume_session_id": resume_session_id,
             }
         )

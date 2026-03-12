@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "ouroboros": {
-      "command": "uvx",
-      "args": ["--python", "3.14", "--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
+      "command": "uv",
+      "args": ["run", "--directory", "/Users/jaegyu.lee/Project/ouroboros", "ouroboros", "mcp", "serve"],
+      "env": {
+        "OUROBOROS_AGENT_RUNTIME": "codex",
+        "OUROBOROS_LLM_BACKEND": "codex"
+      }
     }
   }
 }
