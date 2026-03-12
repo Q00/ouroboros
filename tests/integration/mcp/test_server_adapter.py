@@ -581,6 +581,30 @@ class TestCreateOuroborosServer:
         with pytest.raises(ValueError, match="Invalid MCP server profile"):
             create_ouroboros_server(profile="desktop_safe_typo")  # type: ignore[arg-type]
 
+    def test_invalid_profile_does_not_create_default_state_dir(self, tmp_path) -> None:
+        """Invalid profiles should fail before creating the default interview state directory."""
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+
+        with (
+            patch("pathlib.Path.home", return_value=fake_home),
+            pytest.raises(ValueError, match="Invalid MCP server profile"),
+        ):
+            create_ouroboros_server(profile="desktop_safe_typo")  # type: ignore[arg-type]
+
+        assert not (fake_home / ".ouroboros" / "data").exists()
+
+    def test_desktop_safe_profile_does_not_create_default_state_dir(self, tmp_path) -> None:
+        """Desktop-safe startup should avoid creating the interview state directory."""
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+
+        with patch("pathlib.Path.home", return_value=fake_home):
+            server = create_ouroboros_server(profile="desktop-safe")
+
+        assert server.info.name == "ouroboros-mcp"
+        assert not (fake_home / ".ouroboros" / "data").exists()
+
 
 class TestMCPServerAdapterConcurrency:
     """Test MCPServerAdapter concurrent operations."""

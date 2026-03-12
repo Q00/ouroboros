@@ -276,13 +276,22 @@ def serve(
         raise typer.Exit(1) from e
     except OSError as e:
         print_error(f"MCP Server failed to start: {e}")
-        print_info(
-            "If this keeps happening, try:\n"
-            "  1. Check if another MCP server is running: cat ~/.ouroboros/mcp-server.pid\n"
-            "  2. Kill stale process: kill $(cat ~/.ouroboros/mcp-server.pid)\n"
-            "  3. Remove stale PID: rm ~/.ouroboros/mcp-server.pid\n"
-            "  4. Restart Claude Code"
-        )
+        if os.name == "nt":
+            print_info(
+                "If this keeps happening, try:\n"
+                "  1. Check if another MCP server is running: Get-Content $HOME/.ouroboros/mcp-server.pid\n"
+                "  2. Stop stale process: Stop-Process -Id (Get-Content $HOME/.ouroboros/mcp-server.pid)\n"
+                "  3. Remove stale PID: Remove-Item $HOME/.ouroboros/mcp-server.pid\n"
+                "  4. Restart Codex/Claude Desktop"
+            )
+        else:
+            print_info(
+                "If this keeps happening, try:\n"
+                "  1. Check if another MCP server is running: cat ~/.ouroboros/mcp-server.pid\n"
+                "  2. Kill stale process: kill $(cat ~/.ouroboros/mcp-server.pid)\n"
+                "  3. Remove stale PID: rm ~/.ouroboros/mcp-server.pid\n"
+                "  4. Restart Claude Code"
+            )
         raise typer.Exit(1) from e
 
 

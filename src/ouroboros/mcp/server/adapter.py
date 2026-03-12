@@ -587,18 +587,14 @@ def create_ouroboros_server(
     # max_turns=1 prevented multi-turn tool use (codebase exploration).
     # bypassPermissions is safe here: only read-only tools (Read/Glob/Grep)
     # are used for interview question generation and brownfield exploration.
-    # Create or use provided EventStore
+    effective_profile, profile_warnings = _resolve_server_profile(profile)
+
+    # Create or use provided EventStore after validating profile so invalid
+    # values fail fast without side effects.
     if event_store is None:
         from ouroboros.persistence.event_store import EventStore
 
         event_store = EventStore()
-
-    # Create state directory for interviews
-    if state_dir is None:
-        state_dir = Path.home() / ".ouroboros" / "data"
-        state_dir.mkdir(parents=True, exist_ok=True)
-
-    effective_profile, profile_warnings = _resolve_server_profile(profile)
 
     if effective_profile == "desktop-safe":
         registry = ToolRegistry()
@@ -661,6 +657,11 @@ def create_ouroboros_server(
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
     )
+
+    # Create state directory for interviews only for the full profile.
+    if state_dir is None:
+        state_dir = Path.home() / ".ouroboros" / "data"
+        state_dir.mkdir(parents=True, exist_ok=True)
 
     llm_adapter = ClaudeAgentAdapter(permission_mode="bypassPermissions")
 
