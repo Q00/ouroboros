@@ -420,25 +420,241 @@ def workflow(
             console.print("[muted]Debug mode enabled[/]")
 
 
+async def _get_session_store() -> tuple[Any, Any] | None:
+    """Initialize EventStore and SessionRepository from default DB path.
+
+    Returns:
+        Tuple of (event_store, session_repo) or None if DB doesn't exist.
+    """
+    import os
+
+    from ouroboros.orchestrator.session import SessionRepository
+    from ouroboros.persistence.event_store import EventStore
+
+    db_path = os.path.expanduser("~/.ouroboros/ouroboros.db")
+    if not os.path.exists(db_path):
+        return None
+
+    event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+    await event_store.initialize()
+    repo = SessionRepository(event_store)
+    return event_store, repo
+
+
+async def _find_latest_resumable_session() -> tuple[str, str] | None:
+    """Find the latest PAUSED or RUNNING session.
+
+    Returns:
+        Tuple of (session_id, status) or None if no resumable session found.
+    """
+    from ouroboros.orchestrator.session import SessionStatus
+
+    stores = await _get_session_store()
+    if stores is None:
+        return None
+
+    event_store, repo = stores
+
+    try:
+        start_events = await event_store.get_all_sessions()
+    except Exception:
+        return None
+
+    # start_events are ordered by timestamp desc, so iterate in order
+    for start_event in start_events:
+        sid = start_event.aggregate_id
+        result = await repo.reconstruct_session(sid)
+        if result.is_err:
+            continue
+        tracker = result.value
+        if tracker.status in (SessionStatus.PAUSED, SessionStatus.RUNNING):
+            return (sid, tracker.status.value)
+
+    return None
+
+
+async def _list_sessions(interrupted_only: bool = False) -> None:
+    """List sessions with their status."""
+    from rich.table import Table
+
+    from ouroboros.orchestrator.session import SessionStatus
+
+    stores = await _get_session_store()
+    if stores is None:
+        print_warning("No session database found. Run a workflow first.")
+        return
+
+    event_store, repo = stores
+
+    try:
+        start_events = await event_store.get_all_sessions()
+    except Exception as e:
+        print_error(f"Failed to read sessions: {e}")
+        return
+
+    if not start_events:
+        print_info("No sessions found.")
+        return
+
+    # Build table
+    table = Table(title="Ouroboros Sessions")
+    table.add_column("Session ID", style="cyan", no_wrap=True)
+    table.add_column("Status", style="bold")
+    table.add_column("Messages", justify="right")
+    table.add_column("Started", style="dim")
+    table.add_column("Goal", max_width=40)
+
+    status_style = {
+        SessionStatus.RUNNING: "[yellow]RUNNING[/yellow]",
+        SessionStatus.PAUSED: "[yellow]PAUSED[/yellow]",
+        SessionStatus.COMPLETED: "[green]COMPLETED[/green]",
+        SessionStatus.FAILED: "[red]FAILED[/red]",
+        SessionStatus.CANCELLED: "[dim]CANCELLED[/dim]",
+    }
+
+    row_count = 0
+    for start_event in start_events:
+        sid = start_event.aggregate_id
+        result = await repo.reconstruct_session(sid)
+        if result.is_err:
+            continue
+        tracker = result.value
+
+        if interrupted_only and tracker.status not in (
+            SessionStatus.PAUSED,
+            SessionStatus.RUNNING,
+        ):
+            continue
+
+        goal = start_event.data.get("seed_goal", "")[:40]
+
+        table.add_row(
+            sid,
+            status_style.get(tracker.status, tracker.status.value),
+            str(tracker.messages_processed),
+            tracker.start_time.strftime("%Y-%m-%d %H:%M"),
+            goal,
+        )
+        row_count += 1
+
+    if row_count == 0:
+        if interrupted_only:
+            print_info("No interrupted sessions found.")
+        else:
+            print_info("No sessions found.")
+        return
+
+    console.print(table)
+
+
 @app.command()
 def resume(
-    execution_id: Annotated[
+    seed_file: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to the seed YAML file.",
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    session_id: Annotated[
         str | None,
-        typer.Argument(help="Execution ID to resume. Uses latest if not specified."),
+        typer.Option(
+            "--session", "-s",
+            help="Session ID to resume. Uses latest paused/running if not specified.",
+        ),
+    ] = None,
+    mcp_config: Annotated[
+        Path | None,
+        typer.Option(
+            "--mcp-config",
+            help="Path to MCP client configuration YAML file.",
+        ),
+    ] = None,
+    mcp_tool_prefix: Annotated[
+        str,
+        typer.Option(
+            "--mcp-tool-prefix",
+            help="Prefix to add to all MCP tool names.",
+        ),
+    ] = "",
+    debug: Annotated[
+        bool,
+        typer.Option("--debug", "-d", help="Show logs and agent thinking."),
+    ] = False,
+    no_qa: Annotated[
+        bool,
+        typer.Option("--no-qa", help="Skip post-execution QA."),
+    ] = False,
+    runtime: Annotated[
+        AgentRuntimeBackend | None,
+        typer.Option(
+            "--runtime",
+            help="Agent runtime backend (claude or codex).",
+            case_sensitive=False,
+        ),
     ] = None,
 ) -> None:
-    """Resume a paused or failed execution.
+    """Resume a paused or interrupted execution.
 
-    If no execution ID is provided, resumes the most recent execution.
+    Requires the original seed file. If no session ID is provided,
+    resumes the most recent paused or running session.
 
-    Note: For orchestrator sessions, use:
-        ouroboros run workflow --orchestrator --resume <session_id> seed.yaml
+    Examples:
+
+        # Resume latest interrupted session
+        ouroboros run resume seed.yaml
+
+        # Resume a specific session
+        ouroboros run resume seed.yaml --session orch_abc123
     """
-    # Placeholder implementation
-    if execution_id:
-        print_info(f"Would resume execution: {execution_id}")
-    else:
-        print_info("Would resume most recent execution")
+    if session_id is None:
+        # Find latest resumable session
+        found = asyncio.run(_find_latest_resumable_session())
+        if found is None:
+            print_error("No resumable sessions found. Use 'ouroboros run list --interrupted' to check.")
+            raise typer.Exit(1)
+        session_id, status = found
+        print_info(f"Found {status} session: {session_id}")
+
+    asyncio.run(
+        _run_orchestrator(
+            seed_file,
+            resume_session=session_id,
+            mcp_config=mcp_config,
+            mcp_tool_prefix=mcp_tool_prefix,
+            debug=debug,
+            no_qa=no_qa,
+            runtime_backend=runtime.value if runtime else None,
+        )
+    )
+
+
+@app.command(name="list")
+def list_sessions(
+    interrupted: Annotated[
+        bool,
+        typer.Option(
+            "--interrupted", "-i",
+            help="Show only paused/running (interrupted) sessions.",
+        ),
+    ] = False,
+) -> None:
+    """List workflow sessions.
+
+    Shows all sessions with their status, message count, and start date.
+
+    Examples:
+
+        # List all sessions
+        ouroboros run list
+
+        # Show only interrupted sessions
+        ouroboros run list --interrupted
+    """
+    asyncio.run(_list_sessions(interrupted_only=interrupted))
 
 
 __all__ = ["app"]

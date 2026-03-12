@@ -240,8 +240,12 @@ class TestShorthandCommands:
 
     def test_run_resume_subcommand_still_works(self) -> None:
         """Test backward compat: 'ouroboros run resume' still works."""
+        # resume now requires seed_file argument, so bare invocation exits with 2
         result = runner.invoke(app, ["run", "resume"])
-        assert result.exit_code == 0
+        assert result.exit_code == 2  # missing required argument
+        # But the help should be accessible
+        result_help = runner.invoke(app, ["run", "resume", "--help"])
+        assert result_help.exit_code == 0
 
     def test_init_shorthand_falls_back_to_start(self) -> None:
         """Test that 'ouroboros init <context>' routes to 'ouroboros init start <context>'."""

@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -391,6 +392,48 @@ class OrchestratorRunner:
             return RuntimeHandle(backend=legacy_backend, native_session_id=legacy_session_id)
 
         return None
+
+    async def _reconstruct_ac_state(
+        self,
+        session_id: str,
+    ) -> list[int]:
+        """Reconstruct which ACs were completed by replaying workflow progress events.
+
+        Scans workflow.progress.updated events for the session and extracts
+        the last AC status snapshot to determine completed AC indices.
+
+        Args:
+            session_id: Session to reconstruct AC state for.
+
+        Returns:
+            List of 1-based indices of completed ACs.
+        """
+        try:
+            events = await self._event_store.replay("session", session_id)
+        except Exception:
+            log.warning(
+                "orchestrator.runner.ac_reconstruct_failed",
+                session_id=session_id,
+            )
+            return []
+
+        # Find the last workflow progress event with AC data
+        last_ac_snapshot: list[dict[str, Any]] = []
+        for event in reversed(events):
+            if event.type == "workflow.progress.updated":
+                ac_data = event.data.get("acceptance_criteria")
+                if isinstance(ac_data, list) and ac_data:
+                    last_ac_snapshot = ac_data
+                    break
+
+        completed_indices: list[int] = []
+        for ac in last_ac_snapshot:
+            if isinstance(ac, dict) and ac.get("status") == "completed":
+                index = ac.get("index")
+                if isinstance(index, int):
+                    completed_indices.append(index)
+
+        return completed_indices
 
     def _build_progress_update(
         self,
@@ -1099,6 +1142,39 @@ class OrchestratorRunner:
                 )
             )
 
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            log.info(
+                "orchestrator.runner.execute_interrupted",
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                messages_processed=messages_processed,
+            )
+
+            # Mark session as PAUSED so it can be resumed
+            await self._session_repo.mark_paused(
+                tracker.session_id,
+                reason="Interrupted by user (Ctrl+C)",
+                messages_processed=messages_processed,
+            )
+
+            # Clean up session tracking
+            self._unregister_session(exec_id, tracker.session_id)
+
+            # Display resume hint
+            self._console.print(
+                Panel(
+                    Text(
+                        f"Session paused. Resume with:\n"
+                        f"  ouroboros run resume <seed_file> --session {tracker.session_id}",
+                        style="yellow",
+                    ),
+                    title="[yellow]Execution Paused[/yellow]",
+                    border_style="yellow",
+                )
+            )
+
+            raise
+
         except Exception as e:
             log.exception(
                 "orchestrator.runner.execute_failed",
@@ -1406,19 +1482,45 @@ class OrchestratorRunner:
         # Register session for cancellation tracking
         self._register_session(tracker.execution_id, session_id)
 
+        # Reconstruct which ACs were completed before interruption
+        completed_ac_indices = await self._reconstruct_ac_state(session_id)
+
+        completed_info = (
+            f", {len(completed_ac_indices)}/{len(seed.acceptance_criteria)} ACs completed"
+            if completed_ac_indices
+            else ""
+        )
         self._console.print(
             f"[cyan]Resuming session {session_id}[/cyan]\n"
-            f"[dim]Previously processed: {tracker.messages_processed} messages[/dim]"
+            f"[dim]Previously processed: {tracker.messages_processed} messages{completed_info}[/dim]"
         )
 
-        # Build resume prompt
+        # Build resume prompt with AC progress context
         system_prompt = build_system_prompt(seed)
-        resume_prompt = f"""Continue executing the task from where you left off.
+        task_prompt_str = build_task_prompt(seed)
 
-{build_task_prompt(seed)}
-
-Note: This is a resumed session. Please continue from where execution was interrupted.
-"""
+        if completed_ac_indices:
+            completed_list = ", ".join(f"AC #{i}" for i in sorted(completed_ac_indices))
+            remaining = [
+                f"AC #{i + 1}: {ac}"
+                for i, ac in enumerate(seed.acceptance_criteria)
+                if (i + 1) not in completed_ac_indices
+            ]
+            remaining_str = "\n".join(remaining) if remaining else "All ACs completed."
+            resume_prompt = (
+                f"Continue executing the task from where you left off.\n\n"
+                f"{task_prompt_str}\n\n"
+                f"RESUME CONTEXT: The following ACs were already completed before "
+                f"interruption: {completed_list}.\n"
+                f"Do NOT redo them. Focus on the remaining ACs:\n{remaining_str}\n"
+            )
+        else:
+            resume_prompt = (
+                f"Continue executing the task from where you left off.\n\n"
+                f"{task_prompt_str}\n\n"
+                f"Note: This is a resumed session. Please continue from where "
+                f"execution was interrupted.\n"
+            )
 
         # Get runtime resume state if stored
         runtime_handle = self._deserialize_runtime_handle(tracker.progress)
@@ -1444,6 +1546,12 @@ Note: This is a resumed session. Please continue from where execution was interr
             session_id=session_id,
             activity_map=resume_strategy.get_activity_map(),
         )
+
+        # Pre-mark completed ACs so the progress display starts correctly
+        for ac_idx in completed_ac_indices:
+            for ac in state_tracker.state.acceptance_criteria:
+                if ac.index == ac_idx:
+                    ac.complete()
 
         try:
             # Use simple status spinner with log-style output for changes
@@ -1610,6 +1718,38 @@ Note: This is a resumed session. Please continue from where execution was interr
                     duration_seconds=duration,
                 )
             )
+
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            log.info(
+                "orchestrator.runner.resume_interrupted",
+                session_id=session_id,
+                messages_processed=messages_processed,
+            )
+
+            # Mark session as PAUSED so it can be resumed again
+            await self._session_repo.mark_paused(
+                session_id,
+                reason="Interrupted by user (Ctrl+C) during resume",
+                messages_processed=messages_processed,
+            )
+
+            # Clean up session tracking
+            self._unregister_session(tracker.execution_id, session_id)
+
+            # Display resume hint
+            self._console.print(
+                Panel(
+                    Text(
+                        f"Resumed session paused again. Resume with:\n"
+                        f"  ouroboros run resume <seed_file> --session {session_id}",
+                        style="yellow",
+                    ),
+                    title="[yellow]Execution Paused[/yellow]",
+                    border_style="yellow",
+                )
+            )
+
+            raise
 
         except Exception as e:
             log.exception(
