@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import yaml
 
+from ouroboros.codex import resolve_packaged_codex_skill_path
 from ouroboros.core.types import Result
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
@@ -89,10 +90,12 @@ async def test_packaged_ooo_prefixes_dispatch_from_skill_frontmatter(
     )
     assert isinstance(runtime, CodexCliRuntime)
 
-    skill_md_path = runtime._skills_dir / skill_name / "SKILL.md"
-    assert skill_md_path.is_file()
+    with resolve_packaged_codex_skill_path(
+        skill_name, skills_dir=runtime._skills_dir
+    ) as skill_md_path:
+        assert skill_md_path.is_file()
 
-    frontmatter = _load_skill_frontmatter(skill_md_path)
+        frontmatter = _load_skill_frontmatter(skill_md_path)
     expected_tool = frontmatter["mcp_tool"]
     expected_args = _resolve_frontmatter_args(
         frontmatter["mcp_args"],
@@ -122,7 +125,9 @@ async def test_packaged_ooo_prefixes_dispatch_from_skill_frontmatter(
             "ouroboros.mcp.server.adapter.create_ouroboros_server",
             return_value=fake_server,
         ),
-        patch("ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec") as mock_exec,
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec"
+        ) as mock_exec,
     ):
         messages = [message async for message in runtime.execute_task(prompt)]
 

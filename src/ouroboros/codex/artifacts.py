@@ -170,6 +170,26 @@ def _packaged_codex_skills_dir(*, skills_dir: str | Path | None = None) -> Itera
 
 
 @contextmanager
+def resolve_packaged_codex_skill_path(
+    skill_name: str,
+    *,
+    skills_dir: str | Path | None = None,
+) -> Iterator[Path]:
+    """Resolve the packaged ``SKILL.md`` entrypoint for one Codex skill."""
+    normalized_skill_name = skill_name.strip()
+    if not normalized_skill_name:
+        msg = "skill_name must be a non-empty string"
+        raise ValueError(msg)
+
+    with _packaged_codex_skills_dir(skills_dir=skills_dir) as source_root:
+        skill_md_path = source_root / normalized_skill_name / _SKILL_ENTRYPOINT
+        if not skill_md_path.is_file():
+            msg = f"Packaged Ouroboros skill could not be located: {normalized_skill_name}"
+            raise FileNotFoundError(msg)
+        yield skill_md_path
+
+
+@contextmanager
 def _packaged_codex_rules(
     *,
     rules_path: str | Path | None = None,
@@ -256,6 +276,19 @@ def load_packaged_codex_rules() -> str:
     """Load the packaged Codex rules markdown."""
     with _packaged_codex_rules_path() as resolved_rules_path:
         return resolved_rules_path.read_text(encoding="utf-8")
+
+
+def load_packaged_codex_skill(
+    skill_name: str,
+    *,
+    skills_dir: str | Path | None = None,
+) -> str:
+    """Load the packaged ``SKILL.md`` markdown for one Codex skill."""
+    with resolve_packaged_codex_skill_path(
+        skill_name,
+        skills_dir=skills_dir,
+    ) as resolved_skill_path:
+        return resolved_skill_path.read_text(encoding="utf-8")
 
 
 def _remove_installed_artifact(path: Path) -> None:
@@ -365,6 +398,8 @@ __all__ = [
     "CODEX_SKILL_NAMESPACE",
     "install_codex_rules",
     "install_codex_skills",
+    "load_packaged_codex_skill",
     "load_packaged_codex_rules",
     "resolve_packaged_codex_assets",
+    "resolve_packaged_codex_skill_path",
 ]

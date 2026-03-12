@@ -8,8 +8,10 @@ from ouroboros.codex.artifacts import (
     CodexPackagedSkill,
     install_codex_rules,
     install_codex_skills,
+    load_packaged_codex_skill,
     load_packaged_codex_rules,
     resolve_packaged_codex_assets,
+    resolve_packaged_codex_skill_path,
 )
 
 __all__ = [
@@ -20,6 +22,8 @@ __all__ = [
     "CODEX_SKILL_NAMESPACE",
     "install_codex_rules",
     "install_codex_skills",
+    "load_packaged_codex_skill",
     "load_packaged_codex_rules",
     "resolve_packaged_codex_assets",
+    "resolve_packaged_codex_skill_path",
 ]

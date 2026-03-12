@@ -734,7 +734,7 @@ class GenerateSeedHandler:
             )
             interview_engine = self.interview_engine or InterviewEngine(
                 llm_adapter=llm_adapter,
-                model=get_clarification_model(),
+                model=get_clarification_model(self.llm_backend),
             )
 
             # Load interview state
@@ -790,7 +790,7 @@ class GenerateSeedHandler:
             # Use injected or create seed generator
             generator = self.seed_generator or SeedGenerator(
                 llm_adapter=llm_adapter,
-                model=get_clarification_model(),
+                model=get_clarification_model(self.llm_backend),
             )
 
             # Generate seed
@@ -1146,7 +1146,7 @@ class InterviewHandler:
         engine = self.interview_engine or InterviewEngine(
             llm_adapter=llm_adapter,
             state_dir=Path.home() / ".ouroboros" / "data",
-            model=get_clarification_model(),
+            model=get_clarification_model(self.llm_backend),
         )
 
         _interview_id: str | None = None  # Track for error event emission
@@ -1589,7 +1589,7 @@ class EvaluateHandler:
             mechanical_config = build_mechanical_config(working_dir)
             config = PipelineConfig(
                 mechanical=mechanical_config,
-                semantic=SemanticConfig(model=get_semantic_model()),
+                semantic=SemanticConfig(model=get_semantic_model(self.llm_backend)),
             )
             pipeline = EvaluationPipeline(llm_adapter, config)
             result = await pipeline.evaluate(context)

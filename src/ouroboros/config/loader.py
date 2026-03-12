@@ -489,6 +489,46 @@ def _default_models_for_backend(
     return tuple(_default_model_for_backend(model, backend=backend) for model in default_models)
 
 
+def _normalize_configured_model_for_backend(
+    configured_model: str,
+    *,
+    default_model: str,
+    backend: str | None = None,
+) -> str:
+    """Normalize config-backed models while preserving backend-safe defaults."""
+    candidate = configured_model.strip()
+    if not candidate:
+        return _default_model_for_backend(default_model, backend=backend)
+
+    if (
+        _resolve_llm_backend_for_models(backend) in _CODEX_LLM_BACKENDS
+        and candidate == default_model
+    ):
+        return _CODEX_DEFAULT_MODEL
+
+    return candidate
+
+
+def _normalize_configured_models_for_backend(
+    configured_models: tuple[str, ...] | list[str],
+    *,
+    default_models: tuple[str, ...],
+    backend: str | None = None,
+) -> tuple[str, ...]:
+    """Normalize config-backed model rosters while preserving explicit overrides."""
+    normalized = tuple(model.strip() for model in configured_models if model.strip())
+    if not normalized:
+        return _default_models_for_backend(default_models, backend=backend)
+
+    if (
+        _resolve_llm_backend_for_models(backend) in _CODEX_LLM_BACKENDS
+        and normalized == default_models
+    ):
+        return _default_models_for_backend(default_models, backend=backend)
+
+    return normalized
+
+
 def _parse_model_list(value: str) -> tuple[str, ...]:
     """Parse a comma-separated model list from an environment variable."""
     return tuple(part.strip() for part in value.split(",") if part.strip())
@@ -502,7 +542,11 @@ def get_clarification_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.clarification.default_model
+        return _normalize_configured_model_for_backend(
+            config.clarification.default_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -515,7 +559,11 @@ def get_qa_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.llm.qa_model
+        return _normalize_configured_model_for_backend(
+            config.llm.qa_model,
+            default_model="claude-sonnet-4-20250514",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-sonnet-4-20250514", backend=backend)
 
@@ -528,7 +576,11 @@ def get_dependency_analysis_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.llm.dependency_analysis_model
+        return _normalize_configured_model_for_backend(
+            config.llm.dependency_analysis_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -541,7 +593,11 @@ def get_ontology_analysis_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.llm.ontology_analysis_model
+        return _normalize_configured_model_for_backend(
+            config.llm.ontology_analysis_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -554,7 +610,11 @@ def get_context_compression_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.llm.context_compression_model
+        return _normalize_configured_model_for_backend(
+            config.llm.context_compression_model,
+            default_model="gpt-4",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("gpt-4", backend=backend)
 
@@ -567,7 +627,11 @@ def get_atomicity_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.execution.atomicity_model
+        return _normalize_configured_model_for_backend(
+            config.execution.atomicity_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -580,7 +644,11 @@ def get_decomposition_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.execution.decomposition_model
+        return _normalize_configured_model_for_backend(
+            config.execution.decomposition_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -593,7 +661,11 @@ def get_double_diamond_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.execution.double_diamond_model
+        return _normalize_configured_model_for_backend(
+            config.execution.double_diamond_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -606,7 +678,11 @@ def get_wonder_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.resilience.wonder_model
+        return _normalize_configured_model_for_backend(
+            config.resilience.wonder_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -619,7 +695,11 @@ def get_reflect_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.resilience.reflect_model
+        return _normalize_configured_model_for_backend(
+            config.resilience.reflect_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -632,7 +712,11 @@ def get_semantic_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.evaluation.semantic_model
+        return _normalize_configured_model_for_backend(
+            config.evaluation.semantic_model,
+            default_model="claude-opus-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-opus-4-6", backend=backend)
 
@@ -645,7 +729,11 @@ def get_assertion_extraction_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.evaluation.assertion_extraction_model
+        return _normalize_configured_model_for_backend(
+            config.evaluation.assertion_extraction_model,
+            default_model="claude-sonnet-4-6",
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
@@ -661,7 +749,11 @@ def get_consensus_models(backend: str | None = None) -> tuple[str, ...]:
     try:
         config = load_config()
         if config.consensus.models:
-            return config.consensus.models
+            return _normalize_configured_models_for_backend(
+                config.consensus.models,
+                default_models=_DEFAULT_CONSENSUS_MODELS,
+                backend=backend,
+            )
     except ConfigError:
         pass
 
@@ -676,7 +768,11 @@ def get_consensus_advocate_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.consensus.advocate_model
+        return _normalize_configured_model_for_backend(
+            config.consensus.advocate_model,
+            default_model=_DEFAULT_CONSENSUS_ADVOCATE_MODEL,
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend(_DEFAULT_CONSENSUS_ADVOCATE_MODEL, backend=backend)
 
@@ -689,7 +785,11 @@ def get_consensus_devil_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.consensus.devil_model
+        return _normalize_configured_model_for_backend(
+            config.consensus.devil_model,
+            default_model=_DEFAULT_CONSENSUS_DEVIL_MODEL,
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend(_DEFAULT_CONSENSUS_DEVIL_MODEL, backend=backend)
 
@@ -702,6 +802,10 @@ def get_consensus_judge_model(backend: str | None = None) -> str:
 
     try:
         config = load_config()
-        return config.consensus.judge_model
+        return _normalize_configured_model_for_backend(
+            config.consensus.judge_model,
+            default_model=_DEFAULT_CONSENSUS_JUDGE_MODEL,
+            backend=backend,
+        )
     except ConfigError:
         return _default_model_for_backend(_DEFAULT_CONSENSUS_JUDGE_MODEL, backend=backend)

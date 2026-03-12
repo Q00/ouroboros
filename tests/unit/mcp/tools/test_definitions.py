@@ -1,7 +1,7 @@
 """Tests for Ouroboros tool definitions."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.definitions import (
@@ -403,6 +403,121 @@ class TestOuroborosTools:
 
         assert mock_create_adapter.call_args.kwargs["backend"] == "codex"
         assert mock_create_adapter.call_args.kwargs["use_case"] == "interview"
+
+    async def test_generate_seed_handler_passes_llm_backend_to_model_lookup(self) -> None:
+        """GenerateSeedHandler should resolve model defaults with the active LLM backend."""
+        handler = GenerateSeedHandler(llm_backend="codex")
+        mock_adapter = MagicMock()
+        mock_interview_engine = MagicMock()
+        mock_interview_engine.load_state = AsyncMock(return_value=Result.ok(MagicMock()))
+        mock_seed_generator = MagicMock()
+        mock_seed_generator.generate = AsyncMock(return_value=Result.err(RuntimeError("boom")))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_llm_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.InterviewEngine",
+                return_value=mock_interview_engine,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.SeedGenerator",
+                return_value=mock_seed_generator,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.get_clarification_model",
+                return_value="default",
+            ) as mock_get_model,
+        ):
+            await handler.handle({"session_id": "sess-123", "ambiguity_score": 0.1})
+
+        assert mock_get_model.call_args_list == [call("codex"), call("codex")]
+
+    async def test_evaluate_handler_passes_llm_backend_to_semantic_model_lookup(self) -> None:
+        """EvaluateHandler should derive semantic model defaults from the active backend."""
+        handler = EvaluateHandler(llm_backend="codex")
+        mock_adapter = MagicMock()
+        mock_pipeline = MagicMock()
+        mock_pipeline.evaluate = AsyncMock(return_value=Result.err(RuntimeError("semantic failed")))
+        seed_content = """\
+goal: Test task
+constraints: []
+acceptance_criteria:
+  - Pass
+ontology_schema:
+  name: Test
+  description: Test
+  fields: []
+evaluation_principles: []
+exit_conditions: []
+metadata:
+  seed_id: seed-123
+  version: "1.0.0"
+  created_at: "2024-01-01T00:00:00Z"
+  ambiguity_score: 0.1
+  interview_id: null
+"""
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_llm_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.get_semantic_model",
+                return_value="default",
+            ) as mock_get_model,
+            patch(
+                "ouroboros.evaluation.build_mechanical_config",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "ouroboros.evaluation.EvaluationPipeline",
+                return_value=mock_pipeline,
+            ),
+        ):
+            await handler.handle(
+                {
+                    "session_id": "sess-123",
+                    "artifact": "print('hi')",
+                    "artifact_type": "code",
+                    "seed_content": seed_content,
+                }
+            )
+
+        mock_get_model.assert_called_once_with("codex")
+
+    async def test_qa_handler_passes_llm_backend_to_qa_model_lookup(self) -> None:
+        """QAHandler should derive QA model defaults from the active backend."""
+        handler = QAHandler(llm_backend="codex")
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.err(RuntimeError("llm failed")))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.qa.create_llm_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "ouroboros.mcp.tools.qa.get_qa_model",
+                return_value="default",
+            ) as mock_get_model,
+            patch(
+                "ouroboros.mcp.tools.qa._get_qa_system_prompt",
+                return_value="judge",
+            ),
+        ):
+            await handler.handle(
+                {
+                    "artifact": "print('hi')",
+                    "quality_bar": "code should compile",
+                    "artifact_type": "code",
+                }
+            )
+
+        mock_get_model.assert_called_once_with("codex")
 
 
 VALID_SEED_YAML = """\

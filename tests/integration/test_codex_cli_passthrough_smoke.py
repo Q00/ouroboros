@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.codex import resolve_packaged_codex_skill_path
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.runtime_factory import create_agent_runtime
 
@@ -63,7 +64,8 @@ async def test_unhandled_ooo_commands_pass_through_to_codex_unchanged(
 
     assert isinstance(runtime, CodexCliRuntime)
     assert runtime._skill_dispatcher is not None
-    assert (runtime._skills_dir / "help" / "SKILL.md").is_file()
+    with resolve_packaged_codex_skill_path("help", skills_dir=runtime._skills_dir) as skill_md_path:
+        assert skill_md_path.is_file()
 
     async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
         assert kwargs["cwd"] == str(tmp_path)

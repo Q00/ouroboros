@@ -45,6 +45,11 @@ build-backend = "hatchling.build"
 [tool.hatch.version]
 path = "src/ouroboros/__init__.py"
 
+[tool.hatch.build]
+exclude = [
+    "/.smoke-home",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ouroboros"]
 

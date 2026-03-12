@@ -442,7 +442,7 @@ class QAHandler:
                 max_turns=1,
             )
             config = CompletionConfig(
-                model=get_qa_model(),
+                model=get_qa_model(self.llm_backend),
                 temperature=0.2,
                 max_tokens=2048,
                 response_format={"type": "json_schema", "json_schema": QA_VERDICT_SCHEMA},

@@ -11,8 +11,10 @@ from ouroboros.codex.artifacts import (
     CodexPackagedAssets,
     install_codex_rules,
     install_codex_skills,
+    load_packaged_codex_skill,
     load_packaged_codex_rules,
     resolve_packaged_codex_assets,
+    resolve_packaged_codex_skill_path,
 )
 
 
@@ -105,6 +107,45 @@ class TestInstallCodexRules:
         )
         assert not stale_namespaced_rule.exists()
         assert unrelated_rule.read_text(encoding="utf-8") == "keep me"
+
+
+class TestLoadPackagedCodexSkills:
+    """Test packaged Codex skill entrypoint resolution helpers."""
+
+    @staticmethod
+    def _write_skill(skills_dir: Path, skill_name: str, *, body: str = "# Skill\n") -> Path:
+        skill_dir = skills_dir / skill_name
+        skill_dir.mkdir(parents=True)
+        skill_md_path = skill_dir / "SKILL.md"
+        skill_md_path.write_text(body, encoding="utf-8")
+        return skill_md_path
+
+    def test_loads_explicit_packaged_skill_markdown(self, tmp_path: Path) -> None:
+        """Explicit skill bundles should expose the packaged SKILL.md contents."""
+        packaged_skills_dir = tmp_path / "packaged-skills"
+        skill_md_path = self._write_skill(
+            packaged_skills_dir,
+            "interview",
+            body="---\nname: interview\n---\n",
+        )
+
+        assert load_packaged_codex_skill(
+            "interview", skills_dir=packaged_skills_dir
+        ) == skill_md_path.read_text(encoding="utf-8")
+
+    def test_resolves_repo_packaged_skill_path_by_default(self) -> None:
+        """Default skill lookup should resolve the packaged Codex skill bundle."""
+        with resolve_packaged_codex_skill_path("run") as skill_md_path:
+            assert skill_md_path.name == "SKILL.md"
+            assert skill_md_path.read_text(encoding="utf-8").startswith("---\nname: run\n")
+
+    def test_raises_when_explicit_packaged_skill_is_missing(self, tmp_path: Path) -> None:
+        """Missing skill entrypoints should fail fast."""
+        packaged_skills_dir = tmp_path / "packaged-skills"
+        packaged_skills_dir.mkdir(parents=True)
+
+        with pytest.raises(FileNotFoundError, match="missing"):
+            load_packaged_codex_skill("missing", skills_dir=packaged_skills_dir)
 
 
 class TestInstallCodexSkills:
@@ -553,9 +594,9 @@ class TestCodexAssetSyncSmoke:
             Path("skills") / f"{CODEX_SKILL_NAMESPACE}setup",
         )
         assert all((codex_dir / path).exists() for path in assets.managed_relative_install_paths)
-        assert (
-            codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run" / "notes.txt"
-        ).read_text(encoding="utf-8") == "seed path support"
+        assert (codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run" / "notes.txt").read_text(
+            encoding="utf-8"
+        ) == "seed path support"
         assert stale_rule.read_text(encoding="utf-8") == "keep during setup"
         assert stale_skill.joinpath("SKILL.md").read_text(encoding="utf-8") == "keep during setup"
         assert unrelated_rule.read_text(encoding="utf-8") == "keep unrelated rule"
@@ -629,9 +670,9 @@ class TestCodexAssetSyncSmoke:
             codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}interview",
             codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run",
         )
-        assert (
-            codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run" / "notes.txt"
-        ).read_text(encoding="utf-8") == "new run notes"
+        assert (codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}run" / "notes.txt").read_text(
+            encoding="utf-8"
+        ) == "new run notes"
         assert (
             codex_dir / "skills" / f"{CODEX_SKILL_NAMESPACE}interview" / "prompts.txt"
         ).read_text(encoding="utf-8") == "clarify requirements"

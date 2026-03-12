@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from ouroboros.codex import resolve_packaged_codex_skill_path
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
     resolve_codex_permission_mode,
@@ -93,7 +94,11 @@ class CodexCliRuntime:
             permission_mode=permission_mode,
             model=model,
             cwd=self._cwd,
-            skills_dir=str(self._skills_dir),
+            skills_dir=(
+                str(self._skills_dir)
+                if self._skills_dir is not None
+                else "packaged://ouroboros.codex/skills"
+            ),
         )
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
@@ -108,17 +113,11 @@ class CodexCliRuntime:
             return str(path)
         return candidate
 
-    def _resolve_skills_dir(self, skills_dir: str | Path | None) -> Path:
-        """Resolve the packaged skills directory used for intercept metadata."""
-        if skills_dir is not None:
-            return Path(skills_dir).expanduser()
-
-        for parent in Path(__file__).resolve().parents:
-            candidate = parent / "skills"
-            if candidate.is_dir():
-                return candidate
-
-        return Path("skills")
+    def _resolve_skills_dir(self, skills_dir: str | Path | None) -> Path | None:
+        """Resolve an optional explicit skill override directory for intercept metadata."""
+        if skills_dir is None:
+            return None
+        return Path(skills_dir).expanduser()
 
     def _build_runtime_handle(self, session_id: str | None) -> RuntimeHandle | None:
         """Build a backend-neutral runtime handle for a Codex thread."""
@@ -294,8 +293,7 @@ class CodexCliRuntime:
 
         if isinstance(value, Mapping):
             return {
-                key: self._preview_dispatch_value(item, limit=limit)
-                for key, item in value.items()
+                key: self._preview_dispatch_value(item, limit=limit) for key, item in value.items()
             }
 
         if isinstance(value, list | tuple):
@@ -328,7 +326,8 @@ class CodexCliRuntime:
             self._builtin_mcp_handlers = {
                 handler.definition.name: handler
                 for handler in get_ouroboros_tools(
-                    runtime_backend="codex", llm_backend=self._llm_backend,
+                    runtime_backend="codex",
+                    llm_backend=self._llm_backend,
                 )
             }
 
@@ -423,12 +422,14 @@ class CodexCliRuntime:
             if match.group("ooo_skill") is not None
             else f"/ouroboros:{skill_name}"
         )
-        skill_md_path = self._skills_dir / skill_name / "SKILL.md"
-        if not skill_md_path.is_file():
-            return None
-
         try:
-            frontmatter = self._load_skill_frontmatter(skill_md_path)
+            with resolve_packaged_codex_skill_path(
+                skill_name,
+                skills_dir=self._skills_dir,
+            ) as skill_md_path:
+                frontmatter = self._load_skill_frontmatter(skill_md_path)
+        except FileNotFoundError:
+            return None
         except (OSError, ValueError, yaml.YAMLError) as e:
             log.warning(
                 "codex_cli_runtime.skill_intercept_frontmatter_invalid",
@@ -441,7 +442,9 @@ class CodexCliRuntime:
         normalized, validation_error = self._normalize_mcp_frontmatter(frontmatter)
         if normalized is None:
             warning_event = "codex_cli_runtime.skill_intercept_frontmatter_invalid"
-            if validation_error and validation_error.startswith("missing required frontmatter key:"):
+            if validation_error and validation_error.startswith(
+                "missing required frontmatter key:"
+            ):
                 warning_event = "codex_cli_runtime.skill_intercept_frontmatter_missing"
 
             log.warning(
@@ -748,7 +751,9 @@ class CodexCliRuntime:
                 content = self._extract_text(item)
                 if not content:
                     return []
-                return [AgentMessage(type="assistant", content=content, resume_handle=current_handle)]
+                return [
+                    AgentMessage(type="assistant", content=content, resume_handle=current_handle)
+                ]
 
             if item_type == "reasoning":
                 content = self._extract_text(item)
@@ -807,7 +812,9 @@ class CodexCliRuntime:
                     self._build_tool_message(
                         tool_name="WebSearch",
                         tool_input={"query": query},
-                        content=f"Calling tool: WebSearch: {query}" if query else "Calling tool: WebSearch",
+                        content=f"Calling tool: WebSearch: {query}"
+                        if query
+                        else "Calling tool: WebSearch",
                         handle=current_handle,
                     )
                 ]
@@ -816,7 +823,9 @@ class CodexCliRuntime:
                 content = self._extract_text(item)
                 if not content:
                     return []
-                return [AgentMessage(type="assistant", content=content, resume_handle=current_handle)]
+                return [
+                    AgentMessage(type="assistant", content=content, resume_handle=current_handle)
+                ]
 
             if item_type == "error":
                 content = self._extract_text(item) or "Codex CLI reported an error"

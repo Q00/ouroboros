@@ -26,7 +26,9 @@ class _FakeStream:
 
 
 class _FakeProcess:
-    def __init__(self, stdout_lines: list[str], stderr_lines: list[str], returncode: int = 0) -> None:
+    def __init__(
+        self, stdout_lines: list[str], stderr_lines: list[str], returncode: int = 0
+    ) -> None:
         self.stdout = _FakeStream(stdout_lines)
         self.stderr = _FakeStream(stderr_lines)
         self._returncode = returncode
@@ -199,6 +201,52 @@ class TestCodexCliRuntime:
             "cwd": "/tmp/project",
         }
 
+    def test_resolve_skill_intercept_uses_packaged_skill_helper_without_override(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Default intercept resolution should read packaged skills via the shared helper."""
+        skill_md_path = self._write_skill(
+            tmp_path,
+            "interview",
+            [
+                "name: interview",
+                'description: "Socratic interview to crystallize vague requirements"',
+                "mcp_tool: ouroboros_interview",
+                "mcp_args:",
+                '  initial_context: "$1"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+
+        def fake_resolve_packaged_skill(skill_name: str, *, skills_dir: Path | None = None):
+            assert skill_name == "interview"
+            assert skills_dir is None
+
+            class _ResolvedSkill:
+                def __enter__(self) -> Path:
+                    return skill_md_path
+
+                def __exit__(self, exc_type, exc, tb) -> None:
+                    return None
+
+            return _ResolvedSkill()
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.resolve_packaged_codex_skill_path",
+            side_effect=fake_resolve_packaged_skill,
+        ) as mock_resolve:
+            intercept = runtime._resolve_skill_intercept('ooo interview "Build a REST API"')
+
+        mock_resolve.assert_called_once_with("interview", skills_dir=None)
+        assert intercept is not None
+        assert intercept.mcp_tool == "ouroboros_interview"
+        assert intercept.mcp_args == {
+            "initial_context": "Build a REST API",
+            "cwd": "/tmp/project",
+        }
+
     def test_resolve_skill_intercept_bypasses_incomplete_frontmatter(self, tmp_path: Path) -> None:
         """Missing `mcp_tool` or `mcp_args` disables deterministic intercept."""
         self._write_skill(
@@ -217,8 +265,12 @@ class TestCodexCliRuntime:
 
         assert intercept is None
         mock_warning.assert_called_once()
-        assert mock_warning.call_args[0][0] == "codex_cli_runtime.skill_intercept_frontmatter_missing"
-        assert mock_warning.call_args.kwargs["error"] == "missing required frontmatter key: mcp_args"
+        assert (
+            mock_warning.call_args[0][0] == "codex_cli_runtime.skill_intercept_frontmatter_missing"
+        )
+        assert (
+            mock_warning.call_args.kwargs["error"] == "missing required frontmatter key: mcp_args"
+        )
 
     def test_resolve_skill_intercept_bypasses_invalid_mcp_tool_frontmatter(
         self,
@@ -243,7 +295,9 @@ class TestCodexCliRuntime:
 
         assert intercept is None
         mock_warning.assert_called_once()
-        assert mock_warning.call_args[0][0] == "codex_cli_runtime.skill_intercept_frontmatter_invalid"
+        assert (
+            mock_warning.call_args[0][0] == "codex_cli_runtime.skill_intercept_frontmatter_invalid"
+        )
         assert (
             mock_warning.call_args.kwargs["error"]
             == "mcp_tool must contain only letters, digits, and underscores"
@@ -328,7 +382,9 @@ class TestCodexCliRuntime:
         dispatcher.assert_not_awaited()
         mock_exec.assert_called_once()
         mock_warning.assert_called_once()
-        assert mock_warning.call_args[0][0] == "codex_cli_runtime.skill_intercept_frontmatter_invalid"
+        assert (
+            mock_warning.call_args[0][0] == "codex_cli_runtime.skill_intercept_frontmatter_invalid"
+        )
         assert (
             mock_warning.call_args.kwargs["error"]
             == "mcp_args must be a mapping with string keys and YAML-safe values"
@@ -397,9 +453,7 @@ class TestCodexCliRuntime:
         fake_handler.handle = AsyncMock(
             return_value=Result.ok(
                 MCPToolResult(
-                    content=(
-                        MCPContentItem(type=ContentType.TEXT, text="Seed Execution SUCCESS"),
-                    ),
+                    content=(MCPContentItem(type=ContentType.TEXT, text="Seed Execution SUCCESS"),),
                     meta={
                         "session_id": "sess-123",
                         "execution_id": "exec-456",
@@ -414,7 +468,9 @@ class TestCodexCliRuntime:
         )
 
         with (
-            patch.object(runtime, "_get_mcp_tool_handler", return_value=fake_handler) as mock_lookup,
+            patch.object(
+                runtime, "_get_mcp_tool_handler", return_value=fake_handler
+            ) as mock_lookup,
             patch(
                 "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
             ) as mock_exec,
@@ -576,7 +632,9 @@ class TestCodexCliRuntime:
         dispatcher = AsyncMock(
             return_value=(
                 AgentMessage(type="assistant", content="Starting interview"),
-                AgentMessage(type="result", content="Interview started", data={"subtype": "success"}),
+                AgentMessage(
+                    type="result", content="Interview started", data={"subtype": "success"}
+                ),
             )
         )
         runtime = CodexCliRuntime(
@@ -603,7 +661,10 @@ class TestCodexCliRuntime:
             "cwd": "/tmp/project",
         }
         mock_exec.assert_not_called()
-        assert [message.content for message in messages] == ["Starting interview", "Interview started"]
+        assert [message.content for message in messages] == [
+            "Starting interview",
+            "Interview started",
+        ]
 
     @pytest.mark.asyncio
     async def test_execute_task_passes_runtime_handle_into_interview_dispatcher(
@@ -655,7 +716,10 @@ class TestCodexCliRuntime:
         dispatcher.assert_awaited_once()
         assert dispatcher.await_args.args[1] == resume_handle
         mock_exec.assert_not_called()
-        assert [message.content for message in messages] == ["Continuing interview", "Next question"]
+        assert [message.content for message in messages] == [
+            "Continuing interview",
+            "Next question",
+        ]
 
     @pytest.mark.asyncio
     async def test_execute_task_preserves_nonrecoverable_dispatch_errors(
@@ -698,7 +762,10 @@ class TestCodexCliRuntime:
 
         dispatcher.assert_awaited_once()
         mock_exec.assert_not_called()
-        assert [message.content for message in messages] == ["Dispatching", "Seed validation failed"]
+        assert [message.content for message in messages] == [
+            "Dispatching",
+            "Seed validation failed",
+        ]
         assert messages[-1].is_error is True
 
     @pytest.mark.asyncio
@@ -844,9 +911,7 @@ class TestCodexCliRuntime:
 
     def test_llm_backend_propagated_to_builtin_handlers(self) -> None:
         """llm_backend param is used in _get_builtin_mcp_handlers, not hardcoded."""
-        runtime = CodexCliRuntime(
-            cli_path="codex", llm_backend="litellm"
-        )
+        runtime = CodexCliRuntime(cli_path="codex", llm_backend="litellm")
         assert runtime._llm_backend == "litellm"
 
     @pytest.mark.asyncio
@@ -863,4 +928,6 @@ class TestCodexCliRuntime:
         assert len(messages) == 1
         assert messages[0].type == "result"
         assert messages[0].is_error
-        assert "not found" in messages[0].content.lower() or "FileNotFoundError" in messages[0].content
+        assert (
+            "not found" in messages[0].content.lower() or "FileNotFoundError" in messages[0].content
+        )

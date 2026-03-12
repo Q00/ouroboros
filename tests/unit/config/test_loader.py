@@ -482,6 +482,51 @@ class TestLLMHelperLookups:
             assert get_semantic_model(backend="codex") == "default"
             assert get_assertion_extraction_model(backend="codex") == "default"
 
+    def test_codex_backend_normalizes_config_default_models_to_default_sentinel(self) -> None:
+        """Config-backed default values should still normalize for Codex LLM flows."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(),
+            ),
+        ):
+            assert get_clarification_model(backend="codex") == "default"
+            assert get_qa_model(backend="codex") == "default"
+            assert get_wonder_model(backend="codex") == "default"
+            assert get_reflect_model(backend="codex") == "default"
+            assert get_semantic_model(backend="codex") == "default"
+            assert get_assertion_extraction_model(backend="codex") == "default"
+
+    def test_codex_backend_preserves_explicit_non_default_models_from_config(self) -> None:
+        """Explicit config overrides should survive backend normalization."""
+        custom_config = OuroborosConfig(
+            clarification=ClarificationConfig(default_model="gpt-5-mini"),
+            llm=LLMConfig(qa_model="gpt-5-nano"),
+            resilience=ResilienceConfig(
+                wonder_model="gpt-5",
+                reflect_model="gpt-5-mini",
+            ),
+            evaluation=EvaluationConfig(
+                semantic_model="gpt-5",
+                assertion_extraction_model="gpt-5-nano",
+            ),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=custom_config,
+            ),
+        ):
+            assert get_clarification_model(backend="codex") == "gpt-5-mini"
+            assert get_qa_model(backend="codex") == "gpt-5-nano"
+            assert get_wonder_model(backend="codex") == "gpt-5"
+            assert get_reflect_model(backend="codex") == "gpt-5-mini"
+            assert get_semantic_model(backend="codex") == "gpt-5"
+            assert get_assertion_extraction_model(backend="codex") == "gpt-5-nano"
+
     def test_get_qa_model_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for QA model."""
         monkeypatch.setenv("OUROBOROS_QA_MODEL", "gpt-5-nano")
