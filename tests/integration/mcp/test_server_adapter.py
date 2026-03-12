@@ -566,7 +566,9 @@ class TestCreateOuroborosServer:
             ),
             patch(
                 "ouroboros.orchestrator.adapter.ClaudeAgentAdapter",
-                side_effect=AssertionError("auto profile should not instantiate ClaudeAgentAdapter"),
+                side_effect=AssertionError(
+                    "auto profile should not instantiate ClaudeAgentAdapter"
+                ),
             ),
         ):
             server = create_ouroboros_server(profile="auto")

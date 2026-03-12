@@ -149,7 +149,9 @@ def _project_dir_from_artifact(artifact: str) -> str | None:
     return None
 
 
-def _resolve_server_profile(profile: MCPServerProfile) -> tuple[Literal["full", "desktop-safe"], tuple[str, ...]]:
+def _resolve_server_profile(
+    profile: MCPServerProfile,
+) -> tuple[Literal["full", "desktop-safe"], tuple[str, ...]]:
     """Resolve the effective MCP server profile.
 
     In ``auto`` mode, a Codex-targeted environment request downgrades to the
