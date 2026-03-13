@@ -23,7 +23,12 @@ from rich.console import Console
 import structlog
 import yaml
 
-from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
+from ouroboros.bigbang.ambiguity import (
+    AmbiguityScore,
+    AmbiguityScorer,
+    ComponentScore,
+    ScoreBreakdown,
+)
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.core.errors import ValidationError
@@ -622,6 +627,54 @@ class GenerateSeedHandler:
     seed_generator: SeedGenerator | None = field(default=None, repr=False)
     llm_adapter: ClaudeCodeAdapter | None = field(default=None, repr=False)
 
+    def _build_ambiguity_score_from_value(self, ambiguity_score_value: float) -> AmbiguityScore:
+        """Build an ambiguity score object from an explicit numeric override."""
+        breakdown = ScoreBreakdown(
+            goal_clarity=ComponentScore(
+                name="goal_clarity",
+                clarity_score=1.0 - ambiguity_score_value,
+                weight=0.40,
+                justification="Provided as input parameter",
+            ),
+            constraint_clarity=ComponentScore(
+                name="constraint_clarity",
+                clarity_score=1.0 - ambiguity_score_value,
+                weight=0.30,
+                justification="Provided as input parameter",
+            ),
+            success_criteria_clarity=ComponentScore(
+                name="success_criteria_clarity",
+                clarity_score=1.0 - ambiguity_score_value,
+                weight=0.30,
+                justification="Provided as input parameter",
+            ),
+        )
+        return AmbiguityScore(
+            overall_score=ambiguity_score_value,
+            breakdown=breakdown,
+        )
+
+    def _load_stored_ambiguity_score(self, state: InterviewState) -> AmbiguityScore | None:
+        """Load a persisted ambiguity score snapshot from interview state."""
+        if state.ambiguity_score is None:
+            return None
+
+        if isinstance(state.ambiguity_breakdown, dict):
+            try:
+                breakdown = ScoreBreakdown.model_validate(state.ambiguity_breakdown)
+            except PydanticValidationError:
+                log.warning(
+                    "mcp.tool.generate_seed.invalid_stored_ambiguity_breakdown",
+                    session_id=state.interview_id,
+                )
+            else:
+                return AmbiguityScore(
+                    overall_score=state.ambiguity_score,
+                    breakdown=breakdown,
+                )
+
+        return self._build_ambiguity_score_from_value(state.ambiguity_score)
+
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition."""
@@ -700,42 +753,36 @@ class GenerateSeedHandler:
 
             state: InterviewState = state_result.value
 
-            # Use provided ambiguity score or check if state has it
+            # Use provided ambiguity score, a persisted snapshot, or compute on demand.
             if ambiguity_score_value is not None:
-                # Create a valid ScoreBreakdown with placeholder component scores
-                breakdown = ScoreBreakdown(
-                    goal_clarity=ComponentScore(
-                        name="goal_clarity",
-                        clarity_score=1.0 - ambiguity_score_value,
-                        weight=0.40,
-                        justification="Provided as input parameter",
-                    ),
-                    constraint_clarity=ComponentScore(
-                        name="constraint_clarity",
-                        clarity_score=1.0 - ambiguity_score_value,
-                        weight=0.30,
-                        justification="Provided as input parameter",
-                    ),
-                    success_criteria_clarity=ComponentScore(
-                        name="success_criteria_clarity",
-                        clarity_score=1.0 - ambiguity_score_value,
-                        weight=0.30,
-                        justification="Provided as input parameter",
-                    ),
-                )
-                ambiguity_score = AmbiguityScore(
-                    overall_score=ambiguity_score_value,
-                    breakdown=breakdown,
-                )
+                ambiguity_score = self._build_ambiguity_score_from_value(ambiguity_score_value)
             else:
-                # TODO: Check if state has embedded ambiguity score
-                # For now, require explicit score if not in state
-                return Result.err(
-                    MCPToolError(
-                        "ambiguity_score is required (interview didn't calculate it)",
-                        tool_name="ouroboros_generate_seed",
+                ambiguity_score = self._load_stored_ambiguity_score(state)
+                if ambiguity_score is None:
+                    scorer = AmbiguityScorer(
+                        llm_adapter=llm_adapter,
                     )
-                )
+                    score_result = await scorer.score(state)
+                    if score_result.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                f"Failed to calculate ambiguity: {score_result.error}",
+                                tool_name="ouroboros_generate_seed",
+                            )
+                        )
+
+                    ambiguity_score = score_result.value
+                    state.store_ambiguity(
+                        score=ambiguity_score.overall_score,
+                        breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
+                    )
+                    save_result = await interview_engine.save_state(state)
+                    if save_result.is_err:
+                        log.warning(
+                            "mcp.tool.generate_seed.persist_ambiguity_failed",
+                            session_id=session_id,
+                            error=str(save_result.error),
+                        )
 
             # Use injected or create seed generator
             generator = self.seed_generator or SeedGenerator(llm_adapter=llm_adapter)
@@ -1226,6 +1273,7 @@ class InterviewHandler:
                             )
                         )
                     state = record_result.value
+                    state.clear_stored_ambiguity()
 
                     # Emit response recorded event
                     from ouroboros.events.interview import interview_response_recorded

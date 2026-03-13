@@ -123,6 +123,27 @@ class TestInterviewState:
             interview_id="test_001",
             initial_context="Build a CLI tool",
             status=InterviewStatus.IN_PROGRESS,
+            ambiguity_score=0.18,
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "goal_clarity",
+                    "clarity_score": 0.9,
+                    "weight": 0.4,
+                    "justification": "Clear goal",
+                },
+                "constraint_clarity": {
+                    "name": "constraint_clarity",
+                    "clarity_score": 0.8,
+                    "weight": 0.3,
+                    "justification": "Mostly clear constraints",
+                },
+                "success_criteria_clarity": {
+                    "name": "success_criteria_clarity",
+                    "clarity_score": 0.75,
+                    "weight": 0.3,
+                    "justification": "Success criteria are measurable",
+                },
+            },
         )
         state.rounds.append(
             InterviewRound(
@@ -144,6 +165,21 @@ class TestInterviewState:
         assert len(restored.rounds) == 1
         assert restored.rounds[0].question == "What problem does it solve?"
         assert restored.rounds[0].user_response == "Task management"
+        assert restored.ambiguity_score == 0.18
+        assert restored.ambiguity_breakdown == state.ambiguity_breakdown
+
+    def test_clear_stored_ambiguity(self) -> None:
+        """Stored ambiguity snapshots can be invalidated after interview changes."""
+        state = InterviewState(
+            interview_id="test_001",
+            ambiguity_score=0.12,
+            ambiguity_breakdown={"goal_clarity": {"name": "goal_clarity"}},
+        )
+
+        state.clear_stored_ambiguity()
+
+        assert state.ambiguity_score is None
+        assert state.ambiguity_breakdown is None
 
 
 class TestInterviewRound:

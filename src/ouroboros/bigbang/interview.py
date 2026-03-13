@@ -88,6 +88,8 @@ class InterviewState(BaseModel):
     codebase_paths: list[dict[str, str]] = Field(default_factory=list)
     codebase_context: str = ""
     explore_completed: bool = False
+    ambiguity_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    ambiguity_breakdown: dict[str, Any] | None = None
 
     @property
     def current_round_number(self) -> int:
@@ -102,6 +104,26 @@ class InterviewState(BaseModel):
     def mark_updated(self) -> None:
         """Update the updated_at timestamp."""
         self.updated_at = datetime.now(UTC)
+
+    def store_ambiguity(
+        self,
+        *,
+        score: float,
+        breakdown: dict[str, Any],
+    ) -> None:
+        """Persist the latest ambiguity evaluation on the interview state."""
+        self.ambiguity_score = score
+        self.ambiguity_breakdown = breakdown
+        self.mark_updated()
+
+    def clear_stored_ambiguity(self) -> None:
+        """Invalidate any persisted ambiguity snapshot after interview changes."""
+        if self.ambiguity_score is None and self.ambiguity_breakdown is None:
+            return
+
+        self.ambiguity_score = None
+        self.ambiguity_breakdown = None
+        self.mark_updated()
 
 
 @dataclass

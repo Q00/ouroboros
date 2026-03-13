@@ -3,6 +3,8 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.core.types import Result
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
     CancelExecutionHandler,
@@ -656,6 +658,171 @@ class TestInterviewHandlerCwd:
         mock_engine.start_interview.assert_awaited_once()
         call_kwargs = mock_engine.start_interview.call_args
         assert call_kwargs[1]["cwd"] == str(tmp_path)
+
+    async def test_interview_handle_clears_stored_ambiguity_after_new_answer(self) -> None:
+        """Interview answers should invalidate any persisted ambiguity snapshot."""
+        handler = InterviewHandler()
+        state = InterviewState(
+            interview_id="sess-123",
+            ambiguity_score=0.14,
+            ambiguity_breakdown={"goal_clarity": {"name": "goal_clarity"}},
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What should it do?",
+                    user_response=None,
+                )
+            ],
+        )
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.record_response = AsyncMock(return_value=Result.ok(state))
+        mock_engine.ask_next_question = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value="Next question?"),
+        )
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+
+        with patch(
+            "ouroboros.mcp.tools.definitions.InterviewEngine",
+            return_value=mock_engine,
+        ):
+            result = await handler.handle({"session_id": "sess-123", "answer": "Manage tasks"})
+
+        assert result.is_ok
+        assert state.ambiguity_score is None
+        assert state.ambiguity_breakdown is None
+
+
+class TestGenerateSeedHandlerAmbiguity:
+    """Test ambiguity persistence behavior in GenerateSeedHandler."""
+
+    async def test_generate_seed_handler_calculates_and_persists_ambiguity_when_missing(
+        self,
+    ) -> None:
+        """GenerateSeedHandler should score the interview and persist the snapshot when absent."""
+        state = InterviewState(
+            interview_id="sess-123",
+            initial_context="Build a tool",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What should it do?",
+                    user_response="Manage tasks",
+                )
+            ],
+        )
+        mock_adapter = MagicMock()
+        mock_interview_engine = MagicMock()
+        mock_interview_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_interview_engine.save_state = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False),
+        )
+        mock_seed_generator = MagicMock()
+        mock_seed_generator.generate = AsyncMock(return_value=Result.err(RuntimeError("boom")))
+        mock_score = MagicMock(
+            overall_score=0.12,
+            breakdown=MagicMock(
+                model_dump=MagicMock(
+                    return_value={
+                        "goal_clarity": {
+                            "name": "goal_clarity",
+                            "clarity_score": 0.9,
+                            "weight": 0.4,
+                            "justification": "Clear goal",
+                        },
+                        "constraint_clarity": {
+                            "name": "constraint_clarity",
+                            "clarity_score": 0.9,
+                            "weight": 0.3,
+                            "justification": "Clear constraints",
+                        },
+                        "success_criteria_clarity": {
+                            "name": "success_criteria_clarity",
+                            "clarity_score": 0.85,
+                            "weight": 0.3,
+                            "justification": "Measurable success",
+                        },
+                    }
+                )
+            ),
+        )
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
+        handler = GenerateSeedHandler(
+            llm_adapter=mock_adapter,
+            interview_engine=mock_interview_engine,
+            seed_generator=mock_seed_generator,
+        )
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.AmbiguityScorer",
+                return_value=mock_scorer,
+            ) as mock_scorer_cls,
+        ):
+            await handler.handle({"session_id": "sess-123"})
+
+        mock_scorer_cls.assert_called_once()
+        mock_scorer.score.assert_awaited_once_with(state)
+        mock_interview_engine.save_state.assert_awaited_once_with(state)
+        assert state.ambiguity_score == 0.12
+        assert state.ambiguity_breakdown is not None
+        generate_call = mock_seed_generator.generate.await_args
+        assert generate_call.args[0] == state
+        assert generate_call.args[1].overall_score == 0.12
+
+    async def test_generate_seed_handler_reuses_stored_ambiguity_snapshot(self) -> None:
+        """GenerateSeedHandler should not rescore when the interview state already has a snapshot."""
+        state = InterviewState(
+            interview_id="sess-123",
+            initial_context="Build a tool",
+            ambiguity_score=0.11,
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "goal_clarity",
+                    "clarity_score": 0.92,
+                    "weight": 0.4,
+                    "justification": "Clear goal",
+                },
+                "constraint_clarity": {
+                    "name": "constraint_clarity",
+                    "clarity_score": 0.88,
+                    "weight": 0.3,
+                    "justification": "Clear constraints",
+                },
+                "success_criteria_clarity": {
+                    "name": "success_criteria_clarity",
+                    "clarity_score": 0.87,
+                    "weight": 0.3,
+                    "justification": "Clear success criteria",
+                },
+            },
+        )
+        mock_adapter = MagicMock()
+        mock_interview_engine = MagicMock()
+        mock_interview_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_interview_engine.save_state = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False),
+        )
+        mock_seed_generator = MagicMock()
+        mock_seed_generator.generate = AsyncMock(return_value=Result.err(RuntimeError("boom")))
+        handler = GenerateSeedHandler(
+            llm_adapter=mock_adapter,
+            interview_engine=mock_interview_engine,
+            seed_generator=mock_seed_generator,
+        )
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.AmbiguityScorer",
+            ) as mock_scorer_cls,
+        ):
+            await handler.handle({"session_id": "sess-123"})
+
+        mock_scorer_cls.assert_not_called()
+        assert mock_interview_engine.save_state.await_count == 0
+        generate_call = mock_seed_generator.generate.await_args
+        assert generate_call.args[1].overall_score == 0.11
 
 
 class TestCancelExecutionHandler:
