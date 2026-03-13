@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 import structlog
 
+from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.file_lock import file_lock as _file_lock
 from ouroboros.core.security import InputValidator
@@ -30,9 +31,6 @@ log = structlog.get_logger()
 MIN_ROUNDS_BEFORE_EARLY_EXIT = 3  # Must complete at least 3 rounds
 SOFT_LIMIT_WARNING_THRESHOLD = 15  # Warn about diminishing returns after this
 DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
-
-# Default model moved to config.models.ClarificationConfig.default_model
-_FALLBACK_MODEL = "claude-opus-4-6"
 
 # Legacy alias for backward compatibility
 MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS
@@ -164,7 +162,7 @@ class InterviewEngine:
 
     llm_adapter: LLMAdapter
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
-    model: str = _FALLBACK_MODEL
+    model: str = field(default_factory=get_clarification_model)
     temperature: float = 0.7
     max_tokens: int = 2048
 

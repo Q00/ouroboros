@@ -102,6 +102,7 @@ src/ouroboros/_version.py
 _bmad/
 .claude/commands/bmad/
 .omc/
+.smoke-home/
 
 
 # Local archive for removed/held docs and assets

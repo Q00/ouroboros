@@ -1,19 +1,21 @@
-"""Orchestrator module for Claude Agent SDK integration.
+"""Orchestrator module for backend-neutral agent runtime integration.
 
 This module provides Epic 8 functionality - executing Ouroboros workflows
-via Claude Agent SDK as an alternative execution mode.
+via pluggable agent runtimes as an alternative execution mode.
 
 Key Components:
-    - ClaudeAgentAdapter: Wrapper for Claude Agent SDK with streaming support
+    - AgentRuntime: Common runtime protocol
+    - ClaudeAgentAdapter: Claude runtime implementation
+    - CodexCliRuntime: Codex runtime implementation
     - SessionTracker: Immutable session state tracking
     - SessionRepository: Event-based session persistence
     - OrchestratorRunner: Main orchestration logic
     - MCPToolProvider: Integration with external MCP tools
 
 Usage:
-    from ouroboros.orchestrator import ClaudeAgentAdapter, OrchestratorRunner
+    from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
 
-    adapter = ClaudeAgentAdapter()
+    adapter = create_agent_runtime(backend="claude")
     runner = OrchestratorRunner(adapter, event_store)
     result = await runner.execute_seed(seed, execution_id)
 
@@ -26,6 +28,7 @@ CLI Usage:
     ouroboros run --orchestrator seed.yaml
     ouroboros run --orchestrator seed.yaml --parallel  # Parallel AC execution
     ouroboros run --orchestrator seed.yaml --resume <session_id>
+    ouroboros run --orchestrator seed.yaml --runtime codex
     ouroboros run --orchestrator seed.yaml --mcp-config mcp.yaml
 """
 
@@ -38,17 +41,43 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     TaskResult,
 )
+from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.coordinator import (
     CoordinatorReview,
     FileConflict,
     LevelCoordinator,
 )
-from ouroboros.orchestrator.dependency_analyzer import (
-    ACNode,
-    DependencyAnalysisError,
-    DependencyAnalyzer,
-    DependencyGraph,
-)
+
+# TODO: uncomment when OpenCode runtime is shipped
+# from ouroboros.orchestrator.opencode_runtime import (
+#     OpenCodeRuntime,
+#     OpenCodeRuntimeAdapter,
+# )
+
+try:
+    from ouroboros.orchestrator.dependency_analyzer import (
+        ACDependencySpec,
+        ACNode,
+        ACSharedRuntimeResource,
+        DependencyAnalysisError,
+        DependencyAnalyzer,
+        DependencyGraph,
+        ExecutionPlanningError,
+        ExecutionStage,
+        HybridExecutionPlanner,
+        StagedExecutionPlan,
+    )
+except ModuleNotFoundError:  # pragma: no cover - compatibility for partial installs
+    ACDependencySpec = None
+    ACNode = None
+    ACSharedRuntimeResource = None
+    DependencyAnalysisError = None
+    DependencyAnalyzer = None
+    DependencyGraph = None
+    ExecutionPlanningError = None
+    ExecutionStage = None
+    HybridExecutionPlanner = None
+    StagedExecutionPlan = None
 from ouroboros.orchestrator.events import (
     create_mcp_tools_loaded_event,
     create_progress_event,
@@ -87,10 +116,20 @@ from ouroboros.orchestrator.mcp_tools import (
     MCPToolsLoadedEvent,
     ToolConflict,
 )
+
+# TODO: uncomment when OpenCode runtime is shipped
+# from ouroboros.orchestrator.opencode_event_normalizer import (
+#     OpenCodeEventContext,
+#     OpenCodeEventNormalizer,
+#     normalize_opencode_event,
+# )
 from ouroboros.orchestrator.parallel_executor import (
+    ACExecutionOutcome,
     ACExecutionResult,
     ParallelACExecutor,
     ParallelExecutionResult,
+    ParallelExecutionStageResult,
+    StageExecutionOutcome,
 )
 from ouroboros.orchestrator.runner import (
     OrchestratorError,
@@ -98,6 +137,10 @@ from ouroboros.orchestrator.runner import (
     OrchestratorRunner,
     build_system_prompt,
     build_task_prompt,
+)
+from ouroboros.orchestrator.runtime_factory import (
+    create_agent_runtime,
+    resolve_agent_runtime_backend,
 )
 from ouroboros.orchestrator.session import (
     SessionRepository,
@@ -111,9 +154,14 @@ __all__ = [
     "AgentMessage",
     "ClaudeAgentAdapter",
     "ClaudeCodeRuntime",
+    "CodexCliRuntime",
+    # "OpenCodeRuntime",  # TODO: uncomment when shipped
+    # "OpenCodeRuntimeAdapter",  # TODO: uncomment when shipped
     "DEFAULT_TOOLS",
     "RuntimeHandle",
     "TaskResult",
+    "create_agent_runtime",
+    "resolve_agent_runtime_backend",
     # Session
     "SessionRepository",
     "SessionStatus",
@@ -146,13 +194,25 @@ __all__ = [
     "create_task_started_event",
     "create_tool_called_event",
     # Parallel Execution
+    "ACDependencySpec",
     "ACNode",
+    "ACSharedRuntimeResource",
     "DependencyAnalyzer",
     "DependencyAnalysisError",
     "DependencyGraph",
+    "ExecutionPlanningError",
+    "ExecutionStage",
+    "HybridExecutionPlanner",
+    "StagedExecutionPlan",
+    "ACExecutionOutcome",
     "ACExecutionResult",
     "ParallelACExecutor",
+    "ParallelExecutionStageResult",
     "ParallelExecutionResult",
+    "StageExecutionOutcome",
+    # "OpenCodeEventContext",  # TODO: uncomment when shipped
+    # "OpenCodeEventNormalizer",  # TODO: uncomment when shipped
+    # "normalize_opencode_event",  # TODO: uncomment when shipped
     # Level Context
     "ACContextSummary",
     "LevelContext",

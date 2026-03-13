@@ -7,7 +7,7 @@ This package provides:
 - Orchestration: Task scheduling and model routing
 
 Architecture:
-- Extends existing orchestrator.adapter (ClaudeAgentAdapter)
+- Extends the orchestrator AgentRuntime abstraction
 - Integrates with routing.complexity for PAL routing
 - Uses events.base for state tracking
 

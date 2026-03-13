@@ -4,14 +4,63 @@ Provides async methods for appending and replaying events using SQLAlchemy Core
 with aiosqlite backend.
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.schema import events_table, metadata
+
+_RAW_SUBSCRIBED_EVENT_TYPE_KEYS = frozenset({"type", "event", "kind", "name"})
+_RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS = frozenset(
+    {
+        "args",
+        "arguments",
+        "command",
+        "content",
+        "delta",
+        "error",
+        "input",
+        "message",
+        "params",
+        "path",
+        "payload",
+        "result",
+        "run_id",
+        "server_run_id",
+        "server_session_id",
+        "session",
+        "session_id",
+        "summary",
+        "text",
+        "thread_id",
+        "tool",
+        "tool_name",
+    }
+)
+
+
+def _normalized_mapping_keys(value: Mapping[object, object]) -> set[str]:
+    """Return normalized string keys for mapping inspection."""
+    return {str(key).strip().lower().replace("-", "_") for key in value}
+
+
+def _looks_like_raw_subscribed_event_payload(value: object) -> bool:
+    """Return True when the value resembles a subscribed runtime stream event."""
+    if not isinstance(value, Mapping):
+        return False
+
+    normalized_keys = _normalized_mapping_keys(value)
+    if {"aggregate_type", "aggregate_id", "data"} <= normalized_keys:
+        return False
+
+    if not (_RAW_SUBSCRIBED_EVENT_TYPE_KEYS & normalized_keys):
+        return False
+
+    return bool(_RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS & normalized_keys)
 
 
 class EventStore:
@@ -49,6 +98,34 @@ class EventStore:
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
 
+    def _raise_invalid_append_input(
+        self,
+        event: object,
+        *,
+        operation: str,
+        index: int | None = None,
+    ) -> None:
+        """Raise a persistence error for invalid append inputs."""
+        details = {"received_type": type(event).__name__}
+        if index is not None:
+            details["event_index"] = index
+
+        if isinstance(event, Mapping):
+            details["received_keys"] = sorted(_normalized_mapping_keys(event))[:12]
+            if _looks_like_raw_subscribed_event_payload(event):
+                raise PersistenceError(
+                    "EventStore rejects raw subscribed event stream payloads. "
+                    "Normalize them into BaseEvent records before persistence.",
+                    operation=operation,
+                    details=details,
+                )
+
+        raise PersistenceError(
+            "EventStore only persists BaseEvent instances.",
+            operation=operation,
+            details=details,
+        )
+
     async def initialize(self) -> None:
         """Initialize the database connection and create tables if needed.
 
@@ -85,6 +162,8 @@ class EventStore:
                 "EventStore not initialized. Call initialize() first.",
                 operation="append",
             )
+        if not isinstance(event, BaseEvent):
+            self._raise_invalid_append_input(event, operation="append")
 
         try:
             async with self._engine.begin() as conn:
@@ -121,6 +200,16 @@ class EventStore:
 
         if not events:
             return  # Nothing to do
+        invalid_events = [
+            (index, event) for index, event in enumerate(events) if not isinstance(event, BaseEvent)
+        ]
+        if invalid_events:
+            invalid_index, invalid_event = invalid_events[0]
+            self._raise_invalid_append_input(
+                invalid_event,
+                operation="append_batch",
+                index=invalid_index,
+            )
 
         try:
             async with self._engine.begin() as conn:
@@ -373,6 +462,120 @@ class EventStore:
                     "offset": offset,
                 },
             ) from e
+
+    async def query_session_related_events(
+        self,
+        session_id: str,
+        execution_id: str | None = None,
+        event_type: str | None = None,
+        limit: int | None = 50,
+        offset: int = 0,
+    ) -> list[BaseEvent]:
+        """Query events across the session aggregate and related parallel scopes.
+
+        Parallel execution stores activity in several aggregate families:
+        - ``session/<session_id>`` for top-level session state
+        - ``execution/<execution_id>`` for workflow progress
+        - ``execution/<execution_id>_*`` for AC/Sub-AC runtime scopes
+        - ``execution/<execution_id>:*`` for coordinator level scopes
+
+        Args:
+            session_id: Orchestrator session ID.
+            execution_id: Optional execution ID. If omitted, it is resolved from
+                the session's start event when possible.
+            event_type: Optional event-type filter.
+            limit: Maximum number of events to return. ``None`` returns all.
+            offset: Number of events to skip for pagination.
+
+        Returns:
+            Matching events ordered by timestamp descending.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="query_session_related_events",
+            )
+
+        resolved_execution_id = execution_id or await self._resolve_execution_id_for_session(
+            session_id,
+        )
+
+        conditions = [events_table.c.aggregate_id == session_id]
+        if resolved_execution_id:
+            escaped_execution_id = (
+                resolved_execution_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            conditions.extend(
+                [
+                    events_table.c.aggregate_id == resolved_execution_id,
+                    events_table.c.aggregate_id.like(
+                        f"{escaped_execution_id}\\_%",
+                        escape="\\",
+                    ),
+                    events_table.c.aggregate_id.like(f"{resolved_execution_id}:%"),
+                ]
+            )
+
+        try:
+            async with self._engine.begin() as conn:
+                query = (
+                    select(events_table)
+                    .where(or_(*conditions))
+                    .order_by(events_table.c.timestamp.desc())
+                )
+
+                if event_type:
+                    query = query.where(events_table.c.event_type == event_type)
+
+                if limit is not None:
+                    query = query.limit(limit).offset(offset)
+                elif offset:
+                    query = query.offset(offset)
+
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                return [BaseEvent.from_db_row(dict(row)) for row in rows]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to query session-related events: {e}",
+                operation="select",
+                table="events",
+                details={
+                    "session_id": session_id,
+                    "execution_id": resolved_execution_id,
+                    "event_type": event_type,
+                    "limit": limit,
+                    "offset": offset,
+                },
+            ) from e
+
+    async def _resolve_execution_id_for_session(self, session_id: str) -> str | None:
+        """Return the execution ID referenced by a session start event, if present."""
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="resolve_execution_id_for_session",
+            )
+
+        async with self._engine.begin() as conn:
+            query = (
+                select(events_table)
+                .where(events_table.c.aggregate_type == "session")
+                .where(events_table.c.aggregate_id == session_id)
+                .where(events_table.c.event_type == "orchestrator.session.started")
+                .order_by(events_table.c.timestamp.asc())
+                .limit(1)
+            )
+            result = await conn.execute(query)
+            row = result.mappings().first()
+            if row is None:
+                return None
+            payload = row.get("payload")
+            if isinstance(payload, Mapping):
+                execution_id = payload.get("execution_id")
+                if isinstance(execution_id, str) and execution_id:
+                    return execution_id
+            return None
 
     async def get_all_lineages(self) -> list[BaseEvent]:
         """Get all lineage creation events.

@@ -10,12 +10,14 @@ Verifies that:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.definitions import EvolveStepHandler, ExecuteSeedHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.session import SessionTracker
 
 # ---------------------------------------------------------------------------
 # Fixtures: minimal seed YAML
@@ -88,7 +90,7 @@ FAKE_QA_RESULT = Result.ok(
 
 
 # ---------------------------------------------------------------------------
-# ExecuteSeedHandler tests
+# ExecuteSeedHandler tests — new background launch pattern
 # ---------------------------------------------------------------------------
 
 
@@ -105,19 +107,30 @@ class FakeExecResult:
     summary: dict = field(default_factory=dict)
 
 
+def _make_prepared_tracker() -> SessionTracker:
+    return SessionTracker.create("exec-test", "test-seed-qa", session_id="sess-test")
+
+
 class TestExecuteSeedHandlerQA:
-    """Test QA integration in ExecuteSeedHandler."""
+    """Test QA integration in ExecuteSeedHandler.
+
+    The new handler returns immediately with a 'LAUNCHED' response and runs
+    execution + QA in a background task.  Tests must await those background
+    tasks to verify QA behaviour.
+    """
 
     async def test_qa_called_on_success(self) -> None:
-        """QA is called after successful execution and result includes verdict."""
+        """QA is called in background after successful execution."""
         handler = ExecuteSeedHandler()
 
         fake_exec = FakeExecResult()
-        mock_runner = AsyncMock()
-        mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(_make_prepared_tracker()))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(fake_exec))
+        mock_runner.resume_session = AsyncMock()
 
         with (
-            patch("ouroboros.mcp.tools.definitions.ClaudeAgentAdapter"),
+            patch("ouroboros.mcp.tools.definitions.create_agent_runtime"),
             patch("ouroboros.mcp.tools.definitions.EventStore") as mock_es_cls,
             patch(
                 "ouroboros.mcp.tools.definitions.OrchestratorRunner",
@@ -132,36 +145,32 @@ class TestExecuteSeedHandlerQA:
             mock_es_cls.return_value.initialize = AsyncMock()
 
             result = await handler.handle({"seed_content": VALID_SEED_YAML})
+            # Drain background tasks so QA runs
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
 
         assert result.is_ok, f"Expected ok, got: {result.error}"
+        assert "Seed Execution LAUNCHED" in result.value.text_content
 
-        # QA handler was called
+        # QA handler was called in background
         mock_qa_handle.assert_awaited_once()
         qa_args = mock_qa_handle.call_args[0][0]
         assert qa_args["artifact_type"] == "test_output"
         assert "All tests pass" in qa_args["quality_bar"]
         assert "No lint errors" in qa_args["quality_bar"]
 
-        # Response text includes QA verdict
-        text = result.value.content[0].text
-        assert "QA Verdict" in text
-        assert "Score: 0.85" in text
-
-        # Meta includes QA
-        assert "qa" in result.value.meta
-        assert result.value.meta["qa"]["score"] == 0.85
-        assert result.value.meta["qa"]["verdict"] == "pass"
-
     async def test_skip_qa_bypasses_qa(self) -> None:
-        """skip_qa=True prevents QA from running."""
+        """skip_qa=True prevents QA from running in background."""
         handler = ExecuteSeedHandler()
 
         fake_exec = FakeExecResult()
-        mock_runner = AsyncMock()
-        mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(_make_prepared_tracker()))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(fake_exec))
+        mock_runner.resume_session = AsyncMock()
 
         with (
-            patch("ouroboros.mcp.tools.definitions.ClaudeAgentAdapter"),
+            patch("ouroboros.mcp.tools.definitions.create_agent_runtime"),
             patch("ouroboros.mcp.tools.definitions.EventStore") as mock_es_cls,
             patch(
                 "ouroboros.mcp.tools.definitions.OrchestratorRunner",
@@ -174,27 +183,25 @@ class TestExecuteSeedHandlerQA:
         ):
             mock_es_cls.return_value.initialize = AsyncMock()
 
-            result = await handler.handle(
-                {
-                    "seed_content": VALID_SEED_YAML,
-                    "skip_qa": True,
-                }
-            )
+            result = await handler.handle({"seed_content": VALID_SEED_YAML, "skip_qa": True})
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
 
         assert result.is_ok
         mock_qa_handle.assert_not_awaited()
-        assert "qa" not in result.value.meta
 
     async def test_qa_not_called_on_failure(self) -> None:
         """QA is not called when execution fails."""
         handler = ExecuteSeedHandler()
 
         fake_exec = FakeExecResult(success=False, final_message="Build failed")
-        mock_runner = AsyncMock()
-        mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(_make_prepared_tracker()))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(fake_exec))
+        mock_runner.resume_session = AsyncMock()
 
         with (
-            patch("ouroboros.mcp.tools.definitions.ClaudeAgentAdapter"),
+            patch("ouroboros.mcp.tools.definitions.create_agent_runtime"),
             patch("ouroboros.mcp.tools.definitions.EventStore") as mock_es_cls,
             patch(
                 "ouroboros.mcp.tools.definitions.OrchestratorRunner",
@@ -208,24 +215,29 @@ class TestExecuteSeedHandlerQA:
             mock_es_cls.return_value.initialize = AsyncMock()
 
             result = await handler.handle({"seed_content": VALID_SEED_YAML})
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
 
-        assert result.is_ok  # returns ok with is_error=True in MCPToolResult
+        assert result.is_ok
+        # QA should NOT be called because execution failed
         mock_qa_handle.assert_not_awaited()
 
     async def test_qa_failure_degrades_gracefully(self) -> None:
-        """If QA handler returns error, execution result is still returned."""
+        """If QA handler raises, background task does not crash."""
         handler = ExecuteSeedHandler()
 
         fake_exec = FakeExecResult()
-        mock_runner = AsyncMock()
-        mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(_make_prepared_tracker()))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(fake_exec))
+        mock_runner.resume_session = AsyncMock()
 
         from ouroboros.mcp.errors import MCPToolError
 
         qa_error = Result.err(MCPToolError("LLM failed", tool_name="ouroboros_qa"))
 
         with (
-            patch("ouroboros.mcp.tools.definitions.ClaudeAgentAdapter"),
+            patch("ouroboros.mcp.tools.definitions.create_agent_runtime"),
             patch("ouroboros.mcp.tools.definitions.EventStore") as mock_es_cls,
             patch(
                 "ouroboros.mcp.tools.definitions.OrchestratorRunner",
@@ -240,11 +252,13 @@ class TestExecuteSeedHandlerQA:
             mock_es_cls.return_value.initialize = AsyncMock()
 
             result = await handler.handle({"seed_content": VALID_SEED_YAML})
+            # Background task should complete without raising
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
 
-        # Execution result is still returned successfully, just without QA
+        # Immediate response is still LAUNCHED (not affected by QA failure)
         assert result.is_ok
-        assert "qa" not in result.value.meta
-        assert "Seed Execution SUCCESS" in result.value.content[0].text
+        assert "Seed Execution LAUNCHED" in result.value.text_content
 
     def test_derive_quality_bar(self) -> None:
         """_derive_quality_bar extracts AC from seed."""

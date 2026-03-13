@@ -70,6 +70,21 @@ class TestSessionTracker:
         assert tracker.progress == {"a": 1, "b": 2}
         assert tracker.messages_processed == 2
 
+    def test_with_progress_uses_explicit_messages_processed(self) -> None:
+        """When update dict contains messages_processed, use that value instead of +1."""
+        tracker = SessionTracker.create("exec", "seed")
+        tracker = tracker.with_progress({"messages_processed": 5, "step": "exec"})
+
+        assert tracker.messages_processed == 5
+        assert tracker.progress["messages_processed"] == 5
+
+    def test_with_progress_increments_when_messages_processed_absent(self) -> None:
+        """Without explicit messages_processed, auto-increment by 1."""
+        tracker = SessionTracker.create("exec", "seed")
+        tracker = tracker.with_progress({"step": "exec"})
+
+        assert tracker.messages_processed == 1
+
     def test_with_status(self) -> None:
         """Test changing session status."""
         tracker = SessionTracker.create("exec", "seed")
@@ -170,6 +185,23 @@ class TestSessionRepository:
         assert event.aggregate_type == "session"
 
     @pytest.mark.asyncio
+    async def test_create_session_persists_seed_goal(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Session start events retain the seed goal for immediate replay consumers."""
+        result = await repository.create_session(
+            execution_id="exec_123",
+            seed_id="seed_456",
+            seed_goal="Ship the OpenCode runtime",
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args[0][0]
+        assert event.data["seed_goal"] == "Ship the OpenCode runtime"
+
+    @pytest.mark.asyncio
     async def test_create_session_with_custom_id(
         self,
         repository: SessionRepository,
@@ -201,6 +233,91 @@ class TestSessionRepository:
         event = mock_event_store.append.call_args[0][0]
         assert event.type == "orchestrator.progress.updated"
         assert event.data["progress"]["step"] == 5
+
+    @pytest.mark.asyncio
+    async def test_track_progress_excludes_raw_subscribed_payloads(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """track_progress() strips raw subscribed runtime payloads before append."""
+        result = await repository.track_progress(
+            session_id="sess_123",
+            progress={
+                "messages_processed": 5,
+                "runtime": {
+                    "backend": "opencode",
+                    "native_session_id": "native-123",
+                    "metadata": {
+                        "resume_token": "resume-123",
+                        "subscribed_events": [{"type": "item.completed"}],
+                    },
+                },
+                "raw_event": {"type": "thread.updated"},
+            },
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args[0][0]
+        assert event.data["progress"] == {
+            "messages_processed": 5,
+            "runtime": {
+                "backend": "opencode",
+                "native_session_id": "native-123",
+                "metadata": {
+                    "resume_token": "resume-123",
+                },
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_track_progress_minimizes_opencode_runtime_handle(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """OpenCode checkpoints should persist only the resumable runtime fields."""
+        result = await repository.track_progress(
+            session_id="sess_123",
+            progress={
+                "messages_processed": 5,
+                "runtime": {
+                    "backend": "opencode",
+                    "kind": "implementation_session",
+                    "native_session_id": "native-123",
+                    "cwd": "/tmp/project",
+                    "approval_mode": "acceptEdits",
+                    "updated_at": "2026-03-13T00:00:00+00:00",
+                    "metadata": {
+                        "server_session_id": "server-42",
+                        "session_scope_id": "ac_1",
+                        "session_state_path": (
+                            "execution.acceptance_criteria.ac_1.implementation_session"
+                        ),
+                        "session_role": "implementation",
+                        "retry_attempt": 0,
+                        "runtime_event_type": "tool.completed",
+                    },
+                },
+            },
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args[0][0]
+        assert event.data["progress"]["runtime"] == {
+            "backend": "opencode",
+            "kind": "implementation_session",
+            "native_session_id": "native-123",
+            "cwd": "/tmp/project",
+            "approval_mode": "acceptEdits",
+            "metadata": {
+                "server_session_id": "server-42",
+                "session_scope_id": "ac_1",
+                "session_state_path": ("execution.acceptance_criteria.ac_1.implementation_session"),
+                "session_role": "implementation",
+                "retry_attempt": 0,
+            },
+        }
 
     @pytest.mark.asyncio
     async def test_mark_completed(
@@ -385,6 +502,242 @@ class TestSessionRepository:
         assert tracker.messages_processed == 7
         assert tracker.progress["last_message_type"] == "assistant"
         assert tracker.progress["runtime"]["native_session_id"] == "sess_native"
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_session_merges_parallel_execution_progress(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Parallel execution progress should replay through related execution aggregates."""
+        start_event = MagicMock()
+        start_event.id = "evt-start"
+        start_event.type = "orchestrator.session.started"
+        start_event.timestamp = datetime.now(UTC)
+        start_event.data = {
+            "execution_id": "exec_parallel_123",
+            "seed_id": "seed_456",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+
+        workflow_progress = MagicMock()
+        workflow_progress.id = "evt-workflow"
+        workflow_progress.type = "workflow.progress.updated"
+        workflow_progress.timestamp = datetime.now(UTC)
+        workflow_progress.data = {
+            "completed_count": 2,
+            "total_count": 5,
+            "current_phase": "Deliver",
+            "activity": "Executing",
+            "activity_detail": "Level 1/3: ACs [1, 2]",
+            "messages_count": 14,
+            "tool_calls_count": 6,
+            "acceptance_criteria": [
+                {"index": 0, "content": "AC 1", "status": "completed"},
+                {"index": 1, "content": "AC 2", "status": "executing"},
+            ],
+        }
+
+        child_runtime_event = MagicMock()
+        child_runtime_event.id = "evt-child"
+        child_runtime_event.type = "execution.session.started"
+        child_runtime_event.timestamp = datetime.now(UTC)
+        child_runtime_event.data = {
+            "session_scope_id": "exec_parallel_123_sub_ac_0_0",
+        }
+
+        mock_event_store.replay.return_value = [start_event]
+        mock_event_store.query_session_related_events = AsyncMock(
+            return_value=[start_event, workflow_progress, child_runtime_event]
+        )
+
+        result = await repository.reconstruct_session("sess_123")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.execution_id == "exec_parallel_123"
+        assert tracker.messages_processed == 15
+        assert tracker.progress["completed_count"] == 2
+        assert tracker.progress["tool_calls_count"] == 6
+        assert tracker.progress["current_phase"] == "Deliver"
+        assert tracker.progress["activity_detail"] == "Level 1/3: ACs [1, 2]"
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_session_minimizes_opencode_runtime_from_audit_progress(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Audit progress events should not reintroduce transient OpenCode runtime fields."""
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.data = {
+            "execution_id": "exec_123",
+            "seed_id": "seed_456",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+
+        audit_progress = MagicMock()
+        audit_progress.type = "orchestrator.progress.updated"
+        audit_progress.data = {
+            "message_type": "assistant",
+            "content_preview": "OpenCode resumed",
+            "progress": {
+                "last_message_type": "assistant",
+                "runtime": {
+                    "backend": "opencode",
+                    "kind": "implementation_session",
+                    "native_session_id": "sess_native",
+                    "cwd": "/tmp/project",
+                    "approval_mode": "acceptEdits",
+                    "updated_at": "2026-03-13T00:00:00+00:00",
+                    "metadata": {
+                        "server_session_id": "server-42",
+                        "session_scope_id": "ac_1",
+                        "session_state_path": (
+                            "execution.acceptance_criteria.ac_1.implementation_session"
+                        ),
+                        "session_role": "implementation",
+                        "retry_attempt": 0,
+                        "runtime_event_type": "session.resumed",
+                    },
+                },
+            },
+        }
+
+        mock_event_store.replay.return_value = [start_event, audit_progress]
+
+        result = await repository.reconstruct_session("sess_123")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.progress["runtime"] == {
+            "backend": "opencode",
+            "kind": "implementation_session",
+            "native_session_id": "sess_native",
+            "cwd": "/tmp/project",
+            "approval_mode": "acceptEdits",
+            "metadata": {
+                "server_session_id": "server-42",
+                "session_scope_id": "ac_1",
+                "session_state_path": ("execution.acceptance_criteria.ac_1.implementation_session"),
+                "session_role": "implementation",
+                "retry_attempt": 0,
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_session_preserves_opencode_runtime_identifiers_across_partial_updates(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Later OpenCode progress without ids should retain the last reconnectable runtime handle."""
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.data = {
+            "execution_id": "exec_123",
+            "seed_id": "seed_456",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+
+        session_progress = MagicMock()
+        session_progress.type = "orchestrator.progress.updated"
+        session_progress.data = {
+            "progress": {
+                "runtime": {
+                    "backend": "opencode",
+                    "kind": "implementation_session",
+                    "native_session_id": "sess_native",
+                    "cwd": "/tmp/project",
+                    "approval_mode": "acceptEdits",
+                    "metadata": {
+                        "server_session_id": "server-42",
+                        "session_scope_id": "ac_1",
+                    },
+                },
+                "last_message_type": "system",
+            }
+        }
+
+        result_progress = MagicMock()
+        result_progress.type = "orchestrator.progress.updated"
+        result_progress.data = {
+            "progress": {
+                "runtime": {
+                    "backend": "opencode",
+                    "kind": "implementation_session",
+                    "native_session_id": None,
+                    "cwd": "/tmp/project",
+                    "approval_mode": "acceptEdits",
+                    "metadata": {
+                        "server_session_id": "server-42",
+                    },
+                },
+                "last_message_type": "result",
+            }
+        }
+
+        mock_event_store.replay.return_value = [
+            start_event,
+            session_progress,
+            result_progress,
+        ]
+
+        result = await repository.reconstruct_session("sess_123")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.progress["last_message_type"] == "result"
+        assert tracker.progress["runtime"] == {
+            "backend": "opencode",
+            "kind": "implementation_session",
+            "native_session_id": "sess_native",
+            "cwd": "/tmp/project",
+            "approval_mode": "acceptEdits",
+            "metadata": {
+                "server_session_id": "server-42",
+                "session_scope_id": "ac_1",
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_session_uses_progress_runtime_status_when_terminal_event_missing(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Progress-only runtime signals should still restore the terminal session status."""
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.data = {
+            "execution_id": "exec_123",
+            "seed_id": "seed_456",
+            "start_time": datetime.now(UTC).isoformat(),
+        }
+
+        completed_progress = MagicMock()
+        completed_progress.type = "orchestrator.progress.updated"
+        completed_progress.data = {
+            "message_type": "result",
+            "content_preview": "Adapter finished successfully.",
+            "runtime_status": "completed",
+            "progress": {
+                "last_message_type": "result",
+                "runtime_status": "completed",
+                "messages_processed": 4,
+            },
+        }
+
+        mock_event_store.replay.return_value = [start_event, completed_progress]
+
+        result = await repository.reconstruct_session("sess_123")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.status == SessionStatus.COMPLETED
+        assert tracker.messages_processed == 4
+        assert tracker.progress["runtime_status"] == "completed"
 
     @pytest.mark.asyncio
     async def test_reconstruct_completed_session(
@@ -598,6 +951,34 @@ class TestFindOrphanedSessions:
 
         mock_event_store.get_all_sessions.return_value = [start_event]
         mock_event_store.replay.return_value = [start_event, completed_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_progress_completed_session_not_orphaned_without_terminal_event(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Progress-derived completed status should not be treated as orphaned."""
+        old_time = datetime.now(UTC) - timedelta(hours=5)
+        start_event = self._make_start_event("sess_1", timestamp=old_time)
+        completed_progress = self._make_progress_event(
+            "sess_1", timestamp=old_time + timedelta(hours=1)
+        )
+        completed_progress.data = {
+            "message_type": "result",
+            "runtime_status": "completed",
+            "progress": {
+                "last_message_type": "result",
+                "runtime_status": "completed",
+            },
+        }
+
+        mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.replay.return_value = [start_event, completed_progress]
 
         result = await repository.find_orphaned_sessions()
 

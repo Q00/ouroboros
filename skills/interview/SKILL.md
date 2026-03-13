@@ -1,6 +1,10 @@
 ---
 name: interview
 description: "Socratic interview to crystallize vague requirements"
+mcp_tool: ouroboros_interview
+mcp_args:
+  initial_context: "$1"
+  cwd: "$CWD"
 ---
 
 # /ouroboros:interview

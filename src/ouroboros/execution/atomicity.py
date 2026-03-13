@@ -32,15 +32,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import re
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from ouroboros.config import get_atomicity_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
+from ouroboros.providers.base import LLMAdapter
 from ouroboros.routing.complexity import TaskContext, estimate_complexity
-
-if TYPE_CHECKING:
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
 log = get_logger(__name__)
 
@@ -308,11 +307,11 @@ def _heuristic_atomicity_check(
 
 async def check_atomicity(
     ac_content: str,
-    llm_adapter: LiteLLMAdapter,
+    llm_adapter: LLMAdapter,
     criteria: AtomicityCriteria | None = None,
     *,
     use_llm: bool = True,
-    model: str = "claude-opus-4-6",
+    model: str | None = None,
 ) -> Result[AtomicityResult, ProviderError | ValidationError]:
     """Check if an AC is atomic using LLM + heuristic fallback.
 
@@ -374,7 +373,7 @@ async def check_atomicity(
     ]
 
     config = CompletionConfig(
-        model=model,
+        model=model or get_atomicity_model(),
         temperature=0.3,  # Lower for consistent analysis
         max_tokens=500,
     )

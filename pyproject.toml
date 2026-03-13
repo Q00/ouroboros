@@ -52,8 +52,16 @@ local_scheme = "no-local-version"
 [tool.hatch.build.hooks.vcs]
 version-file = "src/ouroboros/_version.py"
 
+[tool.hatch.build]
+exclude = [
+    "/.smoke-home",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ouroboros"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "ouroboros/codex/skills"
 
 [dependency-groups]
 dev = [

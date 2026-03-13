@@ -18,10 +18,16 @@ ensuring root cause resolution is important.
 """
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 
+from ouroboros.config import (
+    get_consensus_advocate_model,
+    get_consensus_devil_model,
+    get_consensus_judge_model,
+    get_consensus_models,
+)
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_aspect import AnalysisResult
 from ouroboros.core.types import Result
@@ -41,16 +47,11 @@ from ouroboros.events.evaluation import (
     create_stage3_started_event,
 )
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 from ouroboros.strategies.devil_advocate import ConsensusContext, DevilAdvocateStrategy
 
 # Default models for consensus voting (Frontier tier)
 # Can be overridden via ConsensusConfig.models
-DEFAULT_CONSENSUS_MODELS: tuple[str, ...] = (
-    "openrouter/openai/gpt-4o",
-    "openrouter/anthropic/claude-opus-4-6",
-    "openrouter/google/gemini-2.5-pro",
-)
+DEFAULT_CONSENSUS_MODELS: tuple[str, ...] = get_consensus_models()
 
 
 # Perspective labels for single-model fallback (same model, different prompts)
@@ -129,7 +130,7 @@ class ConsensusConfig:
         diversity_required: Require different providers
     """
 
-    models: tuple[str, ...] = DEFAULT_CONSENSUS_MODELS
+    models: tuple[str, ...] = field(default_factory=get_consensus_models)
     temperature: float = 0.3
     max_tokens: int = 1024
     majority_threshold: float = 0.66  # 2/3 = 0.6666...
@@ -536,9 +537,9 @@ class DeliberativeConfig:
         max_tokens: Maximum tokens per response
     """
 
-    advocate_model: str = "openrouter/anthropic/claude-opus-4-6"
-    devil_model: str = "openrouter/openai/gpt-4o"
-    judge_model: str = "openrouter/google/gemini-2.5-pro"
+    advocate_model: str = field(default_factory=get_consensus_advocate_model)
+    devil_model: str = field(default_factory=get_consensus_devil_model)
+    judge_model: str = field(default_factory=get_consensus_judge_model)
     temperature: float = 0.3
     max_tokens: int = 2048
 
@@ -648,7 +649,7 @@ class DeliberativeConsensus:
 
     def __init__(
         self,
-        llm_adapter: LiteLLMAdapter,
+        llm_adapter: LLMAdapter,
         config: DeliberativeConfig | None = None,
         devil_strategy: DevilAdvocateStrategy | None = None,
     ) -> None:
@@ -973,7 +974,7 @@ async def run_consensus_evaluation(
 
 async def run_deliberative_evaluation(
     context: EvaluationContext,
-    llm_adapter: LiteLLMAdapter,
+    llm_adapter: LLMAdapter,
     trigger_reason: str = "manual",
     config: DeliberativeConfig | None = None,
     devil_strategy: DevilAdvocateStrategy | None = None,

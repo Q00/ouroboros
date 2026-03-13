@@ -178,12 +178,17 @@ class TestTaskEvents:
             session_id="sess_123",
             task_description="Implement user authentication",
             acceptance_criterion="Users can log in with email and password",
+            ac_id="ac_1",
+            retry_attempt=2,
         )
 
         assert event.type == "orchestrator.task.started"
         assert event.aggregate_id == "sess_123"
         assert event.data["task_description"] == "Implement user authentication"
         assert event.data["acceptance_criterion"] == "Users can log in with email and password"
+        assert event.data["ac_id"] == "ac_1"
+        assert event.data["retry_attempt"] == 2
+        assert event.data["attempt_number"] == 3
         assert "started_at" in event.data
 
     def test_create_task_completed_event_success(self) -> None:
@@ -193,6 +198,8 @@ class TestTaskEvents:
             acceptance_criterion="AC #1",
             success=True,
             result_summary="Implemented login endpoint",
+            ac_id="ac_1",
+            retry_attempt=1,
         )
 
         assert event.type == "orchestrator.task.completed"
@@ -200,6 +207,9 @@ class TestTaskEvents:
         assert event.data["acceptance_criterion"] == "AC #1"
         assert event.data["success"] is True
         assert event.data["result_summary"] == "Implemented login endpoint"
+        assert event.data["ac_id"] == "ac_1"
+        assert event.data["retry_attempt"] == 1
+        assert event.data["attempt_number"] == 2
         assert "completed_at" in event.data
 
     def test_create_task_completed_event_failure(self) -> None:

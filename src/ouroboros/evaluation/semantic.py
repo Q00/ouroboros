@@ -8,9 +8,10 @@ LLM-based semantic evaluation using Standard tier:
 The SemanticEvaluator uses the LiteLLM adapter for LLM calls.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 
+from ouroboros.config import get_semantic_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
@@ -24,7 +25,7 @@ from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, Mess
 
 # Default model for semantic evaluation (Standard tier)
 # Can be overridden via SemanticConfig.model
-DEFAULT_SEMANTIC_MODEL = "claude-opus-4-6"
+DEFAULT_SEMANTIC_MODEL = get_semantic_model()
 
 # JSON schema for structured semantic evaluation output
 SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
@@ -59,7 +60,7 @@ class SemanticConfig:
         satisfaction_threshold: Minimum score to pass (default 0.8)
     """
 
-    model: str = DEFAULT_SEMANTIC_MODEL
+    model: str = field(default_factory=get_semantic_model)
     temperature: float = 0.2
     max_tokens: int = 2048
     satisfaction_threshold: float = 0.8
@@ -221,7 +222,7 @@ class SemanticEvaluator:
             config: Evaluation configuration
         """
         self._llm = llm_adapter
-        self._config = config or SemanticConfig()
+        self._config = config or SemanticConfig(model=get_semantic_model())
 
     async def evaluate(
         self,

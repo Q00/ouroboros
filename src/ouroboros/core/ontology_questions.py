@@ -27,6 +27,8 @@ from enum import StrEnum
 import json
 from typing import TYPE_CHECKING, Protocol
 
+from ouroboros.config import get_ontology_analysis_model
+
 if TYPE_CHECKING:
     from ouroboros.core.errors import ProviderError, ValidationError
     from ouroboros.core.types import Result
@@ -357,7 +359,7 @@ async def analyze_ontologically(
     llm_adapter: LLMAdapter,
     context: str,
     question_types: tuple[OntologicalQuestionType, ...] = (),
-    model: str = "claude-opus-4-6",
+    model: str | None = None,
     temperature: float = 0.3,
     max_tokens: int = 2048,
 ) -> Result[OntologicalInsight, ProviderError | ValidationError]:
@@ -416,7 +418,7 @@ async def analyze_ontologically(
     ]
 
     config = CompletionConfig(
-        model=model,
+        model=model or get_ontology_analysis_model(),
         temperature=temperature,
         max_tokens=max_tokens,
     )

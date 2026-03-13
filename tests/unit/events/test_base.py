@@ -126,6 +126,87 @@ class TestBaseEventSerialization:
         db_dict = event.to_db_dict()
         assert db_dict["payload"] == {"key": "value"}
 
+    def test_to_db_dict_excludes_raw_subscribed_payloads(self) -> None:
+        """Raw subscribed runtime payloads are stripped before persistence."""
+        event = BaseEvent(
+            type="test.event.created",
+            aggregate_type="test",
+            aggregate_id="test-123",
+            data={
+                "progress": {
+                    "messages_processed": 4,
+                    "runtime": {
+                        "backend": "opencode",
+                        "native_session_id": "sess-123",
+                        "metadata": {
+                            "resume_token": "resume-123",
+                            "raw_subscribed_event": {"type": "session.updated"},
+                            "subscribed_event_payload": {"delta": "keep out"},
+                        },
+                    },
+                    "subscribed_events": [{"type": "tool.started"}],
+                }
+            },
+        )
+
+        db_dict = event.to_db_dict()
+
+        assert db_dict["payload"] == {
+            "progress": {
+                "messages_processed": 4,
+                "runtime": {
+                    "backend": "opencode",
+                    "native_session_id": "sess-123",
+                    "metadata": {
+                        "resume_token": "resume-123",
+                    },
+                },
+            }
+        }
+
+    def test_to_db_dict_excludes_raw_subscribed_payloads_inside_tuples(self) -> None:
+        """Tuple-backed payloads should be normalized before persistence."""
+        event = BaseEvent(
+            type="test.event.created",
+            aggregate_type="test",
+            aggregate_id="test-123",
+            data={
+                "progress": (
+                    {
+                        "messages_processed": 1,
+                        "raw_event": {"type": "assistant.message.delta"},
+                    },
+                    {
+                        "runtime": {
+                            "backend": "opencode",
+                            "metadata": {
+                                "resume_token": "resume-123",
+                                "subscribed_events": [{"type": "tool.started"}],
+                            },
+                        }
+                    },
+                )
+            },
+        )
+
+        db_dict = event.to_db_dict()
+
+        assert db_dict["payload"] == {
+            "progress": [
+                {
+                    "messages_processed": 1,
+                },
+                {
+                    "runtime": {
+                        "backend": "opencode",
+                        "metadata": {
+                            "resume_token": "resume-123",
+                        },
+                    }
+                },
+            ]
+        }
+
     def test_from_db_row_reconstructs_event(self) -> None:
         """from_db_row() reconstructs event from database row."""
         row = {
