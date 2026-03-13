@@ -37,6 +37,7 @@ import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from ouroboros.config import get_decomposition_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
@@ -47,7 +48,7 @@ from ouroboros.events.decomposition import (
 from ouroboros.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    from ouroboros.providers.base import LLMAdapter
 
 log = get_logger(__name__)
 
@@ -289,10 +290,10 @@ async def decompose_ac(
     ac_id: str,
     execution_id: str,
     depth: int,
-    llm_adapter: LiteLLMAdapter,
+    llm_adapter: LLMAdapter,
     discover_insights: str = "",
     *,
-    model: str = "claude-opus-4-6",
+    model: str | None = None,
 ) -> Result[DecompositionResult, DecompositionError | ProviderError]:
     """Decompose a non-atomic AC into child ACs using LLM.
 
@@ -365,7 +366,7 @@ async def decompose_ac(
     ]
 
     config = CompletionConfig(
-        model=model,
+        model=model or get_decomposition_model(),
         temperature=0.5,  # Balanced creativity and consistency
         max_tokens=1000,
     )

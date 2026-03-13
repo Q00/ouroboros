@@ -15,6 +15,7 @@ Usage:
 
     if conflicts:
         review = await coordinator.run_review(
+            execution_id="exec_123",
             conflicts=conflicts,
             level_context=level_ctx,
             level_number=1,
@@ -24,20 +25,29 @@ Usage:
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 import json
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.adapter import RuntimeHandle
+from ouroboros.orchestrator.execution_runtime_scope import (
+    build_level_coordinator_runtime_scope,
+)
 
 if TYPE_CHECKING:
-    from ouroboros.orchestrator.adapter import AgentRuntime
+    from ouroboros.orchestrator.adapter import AgentMessage, AgentRuntime
     from ouroboros.orchestrator.level_context import LevelContext
     from ouroboros.orchestrator.parallel_executor import ACExecutionResult
 
 log = get_logger(__name__)
+
+_LEVEL_COORDINATOR_SESSION_KIND = "level_coordinator"
+_COORDINATOR_SCOPE = "level"
+_COORDINATOR_SESSION_ROLE = "coordinator"
+_COORDINATOR_ARTIFACT_TYPE = "coordinator_review"
 
 
 # Tools available to the Coordinator Claude session
@@ -80,6 +90,10 @@ class CoordinatorReview:
         warnings_for_next_level: Injected into next level prompt.
         duration_seconds: Time spent on review.
         session_id: Claude session ID (None if no session was needed).
+        session_scope_id: Stable identity for persisted reconciliation runtime state.
+        session_state_path: Stable state path for persisted reconciliation runtime state.
+        final_output: Raw final coordinator output captured for level-scoped artifacts.
+        messages: Runtime messages retained in memory for normalized audit emission.
     """
 
     level_number: int
@@ -89,6 +103,70 @@ class CoordinatorReview:
     warnings_for_next_level: tuple[str, ...] = field(default_factory=tuple)
     duration_seconds: float = 0.0
     session_id: str | None = None
+    session_scope_id: str | None = None
+    session_state_path: str | None = None
+    final_output: str = ""
+    messages: tuple[AgentMessage, ...] = field(default_factory=tuple)
+
+    @property
+    def scope(self) -> str:
+        """Coordinator reconciliation is always attributed at level scope."""
+        return _COORDINATOR_SCOPE
+
+    @property
+    def session_role(self) -> str:
+        """Coordinator reconciliation never impersonates an AC session."""
+        return _COORDINATOR_SESSION_ROLE
+
+    @property
+    def stage_index(self) -> int:
+        """Return the 0-based execution stage index for this level."""
+        return self.level_number - 1
+
+    @property
+    def artifact_type(self) -> str:
+        """Return the persisted artifact type for coordinator output."""
+        return _COORDINATOR_ARTIFACT_TYPE
+
+    @property
+    def artifact_owner(self) -> str:
+        """Coordinator artifacts are owned by the level coordinator."""
+        return _COORDINATOR_SESSION_ROLE
+
+    @property
+    def artifact_scope(self) -> str:
+        """Coordinator artifacts belong to the shared level workspace state."""
+        return _COORDINATOR_SCOPE
+
+    @property
+    def artifact_owner_id(self) -> str:
+        """Return the stable coordinator scope identifier used for persistence."""
+        if self.session_scope_id:
+            return self.session_scope_id
+        return f"level_{self.level_number}_coordinator_reconciliation"
+
+    @property
+    def artifact_state_path(self) -> str:
+        """Return the stable persistence path for coordinator runtime state."""
+        if self.session_state_path:
+            return self.session_state_path
+        return f"execution.levels.level_{self.level_number}.coordinator_reconciliation_session"
+
+    def to_artifact_payload(self) -> dict[str, Any]:
+        """Build normalized persisted artifact metadata for coordinator output."""
+        return {
+            "scope": self.scope,
+            "session_role": self.session_role,
+            "stage_index": self.stage_index,
+            "level_number": self.level_number,
+            "session_scope_id": self.artifact_owner_id,
+            "session_state_path": self.artifact_state_path,
+            "artifact_scope": self.artifact_scope,
+            "artifact_owner": self.artifact_owner,
+            "artifact_owner_id": self.artifact_owner_id,
+            "artifact": self.final_output,
+            "artifact_type": self.artifact_type,
+        }
 
 
 class LevelCoordinator:
@@ -105,6 +183,101 @@ class LevelCoordinator:
             adapter: Agent runtime for conflict resolution sessions.
         """
         self._adapter = adapter
+        self._level_runtime_handles: dict[tuple[str, int], RuntimeHandle] = {}
+
+    def _build_level_runtime_handle(
+        self,
+        execution_id: str,
+        level_number: int,
+        *,
+        previous_review: CoordinatorReview | None = None,
+    ) -> RuntimeHandle | None:
+        """Build or resume the runtime handle for level-scoped coordinator work."""
+        runtime_scope = build_level_coordinator_runtime_scope(execution_id, level_number)
+        cache_key = (execution_id, level_number)
+        seeded_handle = self._level_runtime_handles.get(cache_key)
+        backend_candidates = (
+            getattr(self._adapter, "_runtime_handle_backend", None),
+            getattr(self._adapter, "_provider_name", None),
+            getattr(self._adapter, "_runtime_backend", None),
+        )
+        backend = next(
+            (
+                candidate.strip()
+                for candidate in backend_candidates
+                if isinstance(candidate, str) and candidate.strip()
+            ),
+            None,
+        )
+        if backend is None:
+            return None
+
+        cwd = getattr(self._adapter, "_cwd", None)
+        approval_mode = getattr(self._adapter, "_permission_mode", None)
+        native_session_id = seeded_handle.native_session_id if seeded_handle is not None else None
+        if native_session_id is None and previous_review is not None:
+            if previous_review.level_number == level_number:
+                native_session_id = previous_review.session_id
+
+        metadata: dict[str, object] = (
+            dict(seeded_handle.metadata) if seeded_handle is not None else {}
+        )
+        metadata.update(
+            {
+                "scope": "level",
+                "execution_id": execution_id,
+                "level_number": level_number,
+                "session_role": "coordinator",
+                "session_scope_id": runtime_scope.aggregate_id,
+                "session_state_path": runtime_scope.state_path,
+            }
+        )
+        if seeded_handle is not None:
+            return replace(
+                seeded_handle,
+                backend=backend,
+                kind=seeded_handle.kind or _LEVEL_COORDINATOR_SESSION_KIND,
+                native_session_id=native_session_id,
+                cwd=(
+                    seeded_handle.cwd
+                    if seeded_handle.cwd
+                    else cwd
+                    if isinstance(cwd, str) and cwd
+                    else None
+                ),
+                approval_mode=(
+                    seeded_handle.approval_mode
+                    if seeded_handle.approval_mode
+                    else approval_mode
+                    if isinstance(approval_mode, str) and approval_mode
+                    else None
+                ),
+                updated_at=datetime.now(UTC).isoformat(),
+                metadata=metadata,
+            )
+
+        return RuntimeHandle(
+            backend=backend,
+            kind=_LEVEL_COORDINATOR_SESSION_KIND,
+            native_session_id=native_session_id,
+            cwd=cwd if isinstance(cwd, str) and cwd else None,
+            approval_mode=approval_mode
+            if isinstance(approval_mode, str) and approval_mode
+            else None,
+            updated_at=datetime.now(UTC).isoformat(),
+            metadata=metadata,
+        )
+
+    def _remember_level_runtime_handle(
+        self,
+        execution_id: str,
+        level_number: int,
+        runtime_handle: RuntimeHandle | None,
+    ) -> None:
+        """Cache the latest runtime handle for repeated same-level reconciliation."""
+        if runtime_handle is None:
+            return
+        self._level_runtime_handles[(execution_id, level_number)] = runtime_handle
 
     @staticmethod
     def detect_file_conflicts(
@@ -151,9 +324,12 @@ class LevelCoordinator:
 
     async def run_review(
         self,
+        execution_id: str,
         conflicts: list[FileConflict],
         level_context: LevelContext,
         level_number: int,
+        *,
+        previous_review: CoordinatorReview | None = None,
     ) -> CoordinatorReview:
         """Run a Claude session to review and resolve file conflicts.
 
@@ -168,6 +344,7 @@ class LevelCoordinator:
             CoordinatorReview with resolution details.
         """
         start_time = datetime.now(UTC)
+        runtime_scope = build_level_coordinator_runtime_scope(execution_id, level_number)
 
         prompt = _build_review_prompt(conflicts, level_context, level_number)
 
@@ -177,21 +354,37 @@ class LevelCoordinator:
             conflict_count=len(conflicts),
         )
 
+        runtime_handle = self._build_level_runtime_handle(
+            execution_id,
+            level_number,
+            previous_review=previous_review,
+        )
         session_id: str | None = None
         final_text = ""
+        messages: list[AgentMessage] = []
 
         try:
             async for message in self._adapter.execute_task(
                 prompt=prompt,
                 tools=COORDINATOR_TOOLS,
                 system_prompt=COORDINATOR_SYSTEM_PROMPT,
+                resume_handle=runtime_handle,
             ):
+                messages.append(message)
+                if message.resume_handle is not None:
+                    runtime_handle = message.resume_handle
+                    self._remember_level_runtime_handle(
+                        execution_id,
+                        level_number,
+                        runtime_handle,
+                    )
                 if message.resume_handle is not None and message.resume_handle.native_session_id:
                     session_id = message.resume_handle.native_session_id
                 elif message.data.get("session_id"):
                     session_id = message.data["session_id"]
                 if message.is_final:
                     final_text = message.content
+            self._remember_level_runtime_handle(execution_id, level_number, runtime_handle)
 
         except Exception as e:
             log.exception(
@@ -199,18 +392,36 @@ class LevelCoordinator:
                 level=level_number,
                 error=str(e),
             )
+            self._remember_level_runtime_handle(execution_id, level_number, runtime_handle)
             duration = (datetime.now(UTC) - start_time).total_seconds()
             return CoordinatorReview(
                 level_number=level_number,
                 conflicts_detected=tuple(conflicts),
                 review_summary=f"Coordinator review failed: {e}",
                 duration_seconds=duration,
+                session_scope_id=runtime_scope.aggregate_id,
+                session_state_path=runtime_scope.state_path,
+                session_id=session_id,
+                final_output=f"Coordinator review failed: {e}",
+                messages=tuple(messages),
             )
 
         duration = (datetime.now(UTC) - start_time).total_seconds()
 
         # Parse structured response from Claude
-        review = _parse_review_response(final_text, conflicts, level_number, duration, session_id)
+        review = replace(
+            _parse_review_response(
+                final_text,
+                conflicts,
+                level_number,
+                duration,
+                session_id,
+                session_scope_id=runtime_scope.aggregate_id,
+                session_state_path=runtime_scope.state_path,
+            ),
+            final_output=final_text,
+            messages=tuple(messages),
+        )
 
         log.info(
             "coordinator.review.completed",
@@ -310,6 +521,9 @@ def _parse_review_response(
     level_number: int,
     duration: float,
     session_id: str | None,
+    *,
+    session_scope_id: str | None = None,
+    session_state_path: str | None = None,
 ) -> CoordinatorReview:
     """Parse the Coordinator's structured JSON response.
 
@@ -376,6 +590,8 @@ def _parse_review_response(
         warnings_for_next_level=tuple(warnings),
         duration_seconds=duration,
         session_id=session_id,
+        session_scope_id=session_scope_id,
+        session_state_path=session_state_path,
     )
 
 

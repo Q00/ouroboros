@@ -212,6 +212,9 @@ def create_task_started_event(
     session_id: str,
     task_description: str,
     acceptance_criterion: str,
+    *,
+    ac_id: str | None = None,
+    retry_attempt: int = 0,
 ) -> BaseEvent:
     """Create task started event.
 
@@ -219,19 +222,27 @@ def create_task_started_event(
         session_id: Session executing the task.
         task_description: What the task aims to accomplish.
         acceptance_criterion: AC from the seed being executed.
+        ac_id: Stable AC identifier for reopened execution attempts.
+        retry_attempt: Retry attempt number (0 for the first execution).
 
     Returns:
         BaseEvent for task start.
     """
+    data: dict[str, Any] = {
+        "task_description": task_description,
+        "acceptance_criterion": acceptance_criterion,
+        "retry_attempt": retry_attempt,
+        "attempt_number": retry_attempt + 1,
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    if ac_id:
+        data["ac_id"] = ac_id
+
     return BaseEvent(
         type="orchestrator.task.started",
         aggregate_type="session",
         aggregate_id=session_id,
-        data={
-            "task_description": task_description,
-            "acceptance_criterion": acceptance_criterion,
-            "started_at": datetime.now(UTC).isoformat(),
-        },
+        data=data,
     )
 
 
@@ -240,6 +251,9 @@ def create_task_completed_event(
     acceptance_criterion: str,
     success: bool,
     result_summary: str | None = None,
+    *,
+    ac_id: str | None = None,
+    retry_attempt: int = 0,
 ) -> BaseEvent:
     """Create task completed event.
 
@@ -248,20 +262,28 @@ def create_task_completed_event(
         acceptance_criterion: AC that was executed.
         success: Whether the task succeeded.
         result_summary: Summary of what was accomplished.
+        ac_id: Stable AC identifier for reopened execution attempts.
+        retry_attempt: Retry attempt number (0 for the first execution).
 
     Returns:
         BaseEvent for task completion.
     """
+    data: dict[str, Any] = {
+        "acceptance_criterion": acceptance_criterion,
+        "success": success,
+        "result_summary": result_summary,
+        "retry_attempt": retry_attempt,
+        "attempt_number": retry_attempt + 1,
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    if ac_id:
+        data["ac_id"] = ac_id
+
     return BaseEvent(
         type="orchestrator.task.completed",
         aggregate_type="session",
         aggregate_id=session_id,
-        data={
-            "acceptance_criterion": acceptance_criterion,
-            "success": success,
-            "result_summary": result_summary,
-            "completed_at": datetime.now(UTC).isoformat(),
-        },
+        data=data,
     )
 
 
@@ -351,6 +373,7 @@ def create_workflow_progress_event(
     tool_calls_count: int = 0,
     estimated_tokens: int = 0,
     estimated_cost_usd: float = 0.0,
+    last_update: dict[str, Any] | None = None,
 ) -> BaseEvent:
     """Create workflow progress event.
 
@@ -373,31 +396,36 @@ def create_workflow_progress_event(
         tool_calls_count: Total tool calls made.
         estimated_tokens: Estimated token usage.
         estimated_cost_usd: Estimated cost in USD.
+        last_update: Optional normalized artifact snapshot from the latest runtime message.
 
     Returns:
         BaseEvent for workflow progress update.
     """
+    data: dict[str, Any] = {
+        "session_id": session_id,
+        "acceptance_criteria": acceptance_criteria,
+        "completed_count": completed_count,
+        "total_count": total_count,
+        "current_ac_index": current_ac_index,
+        "current_phase": current_phase,
+        "activity": activity,
+        "activity_detail": activity_detail,
+        "elapsed_display": elapsed_display,
+        "estimated_remaining": estimated_remaining,
+        "messages_count": messages_count,
+        "tool_calls_count": tool_calls_count,
+        "estimated_tokens": estimated_tokens,
+        "estimated_cost_usd": estimated_cost_usd,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    if last_update:
+        data["last_update"] = dict(last_update)
+
     return BaseEvent(
         type="workflow.progress.updated",
         aggregate_type="execution",
         aggregate_id=execution_id,
-        data={
-            "session_id": session_id,
-            "acceptance_criteria": acceptance_criteria,
-            "completed_count": completed_count,
-            "total_count": total_count,
-            "current_ac_index": current_ac_index,
-            "current_phase": current_phase,
-            "activity": activity,
-            "activity_detail": activity_detail,
-            "elapsed_display": elapsed_display,
-            "estimated_remaining": estimated_remaining,
-            "messages_count": messages_count,
-            "tool_calls_count": tool_calls_count,
-            "estimated_tokens": estimated_tokens,
-            "estimated_cost_usd": estimated_cost_usd,
-            "timestamp": datetime.now(UTC).isoformat(),
-        },
+        data=data,
     )
 
 

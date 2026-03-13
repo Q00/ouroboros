@@ -1,7 +1,8 @@
 """Tests for Ouroboros tool definitions."""
 
+import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.core.types import Result
@@ -25,8 +26,15 @@ from ouroboros.mcp.tools.definitions import (
     SessionStatusHandler,
     StartEvolveStepHandler,
     StartExecuteSeedHandler,
+    evaluate_handler,
+    execute_seed_handler,
+    generate_seed_handler,
+    get_ouroboros_tools,
+    interview_handler,
 )
+from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.types import ToolInputType
+from ouroboros.orchestrator.session import SessionTracker
 
 
 class TestExecuteSeedHandler:
@@ -37,17 +45,22 @@ class TestExecuteSeedHandler:
         handler = ExecuteSeedHandler()
         assert handler.definition.name == "ouroboros_execute_seed"
 
-    def test_definition_has_required_parameters(self) -> None:
-        """ExecuteSeedHandler has required seed_content parameter."""
+    def test_definition_accepts_seed_content_or_seed_path(self) -> None:
+        """ExecuteSeedHandler accepts either inline content or a seed path."""
         handler = ExecuteSeedHandler()
         defn = handler.definition
 
         param_names = {p.name for p in defn.parameters}
         assert "seed_content" in param_names
+        assert "seed_path" in param_names
 
         seed_param = next(p for p in defn.parameters if p.name == "seed_content")
-        assert seed_param.required is True
+        assert seed_param.required is False
         assert seed_param.type == ToolInputType.STRING
+
+        seed_path_param = next(p for p in defn.parameters if p.name == "seed_path")
+        assert seed_path_param.required is False
+        assert seed_path_param.type == ToolInputType.STRING
 
     def test_definition_has_optional_parameters(self) -> None:
         """ExecuteSeedHandler has optional parameters."""
@@ -55,21 +68,165 @@ class TestExecuteSeedHandler:
         defn = handler.definition
 
         param_names = {p.name for p in defn.parameters}
+        assert "cwd" in param_names
         assert "session_id" in param_names
         assert "model_tier" in param_names
         assert "max_iterations" in param_names
 
-    async def test_handle_requires_seed_content(self) -> None:
-        """handle returns error when seed_content is missing."""
+    async def test_handle_requires_seed_content_or_seed_path(self) -> None:
+        """handle returns error when neither seed_content nor seed_path is provided."""
         handler = ExecuteSeedHandler()
         result = await handler.handle({})
 
         assert result.is_err
-        assert "seed_content is required" in str(result.error)
+        assert "seed_content or seed_path is required" in str(result.error)
+
+    def test_execute_seed_handler_factory_accepts_runtime_backend(self) -> None:
+        """Factory helper preserves explicit runtime backend selection."""
+        handler = execute_seed_handler(runtime_backend="codex")
+        assert handler.agent_runtime_backend == "codex"
+
+    def test_execute_seed_handler_factory_accepts_llm_backend(self) -> None:
+        """Factory helper preserves explicit llm backend selection."""
+        handler = execute_seed_handler(runtime_backend="opencode", llm_backend="opencode")
+        assert handler.agent_runtime_backend == "opencode"
+        assert handler.llm_backend == "opencode"
+
+    async def test_handle_uses_runtime_factory_defaults(self) -> None:
+        """ExecuteSeed relies on runtime factory defaults instead of hardcoded permissions."""
+        handler = ExecuteSeedHandler()
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock(
+            return_value=Result.err(RuntimeError("execution failed"))
+        )
+        mock_runner.execute_precreated_session = AsyncMock()
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                return_value=mock_runtime,
+            ) as mock_create_runtime,
+            patch(
+                "ouroboros.mcp.tools.definitions.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+        ):
+            await handler.handle({"seed_content": VALID_SEED_YAML})
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert mock_create_runtime.call_args.kwargs["backend"] is None
+        assert mock_create_runtime.call_args.kwargs["llm_backend"] is None
+        assert "permission_mode" not in mock_create_runtime.call_args.kwargs
+
+    async def test_handle_forwards_llm_backend_to_runtime_factory(self) -> None:
+        """ExecuteSeed forwards explicit llm backend selection into the runtime factory."""
+        handler = ExecuteSeedHandler(
+            agent_runtime_backend="opencode",
+            llm_backend="opencode",
+        )
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock(
+            return_value=Result.err(RuntimeError("execution failed"))
+        )
+        mock_runner.execute_precreated_session = AsyncMock()
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                return_value=mock_runtime,
+            ) as mock_create_runtime,
+            patch(
+                "ouroboros.mcp.tools.definitions.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+        ):
+            await handler.handle({"seed_content": VALID_SEED_YAML})
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert mock_create_runtime.call_args.kwargs["backend"] == "opencode"
+        assert mock_create_runtime.call_args.kwargs["llm_backend"] == "opencode"
+
+    async def test_handle_resolves_relative_seed_path_against_cwd(self, tmp_path: Path) -> None:
+        """Relative seed paths from `ooo run` resolve against the intercepted working directory."""
+        handler = ExecuteSeedHandler()
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text(VALID_SEED_YAML, encoding="utf-8")
+
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock(
+            return_value=Result.err(RuntimeError("execution failed"))
+        )
+        mock_runner.execute_precreated_session = AsyncMock()
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                return_value=mock_runtime,
+            ) as mock_create_runtime,
+            patch(
+                "ouroboros.mcp.tools.definitions.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+        ):
+            await handler.handle({"seed_path": "seed.yaml", "cwd": str(tmp_path)})
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert mock_create_runtime.call_args.kwargs["cwd"] == tmp_path
+        called_seed = mock_runner.prepare_session.await_args.args[0]
+        assert called_seed.goal == "Test task"
 
     async def test_handle_success(self) -> None:
-        """handle returns success with valid YAML seed input."""
+        """handle returns an immediate launched response with valid YAML seed input."""
         handler = ExecuteSeedHandler()
+        mock_runtime = MagicMock()
+        mock_runtime._runtime_backend = "codex"
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_exec_result = MagicMock(
+            success=True,
+            session_id="sess-success",
+            execution_id="exec-success",
+            messages_processed=1,
+            duration_seconds=0.2,
+            final_message="[TASK_COMPLETE]",
+            summary={},
+        )
+        mock_runner = MagicMock()
+        prepared_tracker = SessionTracker.create(
+            "exec-success",
+            "test-seed-123",
+            session_id="sess-success",
+        )
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(mock_exec_result))
+        mock_runner.resume_session = AsyncMock()
         valid_seed_yaml = """
 goal: Test task
 constraints:
@@ -92,20 +249,228 @@ metadata:
   ambiguity_score: 0.1
   interview_id: null
 """
-        result = await handler.handle(
-            {
-                "seed_content": valid_seed_yaml,
-                "model_tier": "medium",
-            }
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": valid_seed_yaml,
+                    "model_tier": "medium",
+                    "skip_qa": True,
+                }
+            )
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert result.is_ok
+        assert "Seed Execution LAUNCHED" in result.value.text_content
+        assert "Session ID: sess-success" in result.value.text_content
+        assert "Execution ID: exec-success" in result.value.text_content
+        assert result.value.meta["seed_id"] == "test-seed-123"
+        assert result.value.meta["session_id"] == "sess-success"
+        assert result.value.meta["execution_id"] == "exec-success"
+        assert result.value.meta["status"] == "running"
+
+    async def test_handle_reads_seed_from_seed_path(self, tmp_path: Path) -> None:
+        """handle loads seed YAML from seed_path and launches execution in the background."""
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text(VALID_SEED_YAML, encoding="utf-8")
+
+        handler = ExecuteSeedHandler()
+        mock_runtime = MagicMock()
+        mock_runtime._runtime_backend = "codex"
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_exec_result = MagicMock(
+            success=True,
+            session_id="sess-123",
+            execution_id="exec-456",
+            messages_processed=4,
+            duration_seconds=1.2,
+            final_message="Execution finished",
+            summary={},
+        )
+        mock_runner = MagicMock()
+        prepared_tracker = SessionTracker.create(
+            "exec-456",
+            "test-seed-123",
+            session_id="sess-123",
+        )
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(mock_exec_result))
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+        ):
+            result = await handler.handle({"seed_path": str(seed_file), "skip_qa": True})
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert result.is_ok
+        mock_runner.prepare_session.assert_awaited_once()
+        mock_runner.execute_precreated_session.assert_awaited_once()
+        assert "Seed Execution LAUNCHED" in result.value.text_content
+        assert "Session ID: sess-123" in result.value.text_content
+        assert "Execution ID: exec-456" in result.value.text_content
+        assert "Runtime Backend: codex" in result.value.text_content
+        assert result.value.meta["seed_id"] == "test-seed-123"
+        assert result.value.meta["session_id"] == "sess-123"
+        assert result.value.meta["execution_id"] == "exec-456"
+        assert result.value.meta["launched"] is True
+        assert result.value.meta["status"] == "running"
+        assert result.value.meta["runtime_backend"] == "codex"
+        assert result.value.meta["resume_requested"] is False
+
+    async def test_handle_launches_background_execution_with_opencode_runtime(self) -> None:
+        """OpenCode selections should launch the existing orchestrator pipeline in background."""
+        handler = ExecuteSeedHandler(
+            agent_runtime_backend="opencode",
+            llm_backend="opencode",
+        )
+        mock_runtime = MagicMock()
+        mock_runtime._runtime_backend = "opencode"
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_exec_result = MagicMock(
+            success=True,
+            session_id="sess-opencode",
+            execution_id="exec-opencode",
+            messages_processed=6,
+            duration_seconds=1.4,
+            final_message="[TASK_COMPLETE]",
+            summary={},
+        )
+        mock_runner = MagicMock()
+        prepared_tracker = SessionTracker.create(
+            "exec-opencode",
+            "test-seed-123",
+            session_id="sess-opencode",
+        )
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(mock_exec_result))
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                return_value=mock_runtime,
+            ) as mock_create_runtime,
+            patch(
+                "ouroboros.mcp.tools.definitions.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+        ):
+            result = await handler.handle({"seed_content": VALID_SEED_YAML, "skip_qa": True})
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert result.is_ok
+        assert "Runtime Backend: opencode" in result.value.text_content
+        assert result.value.meta["runtime_backend"] == "opencode"
+        assert result.value.meta["llm_backend"] == "opencode"
+        assert result.value.meta["resume_requested"] is False
+        assert result.value.meta["session_id"] == "sess-opencode"
+        assert result.value.meta["execution_id"] == "exec-opencode"
+        assert mock_create_runtime.call_args.kwargs["backend"] == "opencode"
+        assert mock_create_runtime.call_args.kwargs["llm_backend"] == "opencode"
+        mock_runner.prepare_session.assert_awaited_once()
+        mock_runner.execute_precreated_session.assert_awaited_once()
+        assert mock_runner.execute_precreated_session.await_args.kwargs["parallel"] is True
+        mock_runner.resume_session.assert_not_awaited()
+
+    async def test_handle_launches_background_resume_for_existing_session(self) -> None:
+        """Resuming through MCP should reuse the current orchestrator resume path."""
+        handler = ExecuteSeedHandler(
+            agent_runtime_backend="opencode",
+            llm_backend="opencode",
+        )
+        mock_runtime = MagicMock()
+        mock_runtime._runtime_backend = "opencode"
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_exec_result = MagicMock(
+            success=True,
+            session_id="sess-resume",
+            execution_id="exec-resume",
+            messages_processed=8,
+            duration_seconds=1.8,
+            final_message="[TASK_COMPLETE]",
+            summary={},
+        )
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock()
+        mock_runner.execute_precreated_session = AsyncMock()
+        mock_runner.resume_session = AsyncMock(return_value=Result.ok(mock_exec_result))
+        resumed_tracker = SessionTracker.create(
+            "exec-resume",
+            "test-seed-123",
+            session_id="sess-resume",
         )
 
-        # Handler now integrates with actual orchestrator, so we check for proper response
-        # The result should contain execution information or a helpful error about dependencies
-        assert (
-            result.is_ok
-            or "execution" in str(result.error).lower()
-            or "orchestrator" in str(result.error).lower()
-        )
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.SessionRepository.reconstruct_session",
+                new=AsyncMock(return_value=Result.ok(resumed_tracker)),
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": VALID_SEED_YAML,
+                    "session_id": "sess-resume",
+                    "skip_qa": True,
+                }
+            )
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert result.is_ok
+        assert result.value.meta["resume_requested"] is True
+        assert result.value.meta["runtime_backend"] == "opencode"
+        assert result.value.meta["session_id"] == "sess-resume"
+        assert result.value.meta["execution_id"] == "exec-resume"
+        mock_runner.resume_session.assert_awaited_once()
+        assert mock_runner.resume_session.await_args.args[0] == "sess-resume"
+        mock_runner.prepare_session.assert_not_awaited()
+        mock_runner.execute_precreated_session.assert_not_awaited()
 
 
 class TestSessionStatusHandler:
@@ -198,6 +563,62 @@ class TestQueryEventsHandler:
         assert result.is_ok
         assert "test-session" in result.value.text_content
 
+    async def test_handle_with_session_id_includes_related_parallel_execution_events(self) -> None:
+        """session_id queries should include execution and child AC aggregates."""
+        from ouroboros.events.base import BaseEvent
+        from ouroboros.persistence.event_store import EventStore
+
+        event_store = EventStore("sqlite+aiosqlite:///:memory:")
+        await event_store.initialize()
+
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="orch_parallel_123",
+                data={
+                    "execution_id": "exec_parallel_123",
+                    "seed_id": "seed_parallel_123",
+                    "start_time": "2026-03-13T09:00:00+00:00",
+                },
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_parallel_123",
+                data={
+                    "session_id": "orch_parallel_123",
+                    "completed_count": 1,
+                    "total_count": 3,
+                    "messages_count": 5,
+                    "tool_calls_count": 2,
+                    "acceptance_criteria": [],
+                },
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="execution.session.started",
+                aggregate_type="execution",
+                aggregate_id="exec_parallel_123_sub_ac_0_0",
+                data={
+                    "session_id": "native-codex-session",
+                    "session_scope_id": "exec_parallel_123_sub_ac_0_0",
+                },
+            )
+        )
+
+        handler = QueryEventsHandler(event_store=event_store)
+        result = await handler.handle({"session_id": "orch_parallel_123", "limit": 20})
+
+        assert result.is_ok
+        text = result.value.text_content
+        assert "workflow.progress.updated" in text
+        assert "execution.session.started" in text
+        assert "exec_parallel_123_sub_ac_0_0" in text
+
 
 class TestOuroborosTools:
     """Test OUROBOROS_TOOLS constant."""
@@ -236,6 +657,178 @@ class TestOuroborosTools:
         for handler in OUROBOROS_TOOLS:
             assert handler.definition.description
             assert len(handler.definition.description) > 10
+
+    def test_get_ouroboros_tools_can_inject_runtime_backend(self) -> None:
+        """Tool factory can build execute_seed with a specific runtime backend."""
+        tools = get_ouroboros_tools(runtime_backend="codex")
+        assert len(tools) == 19
+        execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
+        assert execute_handler.agent_runtime_backend == "codex"
+
+    def test_get_ouroboros_tools_can_inject_llm_backend(self) -> None:
+        """Tool factory propagates llm backend to LLM-only handlers."""
+        tools = get_ouroboros_tools(runtime_backend="codex", llm_backend="litellm")
+        execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
+        generate_handler = next(h for h in tools if isinstance(h, GenerateSeedHandler))
+        interview_handler_instance = next(h for h in tools if isinstance(h, InterviewHandler))
+        evaluate_handler_instance = next(h for h in tools if isinstance(h, EvaluateHandler))
+        qa_handler = next(h for h in tools if isinstance(h, QAHandler))
+
+        assert execute_handler.agent_runtime_backend == "codex"
+        assert execute_handler.llm_backend == "litellm"
+        assert generate_handler.llm_backend == "litellm"
+        assert interview_handler_instance.llm_backend == "litellm"
+        assert evaluate_handler_instance.llm_backend == "litellm"
+        assert qa_handler.llm_backend == "litellm"
+
+    def test_llm_handler_factories_preserve_backend_selection(self) -> None:
+        """Convenience factories preserve explicit llm backend selection."""
+        assert generate_seed_handler(llm_backend="litellm").llm_backend == "litellm"
+        assert interview_handler(llm_backend="litellm").llm_backend == "litellm"
+        assert evaluate_handler(llm_backend="litellm").llm_backend == "litellm"
+
+    async def test_interview_handler_uses_interview_use_case(self) -> None:
+        """Interview fallback requests the interview-specific permission policy."""
+        handler = InterviewHandler(llm_backend="codex")
+        mock_adapter = MagicMock()
+        mock_engine = MagicMock()
+        mock_start = AsyncMock()
+        mock_start.return_value.is_err = True
+        mock_start.return_value.error.message = "failed"
+        mock_engine.start_interview = mock_start
+        mock_engine.load_state = AsyncMock()
+        mock_engine.record_response = AsyncMock()
+        mock_engine.complete_interview = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_llm_adapter",
+                return_value=mock_adapter,
+            ) as mock_create_adapter,
+            patch(
+                "ouroboros.mcp.tools.definitions.InterviewEngine",
+                return_value=mock_engine,
+            ),
+        ):
+            await handler.handle({"initial_context": "Build a tool"})
+
+        assert mock_create_adapter.call_args.kwargs["backend"] == "codex"
+        assert mock_create_adapter.call_args.kwargs["use_case"] == "interview"
+
+    async def test_generate_seed_handler_passes_llm_backend_to_model_lookup(self) -> None:
+        """GenerateSeedHandler should resolve model defaults with the active LLM backend."""
+        handler = GenerateSeedHandler(llm_backend="codex")
+        mock_adapter = MagicMock()
+        mock_interview_engine = MagicMock()
+        mock_interview_engine.load_state = AsyncMock(return_value=Result.ok(MagicMock()))
+        mock_seed_generator = MagicMock()
+        mock_seed_generator.generate = AsyncMock(return_value=Result.err(RuntimeError("boom")))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_llm_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.InterviewEngine",
+                return_value=mock_interview_engine,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.SeedGenerator",
+                return_value=mock_seed_generator,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.get_clarification_model",
+                return_value="default",
+            ) as mock_get_model,
+        ):
+            await handler.handle({"session_id": "sess-123", "ambiguity_score": 0.1})
+
+        assert mock_get_model.call_args_list == [call("codex"), call("codex")]
+
+    async def test_evaluate_handler_passes_llm_backend_to_semantic_model_lookup(self) -> None:
+        """EvaluateHandler should derive semantic model defaults from the active backend."""
+        handler = EvaluateHandler(llm_backend="codex")
+        mock_adapter = MagicMock()
+        mock_pipeline = MagicMock()
+        mock_pipeline.evaluate = AsyncMock(return_value=Result.err(RuntimeError("semantic failed")))
+        seed_content = """\
+goal: Test task
+constraints: []
+acceptance_criteria:
+  - Pass
+ontology_schema:
+  name: Test
+  description: Test
+  fields: []
+evaluation_principles: []
+exit_conditions: []
+metadata:
+  seed_id: seed-123
+  version: "1.0.0"
+  created_at: "2024-01-01T00:00:00Z"
+  ambiguity_score: 0.1
+  interview_id: null
+"""
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.definitions.create_llm_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.get_semantic_model",
+                return_value="default",
+            ) as mock_get_model,
+            patch(
+                "ouroboros.evaluation.build_mechanical_config",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "ouroboros.evaluation.EvaluationPipeline",
+                return_value=mock_pipeline,
+            ),
+        ):
+            await handler.handle(
+                {
+                    "session_id": "sess-123",
+                    "artifact": "print('hi')",
+                    "artifact_type": "code",
+                    "seed_content": seed_content,
+                }
+            )
+
+        mock_get_model.assert_called_once_with("codex")
+
+    async def test_qa_handler_passes_llm_backend_to_qa_model_lookup(self) -> None:
+        """QAHandler should derive QA model defaults from the active backend."""
+        handler = QAHandler(llm_backend="codex")
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.err(RuntimeError("llm failed")))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.qa.create_llm_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                "ouroboros.mcp.tools.qa.get_qa_model",
+                return_value="default",
+            ) as mock_get_model,
+            patch(
+                "ouroboros.mcp.tools.qa._get_qa_system_prompt",
+                return_value="judge",
+            ),
+        ):
+            await handler.handle(
+                {
+                    "artifact": "print('hi')",
+                    "quality_bar": "code should compile",
+                    "artifact_type": "code",
+                }
+            )
+
+        mock_get_model.assert_called_once_with("codex")
 
 
 class TestAsyncJobHandlers:

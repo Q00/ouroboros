@@ -56,6 +56,14 @@ class TestCLIBasics:
         result = runner.invoke(app, ["run", "workflow", "--help"])
         assert result.exit_code == 0
         assert "seed" in result.output.lower()
+        assert "--runtime" in result.output
+
+    def test_mcp_serve_help(self) -> None:
+        """Test that mcp serve --help shows backend selection options."""
+        result = runner.invoke(app, ["mcp", "serve", "--help"])
+        assert result.exit_code == 0
+        assert "--runtime" in result.output
+        assert "--llm-backend" in result.output
 
 
 class TestInitCommand:
@@ -68,16 +76,18 @@ class TestInitCommand:
         result = runner.invoke(app, ["init", "start", "--help"])
         assert result.exit_code == 0
         assert "context" in result.output.lower() or "resume" in result.output.lower()
+        assert "--runtime" in result.output
+        assert "--llm-backend" in result.output
 
     def test_init_with_context_argument(
         self, temp_state_dir: Path, mock_interview_llm_provider: MockLLMProvider
     ) -> None:
         """Test init start with context argument."""
         # Mock the LLM adapter and asyncio.run
-        with patch("ouroboros.cli.commands.init.LiteLLMAdapter") as mock_adapter_class:
+        with patch("ouroboros.cli.commands.init.create_llm_adapter") as mock_adapter_factory:
             mock_adapter = MagicMock()
             mock_adapter.complete = mock_interview_llm_provider.complete
-            mock_adapter_class.return_value = mock_adapter
+            mock_adapter_factory.return_value = mock_adapter
 
             # Mock the Prompt and Confirm classes to avoid interactive prompts
             with patch("ouroboros.cli.commands.init.Prompt") as mock_prompt:
@@ -107,7 +117,7 @@ class TestInitCommand:
 
     def test_init_list_no_interviews(self, temp_state_dir: Path) -> None:
         """Test init list when no interviews exist."""
-        with patch("ouroboros.cli.commands.init.LiteLLMAdapter"):
+        with patch("ouroboros.cli.commands.init.create_llm_adapter"):
             with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
                 mock_run.return_value = []
 
@@ -121,9 +131,9 @@ class TestInitCommand:
 
     def test_init_resume_missing_interview(self, temp_state_dir: Path) -> None:
         """Test init resume with non-existent interview ID."""
-        with patch("ouroboros.cli.commands.init.LiteLLMAdapter") as mock_adapter_class:
+        with patch("ouroboros.cli.commands.init.create_llm_adapter") as mock_adapter_factory:
             mock_adapter = MagicMock()
-            mock_adapter_class.return_value = mock_adapter
+            mock_adapter_factory.return_value = mock_adapter
 
             with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
                 # The function should raise typer.Exit on error

@@ -2,6 +2,8 @@
 
 import pytest
 
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result
 from ouroboros.orchestrator.workflow_state import (
     AcceptanceCriterion,
     ACStatus,
@@ -53,6 +55,8 @@ class TestAcceptanceCriterion:
 
         assert ac.status == ACStatus.IN_PROGRESS
         assert ac.started_at is not None
+        assert ac.retry_attempt == 0
+        assert ac.attempt_number == 1
 
     def test_complete_criterion(self) -> None:
         """Test completing a criterion."""
@@ -71,6 +75,20 @@ class TestAcceptanceCriterion:
 
         assert ac.status == ACStatus.FAILED
         assert ac.completed_at is not None
+
+    def test_restarting_failed_criterion_increments_retry_attempt(self) -> None:
+        """Test reopening a failed criterion preserves identity and increments retry."""
+        ac = AcceptanceCriterion(index=1, content="Test")
+        ac.start()
+        ac.fail()
+        ac.start()
+
+        assert ac.index == 1
+        assert ac.status == ACStatus.IN_PROGRESS
+        assert ac.retry_attempt == 1
+        assert ac.attempt_number == 2
+        assert ac.started_at is not None
+        assert ac.completed_at is None
 
 
 class TestWorkflowState:
@@ -182,6 +200,229 @@ class TestWorkflowStateTracker:
         # Should advance to next pending AC
         assert state.current_ac_index == 2
 
+    def test_process_runtime_message_projects_tool_result_markers(
+        self, tracker: WorkflowStateTracker
+    ) -> None:
+        """Projected tool-result text should flow through the existing AC marker parser."""
+        tracker.process_runtime_message(
+            AgentMessage(
+                type="assistant",
+                content="",
+                data={
+                    "subtype": "tool_result",
+                    "tool_name": "Edit",
+                    "tool_result": normalize_runtime_tool_result("[AC_COMPLETE: 1] Done!"),
+                },
+            )
+        )
+
+        state = tracker.state
+        assert state.acceptance_criteria[0].status == ACStatus.COMPLETED
+        assert state.current_ac_index == 2
+
+    def test_process_runtime_message_uses_explicit_ac_tracking_metadata(
+        self,
+        tracker: WorkflowStateTracker,
+    ) -> None:
+        """Normalized runtime marker metadata should update AC state directly."""
+        tracker.process_runtime_message(
+            AgentMessage(
+                type="assistant",
+                content="OpenCode progress update",
+                data={"ac_tracking": {"started": [2], "completed": []}},
+            )
+        )
+
+        state = tracker.state
+        assert state.acceptance_criteria[1].status == ACStatus.IN_PROGRESS
+        assert state.current_ac_index == 2
+
+    def test_process_runtime_message_reads_markers_from_tool_result_payload(
+        self,
+        tracker: WorkflowStateTracker,
+    ) -> None:
+        """Generic tool-result content should still update AC state from normalized payloads."""
+        tracker.process_runtime_message(
+            AgentMessage(
+                type="assistant",
+                content="Tool completed successfully.",
+                data={
+                    "subtype": "tool_result",
+                    "tool_name": "Edit",
+                    "tool_result": normalize_runtime_tool_result("[AC_COMPLETE: 1] Done!"),
+                },
+            )
+        )
+
+        state = tracker.state
+        assert state.acceptance_criteria[0].status == ACStatus.COMPLETED
+        assert state.current_ac_index == 2
+
+    def test_process_runtime_message_projects_last_update_artifacts(
+        self,
+        tracker: WorkflowStateTracker,
+    ) -> None:
+        """Projected runtime updates should retain normalized tool-result artifacts."""
+        tracker.process_runtime_message(
+            AgentMessage(
+                type="assistant",
+                content="Tool completed successfully.",
+                data={
+                    "subtype": "tool_result",
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "src/app.py"},
+                    "tool_result": normalize_runtime_tool_result("[AC_COMPLETE: 1] Done!"),
+                },
+                resume_handle=RuntimeHandle(
+                    backend="opencode",
+                    native_session_id="oc-session-1",
+                    metadata={"runtime_event_type": "tool.completed"},
+                ),
+            )
+        )
+
+        state = tracker.state
+        assert state.last_update["message_type"] == "tool_result"
+        assert state.last_update["content_preview"] == "Tool completed successfully."
+        assert state.last_update["tool_name"] == "Edit"
+        assert state.last_update["tool_input"] == {"file_path": "src/app.py"}
+        assert state.last_update["tool_result"]["text_content"] == "[AC_COMPLETE: 1] Done!"
+        assert state.last_update["tool_result"]["is_error"] is False
+        assert state.last_update["tool_result"]["meta"] == {}
+        assert state.last_update["tool_result"]["content"][0]["type"] == "text"
+        assert state.last_update["tool_result"]["content"][0]["text"] == "[AC_COMPLETE: 1] Done!"
+        assert state.last_update["runtime_signal"] == "tool_completed"
+        assert state.last_update["runtime_status"] == "running"
+        assert state.last_update["ac_tracking"] == {"started": [], "completed": [1]}
+        assert tracker.state.to_tui_message_data()["last_update"] == state.last_update
+
+    def test_process_runtime_message_projects_empty_opencode_tool_call_through_workflow_state(
+        self,
+        tracker: WorkflowStateTracker,
+    ) -> None:
+        """Empty OpenCode tool-call messages should still drive shared workflow activity."""
+        tracker.process_runtime_message(
+            AgentMessage(
+                type="assistant",
+                content="",
+                tool_name="Edit",
+                data={
+                    "tool_input": {"file_path": "src/ouroboros/orchestrator/opencode_runtime.py"}
+                },
+                resume_handle=RuntimeHandle(
+                    backend="opencode",
+                    native_session_id="oc-session-tool-1",
+                ),
+            )
+        )
+
+        state = tracker.state
+        assert state.messages_count == 1
+        assert state.tool_calls_count == 1
+        assert state.last_tool == "Edit"
+        assert state.activity == ActivityType.BUILDING
+        assert state.activity_detail == "Edit src/ouroboros/orchestrator/opencode_runtime.py"
+        assert state.recent_outputs == []
+
+    def test_replay_progress_event_reads_nested_tool_result_markers_from_progress_payload(
+        self,
+        tracker: WorkflowStateTracker,
+    ) -> None:
+        """Resume replay should recover AC markers from nested persisted tool-result payloads."""
+        tracker.replay_progress_event(
+            {
+                "progress": {
+                    "messages_processed": 1,
+                    "last_message_type": "tool_result",
+                    "content_preview": "Tool completed successfully.",
+                    "tool_result": normalize_runtime_tool_result("[AC_COMPLETE: 1] Done!"),
+                }
+            }
+        )
+
+        state = tracker.state
+        assert state.messages_count == 1
+        assert state.acceptance_criteria[0].status == ACStatus.COMPLETED
+        assert state.current_ac_index == 2
+
+    def test_replay_progress_event_restores_last_update_from_progress_snapshot(
+        self,
+        tracker: WorkflowStateTracker,
+    ) -> None:
+        """Resume replay should rebuild the last normalized artifact snapshot."""
+        tracker.replay_progress_event(
+            {
+                "progress": {
+                    "messages_processed": 1,
+                    "last_message_type": "tool_result",
+                    "last_content_preview": "Tool completed successfully.",
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "src/app.py"},
+                    "tool_result": normalize_runtime_tool_result("[AC_COMPLETE: 1] Done!"),
+                    "runtime_signal": "tool_completed",
+                    "runtime_status": "running",
+                }
+            }
+        )
+
+        state = tracker.state
+        assert state.last_update["message_type"] == "tool_result"
+        assert state.last_update["content_preview"] == "Tool completed successfully."
+        assert state.last_update["tool_name"] == "Edit"
+        assert state.last_update["tool_input"] == {"file_path": "src/app.py"}
+        assert state.last_update["tool_result"]["text_content"] == "[AC_COMPLETE: 1] Done!"
+        assert state.last_update["tool_result"]["is_error"] is False
+        assert state.last_update["tool_result"]["meta"] == {}
+        assert state.last_update["tool_result"]["content"][0]["type"] == "text"
+        assert state.last_update["tool_result"]["content"][0]["text"] == "[AC_COMPLETE: 1] Done!"
+        assert state.last_update["runtime_signal"] == "tool_completed"
+        assert state.last_update["runtime_status"] == "running"
+        assert state.last_update["ac_tracking"] == {"started": [], "completed": [1]}
+
+    def test_replay_progress_event_restores_completed_ac_without_double_counting(
+        self,
+        tracker: WorkflowStateTracker,
+    ) -> None:
+        """Persisted audit + checkpoint events should rebuild workflow state on resume."""
+        tracker.replay_progress_event(
+            {
+                "message_type": "tool",
+                "content_preview": "Calling tool: Edit: src/app.py",
+                "tool_name": "Edit",
+                "progress": {
+                    "last_message_type": "tool",
+                    "last_content_preview": "Calling tool: Edit: src/app.py",
+                },
+            }
+        )
+        tracker.replay_progress_event(
+            {
+                "message_type": "assistant",
+                "content_preview": "[AC_COMPLETE: 1] Done!",
+                "ac_tracking": {"started": [], "completed": [1]},
+                "progress": {
+                    "last_message_type": "assistant",
+                    "last_content_preview": "[AC_COMPLETE: 1] Done!",
+                },
+            }
+        )
+        tracker.replay_progress_event(
+            {
+                "progress": {
+                    "messages_processed": 2,
+                    "last_message_type": "assistant",
+                    "last_content_preview": "[AC_COMPLETE: 1] Done!",
+                }
+            }
+        )
+
+        state = tracker.state
+        assert state.messages_count == 2
+        assert state.tool_calls_count == 1
+        assert state.last_tool == "Edit"
+        assert state.acceptance_criteria[0].status == ACStatus.COMPLETED
+        assert state.current_ac_index == 2
+
     def test_parse_heuristic_completion(self, tracker: WorkflowStateTracker) -> None:
         """Test heuristic completion detection."""
         tracker.process_message(
@@ -212,6 +453,22 @@ class TestWorkflowStateTracker:
         assert data["completed_acs"] == 1
         assert data["progress_percent"] == 33
         assert len(data["acceptance_criteria"]) == 3
+        assert data["acceptance_criteria"][0]["retry_attempt"] == 0
+        assert data["acceptance_criteria"][0]["attempt_number"] == 1
+
+    def test_tui_message_data_includes_retry_attempt_metadata(
+        self, tracker: WorkflowStateTracker
+    ) -> None:
+        """Workflow progress payload should carry retry attempt metadata per AC."""
+        tracker.process_message("[AC_START: 1]", message_type="assistant")
+        tracker.state.acceptance_criteria[0].fail()
+        tracker.process_message("[AC_START: 1]", message_type="assistant")
+
+        data = tracker.state.to_tui_message_data(execution_id="exec_123")
+
+        assert data["acceptance_criteria"][0]["retry_attempt"] == 1
+        assert data["acceptance_criteria"][0]["attempt_number"] == 2
+        assert data["acceptance_criteria"][0]["status"] == ACStatus.IN_PROGRESS.value
 
     def test_all_acs_completed(self, tracker: WorkflowStateTracker) -> None:
         """Test behavior when all ACs are completed."""

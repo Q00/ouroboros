@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import litellm
 
+from ouroboros.config.models import CredentialsConfig, ProviderCredentials
 from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -136,6 +137,26 @@ class TestLiteLLMAdapterGetApiKey:
 
         assert result is None
 
+    def test_credentials_file_used_when_env_absent(self) -> None:
+        """credentials.yaml provider entries are used when env vars are missing."""
+        adapter = LiteLLMAdapter()
+        credentials = CredentialsConfig(
+            providers={
+                "openrouter": ProviderCredentials(
+                    api_key="cred-openrouter-key",
+                    base_url="https://openrouter.example/v1",
+                )
+            }
+        )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(adapter, "_load_credentials_config", return_value=credentials),
+        ):
+            result = adapter._get_api_key("openrouter/openai/gpt-4")
+
+        assert result == "cred-openrouter-key"
+
 
 class TestLiteLLMAdapterBuildCompletionKwargs:
     """Test LiteLLMAdapter._build_completion_kwargs method."""
@@ -240,6 +261,29 @@ class TestLiteLLMAdapterBuildCompletionKwargs:
 
         assert kwargs["api_base"] == "https://custom.api"
 
+    def test_includes_api_base_from_credentials(self) -> None:
+        """Configured provider base URLs are applied when constructor override is absent."""
+        adapter = LiteLLMAdapter()
+        credentials = CredentialsConfig(
+            providers={
+                "openrouter": ProviderCredentials(
+                    api_key="cred-openrouter-key",
+                    base_url="https://openrouter.example/v1",
+                )
+            }
+        )
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+        config = CompletionConfig(model="openrouter/openai/gpt-4")
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(adapter, "_load_credentials_config", return_value=credentials),
+        ):
+            kwargs = adapter._build_completion_kwargs(messages, config)
+
+        assert kwargs["api_key"] == "cred-openrouter-key"
+        assert kwargs["api_base"] == "https://openrouter.example/v1"
+
 
 class TestLiteLLMAdapterParseResponse:
     """Test LiteLLMAdapter._parse_response method."""
@@ -334,6 +378,13 @@ class TestLiteLLMAdapterExtractProvider:
         result = adapter._extract_provider("claude-3-opus")
 
         assert result == "anthropic"
+
+    def test_infers_openai_from_reasoning_model_prefixes(self) -> None:
+        """Infers OpenAI for o-series model prefixes."""
+        adapter = LiteLLMAdapter()
+
+        assert adapter._extract_provider("o3") == "openai"
+        assert adapter._extract_provider("o4-mini") == "openai"
 
     def test_unknown_model_returns_unknown(self) -> None:
         """Returns 'unknown' for unrecognized model strings."""

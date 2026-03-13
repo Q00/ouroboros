@@ -12,6 +12,7 @@ via the MCP server:
 - ouroboros_generate_seed: Convert interview to immutable seed
 """
 
+import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -31,6 +32,7 @@ from ouroboros.bigbang.ambiguity import (
 )
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
 from ouroboros.bigbang.seed_generator import SeedGenerator
+from ouroboros.config import get_clarification_model, get_semantic_model
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
@@ -49,11 +51,12 @@ from ouroboros.observability.drift import (
     DRIFT_THRESHOLD,
     DriftMeasurement,
 )
-from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
+from ouroboros.orchestrator import create_agent_runtime
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
-from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
+from ouroboros.providers import create_llm_adapter
+from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
@@ -67,7 +70,10 @@ class ExecuteSeedHandler:
     """
 
     event_store: EventStore | None = field(default=None, repr=False)
-    llm_adapter: ClaudeCodeAdapter | None = field(default=None, repr=False)
+    llm_adapter: LLMAdapter | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -82,8 +88,23 @@ class ExecuteSeedHandler:
                 MCPToolParameter(
                     name="seed_content",
                     type=ToolInputType.STRING,
-                    description="The seed content describing the task to execute",
-                    required=True,
+                    description="Inline seed YAML content to execute.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="seed_path",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Path to a seed YAML file. If the path does not exist, the value is "
+                        "treated as inline seed YAML."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="cwd",
+                    type=ToolInputType.STRING,
+                    description="Working directory used to resolve relative seed paths.",
+                    required=False,
                 ),
                 MCPToolParameter(
                     name="session_id",
@@ -126,7 +147,7 @@ class ExecuteSeedHandler:
         """Handle a seed execution request.
 
         Args:
-            arguments: Tool arguments including seed_content.
+            arguments: Tool arguments including seed_content or seed_path.
             execution_id: Pre-allocated execution ID (used by StartExecuteSeedHandler).
             session_id_override: Pre-allocated session ID for new executions
                 (used by StartExecuteSeedHandler).
@@ -134,17 +155,40 @@ class ExecuteSeedHandler:
         Returns:
             Result containing execution result or error.
         """
+        resolved_cwd = self._resolve_dispatch_cwd(arguments.get("cwd"))
         seed_content = arguments.get("seed_content")
+        seed_path = arguments.get("seed_path")
+        if not seed_content and seed_path:
+            seed_candidate = Path(str(seed_path)).expanduser()
+            if not seed_candidate.is_absolute():
+                seed_candidate = resolved_cwd / seed_candidate
+
+            if await asyncio.to_thread(seed_candidate.is_file):
+                try:
+                    seed_content = await asyncio.to_thread(
+                        seed_candidate.read_text,
+                        encoding="utf-8",
+                    )
+                except OSError as e:
+                    return Result.err(
+                        MCPToolError(
+                            f"Failed to read seed file: {e}",
+                            tool_name="ouroboros_execute_seed",
+                        )
+                    )
+            else:
+                seed_content = str(seed_path)
+
         if not seed_content:
             return Result.err(
                 MCPToolError(
-                    "seed_content is required",
+                    "seed_content or seed_path is required",
                     tool_name="ouroboros_execute_seed",
                 )
             )
 
         session_id = arguments.get("session_id")
-        new_session_id = session_id_override
+        _ = session_id_override  # consumed downstream via arguments
         model_tier = arguments.get("model_tier", "medium")
         max_iterations = arguments.get("max_iterations", 10)
 
@@ -153,6 +197,9 @@ class ExecuteSeedHandler:
             session_id=session_id,
             model_tier=model_tier,
             max_iterations=max_iterations,
+            runtime_backend=self.agent_runtime_backend,
+            llm_backend=self.llm_backend,
+            cwd=str(resolved_cwd),
         )
 
         # Parse seed_content YAML into Seed object
@@ -178,7 +225,14 @@ class ExecuteSeedHandler:
 
         # Use injected or create orchestrator dependencies
         try:
-            agent_adapter = ClaudeAgentAdapter(permission_mode="acceptEdits")
+            agent_adapter = create_agent_runtime(
+                backend=self.agent_runtime_backend,
+                cwd=resolved_cwd,
+                llm_backend=self.llm_backend,
+            )
+            runtime_backend = getattr(agent_adapter, "_runtime_backend", None)
+            if not isinstance(runtime_backend, str) or not runtime_backend.strip():
+                runtime_backend = self.agent_runtime_backend
             event_store = self.event_store or EventStore()
             await event_store.initialize()
             # Use stderr: in MCP stdio mode, stdout is the JSON-RPC channel.
@@ -192,80 +246,125 @@ class ExecuteSeedHandler:
                 debug=False,
                 enable_decomposition=True,
             )
+            session_repo = SessionRepository(event_store)
 
-            # Execute or resume session
-            if session_id:
-                # Resume existing session
-                result = await runner.resume_session(session_id, seed)
-                if result.is_err:
-                    error = result.error
-                    return Result.err(
-                        MCPToolError(
-                            f"Session resume failed: {error.message}",
-                            tool_name="ouroboros_execute_seed",
-                        )
-                    )
-                exec_result = result.value
-            else:
-                # Execute new seed
-                result = await runner.execute_seed(
-                    seed=seed,
-                    execution_id=execution_id,
-                    session_id=new_session_id,
-                    parallel=True,
-                )
-                if result.is_err:
-                    error = result.error
-                    return Result.err(
-                        MCPToolError(
-                            f"Execution failed: {error.message}",
-                            tool_name="ouroboros_execute_seed",
-                        )
-                    )
-                exec_result = result.value
-
-            # Format execution results
-            result_text = self._format_execution_result(exec_result, seed)
-
-            # Post-execution QA
-            qa_verdict_text = ""
-            qa_meta = None
             skip_qa = arguments.get("skip_qa", False)
-            if exec_result.success and not skip_qa:
-                from ouroboros.mcp.tools.qa import QAHandler
+            if session_id:
+                tracker_result = await session_repo.reconstruct_session(session_id)
+                if tracker_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            f"Session resume failed: {tracker_result.error.message}",
+                            tool_name="ouroboros_execute_seed",
+                        )
+                    )
+                tracker = tracker_result.value
+                if tracker.status in (
+                    SessionStatus.COMPLETED,
+                    SessionStatus.CANCELLED,
+                    SessionStatus.FAILED,
+                ):
+                    return Result.err(
+                        MCPToolError(
+                            (
+                                f"Session {tracker.session_id} is already "
+                                f"{tracker.status.value} and cannot be resumed"
+                            ),
+                            tool_name="ouroboros_execute_seed",
+                        )
+                    )
+            else:
+                prepared = await runner.prepare_session(seed)
+                if prepared.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            f"Execution failed: {prepared.error.message}",
+                            tool_name="ouroboros_execute_seed",
+                        )
+                    )
+                tracker = prepared.value
 
-                qa_handler = QAHandler(llm_adapter=self.llm_adapter)
-                quality_bar = self._derive_quality_bar(seed)
-                qa_result = await qa_handler.handle(
-                    {
-                        "artifact": exec_result.final_message or "",
-                        "artifact_type": "test_output",
-                        "quality_bar": quality_bar,
-                        "seed_content": seed_content,
-                        "pass_threshold": 0.80,
-                    }
-                )
-                if qa_result.is_ok:
-                    qa_verdict_text = "\n\n" + qa_result.value.content[0].text
-                    qa_meta = qa_result.value.meta
+            # Fire-and-forget: launch execution in a background task and
+            # return the session/execution IDs immediately so the MCP
+            # client is not blocked by Codex's tool-call timeout.
+            async def _run_in_background(
+                _runner: OrchestratorRunner,
+                _seed: Seed,
+                _tracker,
+                _seed_content: str,
+                _resume_existing: bool,
+                _skip_qa: bool,
+            ) -> None:
+                try:
+                    if _resume_existing:
+                        result = await _runner.resume_session(_tracker.session_id, _seed)
+                    else:
+                        result = await _runner.execute_precreated_session(
+                            seed=_seed,
+                            tracker=_tracker,
+                            parallel=True,
+                        )
+                    if result.is_ok and result.value.success and not _skip_qa:
+                        from ouroboros.mcp.tools.qa import QAHandler
 
-            meta = {
-                "session_id": exec_result.session_id,
-                "execution_id": exec_result.execution_id,
-                "success": exec_result.success,
-                "messages_processed": exec_result.messages_processed,
-                "duration_seconds": exec_result.duration_seconds,
-            }
-            if qa_meta:
-                meta["qa"] = qa_meta
+                        qa_handler = QAHandler(
+                            llm_adapter=self.llm_adapter,
+                            llm_backend=self.llm_backend,
+                        )
+                        quality_bar = self._derive_quality_bar(_seed)
+                        await qa_handler.handle(
+                            {
+                                "artifact": result.value.final_message or "",
+                                "artifact_type": "test_output",
+                                "quality_bar": quality_bar,
+                                "seed_content": _seed_content,
+                                "pass_threshold": 0.80,
+                            }
+                        )
+                except Exception:
+                    log.exception("mcp.tool.execute_seed.background_error")
 
+            task = asyncio.create_task(
+                _run_in_background(runner, seed, tracker, seed_content, bool(session_id), skip_qa)
+            )
+            # Prevent the task from being garbage-collected.
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+            # Return immediately with the seed ID.  The execution runs
+            # in the background and progress can be tracked via
+            # ouroboros_session_status / ouroboros_query_events.
             return Result.ok(
                 MCPToolResult(
                     content=(
-                        MCPContentItem(type=ContentType.TEXT, text=result_text + qa_verdict_text),
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                f"Seed Execution LAUNCHED\n"
+                                f"{'=' * 60}\n"
+                                f"Seed ID: {seed.metadata.seed_id}\n"
+                                f"Session ID: {tracker.session_id}\n"
+                                f"Execution ID: {tracker.execution_id}\n"
+                                f"Goal: {seed.goal}\n\n"
+                                f"Runtime Backend: {runtime_backend or 'default'}\n"
+                                f"LLM Backend: {self.llm_backend or 'default'}\n\n"
+                                f"Execution is running in the background.\n"
+                                f"Use ouroboros_session_status to track progress.\n"
+                                f"Use ouroboros_query_events for detailed event history.\n"
+                            ),
+                        ),
                     ),
-                    is_error=not exec_result.success,
-                    meta=meta,
+                    is_error=False,
+                    meta={
+                        "seed_id": seed.metadata.seed_id,
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "launched": True,
+                        "status": "running",
+                        "runtime_backend": runtime_backend,
+                        "llm_backend": self.llm_backend,
+                        "resume_requested": bool(session_id),
+                    },
                 )
             )
         except Exception as e:
@@ -276,6 +375,13 @@ class ExecuteSeedHandler:
                     tool_name="ouroboros_execute_seed",
                 )
             )
+
+    @staticmethod
+    def _resolve_dispatch_cwd(raw_cwd: Any) -> Path:
+        """Resolve the working directory for intercepted seed execution."""
+        if isinstance(raw_cwd, str) and raw_cwd.strip():
+            return Path(raw_cwd).expanduser()
+        return Path.cwd()
 
     @staticmethod
     def _derive_quality_bar(seed: Seed) -> str:
@@ -532,12 +638,20 @@ class QueryEventsHandler:
             await store.initialize()
 
             # Query events from the store
-            events = await store.query_events(
-                aggregate_id=session_id,  # session_id maps to aggregate_id
-                event_type=event_type,
-                limit=limit,
-                offset=offset,
-            )
+            if session_id:
+                events = await store.query_session_related_events(
+                    session_id=session_id,
+                    event_type=event_type,
+                    limit=limit,
+                    offset=offset,
+                )
+            else:
+                events = await store.query_events(
+                    aggregate_id=None,
+                    event_type=event_type,
+                    limit=limit,
+                    offset=offset,
+                )
 
             # Only close if we created the store ourselves
             if self.event_store is None:
@@ -625,7 +739,8 @@ class GenerateSeedHandler:
 
     interview_engine: InterviewEngine | None = field(default=None, repr=False)
     seed_generator: SeedGenerator | None = field(default=None, repr=False)
-    llm_adapter: ClaudeCodeAdapter | None = field(default=None, repr=False)
+    llm_adapter: LLMAdapter | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
 
     def _build_ambiguity_score_from_value(self, ambiguity_score_value: float) -> AmbiguityScore:
         """Build an ambiguity score object from an explicit numeric override."""
@@ -735,9 +850,13 @@ class GenerateSeedHandler:
 
         try:
             # Use injected or create services
-            llm_adapter = self.llm_adapter or ClaudeCodeAdapter(max_turns=1)
+            llm_adapter = self.llm_adapter or create_llm_adapter(
+                backend=self.llm_backend,
+                max_turns=1,
+            )
             interview_engine = self.interview_engine or InterviewEngine(
                 llm_adapter=llm_adapter,
+                model=get_clarification_model(self.llm_backend),
             )
 
             # Load interview state
@@ -785,7 +904,10 @@ class GenerateSeedHandler:
                         )
 
             # Use injected or create seed generator
-            generator = self.seed_generator or SeedGenerator(llm_adapter=llm_adapter)
+            generator = self.seed_generator or SeedGenerator(
+                llm_adapter=llm_adapter,
+                model=get_clarification_model(self.llm_backend),
+            )
 
             # Generate seed
             seed_result = await generator.generate(state, ambiguity_score)
@@ -1051,6 +1173,8 @@ class InterviewHandler:
 
     interview_engine: InterviewEngine | None = field(default=None, repr=False)
     event_store: EventStore | None = field(default=None, repr=False)
+    llm_adapter: LLMAdapter | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize event store."""
@@ -1129,9 +1253,16 @@ class InterviewHandler:
         answer = arguments.get("answer")
 
         # Use injected or create interview engine
+        llm_adapter = self.llm_adapter or create_llm_adapter(
+            backend=self.llm_backend,
+            max_turns=3,
+            use_case="interview",
+            allowed_tools=None,
+        )
         engine = self.interview_engine or InterviewEngine(
-            llm_adapter=ClaudeAgentAdapter(permission_mode="bypassPermissions"),
+            llm_adapter=llm_adapter,
             state_dir=Path.home() / ".ouroboros" / "data",
+            model=get_clarification_model(self.llm_backend),
         )
 
         _interview_id: str | None = None  # Track for error event emission
@@ -1402,7 +1533,8 @@ class EvaluateHandler:
     """
 
     event_store: EventStore | None = field(default=None, repr=False)
-    llm_adapter: ClaudeCodeAdapter | None = field(default=None, repr=False)
+    llm_adapter: LLMAdapter | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -1487,6 +1619,7 @@ class EvaluateHandler:
             EvaluationContext,
             EvaluationPipeline,
             PipelineConfig,
+            SemanticConfig,
             build_mechanical_config,
         )
 
@@ -1564,11 +1697,17 @@ class EvaluateHandler:
             )
 
             # Use injected or create services
-            llm_adapter = self.llm_adapter or ClaudeCodeAdapter(max_turns=1)
+            llm_adapter = self.llm_adapter or create_llm_adapter(
+                backend=self.llm_backend,
+                max_turns=1,
+            )
             working_dir_str = arguments.get("working_dir")
             working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
             mechanical_config = build_mechanical_config(working_dir)
-            config = PipelineConfig(mechanical=mechanical_config)
+            config = PipelineConfig(
+                mechanical=mechanical_config,
+                semantic=SemanticConfig(model=get_semantic_model(self.llm_backend)),
+            )
             pipeline = EvaluationPipeline(llm_adapter, config)
             result = await pipeline.evaluate(context)
 
@@ -3409,9 +3548,16 @@ class CancelJobHandler:
 
 
 # Convenience functions for handler access
-def execute_seed_handler() -> ExecuteSeedHandler:
+def execute_seed_handler(
+    *,
+    runtime_backend: str | None = None,
+    llm_backend: str | None = None,
+) -> ExecuteSeedHandler:
     """Create an ExecuteSeedHandler instance."""
-    return ExecuteSeedHandler()
+    return ExecuteSeedHandler(
+        agent_runtime_backend=runtime_backend,
+        llm_backend=llm_backend,
+    )
 
 
 def start_execute_seed_handler() -> StartExecuteSeedHandler:
@@ -3449,9 +3595,9 @@ def query_events_handler() -> QueryEventsHandler:
     return QueryEventsHandler()
 
 
-def generate_seed_handler() -> GenerateSeedHandler:
+def generate_seed_handler(*, llm_backend: str | None = None) -> GenerateSeedHandler:
     """Create a GenerateSeedHandler instance."""
-    return GenerateSeedHandler()
+    return GenerateSeedHandler(llm_backend=llm_backend)
 
 
 def measure_drift_handler() -> MeasureDriftHandler:
@@ -3459,9 +3605,9 @@ def measure_drift_handler() -> MeasureDriftHandler:
     return MeasureDriftHandler()
 
 
-def interview_handler() -> InterviewHandler:
+def interview_handler(*, llm_backend: str | None = None) -> InterviewHandler:
     """Create an InterviewHandler instance."""
-    return InterviewHandler()
+    return InterviewHandler(llm_backend=llm_backend)
 
 
 def lateral_think_handler() -> LateralThinkHandler:
@@ -3469,9 +3615,9 @@ def lateral_think_handler() -> LateralThinkHandler:
     return LateralThinkHandler()
 
 
-def evaluate_handler() -> EvaluateHandler:
+def evaluate_handler(*, llm_backend: str | None = None) -> EvaluateHandler:
     """Create an EvaluateHandler instance."""
-    return EvaluateHandler()
+    return EvaluateHandler(llm_backend=llm_backend)
 
 
 def evolve_step_handler() -> EvolveStepHandler:
@@ -3494,10 +3640,9 @@ def evolve_rewind_handler() -> EvolveRewindHandler:
     return EvolveRewindHandler()
 
 
-# List of all Ouroboros tools for registration
 from ouroboros.mcp.tools.qa import QAHandler  # noqa: E402
 
-OUROBOROS_TOOLS: tuple[
+OuroborosToolHandlers = tuple[
     ExecuteSeedHandler
     | StartExecuteSeedHandler
     | SessionStatusHandler
@@ -3518,24 +3663,40 @@ OUROBOROS_TOOLS: tuple[
     | CancelExecutionHandler
     | QAHandler,
     ...,
-] = (
-    ExecuteSeedHandler(),
-    StartExecuteSeedHandler(),
-    SessionStatusHandler(),
-    JobStatusHandler(),
-    JobWaitHandler(),
-    JobResultHandler(),
-    CancelJobHandler(),
-    QueryEventsHandler(),
-    GenerateSeedHandler(),
-    MeasureDriftHandler(),
-    InterviewHandler(),
-    EvaluateHandler(),
-    LateralThinkHandler(),
-    EvolveStepHandler(),
-    StartEvolveStepHandler(),
-    LineageStatusHandler(),
-    EvolveRewindHandler(),
-    CancelExecutionHandler(),
-    QAHandler(),
-)
+]
+
+
+def get_ouroboros_tools(
+    *,
+    runtime_backend: str | None = None,
+    llm_backend: str | None = None,
+) -> OuroborosToolHandlers:
+    """Create the default set of Ouroboros MCP tool handlers."""
+    return (
+        ExecuteSeedHandler(
+            agent_runtime_backend=runtime_backend,
+            llm_backend=llm_backend,
+        ),
+        StartExecuteSeedHandler(),
+        SessionStatusHandler(),
+        JobStatusHandler(),
+        JobWaitHandler(),
+        JobResultHandler(),
+        CancelJobHandler(),
+        QueryEventsHandler(),
+        GenerateSeedHandler(llm_backend=llm_backend),
+        MeasureDriftHandler(),
+        InterviewHandler(llm_backend=llm_backend),
+        EvaluateHandler(llm_backend=llm_backend),
+        LateralThinkHandler(),
+        EvolveStepHandler(),
+        StartEvolveStepHandler(),
+        LineageStatusHandler(),
+        EvolveRewindHandler(),
+        CancelExecutionHandler(),
+        QAHandler(llm_backend=llm_backend),
+    )
+
+
+# List of all Ouroboros tools for registration
+OUROBOROS_TOOLS: OuroborosToolHandlers = get_ouroboros_tools()
