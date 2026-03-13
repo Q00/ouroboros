@@ -75,12 +75,38 @@ When the user invokes this skill:
    python3 -c "import ouroboros; print(ouroboros.__version__)"
    ```
 
+   d. **Update CLAUDE.md version marker** (if present):
+
+   Check if the current working directory has a `CLAUDE.md` with an Ouroboros block:
+   ```bash
+   grep -q "ooo:VERSION" CLAUDE.md 2>/dev/null && echo "HAS_BLOCK" || echo "NO_BLOCK"
+   ```
+
+   If `HAS_BLOCK`:
+   1. Extract the old version from the marker:
+      ```bash
+      grep "ooo:VERSION" CLAUDE.md | sed 's/.*ooo:VERSION:\(.*\) -->/\1/'
+      ```
+   2. If the old version differs from the newly installed version, replace the marker:
+      ```bash
+      sed -i.bak "s/<!-- ooo:VERSION:.*-->/<!-- ooo:VERSION:$NEW_VERSION -->/" CLAUDE.md
+      ```
+   3. Report: `CLAUDE.md version marker updated: v{old} → v{new}`
+
+   If `NO_BLOCK`, skip silently.
+
+   > **Note**: This only updates the version marker. If the block content itself
+   > changed between versions, the user should run `ooo setup` to regenerate it.
+
 5. **Post-update guidance**:
    ```
    Updated to v0.X.Z
 
    If you have an MCP server running, restart it:
      ouroboros mcp serve --transport stdio
+
+   If CLAUDE.md block content changed, regenerate it:
+     ooo setup
 
    📍 Run `ooo help` to see what's new.
    ```
