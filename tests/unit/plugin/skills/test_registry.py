@@ -55,6 +55,10 @@ class TestSkillMetadata:
         assert metadata.version == "1.0.0"
         assert metadata.mode == SkillMode.PLUGIN
         assert metadata.requires_mcp is False
+        assert metadata.intercept_eligible is False
+        assert metadata.mcp_tool is None
+        assert metadata.mcp_args is None
+        assert metadata.intercept_validation_error is None
 
     def test_create_full_metadata(self) -> None:
         """Test creating SkillMetadata with all fields."""
@@ -67,6 +71,9 @@ class TestSkillMetadata:
             version="2.0.0",
             mode=SkillMode.MCP,
             requires_mcp=True,
+            intercept_eligible=True,
+            mcp_tool="ouroboros_execute_seed",
+            mcp_args={"seed_content": "$1"},
         )
 
         assert metadata.name == "full-skill"
@@ -76,6 +83,9 @@ class TestSkillMetadata:
         assert metadata.version == "2.0.0"
         assert metadata.mode == SkillMode.MCP
         assert metadata.requires_mcp is True
+        assert metadata.intercept_eligible is True
+        assert metadata.mcp_tool == "ouroboros_execute_seed"
+        assert metadata.mcp_args == {"seed_content": "$1"}
 
     def test_metadata_is_frozen(self) -> None:
         """Test that SkillMetadata is immutable."""
@@ -225,9 +235,192 @@ triggers: autopilot, parallel
             registry = SkillRegistry(skill_dir=skill_dir)
             await registry.discover_all()
 
-            # The simple parser stores triggers as a comma-separated string
-            # Need to check if indexing happens correctly
-            assert len(registry._trigger_index) >= 0  # May be empty with simple parser
+            assert registry._trigger_index["autopilot"] == {"triggered"}
+            assert registry._trigger_index["parallel"] == {"triggered"}
+
+    async def test_discover_all_marks_intercept_eligible_for_valid_frontmatter(self) -> None:
+        """Test valid MCP frontmatter enables interception metadata."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "skills"
+            skill_dir.mkdir()
+            test_skill = skill_dir / "interview"
+            test_skill.mkdir()
+
+            (test_skill / "SKILL.md").write_text(
+                """---
+description: Interview skill
+mcp_tool: ouroboros_interview
+mcp_args:
+  initial_context: "$1"
+  cwd: "$CWD"
+---
+
+# Interview
+"""
+            )
+
+            registry = SkillRegistry(skill_dir=skill_dir)
+            discovered = await registry.discover_all()
+            metadata = discovered["interview"]
+
+            assert metadata.intercept_eligible is True
+            assert metadata.mcp_tool == "ouroboros_interview"
+            assert metadata.mcp_args == {
+                "initial_context": "$1",
+                "cwd": "$CWD",
+            }
+            assert metadata.intercept_validation_error is None
+            assert metadata.mode == SkillMode.MCP
+            assert metadata.requires_mcp is True
+
+    async def test_discover_all_rejects_missing_mcp_tool_for_interception(self) -> None:
+        """Test missing mcp_tool keeps interception disabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "skills"
+            skill_dir.mkdir()
+            test_skill = skill_dir / "run"
+            test_skill.mkdir()
+
+            (test_skill / "SKILL.md").write_text(
+                """---
+description: Run skill
+mcp_args:
+  seed_content: "$1"
+---
+
+# Run
+"""
+            )
+
+            registry = SkillRegistry(skill_dir=skill_dir)
+            discovered = await registry.discover_all()
+            metadata = discovered["run"]
+
+            assert metadata.intercept_eligible is False
+            assert metadata.mcp_tool is None
+            assert metadata.mcp_args is None
+            assert metadata.intercept_validation_error == (
+                "missing required frontmatter key: mcp_tool"
+            )
+
+    async def test_discover_all_rejects_invalid_mcp_tool_for_interception(self) -> None:
+        """Test invalid mcp_tool names do not enable interception."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "skills"
+            skill_dir.mkdir()
+            test_skill = skill_dir / "status"
+            test_skill.mkdir()
+
+            (test_skill / "SKILL.md").write_text(
+                """---
+description: Status skill
+mcp_tool: "ouroboros status"
+mcp_args:
+  session_id: "$1"
+---
+
+# Status
+"""
+            )
+
+            registry = SkillRegistry(skill_dir=skill_dir)
+            discovered = await registry.discover_all()
+            metadata = discovered["status"]
+
+            assert metadata.intercept_eligible is False
+            assert metadata.mcp_tool is None
+            assert metadata.mcp_args is None
+            assert metadata.intercept_validation_error == (
+                "mcp_tool must contain only letters, digits, and underscores"
+            )
+
+    async def test_discover_all_rejects_missing_mcp_args_for_interception(self) -> None:
+        """Test missing mcp_args keeps interception disabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "skills"
+            skill_dir.mkdir()
+            test_skill = skill_dir / "seed"
+            test_skill.mkdir()
+
+            (test_skill / "SKILL.md").write_text(
+                """---
+description: Seed skill
+mcp_tool: ouroboros_generate_seed
+---
+
+# Seed
+"""
+            )
+
+            registry = SkillRegistry(skill_dir=skill_dir)
+            discovered = await registry.discover_all()
+            metadata = discovered["seed"]
+
+            assert metadata.intercept_eligible is False
+            assert metadata.mcp_tool is None
+            assert metadata.mcp_args is None
+            assert metadata.intercept_validation_error == (
+                "missing required frontmatter key: mcp_args"
+            )
+
+    async def test_discover_all_rejects_non_mapping_mcp_args_for_interception(self) -> None:
+        """Test invalid mcp_args structure keeps interception disabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "skills"
+            skill_dir.mkdir()
+            test_skill = skill_dir / "evaluate"
+            test_skill.mkdir()
+
+            (test_skill / "SKILL.md").write_text(
+                """---
+description: Evaluate skill
+mcp_tool: ouroboros_evaluate
+mcp_args:
+  - "$1"
+---
+
+# Evaluate
+"""
+            )
+
+            registry = SkillRegistry(skill_dir=skill_dir)
+            discovered = await registry.discover_all()
+            metadata = discovered["evaluate"]
+
+            assert metadata.intercept_eligible is False
+            assert metadata.mcp_tool is None
+            assert metadata.mcp_args is None
+            assert metadata.intercept_validation_error == (
+                "mcp_args must be a mapping with string keys and YAML-safe values"
+            )
+
+    async def test_discover_all_rejects_frontmatter_parse_failure_for_interception(self) -> None:
+        """Test malformed frontmatter keeps interception disabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            skill_dir = Path(tmpdir) / "skills"
+            skill_dir.mkdir()
+            test_skill = skill_dir / "broken"
+            test_skill.mkdir()
+
+            (test_skill / "SKILL.md").write_text(
+                """---
+mcp_tool: ouroboros_interview
+mcp_args: [oops
+---
+
+# Broken
+"""
+            )
+
+            registry = SkillRegistry(skill_dir=skill_dir)
+            discovered = await registry.discover_all()
+            metadata = discovered["broken"]
+
+            assert metadata.intercept_eligible is False
+            assert metadata.mcp_tool is None
+            assert metadata.mcp_args is None
+            assert metadata.intercept_validation_error is not None
+            assert metadata.intercept_validation_error.startswith("frontmatter parse failed:")
 
 
 class TestSkillRegistryGetAllMetadata:
@@ -516,11 +709,36 @@ Use it for testing.
         result = registry._parse_skill_md(content)
 
         assert result["frontmatter"]["description"] == "A test skill"
-        # Simple parser stores triggers as string when inline
-        assert "triggers" in result["frontmatter"]
+        assert result["frontmatter"]["triggers"] == "test, example"
         assert result["frontmatter"]["version"] == "2.0.0"
+        assert result["frontmatter_error"] is None
         assert result["first_line"] == "This is a test skill."
         assert "usage" in result["sections"]
+
+    def test_parse_skill_md_preserves_nested_mcp_args_mapping(self) -> None:
+        """Test YAML frontmatter keeps nested MCP arg mappings."""
+        registry = SkillRegistry()
+
+        content = """---
+mcp_tool: ouroboros_interview
+mcp_args:
+  initial_context: "$1"
+  cwd: "$CWD"
+  options:
+    resume: false
+---
+
+# Interview
+"""
+        result = registry._parse_skill_md(content)
+
+        assert result["frontmatter"]["mcp_tool"] == "ouroboros_interview"
+        assert result["frontmatter"]["mcp_args"] == {
+            "initial_context": "$1",
+            "cwd": "$CWD",
+            "options": {"resume": False},
+        }
+        assert result["frontmatter_error"] is None
 
     def test_parse_skill_md_without_frontmatter(self) -> None:
         """Test parsing SKILL.md without frontmatter."""
@@ -533,6 +751,7 @@ Just a simple skill without frontmatter.
         result = registry._parse_skill_md(content)
 
         assert result["frontmatter"] == {}
+        assert result["frontmatter_error"] is None
         assert result["first_line"] == "Just a simple skill without frontmatter."
 
     def test_parse_skill_md_extracts_sections(self) -> None:
@@ -573,6 +792,22 @@ Content here.
         # The parser prefers non-heading content first, then heading
         # Since "Content here." is the first non-heading line, that's used
         assert result["first_line"] == "Content here."
+
+    def test_parse_skill_md_reports_frontmatter_parse_error(self) -> None:
+        """Test malformed frontmatter surfaces a parse error."""
+        registry = SkillRegistry()
+
+        content = """---
+mcp_tool: ouroboros_interview
+mcp_args: [oops
+---
+
+# Interview
+"""
+        result = registry._parse_skill_md(content)
+
+        assert result["frontmatter"] == {}
+        assert result["frontmatter_error"] is not None
 
 
 class TestSkillRegistryExtractMagicPrefixes:

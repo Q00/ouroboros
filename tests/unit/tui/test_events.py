@@ -13,6 +13,7 @@ from ouroboros.tui.events import (
     PhaseChanged,
     ResumeRequested,
     TUIState,
+    WorkflowProgressUpdated,
     create_message_from_event,
 )
 
@@ -352,6 +353,35 @@ class TestCreateMessageFromEvent:
         assert msg.ontology_drift == 0.05
         assert msg.combined_drift == 0.12
         assert msg.is_acceptable is True
+
+    def test_workflow_progress_event_preserves_last_update(self) -> None:
+        """Workflow progress events should retain the normalized latest artifact snapshot."""
+        event = BaseEvent(
+            type="workflow.progress.updated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "acceptance_criteria": [],
+                "completed_count": 1,
+                "total_count": 3,
+                "last_update": {
+                    "message_type": "tool_result",
+                    "content_preview": "Tool completed successfully.",
+                    "tool_name": "Edit",
+                    "ac_tracking": {"started": [], "completed": [1]},
+                },
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, WorkflowProgressUpdated)
+        assert msg.last_update == {
+            "message_type": "tool_result",
+            "content_preview": "Tool completed successfully.",
+            "tool_name": "Edit",
+            "ac_tracking": {"started": [], "completed": [1]},
+        }
 
     def test_ac_event(self) -> None:
         """Test converting AC-related events."""

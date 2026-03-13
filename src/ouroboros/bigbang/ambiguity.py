@@ -9,7 +9,7 @@ The scoring algorithm evaluates three key components:
 - Success Criteria Clarity (30%): How measurable the success criteria are
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 import structlog
 
 from ouroboros.bigbang.interview import InterviewState
+from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
@@ -37,8 +38,6 @@ BROWNFIELD_GOAL_CLARITY_WEIGHT = 0.35
 BROWNFIELD_CONSTRAINT_CLARITY_WEIGHT = 0.25
 BROWNFIELD_SUCCESS_CRITERIA_CLARITY_WEIGHT = 0.25
 BROWNFIELD_CONTEXT_CLARITY_WEIGHT = 0.15
-
-DEFAULT_MODEL = "claude-opus-4-6"
 
 # Temperature for reproducible scoring
 SCORING_TEMPERATURE = 0.1
@@ -133,7 +132,7 @@ class AmbiguityScorer:
         max_retries: Maximum retry attempts, or None for unlimited (default).
 
     Example:
-        scorer = AmbiguityScorer(llm_adapter=some_adapter)
+        scorer = AmbiguityScorer(llm_adapter=adapter)
 
         result = await scorer.score(interview_state)
         if result.is_ok:
@@ -147,7 +146,7 @@ class AmbiguityScorer:
     """
 
     llm_adapter: LLMAdapter
-    model: str = DEFAULT_MODEL
+    model: str = field(default_factory=get_clarification_model)
     temperature: float = SCORING_TEMPERATURE
     initial_max_tokens: int = 2048
     max_retries: int | None = 10  # Default to 10 retries (None = unlimited)
@@ -409,14 +408,17 @@ Analyze each component and provide scores with justifications."""
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}") from e
 
-        # Numeric score fields must be present. Missing justifications are recoverable.
-        required_score_fields = [
+        # Validate all required fields are present
+        required_fields = [
             "goal_clarity_score",
+            "goal_clarity_justification",
             "constraint_clarity_score",
+            "constraint_clarity_justification",
             "success_criteria_clarity_score",
+            "success_criteria_clarity_justification",
         ]
 
-        for field_name in required_score_fields:
+        for field_name in required_fields:
             if field_name not in data:
                 raise ValueError(f"Missing required field: {field_name}")
 
@@ -424,15 +426,6 @@ Analyze each component and provide scores with justifications."""
         def clamp_score(value: Any) -> float:
             score = float(value)
             return max(0.0, min(1.0, score))
-
-        def justification_for(field_name: str, component_name: str) -> str:
-            value = data.get(field_name)
-            if value is None:
-                return f"{component_name} justification not provided by model."
-            text = str(value).strip()
-            if not text:
-                return f"{component_name} justification not provided by model."
-            return text
 
         # Select weights based on project type
         if is_brownfield:
@@ -451,10 +444,7 @@ Analyze each component and provide scores with justifications."""
                 name="Context Clarity",
                 clarity_score=clamp_score(data["context_clarity_score"]),
                 weight=BROWNFIELD_CONTEXT_CLARITY_WEIGHT,
-                justification=justification_for(
-                    "context_clarity_justification",
-                    "Context Clarity",
-                ),
+                justification=str(data.get("context_clarity_justification", "")),
             )
 
         return ScoreBreakdown(
@@ -462,28 +452,19 @@ Analyze each component and provide scores with justifications."""
                 name="Goal Clarity",
                 clarity_score=clamp_score(data["goal_clarity_score"]),
                 weight=goal_weight,
-                justification=justification_for(
-                    "goal_clarity_justification",
-                    "Goal Clarity",
-                ),
+                justification=str(data["goal_clarity_justification"]),
             ),
             constraint_clarity=ComponentScore(
                 name="Constraint Clarity",
                 clarity_score=clamp_score(data["constraint_clarity_score"]),
                 weight=constraint_weight,
-                justification=justification_for(
-                    "constraint_clarity_justification",
-                    "Constraint Clarity",
-                ),
+                justification=str(data["constraint_clarity_justification"]),
             ),
             success_criteria_clarity=ComponentScore(
                 name="Success Criteria Clarity",
                 clarity_score=clamp_score(data["success_criteria_clarity_score"]),
                 weight=criteria_weight,
-                justification=justification_for(
-                    "success_criteria_clarity_justification",
-                    "Success Criteria Clarity",
-                ),
+                justification=str(data["success_criteria_clarity_justification"]),
             ),
             context_clarity=context_clarity,
         )

@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.config import get_double_diamond_model
 from ouroboros.core.errors import OuroborosError, ProviderError
 from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
@@ -47,7 +48,7 @@ from ouroboros.resilience.stagnation import (
 )
 
 if TYPE_CHECKING:
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    from ouroboros.providers.base import LLMAdapter
 
 log = get_logger(__name__)
 
@@ -433,13 +434,13 @@ class DoubleDiamond:
     """
 
     # Default model - can be overridden via __init__ for PAL router integration
-    DEFAULT_MODEL = "claude-opus-4-6"
+    DEFAULT_MODEL = get_double_diamond_model()
     DEFAULT_TEMPERATURE = 0.7
     DEFAULT_MAX_TOKENS = 4096
 
     def __init__(
         self,
-        llm_adapter: LiteLLMAdapter,
+        llm_adapter: LLMAdapter,
         *,
         default_model: str | None = None,
         temperature: float | None = None,
@@ -461,7 +462,7 @@ class DoubleDiamond:
             enable_stagnation_detection: Enable stagnation pattern detection.
         """
         self._llm_adapter = llm_adapter
-        self._default_model = default_model or self.DEFAULT_MODEL
+        self._default_model = default_model or get_double_diamond_model()
         self._temperature = temperature if temperature is not None else self.DEFAULT_TEMPERATURE
         self._max_tokens = max_tokens if max_tokens is not None else self.DEFAULT_MAX_TOKENS
         self._max_retries = max_retries
