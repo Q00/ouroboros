@@ -6,7 +6,7 @@ This package provides the agent orchestration engine:
 - Agent Specs: Built-in agent specifications
 
 Architecture:
-- Extends existing orchestrator.adapter (ClaudeAgentAdapter)
+- Extends the orchestrator AgentRuntime abstraction
 - Integrates with routing.complexity for PAL routing
 - Uses events.base for state tracking
 """

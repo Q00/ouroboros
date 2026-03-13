@@ -1,6 +1,9 @@
 ---
 name: status
 description: "Check session status and measure goal drift"
+mcp_tool: ouroboros_session_status
+mcp_args:
+  session_id: "$1"
 ---
 
 # /ouroboros:status

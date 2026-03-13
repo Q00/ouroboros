@@ -19,19 +19,10 @@ from typing import Any
 
 import structlog
 
+from ouroboros.config import get_context_compression_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
-from ouroboros.providers.base import CompletionConfig, Message, MessageRole
-
-try:
-    import litellm
-except ImportError:
-    litellm = None  # type: ignore[assignment]
-
-try:
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
-except ImportError:
-    LiteLLMAdapter = None  # type: ignore[assignment,misc]
+from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
 log = structlog.get_logger()
 
@@ -233,8 +224,8 @@ def get_context_metrics(context: WorkflowContext, model: str = "gpt-4") -> Conte
 
 async def compress_context_with_llm(
     context: WorkflowContext,
-    llm_adapter: LiteLLMAdapter,
-    model: str = "gpt-4",
+    llm_adapter: LLMAdapter,
+    model: str | None = None,
 ) -> Result[str, ProviderError]:
     """Compress context using LLM summarization.
 
@@ -246,6 +237,8 @@ async def compress_context_with_llm(
     Returns:
         Result containing the compressed summary or a ProviderError.
     """
+    resolved_model = model or get_context_compression_model()
+
     # Build summarization prompt
     # Exclude recent history items from summarization
     items_to_summarize = (
@@ -277,14 +270,14 @@ Keep the summary focused and factual. Omit unnecessary details."""
 
     messages = [Message(role=MessageRole.USER, content=prompt)]
     config = CompletionConfig(
-        model=model,
+        model=resolved_model,
         temperature=0.3,  # Lower temperature for more consistent summaries
         max_tokens=2000,  # Limit summary size
     )
 
     log.debug(
         "context.compression.llm.started",
-        model=model,
+        model=resolved_model,
         history_items=len(context.history),
     )
 
@@ -306,8 +299,8 @@ Keep the summary focused and factual. Omit unnecessary details."""
 
 async def compress_context(
     context: WorkflowContext,
-    llm_adapter: LiteLLMAdapter,
-    model: str = "gpt-4",
+    llm_adapter: LLMAdapter,
+    model: str | None = None,
 ) -> Result[CompressionResult, str]:
     """Compress a workflow context when it exceeds limits.
 
@@ -325,17 +318,18 @@ async def compress_context(
     Returns:
         Result containing CompressionResult or error message.
     """
-    before_tokens = count_context_tokens(context, model)
+    resolved_model = model or get_context_compression_model()
+    before_tokens = count_context_tokens(context, resolved_model)
 
     log.info(
         "context.compression.started",
         before_tokens=before_tokens,
         history_items=len(context.history),
-        age_hours=get_context_metrics(context, model).age_hours,
+        age_hours=get_context_metrics(context, resolved_model).age_hours,
     )
 
     # Try LLM-based compression first
-    summary_result = await compress_context_with_llm(context, llm_adapter, model)
+    summary_result = await compress_context_with_llm(context, llm_adapter, resolved_model)
 
     if summary_result.is_ok:
         # LLM compression succeeded
@@ -363,7 +357,7 @@ Summary: {compressed_context["history_summary"]}
 Recent: {compressed_context["recent_history"]}
 Facts: {compressed_context["key_facts"]}
 """
-        after_tokens = count_tokens(compressed_str, model)
+        after_tokens = count_tokens(compressed_str, resolved_model)
         compression_ratio = after_tokens / before_tokens if before_tokens > 0 else 1.0
 
         log.info(
@@ -410,7 +404,7 @@ Seed: {compressed_context["seed_summary"]}
 Current AC: {compressed_context["current_ac"]}
 Facts: {compressed_context["key_facts"]}
 """
-        after_tokens = count_tokens(compressed_str, model)
+        after_tokens = count_tokens(compressed_str, resolved_model)
         compression_ratio = after_tokens / before_tokens if before_tokens > 0 else 1.0
 
         log.warning(

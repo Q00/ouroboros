@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 
+from ouroboros.config import get_assertion_extraction_model
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -24,9 +25,6 @@ from ouroboros.providers.base import (
 from ouroboros.verification.models import SpecAssertion, VerificationTier
 
 logger = logging.getLogger(__name__)
-
-_EXTRACTION_MODEL = "claude-sonnet-4-6"
-
 
 _SYSTEM_PROMPT = """You are a spec verification assistant. Given acceptance criteria for a software project, extract machine-verifiable assertions.
 
@@ -70,7 +68,7 @@ class AssertionExtractor:
     """
 
     llm_adapter: LLMAdapter
-    model: str = _EXTRACTION_MODEL
+    model: str = field(default_factory=get_assertion_extraction_model)
     max_cache_size: int = 64
     _cache: OrderedDict[str, tuple[SpecAssertion, ...]] = field(
         default_factory=OrderedDict, repr=False

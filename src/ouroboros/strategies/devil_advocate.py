@@ -18,11 +18,12 @@ Reference: docs/ontological-framework/aop-design.md
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from typing import TYPE_CHECKING
 
+from ouroboros.config import get_ontology_analysis_model
 from ouroboros.core.ontology_aspect import (
     AnalysisResult,
     OntologicalJoinPoint,
@@ -72,7 +73,7 @@ class DevilAdvocateStrategy:
     """
 
     llm_adapter: LLMAdapter
-    model: str = "claude-opus-4-6"
+    model: str = field(default_factory=get_ontology_analysis_model)
     confidence_threshold: float = 0.7
     temperature: float = 0.3
     max_tokens: int = 2048
