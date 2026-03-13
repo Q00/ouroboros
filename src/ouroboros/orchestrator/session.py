@@ -30,13 +30,26 @@ from uuid import uuid4
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.types import Result
-from ouroboros.events.base import BaseEvent
+from ouroboros.events.base import BaseEvent, sanitize_event_data_for_persistence
 from ouroboros.observability.logging import get_logger
 
 if TYPE_CHECKING:
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
+
+_PARALLEL_ACTIVITY_EVENT_TYPES = frozenset(
+    {
+        "execution.session.started",
+        "execution.session.resumed",
+        "execution.session.completed",
+        "execution.session.failed",
+        "execution.tool.started",
+        "execution.agent.thinking",
+        "execution.coordinator.tool.started",
+        "execution.coordinator.thinking",
+    }
+)
 
 
 # =============================================================================
@@ -114,6 +127,11 @@ class SessionTracker:
     def with_progress(self, update: dict[str, Any]) -> SessionTracker:
         """Return new tracker with updated progress.
 
+        The ``messages_processed`` counter is set from the update dict when
+        present, otherwise it is incremented by one.  This avoids the double-
+        increment that would occur when the caller also tracks a separate
+        counter and stores it in the update.
+
         Args:
             update: Progress data to merge.
 
@@ -121,10 +139,15 @@ class SessionTracker:
             New SessionTracker with merged progress.
         """
         merged_progress = {**self.progress, **update}
+        new_count = update.get("messages_processed")
+        if isinstance(new_count, int):
+            messages_processed = new_count
+        else:
+            messages_processed = self.messages_processed + 1
         return replace(
             self,
             progress=merged_progress,
-            messages_processed=self.messages_processed + 1,
+            messages_processed=messages_processed,
             last_message_time=datetime.now(UTC),
         )
 
@@ -203,11 +226,189 @@ class SessionRepository:
         """
         self._event_store = event_store
 
+    @staticmethod
+    def _normalize_progress_payload(progress: dict[str, Any]) -> dict[str, Any]:
+        """Normalize persisted progress payloads for stable session reconstruction."""
+        sanitized_progress = sanitize_event_data_for_persistence(progress)
+        runtime = sanitized_progress.get("runtime")
+        if not isinstance(runtime, dict):
+            return sanitized_progress
+
+        backend = runtime.get("backend")
+        if backend != "opencode":
+            return sanitized_progress
+
+        sanitized_progress = dict(sanitized_progress)
+        normalized_runtime: dict[str, Any] = {}
+        for key in ("backend", "kind", "native_session_id", "cwd", "approval_mode"):
+            if key in runtime:
+                normalized_runtime[key] = runtime[key]
+
+        metadata = runtime.get("metadata")
+        if isinstance(metadata, dict):
+            normalized_metadata = sanitize_event_data_for_persistence(metadata)
+            normalized_metadata.pop("runtime_event_type", None)
+            normalized_runtime["metadata"] = normalized_metadata
+
+        sanitized_progress["runtime"] = normalized_runtime
+        return sanitized_progress
+
+    @staticmethod
+    def _coerce_runtime_status(value: object) -> SessionStatus | None:
+        """Map normalized runtime-status strings onto SessionStatus values."""
+        if not isinstance(value, str):
+            return None
+
+        normalized = value.strip().lower()
+        if normalized == "running":
+            return SessionStatus.RUNNING
+        if normalized == "paused":
+            return SessionStatus.PAUSED
+        if normalized == "completed":
+            return SessionStatus.COMPLETED
+        if normalized == "failed":
+            return SessionStatus.FAILED
+        if normalized == "cancelled":
+            return SessionStatus.CANCELLED
+        return None
+
+    @classmethod
+    def _status_from_event(
+        cls,
+        event_type: object,
+        event_data: object,
+    ) -> SessionStatus | None:
+        """Derive a session status from either terminal events or runtime progress."""
+        if event_type == "orchestrator.session.completed":
+            return SessionStatus.COMPLETED
+        if event_type == "orchestrator.session.failed":
+            return SessionStatus.FAILED
+        if event_type == "orchestrator.session.paused":
+            return SessionStatus.PAUSED
+        if event_type == "orchestrator.session.cancelled":
+            return SessionStatus.CANCELLED
+
+        if event_type not in {
+            "orchestrator.progress.updated",
+            "workflow.progress.updated",
+        } or not isinstance(
+            event_data,
+            dict,
+        ):
+            return None
+
+        progress = event_data.get("progress")
+        if isinstance(progress, dict):
+            status = cls._coerce_runtime_status(
+                progress.get("runtime_status") or event_data.get("runtime_status")
+            )
+            if status is not None:
+                return status
+
+        return cls._coerce_runtime_status(event_data.get("runtime_status"))
+
+    @staticmethod
+    def _workflow_progress_from_event(event_data: object) -> dict[str, Any]:
+        """Normalize execution-scoped workflow progress into session progress fields."""
+        if not isinstance(event_data, dict):
+            return {}
+
+        progress: dict[str, Any] = {}
+        for key in (
+            "acceptance_criteria",
+            "completed_count",
+            "total_count",
+            "current_ac_index",
+            "current_phase",
+            "activity",
+            "activity_detail",
+            "elapsed_display",
+            "estimated_remaining",
+            "messages_count",
+            "tool_calls_count",
+            "estimated_tokens",
+            "estimated_cost_usd",
+            "last_update",
+        ):
+            value = event_data.get(key)
+            if value is not None:
+                progress[key] = value
+
+        messages_count = event_data.get("messages_count")
+        if isinstance(messages_count, int):
+            progress["messages_processed"] = messages_count
+
+        return progress
+
+    @staticmethod
+    def _merge_event_streams(
+        primary_events: list[BaseEvent],
+        related_events: list[BaseEvent],
+    ) -> list[BaseEvent]:
+        """Merge event streams by id and return them in replay order."""
+        seen_ids: set[str] = set()
+        merged: list[BaseEvent] = []
+
+        for event in [*primary_events, *related_events]:
+            if event.id in seen_ids:
+                continue
+            seen_ids.add(event.id)
+            merged.append(event)
+
+        merged.sort(
+            key=lambda event: (
+                event.timestamp or datetime.min.replace(tzinfo=UTC),
+                event.id,
+            ),
+        )
+        return merged
+
+    @staticmethod
+    def _merge_progress_payloads(
+        existing: dict[str, Any],
+        update: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge progress updates while preserving reconnectable OpenCode runtime state."""
+        merged = {**existing, **update}
+
+        existing_runtime = existing.get("runtime")
+        update_runtime = update.get("runtime")
+        if not isinstance(existing_runtime, dict) or not isinstance(update_runtime, dict):
+            return merged
+
+        if (
+            existing_runtime.get("backend") != "opencode"
+            or update_runtime.get("backend") != "opencode"
+        ):
+            return merged
+
+        merged_runtime = dict(existing_runtime)
+        for key, value in update_runtime.items():
+            if key == "metadata":
+                continue
+            if value is not None:
+                merged_runtime[key] = value
+
+        existing_metadata = existing_runtime.get("metadata")
+        update_metadata = update_runtime.get("metadata")
+        if isinstance(existing_metadata, dict) or isinstance(update_metadata, dict):
+            merged_metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+            if isinstance(update_metadata, dict):
+                merged_metadata.update(
+                    {key: value for key, value in update_metadata.items() if value is not None}
+                )
+            if merged_metadata:
+                merged_runtime["metadata"] = merged_metadata
+
+        merged["runtime"] = merged_runtime
+        return merged
+
     async def create_session(
         self,
         execution_id: str,
         seed_id: str,
         session_id: str | None = None,
+        seed_goal: str | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -215,21 +416,26 @@ class SessionRepository:
             execution_id: Workflow execution ID.
             seed_id: Seed ID being executed.
             session_id: Optional custom session ID.
+            seed_goal: Optional goal text to persist with the start event.
 
         Returns:
             Result containing new SessionTracker.
         """
         tracker = SessionTracker.create(execution_id, seed_id, session_id)
 
+        event_data = {
+            "execution_id": execution_id,
+            "seed_id": seed_id,
+            "start_time": tracker.start_time.isoformat(),
+        }
+        if seed_goal:
+            event_data["seed_goal"] = seed_goal
+
         event = BaseEvent(
             type="orchestrator.session.started",
             aggregate_type="session",
             aggregate_id=tracker.session_id,
-            data={
-                "execution_id": execution_id,
-                "seed_id": seed_id,
-                "start_time": tracker.start_time.isoformat(),
-            },
+            data=event_data,
         )
 
         try:
@@ -267,12 +473,13 @@ class SessionRepository:
         Returns:
             Result indicating success or failure.
         """
+        sanitized_progress = self._normalize_progress_payload(progress)
         event = BaseEvent(
             type="orchestrator.progress.updated",
             aggregate_type="session",
             aggregate_id=session_id,
             data={
-                "progress": progress,
+                "progress": sanitized_progress,
                 "timestamp": datetime.now(UTC).isoformat(),
             },
         )
@@ -485,29 +692,58 @@ class SessionRepository:
                 ),
             )
 
+            execution_id = start_event.data.get("execution_id", "")
+            all_events = list(events)
+            query_related = getattr(self._event_store, "query_session_related_events", None)
+            if callable(query_related):
+                try:
+                    related_events = await query_related(
+                        session_id=session_id,
+                        execution_id=execution_id or None,
+                        limit=None,
+                    )
+                    if isinstance(related_events, list) and related_events:
+                        all_events = self._merge_event_streams(events, related_events)
+                except Exception:
+                    log.warning(
+                        "orchestrator.session.related_event_query_failed",
+                        session_id=session_id,
+                        execution_id=execution_id,
+                    )
+
             # Replay subsequent events
             messages_processed = 0
             last_progress: dict[str, Any] = {}
 
-            for event in events:
+            for event in all_events:
                 if event.type == "orchestrator.progress.updated":
                     progress_update = event.data.get("progress", {})
                     if not isinstance(progress_update, dict):
                         continue
-                    last_progress = {**last_progress, **progress_update}
+                    progress_update = self._normalize_progress_payload(progress_update)
+                    last_progress = self._merge_progress_payloads(last_progress, progress_update)
                     persisted_messages = progress_update.get("messages_processed")
                     if isinstance(persisted_messages, int):
-                        messages_processed = persisted_messages
+                        messages_processed = max(messages_processed, persisted_messages)
                     else:
                         messages_processed += 1
-                elif event.type == "orchestrator.session.completed":
-                    tracker = tracker.with_status(SessionStatus.COMPLETED)
-                elif event.type == "orchestrator.session.failed":
-                    tracker = tracker.with_status(SessionStatus.FAILED)
-                elif event.type == "orchestrator.session.paused":
-                    tracker = tracker.with_status(SessionStatus.PAUSED)
-                elif event.type == "orchestrator.session.cancelled":
-                    tracker = tracker.with_status(SessionStatus.CANCELLED)
+                elif event.type == "workflow.progress.updated":
+                    workflow_progress = self._normalize_progress_payload(
+                        self._workflow_progress_from_event(event.data),
+                    )
+                    if workflow_progress:
+                        last_progress = self._merge_progress_payloads(
+                            last_progress,
+                            workflow_progress,
+                        )
+                        persisted_messages = workflow_progress.get("messages_processed")
+                        if isinstance(persisted_messages, int):
+                            messages_processed = max(messages_processed, persisted_messages)
+                elif event.type in _PARALLEL_ACTIVITY_EVENT_TYPES:
+                    messages_processed += 1
+                status_update = self._status_from_event(event.type, event.data)
+                if status_update is not None:
+                    tracker = tracker.with_status(status_update)
 
             # Apply accumulated progress
             tracker = replace(
@@ -584,14 +820,9 @@ class SessionRepository:
                 # Determine current status by replaying events
                 status = SessionStatus.RUNNING
                 for event in events:
-                    if event.type == "orchestrator.session.completed":
-                        status = SessionStatus.COMPLETED
-                    elif event.type == "orchestrator.session.failed":
-                        status = SessionStatus.FAILED
-                    elif event.type == "orchestrator.session.paused":
-                        status = SessionStatus.PAUSED
-                    elif event.type == "orchestrator.session.cancelled":
-                        status = SessionStatus.CANCELLED
+                    status_update = self._status_from_event(event.type, event.data)
+                    if status_update is not None:
+                        status = status_update
 
                 # Only consider active sessions (RUNNING or PAUSED)
                 if status not in (SessionStatus.RUNNING, SessionStatus.PAUSED):

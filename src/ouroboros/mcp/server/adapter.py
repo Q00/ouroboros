@@ -9,6 +9,7 @@ import asyncio
 from collections.abc import Sequence
 import inspect
 import os
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -487,6 +488,21 @@ class MCPServerAdapter:
             resources=len(self._resource_handlers),
         )
 
+        # Log sandbox environment for diagnostics.  Note: CODEX_SANDBOX_
+        # NETWORK_DISABLED=1 does NOT necessarily block MCP-spawned child
+        # processes — Codex may grant MCP servers a different seatbelt
+        # profile than shell commands.
+        if os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1":
+            log.info(
+                "mcp.server.sandbox_env_detected",
+                detail=(
+                    "CODEX_SANDBOX_NETWORK_DISABLED=1 detected. "
+                    "MCP-spawned agent runtimes may still have network "
+                    "access. If they fail, consider running the parent "
+                    "Codex with --sandbox danger-full-access."
+                ),
+            )
+
         # Run the server with the appropriate transport
         if transport == "sse":
             await self._mcp_server.run_sse_async(host=host, port=port)
@@ -507,6 +523,8 @@ def create_ouroboros_server(
     rate_limit_config: RateLimitConfig | None = None,
     event_store: Any | None = None,
     state_dir: Any | None = None,
+    runtime_backend: str | None = None,
+    llm_backend: str | None = None,
 ) -> MCPServerAdapter:
     """Create an Ouroboros MCP server with all tools and dependencies wired.
 
@@ -529,6 +547,8 @@ def create_ouroboros_server(
         event_store: Optional EventStore instance. If not provided, creates default.
         state_dir: Optional pathlib.Path for interview state directory.
                    If not provided, uses ~/.ouroboros/data.
+        runtime_backend: Optional orchestrator runtime backend override.
+        llm_backend: Optional LLM-only backend override.
 
     Returns:
         Configured MCPServerAdapter with all 10 tools registered.
@@ -536,18 +556,23 @@ def create_ouroboros_server(
     Raises:
         ImportError: If MCP SDK is not installed.
     """
-    # Import tool definitions
-    from pathlib import Path
-
     from rich.console import Console
 
     # Import service dependencies
     from ouroboros.bigbang.interview import InterviewEngine
     from ouroboros.bigbang.seed_generator import SeedGenerator
+    from ouroboros.config import (
+        get_assertion_extraction_model,
+        get_clarification_model,
+        get_reflect_model,
+        get_semantic_model,
+        get_wonder_model,
+    )
     from ouroboros.evaluation import (
         EvaluationContext,
         EvaluationPipeline,
         PipelineConfig,
+        SemanticConfig,
     )
     from ouroboros.mcp.job_manager import JobManager
     from ouroboros.mcp.tools.definitions import (
@@ -573,17 +598,20 @@ def create_ouroboros_server(
     )
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
-    from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
+    from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
     )
+    from ouroboros.providers import create_llm_adapter
 
-    # Create LLM adapter (shared across services)
-    # Use ClaudeAgentAdapter for interview/explore — ClaudeCodeAdapter with
-    # max_turns=1 prevented multi-turn tool use (codebase exploration).
-    # bypassPermissions is safe here: only read-only tools (Read/Glob/Grep)
-    # are used for interview question generation and brownfield exploration.
-    llm_adapter = ClaudeAgentAdapter(permission_mode="bypassPermissions")
+    resolved_runtime_backend = resolve_agent_runtime_backend(runtime_backend)
+
+    # Create shared LLM adapter for interview/seed/evaluation paths.
+    llm_adapter = create_llm_adapter(
+        backend=llm_backend,
+        max_turns=1,
+        cwd=Path.cwd(),
+    )
 
     # Create or use provided EventStore
     if event_store is None:
@@ -600,9 +628,13 @@ def create_ouroboros_server(
     interview_engine = InterviewEngine(
         llm_adapter=llm_adapter,
         state_dir=state_dir,
+        model=get_clarification_model(llm_backend),
     )
 
-    seed_generator = SeedGenerator(llm_adapter=llm_adapter)
+    seed_generator = SeedGenerator(
+        llm_adapter=llm_adapter,
+        model=get_clarification_model(llm_backend),
+    )
 
     # Create evolution engines for evolve_step
     from ouroboros.core.lineage import ACResult, EvaluationSummary
@@ -613,24 +645,26 @@ def create_ouroboros_server(
     from ouroboros.verification.extractor import AssertionExtractor
     from ouroboros.verification.verifier import SpecVerifier
 
-    wonder_model = os.environ.get("OUROBOROS_WONDER_MODEL")  # None → use engine's fallback
-    reflect_model = os.environ.get("OUROBOROS_REFLECT_MODEL")  # None → use engine's fallback
     wonder_engine = WonderEngine(
         llm_adapter=llm_adapter,
-        **({"model": wonder_model} if wonder_model else {}),
+        model=get_wonder_model(llm_backend),
     )
     reflect_engine = ReflectEngine(
         llm_adapter=llm_adapter,
-        **({"model": reflect_model} if reflect_model else {}),
+        model=get_reflect_model(llm_backend),
     )
 
     # Wire real execution/evaluation callables for evolve_step so that
     # generation quality is validated, not only ontology deltas.
     # Use Sonnet for execution (frugal) — Opus is overkill for code generation.
-    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL", "claude-sonnet-4-6")
-    agent_adapter = ClaudeAgentAdapter(
-        permission_mode="acceptEdits",
+    execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
+    if execution_model is None and resolved_runtime_backend == "claude":
+        execution_model = "claude-sonnet-4-6"
+    agent_adapter = create_agent_runtime(
+        backend=resolved_runtime_backend,
         model=execution_model,
+        cwd=Path.cwd(),
+        llm_backend=llm_backend,
     )
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
     # Any non-protocol output on stdout corrupts the MCP communication.
@@ -650,6 +684,7 @@ def create_ouroboros_server(
             stage1_enabled=evolve_stage1,
             stage2_enabled=True,
             stage3_enabled=False,
+            semantic=SemanticConfig(model=get_semantic_model(llm_backend)),
         ),
     )
     evolution_store_initialized = False
@@ -728,7 +763,10 @@ def create_ouroboros_server(
             ac_results=tuple(ac_results),
         )
 
-    spec_extractor = AssertionExtractor(llm_adapter=llm_adapter)
+    spec_extractor = AssertionExtractor(
+        llm_adapter=llm_adapter,
+        model=get_assertion_extraction_model(llm_backend),
+    )
 
     def _extract_project_dir(artifact: str, seed: Any = None) -> str | None:
         """Resolve project directory from explicit config, seed context, or artifacts."""
@@ -958,10 +996,14 @@ def create_ouroboros_server(
 
         max_attempts = 3
         # Use Sonnet for validation fixes — import error resolution doesn't need Opus
-        validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL", "claude-sonnet-4-6")
-        validation_adapter = ClaudeAgentAdapter(
-            permission_mode="acceptEdits",
+        validation_model = os.environ.get("OUROBOROS_VALIDATION_MODEL")
+        if validation_model is None and resolved_runtime_backend == "claude":
+            validation_model = "claude-sonnet-4-6"
+        validation_adapter = create_agent_runtime(
+            backend=resolved_runtime_backend,
             model=validation_model,
+            cwd=project_dir,
+            llm_backend=llm_backend,
         )
 
         for attempt in range(1, max_attempts + 1):
@@ -1079,6 +1121,7 @@ def create_ouroboros_server(
             interview_engine=interview_engine,
             seed_generator=seed_generator,
             llm_adapter=llm_adapter,
+            llm_backend=llm_backend,
         ),
         MeasureDriftHandler(
             event_store=event_store,
@@ -1086,10 +1129,13 @@ def create_ouroboros_server(
         InterviewHandler(
             interview_engine=interview_engine,
             event_store=event_store,
+            llm_adapter=llm_adapter,
+            llm_backend=llm_backend,
         ),
         EvaluateHandler(
             event_store=event_store,
             llm_adapter=llm_adapter,
+            llm_backend=llm_backend,
         ),
         LateralThinkHandler(),
         evolve_step,
@@ -1109,6 +1155,7 @@ def create_ouroboros_server(
         ),
         QAHandler(
             llm_adapter=llm_adapter,
+            llm_backend=llm_backend,
         ),
         CancelExecutionHandler(
             event_store=event_store,

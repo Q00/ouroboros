@@ -2,6 +2,7 @@
 
 import pytest
 
+from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.event_store import EventStore
 
@@ -91,6 +92,201 @@ class TestEventStoreAppend:
         assert stored.aggregate_type == sample_event.aggregate_type
         assert stored.aggregate_id == sample_event.aggregate_id
         assert stored.data == sample_event.data
+
+    async def test_append_excludes_raw_subscribed_payloads(self, event_store: EventStore) -> None:
+        """append() stores normalized payloads without raw subscribed event data."""
+        event = BaseEvent(
+            type="orchestrator.progress.updated",
+            aggregate_type="session",
+            aggregate_id="sess-123",
+            data={
+                "progress": {
+                    "messages_processed": 2,
+                    "runtime": {
+                        "backend": "opencode",
+                        "native_session_id": "native-123",
+                        "metadata": {
+                            "resume_token": "resume-123",
+                            "subscribed_events": [{"type": "item.completed"}],
+                        },
+                    },
+                    "raw_event": {"type": "thread.delta"},
+                }
+            },
+        )
+
+        await event_store.append(event)
+
+        replayed = await event_store.replay("session", "sess-123")
+        assert replayed[0].data == {
+            "progress": {
+                "messages_processed": 2,
+                "runtime": {
+                    "backend": "opencode",
+                    "native_session_id": "native-123",
+                    "metadata": {
+                        "resume_token": "resume-123",
+                    },
+                },
+            }
+        }
+
+    async def test_append_excludes_raw_subscribed_payloads_nested_in_tuples(
+        self, event_store: EventStore
+    ) -> None:
+        """append() should sanitize raw stream payloads even inside tuple-backed data."""
+        event = BaseEvent(
+            type="orchestrator.progress.updated",
+            aggregate_type="session",
+            aggregate_id="sess-123",
+            data={
+                "progress_batches": (
+                    {
+                        "messages_processed": 2,
+                        "raw_event": {"type": "assistant.message.delta"},
+                    },
+                    {
+                        "runtime": {
+                            "backend": "opencode",
+                            "native_session_id": "native-123",
+                            "metadata": {
+                                "resume_token": "resume-123",
+                                "subscribed_events": [{"type": "item.completed"}],
+                            },
+                        },
+                    },
+                ),
+            },
+        )
+
+        await event_store.append(event)
+
+        replayed = await event_store.replay("session", "sess-123")
+        assert replayed[0].data == {
+            "progress_batches": [
+                {
+                    "messages_processed": 2,
+                },
+                {
+                    "runtime": {
+                        "backend": "opencode",
+                        "native_session_id": "native-123",
+                        "metadata": {
+                            "resume_token": "resume-123",
+                        },
+                    },
+                },
+            ]
+        }
+
+    async def test_replay_history_contains_only_normalized_base_events(
+        self, event_store: EventStore
+    ) -> None:
+        """Replayed history should contain only normalized BaseEvent records."""
+        events = [
+            BaseEvent(
+                type="orchestrator.progress.updated",
+                aggregate_type="session",
+                aggregate_id="sess-history-123",
+                data={
+                    "progress": {
+                        "step": "session.started",
+                        "raw_event": {"type": "session.started"},
+                        "runtime": {
+                            "backend": "opencode",
+                            "metadata": {
+                                "resume_token": "resume-123",
+                                "subscribed_events": [{"type": "session.started"}],
+                            },
+                        },
+                    }
+                },
+            ),
+            BaseEvent(
+                type="orchestrator.tool.called",
+                aggregate_type="session",
+                aggregate_id="sess-history-123",
+                data={
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "src/ouroboros/orchestrator/runner.py"},
+                    "raw_subscribed_event": {"type": "tool.started"},
+                },
+            ),
+        ]
+
+        await event_store.append_batch(events)
+
+        replayed = await event_store.replay("session", "sess-history-123")
+
+        assert len(replayed) == 2
+        assert all(isinstance(event, BaseEvent) for event in replayed)
+        assert replayed[0].data == {
+            "progress": {
+                "step": "session.started",
+                "runtime": {
+                    "backend": "opencode",
+                    "metadata": {"resume_token": "resume-123"},
+                },
+            }
+        }
+        assert replayed[1].data == {
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/ouroboros/orchestrator/runner.py"},
+        }
+
+    async def test_append_rejects_non_base_event(self, event_store: EventStore) -> None:
+        """append() rejects raw dict payloads in place of normalized BaseEvent records."""
+        with pytest.raises(PersistenceError, match="BaseEvent"):
+            await event_store.append({"type": "raw.event"})  # type: ignore[arg-type]
+
+    async def test_append_rejects_raw_subscribed_stream_payload(
+        self, event_store: EventStore
+    ) -> None:
+        """append() explicitly rejects raw subscribed runtime payloads."""
+        with pytest.raises(PersistenceError, match="raw subscribed event stream payloads"):
+            await event_store.append(  # type: ignore[arg-type]
+                {
+                    "type": "assistant.message.delta",
+                    "session_id": "native-123",
+                    "delta": {"text": "Applying patch"},
+                    "payload": {"raw_chunk": "delta-1"},
+                }
+            )
+
+    async def test_append_batch_rejects_non_base_event(self, event_store: EventStore) -> None:
+        """append_batch() rejects raw dict payloads in place of normalized events."""
+        with pytest.raises(PersistenceError, match="BaseEvent"):
+            await event_store.append_batch(  # type: ignore[arg-type]
+                [
+                    BaseEvent(
+                        type="test.event.created",
+                        aggregate_type="test",
+                        aggregate_id="test-123",
+                    ),
+                    {"type": "raw.event"},
+                ]
+            )
+
+    async def test_append_batch_rejects_raw_subscribed_stream_payload(
+        self, event_store: EventStore
+    ) -> None:
+        """append_batch() explicitly rejects raw subscribed runtime payloads."""
+        with pytest.raises(PersistenceError, match="raw subscribed event stream payloads"):
+            await event_store.append_batch(  # type: ignore[arg-type]
+                [
+                    BaseEvent(
+                        type="test.event.created",
+                        aggregate_type="test",
+                        aggregate_id="test-123",
+                    ),
+                    {
+                        "type": "tool.started",
+                        "tool_name": "Edit",
+                        "session_id": "native-123",
+                        "input": {"file_path": "src/ouroboros/persistence/event_store.py"},
+                    },
+                ]
+            )
 
 
 class TestEventStoreReplay:

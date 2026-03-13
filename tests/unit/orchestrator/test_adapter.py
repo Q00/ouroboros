@@ -131,6 +131,133 @@ class TestRuntimeHandle:
         """Test invalid runtime handle payloads are rejected."""
         assert RuntimeHandle.from_dict({"native_session_id": "sess_123"}) is None
 
+    def test_opencode_session_state_dict_keeps_only_resume_fields(self) -> None:
+        """OpenCode session persistence should strip transient runtime fields."""
+        handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            native_session_id="oc-session-123",
+            conversation_id="conversation-1",
+            previous_response_id="response-1",
+            transcript_path="/tmp/opencode.jsonl",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            updated_at="2026-03-13T09:00:00+00:00",
+            metadata={
+                "ac_id": "ac_2",
+                "server_session_id": "server-42",
+                "session_attempt_id": "ac_2_attempt_2",
+                "session_scope_id": "ac_2",
+                "session_state_path": "execution.acceptance_criteria.ac_2.implementation_session",
+                "scope": "ac",
+                "session_role": "implementation",
+                "retry_attempt": 1,
+                "attempt_number": 2,
+                "tool_catalog": [{"name": "Read"}],
+                "runtime_event_type": "session.started",
+                "debug_token": "drop-me",
+            },
+        )
+
+        persisted = handle.to_session_state_dict()
+        restored = RuntimeHandle.from_dict(persisted)
+
+        assert persisted == {
+            "backend": "opencode",
+            "kind": "implementation_session",
+            "native_session_id": "oc-session-123",
+            "cwd": "/tmp/project",
+            "approval_mode": "acceptEdits",
+            "metadata": {
+                "ac_id": "ac_2",
+                "server_session_id": "server-42",
+                "session_attempt_id": "ac_2_attempt_2",
+                "session_scope_id": "ac_2",
+                "session_state_path": "execution.acceptance_criteria.ac_2.implementation_session",
+                "scope": "ac",
+                "session_role": "implementation",
+                "retry_attempt": 1,
+                "attempt_number": 2,
+                "tool_catalog": [{"name": "Read"}],
+            },
+        }
+        assert restored is not None
+        assert restored.backend == "opencode"
+        assert restored.native_session_id == "oc-session-123"
+        assert restored.cwd == "/tmp/project"
+        assert restored.approval_mode == "acceptEdits"
+        assert restored.ac_id == "ac_2"
+        assert restored.metadata["server_session_id"] == "server-42"
+        assert restored.session_scope_id == "ac_2"
+        assert restored.session_attempt_id == "ac_2_attempt_2"
+        assert "runtime_event_type" not in restored.metadata
+
+    def test_opencode_handle_exposes_reconnect_identifiers(self) -> None:
+        """OpenCode handles should expose the reconnect ids carried in metadata."""
+        handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            native_session_id="oc-session-123",
+            metadata={"server_session_id": "server-42"},
+        )
+        server_only_handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            metadata={"server_session_id": "server-99"},
+        )
+
+        assert handle.server_session_id == "server-42"
+        assert handle.resume_session_id == "oc-session-123"
+        assert server_only_handle.server_session_id == "server-99"
+        assert server_only_handle.resume_session_id == "server-99"
+
+    @pytest.mark.asyncio
+    async def test_runtime_handle_exposes_lifecycle_snapshot_and_live_controls(self) -> None:
+        """Live controls stay off the persisted payload but remain callable in memory."""
+        control_calls = {"observe": 0, "terminate": 0}
+
+        async def _observe(handle: RuntimeHandle) -> dict[str, object]:
+            control_calls["observe"] += 1
+            snapshot = handle.snapshot()
+            snapshot["observed"] = True
+            return snapshot
+
+        async def _terminate(_handle: RuntimeHandle) -> bool:
+            control_calls["terminate"] += 1
+            return True
+
+        handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            native_session_id="oc-session-123",
+            metadata={
+                "server_session_id": "server-42",
+                "runtime_event_type": "session.started",
+            },
+        ).bind_controls(
+            observe_callback=_observe,
+            terminate_callback=_terminate,
+        )
+
+        observed = await handle.observe()
+
+        assert handle.control_session_id == "server-42"
+        assert handle.lifecycle_state == "running"
+        assert handle.can_resume is True
+        assert handle.can_observe is True
+        assert handle.can_terminate is True
+        assert observed["observed"] is True
+        assert observed["control_session_id"] == "server-42"
+        assert observed["lifecycle_state"] == "running"
+        assert await handle.terminate() is True
+        assert control_calls == {"observe": 1, "terminate": 1}
+        assert RuntimeHandle.from_dict(handle.to_session_state_dict()) == RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            native_session_id="oc-session-123",
+            metadata={"server_session_id": "server-42"},
+        )
+
 
 class TestClaudeAgentAdapter:
     """Tests for ClaudeAgentAdapter."""
@@ -146,11 +273,42 @@ class TestClaudeAgentAdapter:
         adapter = ClaudeAgentAdapter(permission_mode="bypassPermissions")
         assert adapter._permission_mode == "bypassPermissions"
 
+    def test_init_with_custom_cwd_and_cli_path(self) -> None:
+        """Test initialization stores backend-neutral runtime construction data."""
+        adapter = ClaudeAgentAdapter(cwd="/tmp/project", cli_path="/tmp/claude")
+        assert adapter._cwd == "/tmp/project"
+        assert adapter._cli_path == "/tmp/claude"
+
     @patch.dict("os.environ", {"ANTHROPIC_API_KEY": "env_key"})
     def test_init_from_environment(self) -> None:
         """Test initialization from environment variable."""
         adapter = ClaudeAgentAdapter()
         assert adapter._api_key == "env_key"
+
+    def test_build_runtime_handle_preserves_existing_scope_metadata(self) -> None:
+        """Coordinator-scoped runtime metadata survives native session binding."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
+        seeded_handle = RuntimeHandle(
+            backend="claude",
+            kind="level_coordinator",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                "scope": "level",
+                "level_number": 3,
+                "session_role": "coordinator",
+            },
+        )
+
+        handle = adapter._build_runtime_handle("sess_123", seeded_handle)
+
+        assert handle is not None
+        assert handle.backend == "claude"
+        assert handle.kind == "level_coordinator"
+        assert handle.native_session_id == "sess_123"
+        assert handle.cwd == "/tmp/project"
+        assert handle.approval_mode == "acceptEdits"
+        assert handle.metadata == seeded_handle.metadata
 
     def test_convert_assistant_message(self) -> None:
         """Test converting SDK assistant message."""

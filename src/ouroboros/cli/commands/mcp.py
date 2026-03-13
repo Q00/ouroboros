@@ -6,6 +6,7 @@ Start and manage the MCP (Model Context Protocol) server.
 from __future__ import annotations
 
 import asyncio
+from enum import Enum
 import os
 from pathlib import Path
 from typing import Annotated
@@ -21,6 +22,23 @@ _PID_FILE = _PID_DIR / "mcp-server.pid"
 
 # Separate stderr console for stdio transport (stdout is JSON-RPC channel)
 _stderr_console = Console(stderr=True)
+
+
+class AgentRuntimeBackend(str, Enum):  # noqa: UP042
+    """Supported orchestrator runtime backends for MCP commands."""
+
+    CLAUDE = "claude"
+    CODEX = "codex"
+    OPENCODE = "opencode"
+
+
+class LLMBackend(str, Enum):  # noqa: UP042
+    """Supported LLM-only backends for MCP commands."""
+
+    CLAUDE_CODE = "claude_code"
+    LITELLM = "litellm"
+    CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 def _write_pid_file() -> bool:
@@ -92,6 +110,8 @@ async def _run_mcp_server(
     port: int,
     transport: str,
     db_path: str | None = None,
+    runtime_backend: str | None = None,
+    llm_backend: str | None = None,
 ) -> None:
     """Run the MCP server.
 
@@ -100,6 +120,8 @@ async def _run_mcp_server(
         port: Port to bind to.
         transport: Transport type (stdio or sse).
         db_path: Optional path to EventStore database.
+        runtime_backend: Optional orchestrator runtime backend override.
+        llm_backend: Optional LLM-only backend override.
     """
     from ouroboros.mcp.server.adapter import create_ouroboros_server
     from ouroboros.orchestrator.session import SessionRepository
@@ -133,9 +155,15 @@ async def _run_mcp_server(
         name="ouroboros-mcp",
         version="1.0.0",
         event_store=event_store,
+        runtime_backend=runtime_backend,
+        llm_backend=llm_backend,
     )
 
     tool_count = len(server.info.tools)
+
+    # Detect Codex seatbelt sandbox and warn about network restrictions.
+    _sandbox_network_disabled = os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
+    _console_out = _stderr_console if transport == "stdio" else Console()
 
     if transport == "stdio":
         # In stdio mode, stdout is the JSON-RPC channel.
@@ -149,6 +177,14 @@ async def _run_mcp_server(
         print_info(f"Registered {tool_count} tools")
         print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
+
+    if _sandbox_network_disabled:
+        _console_out.print(
+            "[dim]Note: CODEX_SANDBOX_NETWORK_DISABLED=1 detected. "
+            "MCP-spawned runtimes usually retain network access. "
+            "If agent tasks fail with network errors, try: "
+            "--sandbox danger-full-access[/dim]"
+        )
 
     # Manage PID file for stale instance detection
     if _check_stale_instance():
@@ -199,6 +235,25 @@ def serve(
             help="Path to EventStore database (default: ~/.ouroboros/ouroboros.db)",
         ),
     ] = "",
+    runtime: Annotated[
+        AgentRuntimeBackend | None,
+        typer.Option(
+            "--runtime",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
+            case_sensitive=False,
+        ),
+    ] = None,
+    llm_backend: Annotated[
+        LLMBackend | None,
+        typer.Option(
+            "--llm-backend",
+            help=(
+                "LLM backend for interview/seed/evaluation tools "
+                "(claude_code, litellm, codex, or opencode)."
+            ),
+            case_sensitive=False,
+        ),
+    ] = None,
 ) -> None:
     """Start the MCP server.
 
@@ -218,10 +273,28 @@ def serve(
 
         # Start with SSE transport on custom port
         ouroboros mcp serve --transport sse --port 9000
+
+        # Start with Codex runtime for orchestrator-driven tools
+        ouroboros mcp serve --runtime codex
+
+        # Use Codex CLI for LLM-only tools as well
+        ouroboros mcp serve --runtime codex --llm-backend codex
+
+        # Use OpenCode for orchestrator and LLM-backed tools
+        ouroboros mcp serve --runtime opencode --llm-backend opencode
     """
     try:
         db_path = db if db else None
-        asyncio.run(_run_mcp_server(host, port, transport, db_path))
+        asyncio.run(
+            _run_mcp_server(
+                host,
+                port,
+                transport,
+                db_path,
+                runtime.value if runtime else None,
+                llm_backend.value if llm_backend else None,
+            )
+        )
     except KeyboardInterrupt:
         print_info("\nMCP Server stopped")
     except ImportError as e:
@@ -235,13 +308,33 @@ def serve(
             "  1. Check if another MCP server is running: cat ~/.ouroboros/mcp-server.pid\n"
             "  2. Kill stale process: kill $(cat ~/.ouroboros/mcp-server.pid)\n"
             "  3. Remove stale PID: rm ~/.ouroboros/mcp-server.pid\n"
-            "  4. Restart Claude Code"
+            "  4. Restart your MCP client"
         )
         raise typer.Exit(1) from e
 
 
 @app.command()
-def info() -> None:
+def info(
+    runtime: Annotated[
+        AgentRuntimeBackend | None,
+        typer.Option(
+            "--runtime",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
+            case_sensitive=False,
+        ),
+    ] = None,
+    llm_backend: Annotated[
+        LLMBackend | None,
+        typer.Option(
+            "--llm-backend",
+            help=(
+                "LLM backend for interview/seed/evaluation tools "
+                "(claude_code, litellm, codex, or opencode)."
+            ),
+            case_sensitive=False,
+        ),
+    ] = None,
+) -> None:
     """Show MCP server information and available tools."""
     from ouroboros.cli.formatters import console
     from ouroboros.mcp.server.adapter import create_ouroboros_server
@@ -250,6 +343,8 @@ def info() -> None:
     server = create_ouroboros_server(
         name="ouroboros-mcp",
         version="1.0.0",
+        runtime_backend=runtime.value if runtime else None,
+        llm_backend=llm_backend.value if llm_backend else None,
     )
 
     server_info = server.info

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.coordinator import (
     CoordinatorReview,
     FileConflict,
@@ -75,6 +75,19 @@ class TestCoordinatorReview:
         assert review.warnings_for_next_level == ()
         assert review.duration_seconds == 0.0
         assert review.session_id is None
+        assert review.session_scope_id is None
+        assert review.session_state_path is None
+        assert review.scope == "level"
+        assert review.session_role == "coordinator"
+        assert review.stage_index == 0
+        assert review.artifact_scope == "level"
+        assert review.artifact_owner == "coordinator"
+        assert review.artifact_type == "coordinator_review"
+        assert review.artifact_owner_id == "level_1_coordinator_reconciliation"
+        assert (
+            review.artifact_state_path
+            == "execution.levels.level_1.coordinator_reconciliation_session"
+        )
 
     def test_full_review(self):
         conflict = FileConflict(
@@ -90,11 +103,47 @@ class TestCoordinatorReview:
             warnings_for_next_level=("Ensure routes are registered in main.py",),
             duration_seconds=5.3,
             session_id="sess_abc",
+            session_scope_id="exec_scope_level_2_coordinator_reconciliation",
+            session_state_path=(
+                "execution.workflows.exec_scope.levels.level_2.coordinator_reconciliation_session"
+            ),
         )
         assert len(review.conflicts_detected) == 1
         assert review.conflicts_detected[0].resolved is True
         assert len(review.fixes_applied) == 1
         assert len(review.warnings_for_next_level) == 1
+        assert review.session_scope_id == "exec_scope_level_2_coordinator_reconciliation"
+        assert (
+            review.session_state_path == "execution.workflows.exec_scope.levels.level_2."
+            "coordinator_reconciliation_session"
+        )
+        assert review.artifact_owner_id == "exec_scope_level_2_coordinator_reconciliation"
+        assert (
+            review.artifact_state_path == "execution.workflows.exec_scope.levels.level_2."
+            "coordinator_reconciliation_session"
+        )
+
+    def test_artifact_payload_is_explicitly_level_scoped(self):
+        review = CoordinatorReview(
+            level_number=3,
+            session_scope_id="level_3_coordinator_reconciliation",
+            session_state_path="execution.levels.level_3.coordinator_reconciliation_session",
+            final_output='{"review_summary":"resolved"}',
+        )
+
+        assert review.to_artifact_payload() == {
+            "scope": "level",
+            "session_role": "coordinator",
+            "stage_index": 2,
+            "level_number": 3,
+            "session_scope_id": "level_3_coordinator_reconciliation",
+            "session_state_path": "execution.levels.level_3.coordinator_reconciliation_session",
+            "artifact_scope": "level",
+            "artifact_owner": "coordinator",
+            "artifact_owner_id": "level_3_coordinator_reconciliation",
+            "artifact": '{"review_summary":"resolved"}',
+            "artifact_type": "coordinator_review",
+        }
 
     def test_frozen(self):
         review = CoordinatorReview(level_number=1)
@@ -136,6 +185,37 @@ def _make_result(
         messages=tuple(messages),
         sub_results=tuple(sub_results or []),
     )
+
+
+class _StubCoordinatorRuntime:
+    """Minimal runtime stub for coordinator review tests."""
+
+    def __init__(self, messages: tuple[AgentMessage, ...]) -> None:
+        self._messages = messages
+        self.calls: list[dict[str, object]] = []
+        self._runtime_handle_backend = "opencode"
+        self._cwd = "/tmp/project"
+        self._permission_mode = "acceptEdits"
+
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+    ):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "tools": tools,
+                "system_prompt": system_prompt,
+                "resume_handle": resume_handle,
+                "resume_session_id": resume_session_id,
+            }
+        )
+        for message in self._messages:
+            yield message
 
 
 class TestDetectFileConflicts:
@@ -379,6 +459,26 @@ class TestParseReviewResponse:
         assert review.session_id == "sess_1"
         assert review.conflicts_detected[0].resolved is True
 
+    def test_carries_session_scope_metadata(self):
+        response = '{"review_summary": "Scoped review", "conflicts_resolved": []}'
+        review = _parse_review_response(
+            response,
+            [],
+            2,
+            1.25,
+            "sess_2",
+            session_scope_id="exec_scope_level_2_coordinator_reconciliation",
+            session_state_path=(
+                "execution.workflows.exec_scope.levels.level_2.coordinator_reconciliation_session"
+            ),
+        )
+
+        assert review.session_scope_id == "exec_scope_level_2_coordinator_reconciliation"
+        assert (
+            review.session_state_path == "execution.workflows.exec_scope.levels.level_2."
+            "coordinator_reconciliation_session"
+        )
+
     def test_bare_json_response(self):
         response = '{"review_summary": "All good", "fixes_applied": [], "warnings_for_next_level": [], "conflicts_resolved": []}'
         review = _parse_review_response(response, [], 2, 1.0, None)
@@ -409,6 +509,88 @@ class TestParseReviewResponse:
         assert review.review_summary == "partial"
         assert review.fixes_applied == ()
         assert review.warnings_for_next_level == ()
+
+
+class TestRunReview:
+    """Tests for LevelCoordinator.run_review()."""
+
+    @pytest.mark.asyncio
+    async def test_run_review_uses_fresh_level_scoped_runtime_handle(self):
+        runtime = _StubCoordinatorRuntime(
+            (
+                AgentMessage(
+                    type="assistant",
+                    content="Reviewing conflicts",
+                    resume_handle=RuntimeHandle(
+                        backend="opencode",
+                        kind="level_coordinator",
+                        native_session_id="coord-level-1",
+                        cwd="/tmp/project",
+                        approval_mode="acceptEdits",
+                        metadata={
+                            "scope": "level",
+                            "level_number": 1,
+                            "session_role": "coordinator",
+                        },
+                    ),
+                ),
+                AgentMessage(
+                    type="result",
+                    content='{"review_summary":"Resolved","fixes_applied":[],"warnings_for_next_level":[],"conflicts_resolved":[]}',
+                    data={"subtype": "success"},
+                    resume_handle=RuntimeHandle(
+                        backend="opencode",
+                        kind="level_coordinator",
+                        native_session_id="coord-level-1",
+                        cwd="/tmp/project",
+                        approval_mode="acceptEdits",
+                        metadata={
+                            "scope": "level",
+                            "level_number": 1,
+                            "session_role": "coordinator",
+                        },
+                    ),
+                ),
+            )
+        )
+        coordinator = LevelCoordinator(runtime)
+        level_ctx = LevelContext(level_number=1, completed_acs=())
+
+        review = await coordinator.run_review(
+            execution_id="exec_level_scope",
+            conflicts=[FileConflict(file_path="src/app.py", ac_indices=(0, 1))],
+            level_context=level_ctx,
+            level_number=1,
+        )
+
+        assert review.review_summary == "Resolved"
+        assert review.session_id == "coord-level-1"
+        assert review.session_scope_id == "exec_level_scope_level_1_coordinator_reconciliation"
+        assert (
+            review.session_state_path == "execution.workflows.exec_level_scope.levels.level_1."
+            "coordinator_reconciliation_session"
+        )
+        assert len(runtime.calls) == 1
+        resume_handle = runtime.calls[0]["resume_handle"]
+        assert isinstance(resume_handle, RuntimeHandle)
+        assert resume_handle.native_session_id is None
+        assert resume_handle.backend == "opencode"
+        assert resume_handle.kind == "level_coordinator"
+        assert resume_handle.cwd == "/tmp/project"
+        assert resume_handle.approval_mode == "acceptEdits"
+        assert resume_handle.metadata["scope"] == "level"
+        assert resume_handle.metadata["execution_id"] == "exec_level_scope"
+        assert resume_handle.metadata["level_number"] == 1
+        assert resume_handle.metadata["session_role"] == "coordinator"
+        assert (
+            resume_handle.metadata["session_scope_id"]
+            == "exec_level_scope_level_1_coordinator_reconciliation"
+        )
+        assert (
+            resume_handle.metadata["session_state_path"]
+            == "execution.workflows.exec_level_scope.levels.level_1."
+            "coordinator_reconciliation_session"
+        )
 
 
 # =============================================================================

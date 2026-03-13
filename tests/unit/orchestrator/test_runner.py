@@ -16,7 +16,14 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.core.types import Result
+from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+
+# TODO: uncomment when OpenCode runtime is shipped
+# from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
+from ouroboros.orchestrator.parallel_executor import ACExecutionResult, ParallelExecutionResult
 from ouroboros.orchestrator.runner import (
     OrchestratorError,
     OrchestratorResult,
@@ -230,6 +237,447 @@ class TestOrchestratorRunner:
         assert result.value.messages_processed == 9
 
     @pytest.mark.asyncio
+    async def test_prepare_session_forwards_seed_goal(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """prepare_session reserves a session with the seed goal persisted."""
+        tracker = SessionTracker.create(
+            "exec_prepared",
+            sample_seed.metadata.seed_id,
+            session_id="orch_prepared",
+        )
+        create_session = AsyncMock(return_value=Result.ok(tracker))
+
+        with patch.object(runner._session_repo, "create_session", create_session):
+            result = await runner.prepare_session(
+                sample_seed,
+                execution_id="exec_prepared",
+                session_id="orch_prepared",
+            )
+
+        assert result.is_ok
+        assert result.value is tracker
+        create_session.assert_awaited_once_with(
+            execution_id="exec_prepared",
+            seed_id=sample_seed.metadata.seed_id,
+            session_id="orch_prepared",
+            seed_goal=sample_seed.goal,
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_delegates_to_precreated_session(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """execute_seed should reserve IDs first, then run the precreated session."""
+        tracker = SessionTracker.create(
+            "exec_delegated",
+            sample_seed.metadata.seed_id,
+            session_id="orch_delegated",
+        )
+        orchestrator_result = OrchestratorResult(
+            success=True,
+            session_id=tracker.session_id,
+            execution_id=tracker.execution_id,
+        )
+        prepare_session = AsyncMock(return_value=Result.ok(tracker))
+        execute_precreated = AsyncMock(return_value=Result.ok(orchestrator_result))
+
+        with (
+            patch.object(runner, "prepare_session", prepare_session),
+            patch.object(runner, "execute_precreated_session", execute_precreated),
+        ):
+            result = await runner.execute_seed(sample_seed, execution_id="exec_delegated")
+
+        assert result.is_ok
+        assert result.value == orchestrator_result
+        prepare_session.assert_awaited_once_with(sample_seed, execution_id="exec_delegated")
+        execute_precreated.assert_awaited_once_with(
+            seed=sample_seed,
+            tracker=tracker,
+            parallel=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_seeds_startup_tool_catalog_on_runtime_handle(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Initial runtime startup should expose the merged tool catalog before tool calls."""
+        from ouroboros.core.types import Result
+
+        captured_kwargs: dict[str, Any] = {}
+        mock_adapter._runtime_handle_backend = "opencode"
+        mock_adapter._cwd = "/tmp/project"
+        mock_adapter._permission_mode = "acceptEdits"
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            captured_kwargs.update(kwargs)
+            resume_handle = kwargs["resume_handle"]
+            assert isinstance(resume_handle, RuntimeHandle)
+            yield AgentMessage(
+                type="result",
+                content="[TASK_COMPLETE]",
+                data={"subtype": "success"},
+                resume_handle=resume_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+        resume_handle = captured_kwargs["resume_handle"]
+        assert isinstance(resume_handle, RuntimeHandle)
+        assert resume_handle.backend == "opencode"
+        assert resume_handle.cwd == "/tmp/project"
+        assert resume_handle.metadata["tool_catalog"][0]["name"] == "Read"
+        assert resume_handle.metadata["tool_catalog"][0]["id"] == "builtin:Read"
+        assert "Edit" in {tool["name"] for tool in resume_handle.metadata["tool_catalog"]}
+
+    def test_build_progress_update_serializes_opencode_tool_result_metadata(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """OpenCode tool/result metadata should survive into persisted progress state."""
+        from ouroboros.orchestrator.mcp_tools import (
+            normalize_runtime_tool_definition,
+            normalize_runtime_tool_result,
+        )
+
+        runtime_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="oc-session-1",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                "server_session_id": "server-42",
+                "runtime_event_type": "tool.completed",
+            },
+        )
+        message = AgentMessage(
+            type="assistant",
+            content="Updated src/app.py",
+            data={
+                "subtype": "tool_result",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "src/app.py"},
+                "tool_definition": normalize_runtime_tool_definition(
+                    "Edit",
+                    {"file_path": "src/app.py"},
+                ),
+                "tool_result": normalize_runtime_tool_result("Updated src/app.py"),
+            },
+            resume_handle=runtime_handle,
+        )
+
+        progress = runner._build_progress_update(message, 3)
+
+        assert progress["last_message_type"] == "tool_result"
+        assert progress["messages_processed"] == 3
+        assert progress["runtime_backend"] == "opencode"
+        assert progress["runtime_event_type"] == "tool.completed"
+        assert progress["tool_name"] == "Edit"
+        assert progress["tool_input"] == {"file_path": "src/app.py"}
+        assert progress["tool_definition"]["name"] == "Edit"
+        assert progress["tool_result"]["text_content"] == "Updated src/app.py"
+        assert progress["runtime"] == {
+            "backend": "opencode",
+            "kind": "agent_runtime",
+            "native_session_id": "oc-session-1",
+            "cwd": "/tmp/project",
+            "approval_mode": "acceptEdits",
+            "metadata": {
+                "server_session_id": "server-42",
+            },
+        }
+
+    def test_build_progress_update_projects_empty_tool_result_content(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Projected tool-result text should drive persisted progress previews."""
+        from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result
+
+        message = AgentMessage(
+            type="assistant",
+            content="",
+            data={
+                "subtype": "tool_result",
+                "tool_name": "Edit",
+                "tool_result": normalize_runtime_tool_result("[AC_COMPLETE: 1] Done!"),
+            },
+        )
+
+        progress = runner._build_progress_update(message, 4)
+        progress_event = runner._build_progress_event("sess_123", message, step=4)
+
+        assert progress["last_message_type"] == "tool_result"
+        assert progress["content_preview"] == "[AC_COMPLETE: 1] Done!"
+        assert progress_event.data["content_preview"] == "[AC_COMPLETE: 1] Done!"
+        assert progress_event.data["progress"]["last_content_preview"] == "[AC_COMPLETE: 1] Done!"
+
+    def test_build_progress_update_extracts_ac_tracking_from_tool_result_payload(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Persisted progress should keep AC markers from normalized tool-result payloads."""
+        from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result
+
+        message = AgentMessage(
+            type="assistant",
+            content="Tool completed successfully.",
+            data={
+                "subtype": "tool_result",
+                "tool_name": "Edit",
+                "tool_result": normalize_runtime_tool_result("[AC_COMPLETE: 1] Done!"),
+            },
+        )
+
+        progress = runner._build_progress_update(message, 4)
+        progress_event = runner._build_progress_event("sess_123", message, step=4)
+
+        assert progress["content_preview"] == "Tool completed successfully."
+        assert progress["ac_tracking"] == {"started": [], "completed": [1]}
+        assert progress_event.data["content_preview"] == "Tool completed successfully."
+        assert progress_event.data["ac_tracking"] == {"started": [], "completed": [1]}
+        assert progress_event.data["progress"]["ac_tracking"] == {
+            "started": [],
+            "completed": [1],
+        }
+
+    def test_build_progress_event_serializes_ac_tracking_metadata(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """AC marker metadata should survive into persisted progress events."""
+        message = AgentMessage(
+            type="assistant",
+            content="[AC_START: 2] Implementing the second acceptance criterion.",
+            data={"ac_tracking": {"started": [2], "completed": []}},
+            resume_handle=RuntimeHandle(backend="opencode", native_session_id="oc-session-1"),
+        )
+
+        progress = runner._build_progress_update(message, 4)
+        progress_event = runner._build_progress_event("sess_123", message)
+
+        assert progress["ac_tracking"] == {"started": [2], "completed": []}
+        assert progress_event.data["ac_tracking"] == {"started": [2], "completed": []}
+        assert progress_event.data["progress"]["ac_tracking"] == {
+            "started": [2],
+            "completed": [],
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_emits_enriched_opencode_tool_and_progress_events(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """OpenCode-backed runs should reuse the standard tool/progress event stream."""
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.mcp_tools import (
+            normalize_runtime_tool_definition,
+            normalize_runtime_tool_result,
+        )
+
+        runtime_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="oc-session-1",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                "server_session_id": "server-42",
+                "runtime_event_type": "session.started",
+            },
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            yield AgentMessage(
+                type="system",
+                content="OpenCode session initialized",
+                resume_handle=runtime_handle,
+            )
+            yield AgentMessage(
+                type="assistant",
+                content="Calling tool: Edit: src/app.py",
+                tool_name="Edit",
+                data={
+                    "tool_input": {"file_path": "src/app.py"},
+                    "tool_definition": normalize_runtime_tool_definition(
+                        "Edit",
+                        {"file_path": "src/app.py"},
+                    ),
+                },
+                resume_handle=runtime_handle,
+            )
+            yield AgentMessage(
+                type="assistant",
+                content="Updated src/app.py",
+                data={
+                    "subtype": "tool_result",
+                    "tool_name": "Edit",
+                    "tool_definition": normalize_runtime_tool_definition("Edit"),
+                    "tool_result": normalize_runtime_tool_result("Updated src/app.py"),
+                },
+                resume_handle=runtime_handle,
+            )
+            yield AgentMessage(
+                type="result",
+                content="Task completed successfully",
+                data={"subtype": "success"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+
+        appended_events = [call.args[0] for call in mock_event_store.append.await_args_list]
+        tool_event = next(
+            event for event in appended_events if event.type == "orchestrator.tool.called"
+        )
+        progress_events = [
+            event
+            for event in appended_events
+            if event.type == "orchestrator.progress.updated" and event.data.get("message_type")
+        ]
+
+        assert tool_event.data["tool_name"] == "Edit"
+        assert tool_event.data["tool_input_preview"] == "file_path: src/app.py"
+        assert tool_event.data["tool_input"] == {"file_path": "src/app.py"}
+        assert tool_event.data["tool_definition"]["name"] == "Edit"
+        assert tool_event.data["runtime_backend"] == "opencode"
+
+        system_event = next(
+            event for event in progress_events if event.data["message_type"] == "system"
+        )
+        tool_result_event = next(
+            event for event in progress_events if event.data["message_type"] == "tool_result"
+        )
+
+        assert system_event.data["runtime_backend"] == "opencode"
+        assert system_event.data["session_id"] == "oc-session-1"
+        assert system_event.data["server_session_id"] == "server-42"
+        assert system_event.data["resume_session_id"] == "oc-session-1"
+        assert system_event.data["runtime"]["native_session_id"] == "oc-session-1"
+        assert tool_result_event.data["tool_name"] == "Edit"
+        assert tool_result_event.data["resume_session_id"] == "oc-session-1"
+        assert tool_result_event.data["tool_result"]["text_content"] == "Updated src/app.py"
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_emits_workflow_progress_with_projected_last_update(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Workflow progress updates should carry the normalized latest runtime artifact."""
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.mcp_tools import normalize_runtime_tool_result
+
+        runtime_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="oc-session-1",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={"server_session_id": "server-42"},
+        )
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            yield AgentMessage(
+                type="assistant",
+                content="Tool completed successfully.",
+                data={
+                    "subtype": "tool_result",
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "src/app.py"},
+                    "tool_result": normalize_runtime_tool_result("[AC_COMPLETE: 1] Done!"),
+                    "runtime_event_type": "tool.completed",
+                },
+                resume_handle=runtime_handle,
+            )
+            yield AgentMessage(
+                type="result",
+                content="[TASK_COMPLETE]",
+                data={"subtype": "success", "runtime_event_type": "result.completed"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+
+        workflow_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "workflow.progress.updated"
+        ]
+        tool_result_workflow_event = next(
+            event
+            for event in workflow_events
+            if event.data.get("last_update", {}).get("message_type") == "tool_result"
+        )
+
+        assert tool_result_workflow_event.data["completed_count"] == 1
+        assert tool_result_workflow_event.data["current_ac_index"] == 2
+        last_update = tool_result_workflow_event.data["last_update"]
+        assert last_update["message_type"] == "tool_result"
+        assert last_update["content_preview"] == "Tool completed successfully."
+        assert last_update["tool_name"] == "Edit"
+        assert last_update["tool_input"] == {"file_path": "src/app.py"}
+        assert last_update["tool_result"]["text_content"] == "[AC_COMPLETE: 1] Done!"
+        assert last_update["tool_result"]["is_error"] is False
+        assert last_update["tool_result"]["meta"] == {}
+        assert last_update["tool_result"]["content"][0]["type"] == "text"
+        assert last_update["tool_result"]["content"][0]["text"] == "[AC_COMPLETE: 1] Done!"
+        assert last_update["runtime_signal"] == "tool_completed"
+        assert last_update["runtime_status"] == "running"
+        assert last_update["ac_tracking"] == {"started": [], "completed": [1]}
+
+    @pytest.mark.asyncio
     async def test_execute_seed_failure(
         self,
         runner: OrchestratorRunner,
@@ -262,6 +710,37 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert result.value.success is False
         assert "failed" in result.value.final_message.lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_exception_marks_session_failed(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Unexpected execution exceptions should mark the session as failed."""
+        from ouroboros.core.types import Result
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            if False:
+                yield AgentMessage(type="assistant", content="never")
+            raise RuntimeError("coordinator crash")
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        mark_failed = AsyncMock(return_value=Result.ok(None))
+
+        with patch.object(runner._session_repo, "create_session", mock_create_session):
+            with patch.object(runner._session_repo, "mark_failed", mark_failed):
+                result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_err
+        assert "coordinator crash" in str(result.error)
+        mark_failed.assert_awaited_once()
+        assert mark_failed.await_args.args[1] == "coordinator crash"
 
     @pytest.mark.asyncio
     async def test_execute_seed_session_creation_fails(
@@ -334,6 +813,45 @@ class TestOrchestratorRunner:
 
         assert handle == RuntimeHandle(backend="claude", native_session_id="sess_legacy")
 
+    def test_build_progress_update_round_trips_persisted_opencode_resume_handle(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Persisted OpenCode progress should preserve the reconnect handle exactly."""
+        runtime_handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            updated_at="2026-03-13T00:00:00+00:00",
+            metadata={
+                "server_session_id": "server-42",
+                "session_scope_id": "ac_1",
+                "session_state_path": "execution.acceptance_criteria.ac_1.implementation_session",
+                "session_role": "implementation",
+                "retry_attempt": 0,
+            },
+        )
+        message = AgentMessage(
+            type="system",
+            content="OpenCode session bound",
+            resume_handle=runtime_handle,
+        )
+
+        progress = runner._build_progress_update(message, 2)
+        restored = runner._deserialize_runtime_handle(progress)
+
+        assert progress["runtime"] == runtime_handle.to_session_state_dict()
+        assert progress["runtime_backend"] == "opencode"
+        assert progress["server_session_id"] == "server-42"
+        assert progress["resume_session_id"] == "server-42"
+        assert restored is not None
+        assert restored.backend == runtime_handle.backend
+        assert restored.kind == runtime_handle.kind
+        assert restored.cwd == runtime_handle.cwd
+        assert restored.approval_mode == runtime_handle.approval_mode
+        assert restored.metadata == runtime_handle.metadata
+
     @pytest.mark.asyncio
     async def test_resume_session_uses_runtime_handle(
         self,
@@ -379,7 +897,271 @@ class TestOrchestratorRunner:
             result = await runner.resume_session("sess_resume", sample_seed)
 
         assert result.is_ok
-        assert captured_kwargs["resume_handle"] == runtime_handle
+        resume_handle = captured_kwargs["resume_handle"]
+        assert isinstance(resume_handle, RuntimeHandle)
+        assert resume_handle.backend == runtime_handle.backend
+        assert resume_handle.native_session_id == runtime_handle.native_session_id
+        assert resume_handle.metadata["tool_catalog"][0]["name"] == "Read"
+
+    @pytest.mark.asyncio
+    @pytest.mark.skip(reason="OpenCode runtime not yet shipped")
+    async def test_resume_session_reconnects_opencode_runtime_from_persisted_handle(
+        self,
+        tmp_path,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Interrupted OpenCode runs should resume from the stored runtime handle."""
+
+        class _FakeStream:
+            def __init__(self, text: str = "") -> None:
+                self._buffer = text.encode("utf-8")
+                self._drained = False
+
+            async def read(self, _chunk_size: int = 16384) -> bytes:
+                if self._drained:
+                    return b""
+                self._drained = True
+                return self._buffer
+
+        class _FakeProcess:
+            def __init__(self, stdout_text: str, *, returncode: int = 0) -> None:
+                self.stdout = _FakeStream(stdout_text)
+                self.stderr = _FakeStream("")
+                self.stdin = None
+                self._returncode = returncode
+
+            async def wait(self) -> int:
+                return self._returncode
+
+        runtime = OpenCodeRuntime(  # noqa: F821
+            cli_path="/tmp/opencode",
+            permission_mode="acceptEdits",
+            cwd=tmp_path,
+        )
+        runner = OrchestratorRunner(runtime, mock_event_store, mock_console)
+
+        persisted_handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            cwd=str(tmp_path),
+            approval_mode="acceptEdits",
+            updated_at="2026-03-13T00:00:00+00:00",
+            metadata={
+                "server_session_id": "server-42",
+                "session_scope_id": "ac_0",
+                "session_state_path": ("execution.acceptance_criteria.ac_0.implementation_session"),
+                "session_role": "implementation",
+                "retry_attempt": 0,
+            },
+        )
+        running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.RUNNING
+        )
+        running_tracker = running_tracker.with_progress(
+            {
+                "runtime": persisted_handle.to_dict(),
+                "runtime_backend": "opencode",
+                "messages_processed": 4,
+            }
+        )
+
+        async def mock_reconstruct(*args: Any, **kwargs: Any):
+            return Result.ok(running_tracker)
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        recorded_commands: list[tuple[str, ...]] = []
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            recorded_commands.append(tuple(command))
+            output_index = command.index("--output-last-message") + 1
+            output_path = kwargs.get("cwd")
+            assert output_path == str(tmp_path)
+            from pathlib import Path
+
+            Path(command[output_index]).write_text("Resume pass complete.", encoding="utf-8")
+            stdout_text = (
+                '{"type":"session.resumed","server_session_id":"server-42",'
+                '"session":{"id":"oc-session-123"}}\n'
+                '{"type":"assistant.message.delta","delta":{"text":"Reconnected to the'
+                ' interrupted OpenCode session."}}\n'
+            )
+            return _FakeProcess(stdout_text)
+
+        with (
+            patch.object(runner._session_repo, "reconstruct_session", mock_reconstruct),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+            patch(
+                "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_ok
+        assert result.value.success is True
+        assert recorded_commands
+        assert recorded_commands[0][:2] == ("/tmp/opencode", "run")
+        assert "--resume" in recorded_commands[0]
+        assert recorded_commands[0][recorded_commands[0].index("--resume") + 1] == "server-42"
+        progress_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "orchestrator.progress.updated"
+        ]
+        assert any(
+            event.data.get("progress", {}).get("runtime", {}).get("native_session_id")
+            == "oc-session-123"
+            for event in progress_events
+        )
+
+    @pytest.mark.asyncio
+    async def test_resume_session_replays_persisted_progress_into_workflow_state(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Resume should rebuild workflow state from persisted progress before streaming."""
+        runtime_handle = RuntimeHandle(backend="opencode", native_session_id="oc-session-123")
+        running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.RUNNING
+        )
+        running_tracker = running_tracker.with_progress(
+            {
+                "runtime": runtime_handle.to_dict(),
+                "messages_processed": 4,
+            }
+        )
+
+        async def mock_reconstruct(*args: Any, **kwargs: Any):
+            return Result.ok(running_tracker)
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            yield AgentMessage(
+                type="result",
+                content="[TASK_COMPLETE]",
+                data={"subtype": "success"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+        mock_event_store.replay.return_value = [
+            BaseEvent(
+                type="orchestrator.progress.updated",
+                aggregate_type="session",
+                aggregate_id="sess_resume",
+                data={
+                    "message_type": "assistant",
+                    "content_preview": "[AC_COMPLETE: 1] Finished the first criterion.",
+                    "ac_tracking": {"started": [], "completed": [1]},
+                    "progress": {
+                        "last_message_type": "assistant",
+                        "last_content_preview": "[AC_COMPLETE: 1] Finished the first criterion.",
+                    },
+                },
+            )
+        ]
+
+        with (
+            patch.object(runner._session_repo, "reconstruct_session", mock_reconstruct),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_ok
+        workflow_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "workflow.progress.updated"
+        ]
+        assert workflow_events
+        assert workflow_events[0].data["completed_count"] == 1
+        assert workflow_events[0].data["current_ac_index"] == 2
+
+    @pytest.mark.asyncio
+    async def test_execute_parallel_passes_staged_execution_plan(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Parallel execution should pass a staged plan into the executor."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
+        dependency_graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=sample_seed.acceptance_criteria[0]),
+                ACNode(index=1, content=sample_seed.acceptance_criteria[1]),
+                ACNode(index=2, content=sample_seed.acceptance_criteria[2], depends_on=(0, 1)),
+            ),
+            execution_levels=((0, 1), (2,)),
+        )
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content=sample_seed.acceptance_criteria[0],
+                    success=True,
+                    final_message="done",
+                ),
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content=sample_seed.acceptance_criteria[1],
+                    success=True,
+                    final_message="done",
+                ),
+                ACExecutionResult(
+                    ac_index=2,
+                    ac_content=sample_seed.acceptance_criteria[2],
+                    success=True,
+                    final_message="done",
+                ),
+            ),
+            success_count=3,
+            failure_count=0,
+            total_messages=3,
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=parallel_result),
+            ) as mock_execute_parallel,
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id="exec_parallel",
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok
+        kwargs = mock_execute_parallel.await_args.kwargs
+        execution_plan = kwargs["execution_plan"]
+        assert execution_plan.execution_levels == dependency_graph.execution_levels
+        assert execution_plan.total_stages == 2
+        assert kwargs["session_id"] == tracker.session_id
 
 
 class TestOrchestratorError:
@@ -508,10 +1290,11 @@ class TestOrchestratorRunnerWithMCP:
             mock_console,
         )
 
-        merged_tools, provider = await runner._get_merged_tools("session_123")
+        merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
 
         assert merged_tools == DEFAULT_TOOLS
         assert provider is None
+        assert [tool.name for tool in tool_catalog.tools] == DEFAULT_TOOLS
 
     @pytest.mark.asyncio
     async def test_get_merged_tools_with_mcp(
@@ -531,12 +1314,70 @@ class TestOrchestratorRunnerWithMCP:
             mcp_manager=mock_mcp_manager,
         )
 
-        merged_tools, provider = await runner._get_merged_tools("session_123")
+        merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
 
         # Should include DEFAULT_TOOLS + MCP tools
         assert all(t in merged_tools for t in DEFAULT_TOOLS)
         assert "external_tool" in merged_tools
         assert provider is not None
+        assert tool_catalog.attached_tools[0].name == "external_tool"
+
+    @pytest.mark.asyncio
+    async def test_get_merged_tools_uses_deterministic_session_catalog_order(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        mock_mcp_manager: MagicMock,
+    ) -> None:
+        """Merged tool order should come from the normalized session catalog."""
+        from ouroboros.mcp.types import MCPToolDefinition
+
+        class _Strategy:
+            def get_tools(self) -> list[str]:
+                return ["Write", "Read"]
+
+        mock_mcp_manager.list_all_tools = AsyncMock(
+            return_value=[
+                MCPToolDefinition(
+                    name="search",
+                    description="Search from server-b",
+                    server_name="server-b",
+                ),
+                MCPToolDefinition(
+                    name="Read",
+                    description="Conflicting read tool",
+                    server_name="server-shadow",
+                ),
+                MCPToolDefinition(
+                    name="alpha",
+                    description="Alpha tool",
+                    server_name="server-a",
+                ),
+                MCPToolDefinition(
+                    name="search",
+                    description="Search from server-a",
+                    server_name="server-a",
+                ),
+            ]
+        )
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            mcp_manager=mock_mcp_manager,
+        )
+
+        merged_tools, provider, tool_catalog = await runner._get_merged_tools(
+            "session_123",
+            strategy=_Strategy(),
+        )
+
+        assert merged_tools == ["Write", "Read", "alpha", "search"]
+        assert provider is not None
+        assert [tool.name for tool in provider.session_catalog.tools] == merged_tools
+        assert [tool.name for tool in tool_catalog.tools] == merged_tools
 
     @pytest.mark.asyncio
     async def test_get_merged_tools_mcp_failure(
@@ -558,7 +1399,7 @@ class TestOrchestratorRunnerWithMCP:
             mcp_manager=mock_mcp_manager,
         )
 
-        merged_tools, provider = await runner._get_merged_tools("session_123")
+        merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
 
         # Should still return DEFAULT_TOOLS on failure
         assert merged_tools == DEFAULT_TOOLS
@@ -567,6 +1408,7 @@ class TestOrchestratorRunnerWithMCP:
         assert provider is not None
         # No MCP tools should have been added
         assert len(merged_tools) == len(DEFAULT_TOOLS)
+        assert tool_catalog.attached_tools == ()
 
     @pytest.mark.asyncio
     async def test_execute_seed_with_mcp_tools(

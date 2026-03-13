@@ -244,9 +244,9 @@ class AgentPool:
 
     Example:
         from ouroboros.plugin.agents.pool import AgentPool
-        from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
+        from ouroboros.orchestrator import create_agent_runtime
 
-        adapter = ClaudeAgentAdapter()
+        adapter = create_agent_runtime(backend="claude")
         pool = AgentPool(adapter=adapter)
         await pool.start()
 
@@ -769,7 +769,7 @@ class AgentPool:
                 await asyncio.sleep(self._config.health_check_interval)
 
                 idle_count = sum(1 for a in self._agents.values() if a.state == AgentState.IDLE)
-                len(self._agents) - idle_count
+                busy_count = len(self._agents) - idle_count  # noqa: F841
                 queue_size = self._task_queue.qsize()
 
                 # Scale up if needed
