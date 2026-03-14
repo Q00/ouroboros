@@ -72,7 +72,7 @@ If the MCP tool is NOT available, fall back to agent-based generation:
 The seed contains:
 
 - **GOAL**: Clear primary objective
-- **CONSTRAINTS**: Hard limitations (e.g., Python 3.14+, no external DB)
+- **CONSTRAINTS**: Hard limitations (e.g., Python >= 3.12, no external DB)
 - **ACCEPTANCE_CRITERIA**: Measurable success criteria
 - **ONTOLOGY_SCHEMA**: Data structure definition (name, fields, types)
 - **EVALUATION_PRINCIPLES**: Quality principles with weights
@@ -84,7 +84,7 @@ The seed contains:
 ```yaml
 goal: Build a CLI task management tool
 constraints:
-  - Python 3.14+
+  - Python >= 3.12
   - No external database
   - SQLite for persistence
 acceptance_criteria:

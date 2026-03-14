@@ -2,29 +2,39 @@
 
 Transform your vague ideas into validated specifications and execute them with confidence.
 
+> **Command context guide:** This page contains commands for two different contexts:
+> - **Terminal** -- commands you run in your regular shell (bash, zsh, etc.)
+> - **Inside a runtime session** -- `ooo` skill commands run inside a Claude Code session; Codex CLI users run equivalent `ouroboros` CLI commands in their terminal
+>
+> Each code block is labeled to indicate where to run it.
+
 ## Quick Start
 
-### Plugin Mode (No Python Required)
+### Claude Code (Skill Mode -- No Python Required)
 
-**In your terminal — install the plugin:**
+**Terminal -- install the skill:**
 ```bash
+# Run these in your regular terminal (shell)
 claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
 ```
 
-**Inside a Claude Code session — run setup, then start building:**
+**Inside a Claude Code session -- run setup, then start building:**
 ```
+# Run these inside an active Claude Code session (start one with `claude`)
 ooo setup
 ooo interview "Build a task management CLI"
 ooo seed
 ```
 
-> **Important:** `ooo` commands are Claude Code skills. They run inside a Claude Code session (start one with `claude`), not directly in your terminal.
+> **Important:** `ooo` commands are Claude Code skills, not shell commands. They only work inside a Claude Code session. For Codex CLI or standalone usage, use the `ouroboros` CLI instead (see Full Mode below).
 > `ooo setup` registers the MCP server globally (one-time) and optionally adds an Ouroboros reference block to your project's CLAUDE.md (per-project).
 
 **Done!** You now have a validated specification ready for execution.
 
-### Full Mode (Python 3.14+ Required)
+### Full Mode (Python >= 3.12 Required)
+
+**Terminal:**
 ```bash
 # Setup
 git clone https://github.com/Q00/ouroboros
@@ -36,7 +46,7 @@ export ANTHROPIC_API_KEY="your-key"
 ouroboros setup
 
 # Execute
-ouroboros run --seed ~/.ouroboros/seeds/latest.yaml
+ouroboros run workflow ~/.ouroboros/seeds/latest.yaml
 ```
 
 ---
@@ -44,50 +54,54 @@ ouroboros run --seed ~/.ouroboros/seeds/latest.yaml
 ## Installation Guide
 
 ### Prerequisites
-- **Claude Code** (for Plugin Mode)
-- **Python 3.14+** (for Full Mode)
+- **Claude Code** (for Skill Mode) or **Codex CLI** (for Codex runtime)
+- **Python >= 3.12** (for Full Mode / Codex runtime)
 - **API Key** from OpenAI, Anthropic, or compatible provider
 
-### Option 1: Plugin Mode (Recommended for Beginners)
+### Option 1: Claude Code Skill Mode (Recommended for Claude Code Users)
+
+**Terminal:**
 ```bash
-# Install via Claude Code marketplace (run in your terminal)
+# Install via Claude Code marketplace
 claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
 ```
 
-Then start a Claude Code session and run:
+**Inside a Claude Code session:**
 ```
-# Setup (inside Claude Code)
+# Start a session first with `claude`, then run:
 ooo setup
 
 # Verify installation
 ooo help
 ```
 
-### Option 2: Full Mode (For Developers)
+### Option 2: pip Install (For Users)
+
+**Terminal:**
 ```bash
-# Clone repository
-git clone https://github.com/Q00/ouroboros
-cd ouroboros
-
-# Install dependencies
-uv sync
-
-# Or using pip
-pip install -e .
+pip install ouroboros-ai              # Base (core engine)
+pip install ouroboros-ai[claude]      # + Claude Code runtime deps
+pip install ouroboros-ai[litellm]     # + LiteLLM multi-provider support
+pip install ouroboros-ai[all]         # Everything (claude + litellm + dashboard)
 
 # Verify CLI
 ouroboros --version
 ```
 
-### Option 3: Standalone Binary
-```bash
-# Download from GitHub Releases
-# macOS: brew install ouroboros
-# Linux: snap install ouroboros
+> **Codex CLI** is an external prerequisite installed separately (`npm install -g @openai/codex`). No Python extras are required -- the base `ouroboros-ai` package is sufficient.
 
-# Verify
-ouroboros --version
+### Option 3: From Source (For Contributors)
+```bash
+# Clone repository
+git clone https://github.com/Q00/ouroboros
+cd ouroboros
+
+# Install all dependencies (including dev tools)
+uv sync
+
+# Verify CLI
+uv run ouroboros --version
 ```
 
 ---
@@ -141,14 +155,81 @@ export OUROBOROS_MCP_PORT=8000
 
 ---
 
+## Choosing a Runtime Backend
+
+Ouroboros is a specification-first workflow engine that delegates code execution to a **runtime backend**. Two backends are currently supported:
+
+| | Claude Code | Codex CLI |
+|---|---|---|
+| **Best for** | Teams already using Claude Code; subscription-based usage | OpenAI-ecosystem users; pay-per-token API billing |
+| **Billing model** | Claude Code Max Plan (flat subscription) | OpenAI API usage (pay-per-token) |
+| **Install** | `pip install ouroboros-ai[claude]` | `pip install ouroboros-ai` (base package) + `npm install -g @openai/codex` |
+| **Skill shortcuts** | `ooo` commands inside Claude Code sessions | `ooo` commands via installed Codex rules and skills |
+| **Sandbox** | Runs inside Claude Code session | Codex CLI manages its own sandbox |
+| **Config value** | `claude` | `codex` |
+
+> **Note:** Both backends execute the same Ouroboros workflow engine -- seeds, interviews, evaluations, and the TUI dashboard work identically. The runtime backend only determines which AI coding agent performs the underlying code generation and tool execution.
+
+### Setting the Runtime Backend
+
+The easiest way to configure your runtime is during initial setup:
+
+```bash
+ouroboros setup
+# Detects installed runtimes and prompts you to choose one
+```
+
+To set or change it manually, edit `~/.ouroboros/config.yaml`:
+
+```yaml
+orchestrator:
+  runtime_backend: claude   # or: codex
+```
+
+Or use the CLI:
+
+```bash
+ouroboros config set orchestrator.runtime_backend codex
+```
+
+Or set the environment variable (overrides config file):
+
+```bash
+export OUROBOROS_RUNTIME_BACKEND=codex
+```
+
+Resolution order (highest priority first):
+
+1. `OUROBOROS_RUNTIME_BACKEND` environment variable
+2. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
+3. Auto-detection during `ouroboros setup`
+
+### Decision Guide
+
+**Choose Claude Code if you:**
+- Already have a Claude Code Max Plan subscription
+- Want `ooo` skill shortcuts inside Claude Code sessions
+- Prefer Anthropic models (Claude Sonnet / Opus)
+
+**Choose Codex CLI if you:**
+- Prefer OpenAI models (GPT-5.4 or later)
+- Want pay-per-token billing through the OpenAI API
+- Are already using the OpenAI ecosystem
+
+For detailed runtime-specific setup, see:
+- [Claude Code runtime guide](runtime-guides/claude-code.md)
+- [Codex CLI runtime guide](runtime-guides/codex.md)
+
+---
+
 ## Your First Workflow: Complete Tutorial
 
-> All `ooo` commands below run inside a Claude Code session.
+> **Runtime note:** The examples below use `ouroboros` CLI commands (work with any runtime). Claude Code users can substitute `ooo` skill shortcuts inside an active session (e.g., `ooo interview` instead of `ouroboros init`).
 
 ### Step 1: Start with an Idea
-```
-# Launch the Socratic interview
-ooo interview "I want to build a personal finance tracker"
+```bash
+ouroboros init "I want to build a personal finance tracker"
+# Claude Code alternative: ooo interview "I want to build a personal finance tracker"
 ```
 
 ### Step 2: Answer Clarifying Questions
@@ -161,9 +242,10 @@ The interview will ask questions like:
 Continue until the ambiguity score drops below 0.2.
 
 ### Step 3: Generate the Seed
-```
+```bash
 # Create immutable specification
-ooo seed
+ouroboros seed
+# Claude Code alternative: ooo seed
 ```
 
 This generates a `seed.yaml` file like:
@@ -190,9 +272,9 @@ metadata:
 ```
 
 ### Step 4: Execute with TUI
+
 ```bash
-# Launch visual execution
-ouroboros run --seed finance-tracker.yaml --ui tui
+ouroboros run workflow finance-tracker.yaml
 ```
 
 ### Step 5: Monitor Progress
@@ -203,9 +285,9 @@ Watch the TUI dashboard show:
 - Real-time metrics (tokens, cost, drift)
 
 ### Step 6: Evaluate Results
-```
-# Run 3-stage evaluation
-ooo evaluate
+```bash
+ouroboros evaluate
+# Claude Code alternative: ooo evaluate
 ```
 
 The evaluation checks:
@@ -218,54 +300,57 @@ The evaluation checks:
 ## Common Workflows
 
 ### Workflow 1: New Project from Scratch
-```
-# All ooo commands run inside a Claude Code session
 
+```bash
 # 1. Clarify requirements
-ooo interview "Build a REST API for a blog"
+ouroboros init "Build a REST API for a blog"
 
 # 2. Generate specification
-ooo seed
+ouroboros seed
 
 # 3. Execute with visualization
-ooo run
+ouroboros run workflow latest.yaml
 
 # 4. Evaluate results
-ooo evaluate
+ouroboros evaluate
 
 # 5. Monitor drift
-ooo status
+ouroboros status
 ```
 
 ### Workflow 2: Bug Fixing
-```
+
+```bash
 # 1. Analyze the problem
-ooo interview "User registration fails with email validation"
+ouroboros init "User registration fails with email validation"
 
 # 2. Generate fix seed
-ooo seed
+ouroboros seed
 
 # 3. Execute
-ooo run
+ouroboros run workflow latest.yaml
 
 # 4. Verify fix
-ooo evaluate
+ouroboros evaluate
 ```
 
 ### Workflow 3: Feature Enhancement
-```
+
+```bash
 # 1. Plan the enhancement
-ooo interview "Add real-time notifications to the chat app"
+ouroboros init "Add real-time notifications to the chat app"
 
 # 2. Break into tasks
-ooo seed
+ouroboros seed
 
 # 3. Execute
-ooo run
+ouroboros run workflow latest.yaml
 
 # 4. Review implementation
-ooo evaluate
+ouroboros evaluate
 ```
+
+> **Claude Code users:** Substitute `ooo` skill commands (e.g., `ooo interview`, `ooo seed`, `ooo run`) inside an active Claude Code session for any of the workflows above.
 
 ---
 
@@ -276,16 +361,16 @@ The TUI provides real-time visibility into your workflow:
 ### Main Dashboard View
 ```
 ┌──────────────────────────────────────────────────────┐
-│  🎯 OUROBOROS DASHBOARD                              │
+│  OUROBOROS DASHBOARD                                 │
 ├──────────────────────────────────────────────────────┤
-│  Phase: 🟢 DESIGN                                    │
-│  Progress: 65% [████████████░░░░░░░░░░░]              │
+│  Phase: [*] DESIGN                                   │
+│  Progress: 65% [============-------]                 │
 │  Cost: $2.34 (85% saved)                             │
-│  Drift: 0.12 ✅                                      │
+│  Drift: 0.12 OK                                     │
 ├──────────────────────────────────────────────────────┤
 │  Task Tree                                          │
-│  ├─ 🟢 Define API endpoints (100%)                    │
-│  ├─ 🟡 Implement auth service (75%)                 │
+│  ├─ [*] Define API endpoints (100%)                  │
+│  ├─ [~] Implement auth service (75%)                 │
 │  └─ ○ Create database schema (0%)                    │
 ├──────────────────────────────────────────────────────┤
 │  Active Agents: 3/5                                  │
@@ -314,9 +399,11 @@ The TUI provides real-time visibility into your workflow:
 
 ### Installation Issues
 
-#### Plugin not recognized
+#### Claude Code skill not recognized
+
+**Terminal:**
 ```bash
-# Check plugin is installed
+# Check skill is installed
 claude plugin list
 
 # Reinstall if needed
@@ -328,7 +415,7 @@ claude plugin install ouroboros@ouroboros --force
 #### Python dependency errors
 ```bash
 # Check Python version
-python --version  # Must be 3.14+
+python --version  # Must be >= 3.12
 
 # Reinstall with uv
 uv sync --all-groups
@@ -353,11 +440,11 @@ ouroboros status health
 
 #### MCP server issues
 ```bash
-# Re-register MCP server
-ouroboros mcp register
+# Check MCP server info
+ouroboros mcp info
 
-# Check server status
-ouroboros mcp status
+# Restart MCP server
+ouroboros mcp serve
 ```
 
 ### Execution Issues
@@ -370,26 +457,28 @@ echo $TERM
 # Set proper TERM
 export TERM=xterm-256color
 
-# Try CLI mode
-ouroboros run --seed project.yaml --ui cli
+# Launch TUI monitor in a separate terminal
+ouroboros tui monitor
 ```
 
 #### High costs
-```bash
-# Check predictions
-ouroboros predict --seed project.yaml
 
-# Review cost breakdown
-ouroboros cost breakdown
-```
+Reduce seed scope or use a more cost-efficient model tier. Check execution cost in the TUI dashboard or session status output.
 
 #### Stuck execution
-```bash
-# Check status (terminal)
-ouroboros status --events
 
-# Or restart from checkpoint
-ouroboros run --seed project.yaml --resume
+**Terminal:**
+```bash
+# Check execution status
+ouroboros status executions
+
+# Or resume a paused/failed execution
+ouroboros run resume
+```
+
+**Inside a runtime session (Claude Code):**
+```
+ooo unstuck
 ```
 
 ### Performance Issues
@@ -408,11 +497,11 @@ export OUROBOROS_MAX_PARALLEL=2
 
 #### Memory issues
 ```bash
-# Enable compression
-export OUROBOROS_COMPRESS=true
+# Reduce parallel tasks
+export OUROBOROS_MAX_PARALLEL=2
 
-# Check memory limits
-ouroboros config get limits
+# Check current configuration
+ouroboros config show
 ```
 
 ---
@@ -449,23 +538,22 @@ ouroboros config get limits
 3. **Event Analysis** - Use replay to learn from past executions
 
 ### Community
-- 📚 [Documentation](https://github.com/Q00/ouroboros/docs)
-- 💬 [Discord Community](https://discord.gg/ouroboros)
-- 🐛 [GitHub Issues](https://github.com/Q00/ouroboros/issues)
-- 💡 [Feature Requests](https://github.com/Q00/ouroboros/discussions)
+- [Documentation](https://github.com/Q00/ouroboros/tree/main/docs)
+- [GitHub Issues](https://github.com/Q00/ouroboros/issues)
+- [Feature Requests](https://github.com/Q00/ouroboros/discussions)
 
 ---
 
 ## Troubleshooting Reference
 
-| Issue | Solution | Command |
-|-------|----------|---------|
-| Plugin not loaded | Reinstall plugin | `claude plugin install ouroboros@ouroboros` |
-| CLI not found | Install Python package | `pip install ouroboros-ai` |
-| API errors | Check API key | `export ANTHROPIC_API_KEY=...` |
-| TUI blank | Check terminal | `export TERM=xterm-256color` |
-| High costs | Reduce seed scope | `ooo interview` to refine |
-| Execution stuck | Use unstuck | `ooo unstuck` |
-| Drift detected | Review spec | `ouroboros status drift` |
+| Issue | Solution | Command | Where |
+|-------|----------|---------|-------|
+| Claude Code skill not loaded | Reinstall skill | `claude plugin install ouroboros@ouroboros` | Terminal |
+| CLI not found | Install Python package | `pip install ouroboros-ai` | Terminal |
+| API errors | Check API key | `export ANTHROPIC_API_KEY=...` | Terminal |
+| TUI blank | Check terminal | `export TERM=xterm-256color` | Terminal |
+| High costs | Reduce seed scope | `ooo interview` / `ouroboros init` | Runtime session |
+| Execution stuck | Use unstuck | `ooo unstuck` / `ouroboros run resume` | Runtime session |
+| Drift detected | Review spec | `ouroboros status executions` | Terminal |
 
-Need more help? Check our [FAQ](docs/faq.md) or join our [Discord](https://discord.gg/ouroboros).
+Need more help? Open an issue on [GitHub](https://github.com/Q00/ouroboros/issues).

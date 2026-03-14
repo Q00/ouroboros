@@ -279,8 +279,8 @@ uv run ruff check src/ouroboros/core/ontology_questions.py
    - 찬성/반대/심판 구조로 토론
    - Devil이 "증상 치료 아닌가?" 질문
 
-3. **Claude Code와의 융합**
-   - Claude Code는 다중 모델 토론 안 함
+3. **런타임 백엔드와의 융합**
+   - 단일 런타임 백엔드는 다중 모델 토론 안 함
    - Ouroboros의 Consensus가 고유 가치
 
 ---

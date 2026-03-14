@@ -1,7 +1,7 @@
 [project]
 name = "ouroboros-ai"
 dynamic = ["version"]
-description = "Self-Improving AI Workflow System"
+description = "Specification-first workflow engine for AI coding agents. Works with Claude Code and Codex CLI."
 readme = "README.md"
 authors = [
     { name = "Q00", email = "jqyu.lee@gmail.com" }

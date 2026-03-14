@@ -22,7 +22,7 @@ uv run ouroboros tui monitor
 goal: "Build a Python library for parsing and validating YAML configurations"
 task_type: code
 constraints:
-  - "Python 3.14+"
+  - "Python >= 3.12"
   - "PyYAML as only external dependency"
   - "Type hints throughout"
 acceptance_criteria:
