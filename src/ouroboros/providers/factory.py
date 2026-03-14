@@ -105,18 +105,12 @@ def create_llm_adapter(
             timeout=timeout,
             max_retries=max_retries,
         )
-    # TODO: uncomment when OpenCode adapter is shipped
-    # if resolved_backend == "opencode":
-    #     return OpenCodeLLMAdapter(
-    #         cli_path=cli_path or get_opencode_cli_path(),
-    #         cwd=cwd,
-    #         permission_mode=resolved_permission_mode,
-    #         allowed_tools=allowed_tools,
-    #         max_turns=max_turns,
-    #         on_message=on_message,
-    #         timeout=timeout,
-    #         max_retries=max_retries,
-    #     )
+    if resolved_backend == "opencode":
+        msg = (
+            "OpenCode LLM adapter is not yet available. "
+            "Supported backends: claude_code, codex, litellm"
+        )
+        raise NotImplementedError(msg)
 
     return LiteLLMAdapter(
         api_key=api_key,

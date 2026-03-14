@@ -82,7 +82,9 @@ class ExecuteSeedHandler:
             name="ouroboros_execute_seed",
             description=(
                 "Execute a seed (task specification) in Ouroboros. "
-                "A seed defines a task to be executed with acceptance criteria."
+                "A seed defines a task to be executed with acceptance criteria. "
+                "This is the handler for 'ooo run' commands — "
+                "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=(
                 MCPToolParameter(
@@ -163,21 +165,25 @@ class ExecuteSeedHandler:
             if not seed_candidate.is_absolute():
                 seed_candidate = resolved_cwd / seed_candidate
 
-            if await asyncio.to_thread(seed_candidate.is_file):
-                try:
-                    seed_content = await asyncio.to_thread(
-                        seed_candidate.read_text,
-                        encoding="utf-8",
+            try:
+                seed_content = await asyncio.to_thread(
+                    seed_candidate.read_text,
+                    encoding="utf-8",
+                )
+            except FileNotFoundError:
+                return Result.err(
+                    MCPToolError(
+                        f"Seed file not found: {seed_candidate}",
+                        tool_name="ouroboros_execute_seed",
                     )
-                except OSError as e:
-                    return Result.err(
-                        MCPToolError(
-                            f"Failed to read seed file: {e}",
-                            tool_name="ouroboros_execute_seed",
-                        )
+                )
+            except OSError as e:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to read seed file: {e}",
+                        tool_name="ouroboros_execute_seed",
                     )
-            else:
-                seed_content = str(seed_path)
+                )
 
         if not seed_content:
             return Result.err(
@@ -225,14 +231,16 @@ class ExecuteSeedHandler:
 
         # Use injected or create orchestrator dependencies
         try:
+            from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
+            from ouroboros.providers.factory import resolve_llm_backend
+
             agent_adapter = create_agent_runtime(
                 backend=self.agent_runtime_backend,
                 cwd=resolved_cwd,
                 llm_backend=self.llm_backend,
             )
-            runtime_backend = getattr(agent_adapter, "_runtime_backend", None)
-            if not isinstance(runtime_backend, str) or not runtime_backend.strip():
-                runtime_backend = self.agent_runtime_backend
+            runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
+            resolved_llm_backend = resolve_llm_backend(self.llm_backend)
             event_store = self.event_store or EventStore()
             await event_store.initialize()
             # Use stderr: in MCP stdio mode, stdout is the JSON-RPC channel.
@@ -294,6 +302,7 @@ class ExecuteSeedHandler:
                 _seed_content: str,
                 _resume_existing: bool,
                 _skip_qa: bool,
+                _session_repo: SessionRepository = session_repo,
             ) -> None:
                 try:
                     if _resume_existing:
@@ -304,7 +313,25 @@ class ExecuteSeedHandler:
                             tracker=_tracker,
                             parallel=True,
                         )
-                    if result.is_ok and result.value.success and not _skip_qa:
+                    if result.is_err:
+                        log.error(
+                            "mcp.tool.execute_seed.background_failed",
+                            session_id=_tracker.session_id,
+                            error=str(result.error),
+                        )
+                        await _session_repo.mark_failed(
+                            _tracker.session_id,
+                            error_message=str(result.error),
+                        )
+                        return
+                    if not result.value.success:
+                        log.warning(
+                            "mcp.tool.execute_seed.background_unsuccessful",
+                            session_id=_tracker.session_id,
+                            message=result.value.final_message,
+                        )
+                        return
+                    if not _skip_qa:
                         from ouroboros.mcp.tools.qa import QAHandler
 
                         qa_handler = QAHandler(
@@ -322,7 +349,17 @@ class ExecuteSeedHandler:
                             }
                         )
                 except Exception:
-                    log.exception("mcp.tool.execute_seed.background_error")
+                    log.exception(
+                        "mcp.tool.execute_seed.background_error",
+                        session_id=_tracker.session_id,
+                    )
+                    try:
+                        await _session_repo.mark_failed(
+                            _tracker.session_id,
+                            error_message="Unexpected error in background execution",
+                        )
+                    except Exception:
+                        log.exception("mcp.tool.execute_seed.mark_failed_error")
 
             task = asyncio.create_task(
                 _run_in_background(runner, seed, tracker, seed_content, bool(session_id), skip_qa)
@@ -346,8 +383,8 @@ class ExecuteSeedHandler:
                                 f"Session ID: {tracker.session_id}\n"
                                 f"Execution ID: {tracker.execution_id}\n"
                                 f"Goal: {seed.goal}\n\n"
-                                f"Runtime Backend: {runtime_backend or 'default'}\n"
-                                f"LLM Backend: {self.llm_backend or 'default'}\n\n"
+                                f"Runtime Backend: {runtime_backend}\n"
+                                f"LLM Backend: {resolved_llm_backend}\n\n"
                                 f"Execution is running in the background.\n"
                                 f"Use ouroboros_session_status to track progress.\n"
                                 f"Use ouroboros_query_events for detailed event history.\n"
@@ -514,10 +551,20 @@ class SessionStatusHandler:
 
             tracker = result.value
 
-            # Build status response from SessionTracker
+            # Build status response from SessionTracker.
+            # The "Terminal:" line is a machine-parseable summary so callers
+            # can reliably detect end-of-session without substring-matching
+            # "completed" against the entire text body (which may contain the
+            # word in AC descriptions, progress dicts, etc.).
+            is_terminal = tracker.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }
             status_text = (
                 f"Session: {tracker.session_id}\n"
                 f"Status: {tracker.status.value}\n"
+                f"Terminal: {is_terminal}\n"
                 f"Execution ID: {tracker.execution_id}\n"
                 f"Seed ID: {tracker.seed_id}\n"
                 f"Messages Processed: {tracker.messages_processed}\n"
@@ -3130,7 +3177,9 @@ class StartExecuteSeedHandler:
             description=(
                 "Start a seed execution in the background and return a job ID immediately. "
                 "Use ouroboros_job_status, ouroboros_job_wait, and ouroboros_job_result "
-                "to monitor progress."
+                "to monitor progress. "
+                "This is the handler for 'ooo run' commands — "
+                "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=ExecuteSeedHandler().definition.parameters,
         )
@@ -3140,10 +3189,36 @@ class StartExecuteSeedHandler:
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
         seed_content = arguments.get("seed_content")
+        seed_path = arguments.get("seed_path")
+        if not seed_content and seed_path:
+            resolved_cwd = Path(arguments.get("cwd") or os.getcwd())
+            seed_candidate = Path(str(seed_path)).expanduser()
+            if not seed_candidate.is_absolute():
+                seed_candidate = resolved_cwd / seed_candidate
+            try:
+                seed_content = await asyncio.to_thread(
+                    seed_candidate.read_text, encoding="utf-8"
+                )
+                arguments = {**arguments, "seed_content": seed_content}
+            except FileNotFoundError:
+                return Result.err(
+                    MCPToolError(
+                        f"Seed file not found: {seed_candidate}",
+                        tool_name="ouroboros_start_execute_seed",
+                    )
+                )
+            except OSError as e:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to read seed file: {e}",
+                        tool_name="ouroboros_start_execute_seed",
+                    )
+                )
+
         if not seed_content:
             return Result.err(
                 MCPToolError(
-                    "seed_content is required",
+                    "seed_content or seed_path is required",
                     tool_name="ouroboros_start_execute_seed",
                 )
             )
@@ -3182,11 +3257,25 @@ class StartExecuteSeedHandler:
             ),
         )
 
+        from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
+        from ouroboros.providers.factory import resolve_llm_backend
+
+        try:
+            runtime_backend = resolve_agent_runtime_backend()
+        except (ValueError, Exception):
+            runtime_backend = "unknown"
+        try:
+            llm_backend = resolve_llm_backend()
+        except (ValueError, Exception):
+            llm_backend = "unknown"
+
         text = (
             f"Started background execution.\n\n"
             f"Job ID: {snapshot.job_id}\n"
             f"Session ID: {snapshot.links.session_id or 'pending'}\n"
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
+            f"Runtime Backend: {runtime_backend}\n"
+            f"LLM Backend: {llm_backend}\n\n"
             "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
         )
         return Result.ok(

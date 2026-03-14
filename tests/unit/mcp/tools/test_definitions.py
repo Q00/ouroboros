@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import pytest
+
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.definitions import (
@@ -335,13 +337,13 @@ metadata:
         assert "Seed Execution LAUNCHED" in result.value.text_content
         assert "Session ID: sess-123" in result.value.text_content
         assert "Execution ID: exec-456" in result.value.text_content
-        assert "Runtime Backend: codex" in result.value.text_content
+        assert "Runtime Backend: claude" in result.value.text_content
         assert result.value.meta["seed_id"] == "test-seed-123"
         assert result.value.meta["session_id"] == "sess-123"
         assert result.value.meta["execution_id"] == "exec-456"
         assert result.value.meta["launched"] is True
         assert result.value.meta["status"] == "running"
-        assert result.value.meta["runtime_backend"] == "codex"
+        assert result.value.meta["runtime_backend"] == "claude"
         assert result.value.meta["resume_requested"] is False
 
     async def test_handle_launches_background_execution_with_opencode_runtime(self) -> None:
@@ -516,6 +518,71 @@ class TestSessionStatusHandler:
             assert (
                 "not found" in str(result.error).lower() or "no events" in str(result.error).lower()
             )
+
+    @pytest.mark.parametrize(
+        "status_value,expected_terminal",
+        [
+            ("running", "False"),
+            ("paused", "False"),
+            ("completed", "True"),
+            ("failed", "True"),
+            ("cancelled", "True"),
+        ],
+    )
+    async def test_terminal_line_matches_status(
+        self, status_value: str, expected_terminal: str
+    ) -> None:
+        """Terminal line in text output accurately reflects session status.
+
+        Prevents false-positive detection where callers match 'completed'
+        against the entire text body instead of a structured field.
+        """
+        from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
+
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+
+        handler = SessionStatusHandler(event_store=mock_event_store)
+        handler._initialized = True
+
+        mock_tracker = MagicMock(spec=SessionTracker)
+        mock_tracker.session_id = "sess-terminal-test"
+        mock_tracker.status = SessionStatus(status_value)
+        mock_tracker.execution_id = "exec-1"
+        mock_tracker.seed_id = "seed-1"
+        mock_tracker.messages_processed = 5
+        mock_tracker.start_time = MagicMock(isoformat=MagicMock(return_value="2026-01-01T00:00:00"))
+        mock_tracker.last_message_time = None
+        mock_tracker.progress = {}
+        mock_tracker.is_active = status_value in ("running", "paused")
+        mock_tracker.is_completed = status_value == "completed"
+        mock_tracker.is_failed = status_value == "failed"
+
+        mock_repo = AsyncMock(spec=SessionRepository)
+        mock_repo.reconstruct_session = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value=mock_tracker)
+        )
+        handler._session_repo = mock_repo
+
+        result = await handler.handle({"session_id": "sess-terminal-test"})
+
+        assert result.is_ok
+        text = result.value.text_content
+
+        # Parse the Terminal line specifically
+        terminal_line = [line for line in text.split("\n") if line.startswith("Terminal:")]
+        assert len(terminal_line) == 1, f"Expected exactly one Terminal: line, got: {terminal_line}"
+        assert terminal_line[0] == f"Terminal: {expected_terminal}"
+
+        # Also verify Status line
+        status_line = [line for line in text.split("\n") if line.startswith("Status:")]
+        assert len(status_line) == 1
+        assert status_line[0] == f"Status: {status_value}"
+
+        # Verify meta dict
+        assert result.value.meta["status"] == status_value
+        assert result.value.meta["is_completed"] == (status_value == "completed")
+        assert result.value.meta["is_failed"] == (status_value == "failed")
 
 
 class TestQueryEventsHandler:
