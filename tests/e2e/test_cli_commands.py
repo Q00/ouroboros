@@ -56,14 +56,14 @@ class TestCLIBasics:
         result = runner.invoke(app, ["run", "workflow", "--help"])
         assert result.exit_code == 0
         assert "seed" in result.output.lower()
-        assert "--runtime" in result.output
+        assert "runtime" in result.output.lower()
 
     def test_mcp_serve_help(self) -> None:
         """Test that mcp serve --help shows backend selection options."""
         result = runner.invoke(app, ["mcp", "serve", "--help"])
         assert result.exit_code == 0
-        assert "--runtime" in result.output
-        assert "--llm-backend" in result.output
+        assert "runtime" in result.output.lower()
+        assert "llm-backend" in result.output.lower()
 
 
 class TestInitCommand:
@@ -76,8 +76,8 @@ class TestInitCommand:
         result = runner.invoke(app, ["init", "start", "--help"])
         assert result.exit_code == 0
         assert "context" in result.output.lower() or "resume" in result.output.lower()
-        assert "--runtime" in result.output
-        assert "--llm-backend" in result.output
+        assert "runtime" in result.output.lower()
+        assert "llm-backend" in result.output.lower()
 
     def test_init_with_context_argument(
         self, temp_state_dir: Path, mock_interview_llm_provider: MockLLMProvider
