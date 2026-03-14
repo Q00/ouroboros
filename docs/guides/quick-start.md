@@ -4,7 +4,7 @@ Get Ouroboros running and execute your first AI workflow in under 10 minutes.
 
 ## Prerequisites
 
-- Python 3.14+
+- Python >= 3.12
 - [uv](https://github.com/astral-sh/uv) package manager
 - An LLM API key (Anthropic recommended)
 
@@ -67,7 +67,7 @@ The interview continues until ambiguity drops to 0.2 or below.
 goal: "Build a single-user CLI task manager with SQLite storage"
 task_type: code    # "code", "research", or "analysis"
 constraints:
-  - "Python 3.14+"
+  - "Python >= 3.12"
   - "SQLite for persistence"
   - "No external dependencies beyond stdlib"
 acceptance_criteria:
@@ -98,7 +98,7 @@ uv run ouroboros run seed.yaml
 Ouroboros runs the six-phase pipeline:
 
 1. **PAL Router** -- selects cost-effective model tier per task complexity
-2. **Double Diamond** -- decomposes ACs, executes via Claude Agent SDK
+2. **Double Diamond** -- decomposes ACs, executes via the configured runtime backend
 3. **Resilience** -- detects stagnation, switches personas if stuck
 4. **Evaluation** -- mechanical checks, semantic evaluation, consensus (if triggered)
 

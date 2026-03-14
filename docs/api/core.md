@@ -381,7 +381,7 @@ from ouroboros.core import (
 seed = Seed(
     goal="Build a CLI task management tool",
     constraints=(
-        "Python 3.14+",
+        "Python >= 3.12",
         "No external database dependencies",
     ),
     acceptance_criteria=(
