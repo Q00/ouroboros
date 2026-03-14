@@ -96,6 +96,11 @@ LANGUAGE_PRESETS: dict[str, LanguagePreset] = {
         test_command=("go", "test", "./..."),
         coverage_command=("go", "test", "-cover", "./..."),
     ),
+    "java-maven": LanguagePreset(
+        name="java-maven",
+        build_command=("mvn", "clean", "compile"),
+        test_command=("mvn", "test"),
+    ),
     "node-npm": LanguagePreset(
         name="node-npm",
         lint_command=("npm", "run", "lint"),
@@ -133,6 +138,8 @@ _DETECTION_RULES: list[tuple[str, str]] = [
     ("Cargo.toml", "rust"),
     # Go
     ("go.mod", "go"),
+    # Java (Maven)
+    ("pom.xml", "java-maven"),
     # Node.js package managers (check lockfiles before generic package.json)
     ("bun.lockb", "node-bun"),
     ("bun.lock", "node-bun"),

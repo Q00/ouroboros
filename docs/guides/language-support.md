@@ -11,6 +11,7 @@ Ouroboros Stage 1 (Mechanical Verification) auto-detects your project's language
 | Zig | `build.zig` | — | `zig build` | `zig build test` | — | — |
 | Rust | `Cargo.toml` | `cargo clippy` | `cargo build` | `cargo test` | — | — |
 | Go | `go.mod` | `go vet ./...` | `go build ./...` | `go test ./...` | — | `go test -cover ./...` |
+| Java (Maven) | `pom.xml` | — | `mvn clean compile` | `mvn test` | — | — |
 | Node (npm) | `package-lock.json` | `npm run lint` | `npm run build` | `npm test` | — | — |
 | Node (pnpm) | `pnpm-lock.yaml` | `pnpm lint` | `pnpm build` | `pnpm test` | — | — |
 | Node (bun) | `bun.lockb` | `bun lint` | `bun run build` | `bun test` | — | — |
@@ -70,6 +71,15 @@ test = "zig build test -Doptimize=Debug"
 build = "cmake --build build"
 test = "ctest --test-dir build"
 lint = "clang-tidy src/*.cpp"
+```
+
+**Java Maven project with additional checks:**
+```toml
+build = "mvn clean compile"
+test = "mvn test"
+lint = "mvn checkstyle:check"
+static = "mvn spotbugs:check"
+coverage = "mvn verify -Pcoverage"
 ```
 
 **Haskell project:**

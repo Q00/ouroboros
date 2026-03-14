@@ -49,6 +49,12 @@ class TestDetectLanguage:
         assert preset is not None
         assert preset.name == "python"
 
+    def test_detect_java_maven(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").touch()
+        preset = detect_language(tmp_path)
+        assert preset is not None
+        assert preset.name == "java-maven"
+
     def test_detect_node_npm(self, tmp_path: Path) -> None:
         (tmp_path / "package.json").touch()
         (tmp_path / "package-lock.json").touch()
@@ -88,6 +94,33 @@ class TestDetectLanguage:
         """Empty directory returns None."""
         preset = detect_language(tmp_path)
         assert preset is None
+
+    def test_pom_xml_detected_before_package_json(self, tmp_path: Path) -> None:
+        """pom.xml takes priority over package.json (Maven before Node)."""
+        (tmp_path / "pom.xml").touch()
+        (tmp_path / "package.json").touch()
+        preset = detect_language(tmp_path)
+        assert preset is not None
+        assert preset.name == "java-maven"
+
+    def test_pom_xml_detected_before_node_lockfiles(self, tmp_path: Path) -> None:
+        """pom.xml takes priority over Node lockfiles (Maven before Node)."""
+        for lockfile in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb"):
+            d = tmp_path / lockfile.replace(".", "_")
+            d.mkdir()
+            (d / "pom.xml").touch()
+            (d / lockfile).touch()
+            preset = detect_language(d)
+            assert preset is not None, f"Failed for {lockfile}"
+            assert preset.name == "java-maven", f"Expected java-maven over {lockfile}"
+
+    def test_go_mod_detected_before_pom_xml(self, tmp_path: Path) -> None:
+        """go.mod takes priority over pom.xml (Go before Maven)."""
+        (tmp_path / "go.mod").touch()
+        (tmp_path / "pom.xml").touch()
+        preset = detect_language(tmp_path)
+        assert preset is not None
+        assert preset.name == "go"
 
     def test_uv_takes_priority_over_pyproject(self, tmp_path: Path) -> None:
         """uv.lock is checked before pyproject.toml."""
@@ -209,6 +242,16 @@ class TestBuildMechanicalConfig:
         assert config.test_command == ("make", "test")
         assert config.lint_command is None
 
+    def test_auto_detect_java_maven(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").touch()
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command == ("mvn", "clean", "compile")
+        assert config.test_command == ("mvn", "test")
+        assert config.lint_command is None
+        assert config.static_command is None
+        assert config.coverage_command is None
+        assert config.working_dir == tmp_path
+
     def test_no_toml_file_no_error(self, tmp_path: Path) -> None:
         """Missing .ouroboros/mechanical.toml is not an error."""
         (tmp_path / "build.zig").touch()
@@ -246,3 +289,34 @@ class TestLanguagePresetCommands:
         assert preset.build_command is not None
         assert preset.test_command is not None
         assert preset.coverage_command is not None
+
+    def test_java_maven_preset_has_build_and_test_only(self) -> None:
+        from ouroboros.evaluation.languages import LANGUAGE_PRESETS
+
+        preset = LANGUAGE_PRESETS["java-maven"]
+        assert preset.name == "java-maven"
+        assert preset.build_command == ("mvn", "clean", "compile")
+        assert preset.test_command == ("mvn", "test")
+        assert preset.lint_command is None
+        assert preset.static_command is None
+        assert preset.coverage_command is None
+
+    def test_java_maven_preset_no_quiet_flags(self) -> None:
+        """Maven commands must not include quiet flags (-q or --quiet)."""
+        from ouroboros.evaluation.languages import LANGUAGE_PRESETS
+
+        preset = LANGUAGE_PRESETS["java-maven"]
+        for cmd in (preset.build_command, preset.test_command):
+            assert cmd is not None
+            assert "-q" not in cmd
+            assert "--quiet" not in cmd
+
+    def test_java_maven_preset_is_frozen(self) -> None:
+        """java-maven preset is immutable (frozen dataclass)."""
+        from ouroboros.evaluation.languages import LANGUAGE_PRESETS
+
+        preset = LANGUAGE_PRESETS["java-maven"]
+        import pytest
+
+        with pytest.raises(AttributeError):
+            preset.name = "modified"  # type: ignore[misc]
