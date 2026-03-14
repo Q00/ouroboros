@@ -114,17 +114,51 @@ impl OuroborosDb {
             .unwrap_or(0)
     }
 
-    pub fn read_events_for_session(&mut self, aggregate_id: &str) -> Vec<EventRow> {
-        let mut stmt = match self.conn.prepare(
-            "SELECT id, aggregate_type, aggregate_id, event_type, payload, timestamp \
-             FROM events WHERE aggregate_id = ?1 ORDER BY timestamp ASC",
-        ) {
+    /// Load all events for a session: orchestrator events + execution events + AC sub-events.
+    /// First finds the execution_id from the session's orchestrator.session.started event,
+    /// then loads all events whose aggregate_id matches the session OR the execution prefix.
+    pub fn read_events_for_session(&mut self, session_aggregate_id: &str) -> Vec<EventRow> {
+        // 1. Find execution_id from session.started event
+        let execution_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT payload FROM events \
+                 WHERE aggregate_id = ?1 AND event_type = 'orchestrator.session.started' \
+                 LIMIT 1",
+                [session_aggregate_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|payload_str| {
+                serde_json::from_str::<Value>(&payload_str)
+                    .ok()
+                    .and_then(|v| v.get("execution_id").and_then(|e| e.as_str()).map(String::from))
+            });
+
+        // 2. Build query: session events + execution events + AC sub-events
+        let query = match &execution_id {
+            Some(exec_id) => format!(
+                "SELECT id, aggregate_type, aggregate_id, event_type, payload, timestamp \
+                 FROM events \
+                 WHERE aggregate_id = '{sid}' OR aggregate_id LIKE '{eid}%' \
+                 ORDER BY timestamp ASC",
+                sid = session_aggregate_id.replace('\'', "''"),
+                eid = exec_id.replace('\'', "''"),
+            ),
+            None => format!(
+                "SELECT id, aggregate_type, aggregate_id, event_type, payload, timestamp \
+                 FROM events WHERE aggregate_id = '{}' ORDER BY timestamp ASC",
+                session_aggregate_id.replace('\'', "''"),
+            ),
+        };
+
+        let mut stmt = match self.conn.prepare(&query) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
 
         let rows: Vec<EventRow> = stmt
-            .query_map([aggregate_id], |row| {
+            .query_map([], |row| {
                 let payload_str: String = row.get(4)?;
                 let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
                 Ok(EventRow {
@@ -364,6 +398,41 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
                         .entry(phase_key)
                         .or_default()
                         .push(detail.to_string());
+                }
+                // Parse AC tree from acceptance_criteria array
+                if let Some(acs) = ev.payload.get("acceptance_criteria").and_then(|v| v.as_array())
+                {
+                    state.ac_root.clear();
+                    for ac in acs {
+                        let ac_id = ac
+                            .get("ac_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let content = ac
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let status_str = ac
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pending");
+                        let status = match status_str {
+                            "completed" | "passed" => ACStatus::Completed,
+                            "executing" | "running" => ACStatus::Executing,
+                            "failed" => ACStatus::Failed,
+                            _ => ACStatus::Pending,
+                        };
+                        state.ac_root.push(ACNode {
+                            id: ac_id,
+                            content,
+                            status,
+                            depth: 1,
+                            is_atomic: true,
+                            children: vec![],
+                        });
+                    }
                 }
             }
             "execution.tool.started" => {
