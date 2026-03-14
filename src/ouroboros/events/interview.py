@@ -10,15 +10,29 @@ from ouroboros.events.base import BaseEvent
 def interview_started(
     interview_id: str,
     initial_context: str,
+    *,
+    consultants_enabled: bool = False,
+    consultants: tuple[str, ...] | list[str] = (),
 ) -> BaseEvent:
-    """Create event when a new interview session starts."""
+    """Create event when a new interview session starts.
+
+    Args:
+        interview_id: Unique interview session identifier.
+        initial_context: The user-supplied project description (truncated to 500 chars).
+        consultants_enabled: Whether consulting persona rotation is active.
+        consultants: Names of the consulting personas in use (e.g. ``["contrarian", "architect"]``).
+    """
+    data: dict[str, object] = {
+        "initial_context": initial_context[:500],
+        "consultants_enabled": consultants_enabled,
+    }
+    if consultants:
+        data["consultants"] = list(consultants)
     return BaseEvent(
         type="interview.started",
         aggregate_type="interview",
         aggregate_id=interview_id,
-        data={
-            "initial_context": initial_context[:500],
-        },
+        data=data,
     )
 
 

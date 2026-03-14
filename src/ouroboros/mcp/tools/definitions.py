@@ -1109,8 +1109,44 @@ class InterviewHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="consulting_personas",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Comma-separated list of consulting personas to rotate "
+                        "through during the interview (interview+ mode). "
+                        "Available personas: contrarian, architect, researcher, "
+                        "hacker, ontologist. Example: 'contrarian,architect,researcher'. "
+                        "If omitted, default interview behavior is used."
+                    ),
+                    required=False,
+                ),
             ),
         )
+
+    @staticmethod
+    def _parse_consulting_personas(raw: str | None) -> tuple[str, ...]:
+        """Parse comma-separated consulting personas string into a validated tuple.
+
+        Args:
+            raw: Comma-separated persona names, or None.
+
+        Returns:
+            Tuple of valid persona name strings. Empty tuple if raw is None/empty.
+        """
+        if not raw:
+            return ()
+        valid_personas = {"contrarian", "architect", "researcher", "hacker", "ontologist"}
+        all_tokens = [p.strip().lower() for p in raw.split(",") if p.strip()]
+        parsed = tuple(t for t in all_tokens if t in valid_personas)
+        rejected = [t for t in all_tokens if t not in valid_personas]
+        if rejected:
+            log.warning(
+                "mcp.tool.interview.unknown_personas",
+                rejected=rejected,
+                valid=sorted(valid_personas),
+            )
+        return parsed
 
     async def handle(
         self,
@@ -1127,11 +1163,13 @@ class InterviewHandler:
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
+        consulting_personas = self._parse_consulting_personas(arguments.get("consulting_personas"))
 
         # Use injected or create interview engine
         engine = self.interview_engine or InterviewEngine(
             llm_adapter=ClaudeAgentAdapter(permission_mode="bypassPermissions"),
             state_dir=Path.home() / ".ouroboros" / "data",
+            consulting_personas=consulting_personas,
         )
 
         _interview_id: str | None = None  # Track for error event emission
@@ -1197,6 +1235,10 @@ class InterviewHandler:
                 )
                 state.mark_updated()
 
+                # Store consulting_personas in state for resume persistence
+                if consulting_personas:
+                    state.consulting_personas = consulting_personas
+
                 # Persist state to disk so subsequent calls can resume
                 save_result = await engine.save_state(state)
                 if save_result.is_err:
@@ -1212,6 +1254,8 @@ class InterviewHandler:
                     interview_started(
                         state.interview_id,
                         initial_context,
+                        consultants_enabled=bool(engine.consulting_personas),
+                        consultants=engine.consulting_personas,
                     )
                 )
 
@@ -1246,6 +1290,10 @@ class InterviewHandler:
 
                 state = load_result.value
                 _interview_id = session_id
+
+                # Restore consulting_personas from state if not provided in this call
+                if not consulting_personas and state.consulting_personas:
+                    engine.consulting_personas = state.consulting_personas
 
                 # If answer provided, record it first
                 if answer:

@@ -693,6 +693,111 @@ class TestInterviewHandlerCwd:
         assert state.ambiguity_breakdown is None
 
 
+class TestInterviewHandlerConsultingPersonas:
+    """Test InterviewHandler consulting_personas parameter."""
+
+    def test_interview_definition_has_consulting_personas_param(self) -> None:
+        """Interview tool definition includes the consulting_personas parameter."""
+        handler = InterviewHandler()
+        defn = handler.definition
+
+        param_names = {p.name for p in defn.parameters}
+        assert "consulting_personas" in param_names
+
+        cp_param = next(p for p in defn.parameters if p.name == "consulting_personas")
+        assert cp_param.required is False
+        assert cp_param.type == ToolInputType.STRING
+
+    def test_parse_consulting_personas_none(self) -> None:
+        """None input returns empty tuple."""
+        assert InterviewHandler._parse_consulting_personas(None) == ()
+
+    def test_parse_consulting_personas_empty_string(self) -> None:
+        """Empty string returns empty tuple."""
+        assert InterviewHandler._parse_consulting_personas("") == ()
+
+    def test_parse_consulting_personas_valid(self) -> None:
+        """Valid comma-separated personas are parsed correctly."""
+        result = InterviewHandler._parse_consulting_personas("contrarian,architect,hacker")
+        assert result == ("contrarian", "architect", "hacker")
+
+    def test_parse_consulting_personas_strips_whitespace(self) -> None:
+        """Whitespace around persona names is stripped."""
+        result = InterviewHandler._parse_consulting_personas(" contrarian , architect ")
+        assert result == ("contrarian", "architect")
+
+    def test_parse_consulting_personas_filters_invalid(self) -> None:
+        """Invalid persona names are filtered out."""
+        result = InterviewHandler._parse_consulting_personas("contrarian,invalid,hacker")
+        assert result == ("contrarian", "hacker")
+
+    def test_parse_consulting_personas_case_insensitive(self) -> None:
+        """Persona names are lowercased for matching."""
+        result = InterviewHandler._parse_consulting_personas("CONTRARIAN,Architect")
+        assert result == ("contrarian", "architect")
+
+    async def test_interview_handle_passes_consulting_personas_to_engine(self) -> None:
+        """handle creates InterviewEngine with consulting_personas when provided."""
+        handler = InterviewHandler()
+
+        with patch(
+            "ouroboros.mcp.tools.definitions.InterviewEngine",
+        ) as MockEngine:
+            mock_engine = MagicMock()
+            mock_state = MagicMock()
+            mock_state.interview_id = "test-456"
+            mock_state.rounds = []
+            mock_state.mark_updated = MagicMock()
+
+            mock_engine.start_interview = AsyncMock(
+                return_value=MagicMock(is_ok=True, is_err=False, value=mock_state)
+            )
+            mock_engine.ask_next_question = AsyncMock(
+                return_value=MagicMock(is_ok=True, is_err=False, value="Question?")
+            )
+            mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+            MockEngine.return_value = mock_engine
+
+            await handler.handle(
+                {
+                    "initial_context": "Build a CLI",
+                    "consulting_personas": "contrarian,architect",
+                }
+            )
+
+            MockEngine.assert_called_once()
+            call_kwargs = MockEngine.call_args[1]
+            assert call_kwargs["consulting_personas"] == ("contrarian", "architect")
+
+    async def test_interview_handle_no_consulting_personas_passes_empty_tuple(self) -> None:
+        """handle creates InterviewEngine with empty consulting_personas when not provided."""
+        handler = InterviewHandler()
+
+        with patch(
+            "ouroboros.mcp.tools.definitions.InterviewEngine",
+        ) as MockEngine:
+            mock_engine = MagicMock()
+            mock_state = MagicMock()
+            mock_state.interview_id = "test-789"
+            mock_state.rounds = []
+            mock_state.mark_updated = MagicMock()
+
+            mock_engine.start_interview = AsyncMock(
+                return_value=MagicMock(is_ok=True, is_err=False, value=mock_state)
+            )
+            mock_engine.ask_next_question = AsyncMock(
+                return_value=MagicMock(is_ok=True, is_err=False, value="Question?")
+            )
+            mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+            MockEngine.return_value = mock_engine
+
+            await handler.handle({"initial_context": "Build a CLI"})
+
+            MockEngine.assert_called_once()
+            call_kwargs = MockEngine.call_args[1]
+            assert call_kwargs["consulting_personas"] == ()
+
+
 class TestGenerateSeedHandlerAmbiguity:
     """Test ambiguity persistence behavior in GenerateSeedHandler."""
 

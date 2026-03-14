@@ -11,10 +11,69 @@ Socratic interview to crystallize vague requirements into clear specifications.
 
 ```
 ooo interview [topic]
+ooo interview+ [topic]
 /ouroboros:interview [topic]
 ```
 
 **Trigger keywords:** "interview me", "clarify requirements"
+
+### Standard vs Interview+
+
+| Variant | Command | Behavior |
+|---------|---------|----------|
+| Standard | `ooo interview` | Single interviewer persona throughout |
+| Interview+ | `ooo interview+` | Rotates consulting personas between questions for diverse perspectives |
+
+**Interview+** enhances the interview by rotating the system prompt through
+five consulting personas between questions. Each persona brings a distinct
+analytical lens, surfacing requirements that a single viewpoint might miss.
+The total question count does **not** increase — the same number of questions
+are asked, but from varied perspectives.
+
+#### Available Consulting Personas
+
+| Persona | Lens | What it surfaces |
+|---------|------|------------------|
+| `contrarian` | Challenges assumptions | Edge cases, hidden risks, unstated constraints |
+| `architect` | System design & scalability | Component boundaries, integration points, NFRs |
+| `researcher` | Evidence & prior art | Existing solutions, academic patterns, data needs |
+| `hacker` | Exploit & stress-test | Security gaps, failure modes, abuse scenarios |
+| `ontologist` | Naming & domain modeling | Ubiquitous language, entity relationships, taxonomies |
+
+Personas are loaded via `load_persona_prompt_data` from `ouroboros.agents.loader`
+and injected as system prompt rotations — **not** as separate LLM calls.
+
+#### Interview+ Examples
+
+```
+User: ooo interview+ Build a REST API
+
+[consultant: architect]
+Q1: What domain entities will this API expose, and how do they relate to each other?
+User: Tasks and projects — tasks belong to projects.
+
+[consultant: hacker]
+Q2: How will you authenticate API consumers, and what happens if a token is
+    stolen or replayed?
+User: JWT with refresh tokens, short-lived access tokens.
+
+[consultant: ontologist]
+Q3: You said "tasks belong to projects" — is a task always scoped to exactly
+    one project, or can it exist independently?
+User: Always scoped to one project.
+
+[consultant: contrarian]
+Q4: You chose JWT — have you considered that JWTs can't be revoked server-side
+    without a blacklist? Would session tokens be simpler for your use case?
+User: Good point, we'll add a token blacklist.
+
+[consultant: researcher]
+Q5: Similar task-management APIs (Asana, Linear) expose webhooks for
+    real-time updates. Will your API need event-driven integrations?
+User: Yes, webhooks for task status changes.
+
+📍 Next: `ooo seed` to crystallize these requirements into a specification
+```
 
 ## Instructions
 
@@ -55,6 +114,14 @@ Compare the result with the current version in `.claude-plugin/plugin.json`.
     4. Tell the user: "Updated! Restart Claude Code to apply, then run `ooo interview` again."
   - If "Skip": proceed immediately.
 - If versions match, the check fails (network error, timeout, rate limit 403/429), or parsing fails/returns empty: **silently skip** and proceed.
+
+**Detecting interview+ mode**: If the user's command includes the `+` suffix
+(e.g., `ooo interview+`), pass the consulting personas to the interview engine.
+The five personas — `contrarian`, `architect`, `researcher`, `hacker`,
+`ontologist` — are rotated as system prompt enrichments between questions.
+The `interview_started` event metadata records which consultants are active
+(e.g., `"consultants": ["contrarian", "architect", "researcher", "hacker", "ontologist"]`).
+Default `ooo interview` (without `+`) uses no personas and behaves exactly as before.
 
 Then choose the execution path:
 
