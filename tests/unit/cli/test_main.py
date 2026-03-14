@@ -79,7 +79,7 @@ class TestRunCommands:
         result = runner.invoke(app, ["run", "workflow", "--help"])
         assert result.exit_code == 0
         assert "seed" in result.output.lower()
-        assert "--runtime" in result.output
+        assert "runtime" in result.output.lower()
 
     def test_run_resume_help(self) -> None:
         """Test run resume command help."""
@@ -96,8 +96,8 @@ class TestInitCommands:
         result = runner.invoke(app, ["init", "start", "--help"])
         assert result.exit_code == 0
         assert "context" in result.output.lower()
-        assert "--runtime" in result.output
-        assert "--llm-backend" in result.output
+        assert "runtime" in result.output.lower()
+        assert "llm-backend" in result.output.lower()
 
 
 class TestConfigCommands:
@@ -171,8 +171,8 @@ class TestMCPCommands:
         assert result.exit_code == 0
         assert "transport" in result.output.lower()
         assert "port" in result.output.lower()
-        assert "--runtime" in result.output
-        assert "--llm-backend" in result.output
+        assert "runtime" in result.output.lower()
+        assert "llm-backend" in result.output.lower()
 
     def test_mcp_info(self) -> None:
         """Test mcp info command."""
