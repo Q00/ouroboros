@@ -161,7 +161,11 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
         return len(text) // 4
 
     try:
+        import litellm
+
         return litellm.token_counter(model=model, text=text)
+    except ImportError:
+        return len(text) // 4
     except Exception as e:
         # Fallback to rough estimation if token counting fails
         log.warning(
