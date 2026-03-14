@@ -217,6 +217,9 @@ fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
     if ui.key('4') {
         state.tabs.selected = 3;
     }
+    if ui.key('5') {
+        state.tabs.selected = 4;
+    }
     if ui.key('l') {
         state.tabs.selected = 2;
     }

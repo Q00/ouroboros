@@ -11,6 +11,7 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
     let accent = ui.theme().accent;
     let success = ui.theme().success;
     let error = ui.theme().error;
+    let primary = ui.theme().primary;
 
     ui.container().grow(1).gap(1).row(|ui| {
         ui.container()
@@ -27,9 +28,8 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
                 } else {
                     ui.scrollable(&mut state.execution_scroll)
                         .grow(1)
-                        .p(1)
                         .col(|ui| {
-                            let events = if state.execution_events.is_empty() {
+                            let events: Vec<ExecutionEvent> = if state.execution_events.is_empty() {
                                 state
                                     .raw_events
                                     .iter()
@@ -39,38 +39,34 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
                                         detail: e.data_preview.clone(),
                                         phase: None,
                                     })
-                                    .collect::<Vec<_>>()
+                                    .collect()
                             } else {
                                 state.execution_events.clone()
                             };
 
                             for (i, ev) in events.iter().rev().enumerate() {
                                 let bg = if i % 2 == 0 { surface } else { surface_hover };
-                                let type_color = if ev.event_type.contains("started") {
-                                    success
-                                } else if ev.event_type.contains("completed") {
-                                    secondary
-                                } else if ev.event_type.contains("failed")
-                                    || ev.event_type.contains("error")
-                                {
-                                    error
-                                } else if ev.event_type.contains("tool") {
-                                    accent
-                                } else {
-                                    dim
-                                };
 
-                                ui.container().bg(bg).px(2).py(0).col(|ui| {
-                                    ui.row(|ui| {
-                                        ui.text(&ev.timestamp).fg(dim);
-                                        ui.text("  ").fg(dim);
-                                        ui.text(&ev.event_type).fg(type_color).bold();
-                                        if let Some(ref p) = ev.phase {
-                                            ui.text(format!("  [{}]", p)).fg(secondary);
-                                        }
-                                    });
+                                let (icon, type_color) = event_visual(
+                                    &ev.event_type,
+                                    success,
+                                    secondary,
+                                    error,
+                                    accent,
+                                    dim,
+                                );
+
+                                ui.container().bg(bg).px(2).py(0).row(|ui| {
+                                    ui.text(format!(" {icon} ")).fg(type_color);
+                                    ui.text(&ev.timestamp).fg(dim);
+                                    ui.text("  ").fg(dim);
+                                    ui.text(&ev.event_type).fg(type_color).bold();
+                                    if let Some(ref p) = ev.phase {
+                                        ui.text(format!(" [{p}]")).fg(secondary);
+                                    }
                                     if !ev.detail.is_empty() {
-                                        ui.text_wrap(&ev.detail).fg(dim);
+                                        ui.spacer();
+                                        ui.text(truncate(&ev.detail, 40)).fg(dim);
                                     }
                                 });
                             }
@@ -87,69 +83,157 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
                 });
             });
 
-        ui.container()
-            .w_pct(35)
-            .border(Border::Single)
-            .title(" Phase Outputs ")
-            .bg(surface)
-            .col(|ui| {
-                ui.container().grow(1).p(1).gap(1).col(|ui| {
+        ui.container().w_pct(35).gap(1).col(|ui| {
+            ui.container()
+                .border(Border::Single)
+                .title(" Phase ")
+                .bg(surface)
+                .p(1)
+                .gap(0)
+                .col(|ui| {
                     for phase in Phase::ALL {
-                        let (icon, color) = if phase.index() < state.current_phase.index() {
+                        let done = phase.index() < state.current_phase.index();
+                        let active = phase == state.current_phase;
+                        let (icon, color) = if done {
                             ("●", success)
-                        } else if phase == state.current_phase {
+                        } else if active {
                             ("◐", accent)
                         } else {
                             ("○", dim)
                         };
 
-                        ui.container().bg(surface_hover).p(1).col(|ui| {
-                            ui.row(|ui| {
-                                ui.text(format!("{icon} {}", phase.label()))
-                                    .fg(color)
-                                    .bold();
-                                ui.spacer();
-                                if phase.index() < state.current_phase.index() {
-                                    ui.text("done").fg(success);
-                                } else if phase == state.current_phase {
-                                    ui.text("active").fg(accent);
-                                }
-                            });
+                        ui.row(|ui| {
+                            ui.text(format!(" {icon} {:<10}", phase.label())).fg(color);
+                            if done {
+                                ui.text("  ✓").fg(success);
+                            } else if active {
+                                ui.text("  ...").fg(accent);
+                            }
                         });
                     }
 
                     ui.separator();
 
-                    ui.text("Active Tools").fg(text).bold();
+                    let (done, total) = state.ac_progress();
+                    if total > 0 {
+                        ui.progress(done as f64 / total as f64);
+                        ui.text(format!("  {done}/{total} AC")).fg(text);
+                    }
+                });
+
+            ui.container()
+                .border(Border::Single)
+                .title(" Tools ")
+                .bg(surface)
+                .p(1)
+                .gap(0)
+                .col(|ui| {
                     if state.active_tools.is_empty() {
                         ui.text("  idle").fg(dim).italic();
                     } else {
                         for (ac_id, tool) in &state.active_tools {
                             ui.row(|ui| {
-                                ui.text(format!("  {}", ac_id)).fg(secondary);
-                                ui.text(format!(" → {} {}", tool.tool_name, tool.tool_detail))
-                                    .fg(dim);
+                                ui.text(" ● ").fg(accent);
+                                ui.text(ac_id).fg(secondary);
+                                ui.text(format!(" {} ", tool.tool_name)).fg(text);
+                                ui.text(&tool.tool_detail).fg(dim);
                             });
                         }
                     }
 
-                    ui.spacer();
+                    let total_tools: usize = state.tool_history.values().map(|v| v.len()).sum();
+                    if total_tools > 0 {
+                        ui.separator();
+                        ui.text(format!("  {total_tools} total calls")).fg(dim);
+                    }
+                });
 
-                    ui.text("Metrics").fg(text).bold();
+            ui.container()
+                .grow(1)
+                .border(Border::Single)
+                .title(" Metrics ")
+                .bg(surface)
+                .p(1)
+                .gap(0)
+                .col(|ui| {
                     ui.row(|ui| {
-                        ui.text("  Drift  ").fg(dim);
-                        ui.text(format!("{:.3}", state.drift.combined)).fg(text);
+                        ui.text("  Drift    ").fg(dim);
+                        ui.text(format!("{:.3}", state.drift.combined))
+                            .fg(drift_color(state.drift.combined));
                     });
+                    if !state.drift.history.is_empty() {
+                        ui.row(|ui| {
+                            ui.text("           ").fg(dim);
+                            ui.sparkline(&state.drift.history, 18);
+                        });
+                    }
+
+                    ui.separator();
+
                     ui.row(|ui| {
-                        ui.text("  Cost   ").fg(dim);
+                        ui.text("  Cost     ").fg(dim);
                         ui.text(format!("${:.2}", state.cost.total_cost_usd))
                             .fg(success);
                     });
                     ui.row(|ui| {
-                        ui.text("  Tokens ").fg(dim);
+                        ui.text("  Tokens   ").fg(dim);
                         ui.text(format!("{}", state.cost.total_tokens)).fg(text);
                     });
+                    if !state.cost.history.is_empty() {
+                        ui.row(|ui| {
+                            ui.text("           ").fg(dim);
+                            ui.sparkline(&state.cost.history, 18);
+                        });
+                    }
+
+                    ui.separator();
+
+                    ui.row(|ui| {
+                        ui.text("  Iter     ").fg(dim);
+                        ui.text(format!("{}", state.iteration)).fg(primary);
+                    });
+                    ui.row(|ui| {
+                        ui.text("  Elapsed  ").fg(dim);
+                        ui.text(&state.elapsed).fg(text);
+                    });
                 });
-            });
+        });
     });
+}
+
+fn event_visual(
+    event_type: &str,
+    success: slt::Color,
+    secondary: slt::Color,
+    error: slt::Color,
+    accent: slt::Color,
+    dim: slt::Color,
+) -> (&'static str, slt::Color) {
+    if event_type.contains("started") || event_type.contains("started") {
+        ("▶", success)
+    } else if event_type.contains("completed") {
+        ("✓", secondary)
+    } else if event_type.contains("failed") || event_type.contains("error") {
+        ("✗", error)
+    } else if event_type.contains("tool") {
+        ("⚡", accent)
+    } else if event_type.contains("phase") {
+        ("◆", secondary)
+    } else if event_type.contains("drift") {
+        ("↕", accent)
+    } else if event_type.contains("cost") || event_type.contains("token") {
+        ("$", success)
+    } else {
+        ("·", dim)
+    }
+}
+
+fn drift_color(v: f64) -> slt::Color {
+    if v < 0.1 {
+        slt::Color::Green
+    } else if v < 0.2 {
+        slt::Color::Yellow
+    } else {
+        slt::Color::Red
+    }
 }
