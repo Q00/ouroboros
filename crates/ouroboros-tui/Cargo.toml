@@ -1,0 +1,18 @@
+[package]
+name = "ouroboros-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Native TUI monitor for Ouroboros workflows, built with SuperLightTUI"
+license = "MIT"
+rust-version = "1.74"
+repository = "https://github.com/Q00/ouroboros"
+keywords = ["tui", "ouroboros", "monitor", "terminal"]
+
+[[bin]]
+name = "ouroboros-tui"
+path = "src/main.rs"
+
+[dependencies]
+superlighttui = "0.6.1"
+rusqlite = { version = "0.33", features = ["bundled"] }
+serde_json = "1"
