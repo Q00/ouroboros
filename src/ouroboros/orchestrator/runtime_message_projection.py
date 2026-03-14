@@ -77,25 +77,30 @@ def project_runtime_message(message: AgentMessage) -> ProjectedRuntimeMessage:
     # to avoid 3x redundant derive_runtime_signal() calls.
     _event_type = runtime_event_type(message)
     _subtype = message_subtype(message)
-    _signal_kwargs = dict(
-        runtime_event_type=_event_type,
-        subtype=_subtype,
-        is_final=message.is_final,
-        is_error=message.is_error,
-    )
+    _signal_kwargs = {
+        "runtime_event_type": _event_type,
+        "subtype": _subtype,
+        "is_final": message.is_final,
+        "is_error": message.is_error,
+    }
     # First pass: derive signal from raw message.type to normalize message_type.
     _raw_signal, _raw_status = derive_runtime_signal(
-        message_type=message.type, **_signal_kwargs,
+        message_type=message.type,
+        **_signal_kwargs,
     )
     message_type = _normalized_message_type_from_signal(
-        message, tool_name, _raw_signal, _raw_status,
+        message,
+        tool_name,
+        _raw_signal,
+        _raw_status,
     )
     # Second pass only if message_type changed (e.g. subtype → "tool_result").
     if message_type == message.type:
         runtime_signal, runtime_status = _raw_signal, _raw_status
     else:
         runtime_signal, runtime_status = derive_runtime_signal(
-            message_type=message_type, **_signal_kwargs,
+            message_type=message_type,
+            **_signal_kwargs,
         )
 
     content = message.content.strip()
@@ -138,7 +143,10 @@ def normalized_message_type(message: AgentMessage) -> str:
         is_error=message.is_error,
     )
     return _normalized_message_type_from_signal(
-        message, message_tool_name(message), runtime_signal, runtime_status,
+        message,
+        message_tool_name(message),
+        runtime_signal,
+        runtime_status,
     )
 
 

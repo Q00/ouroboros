@@ -183,9 +183,7 @@ class TestResolveLLMPermissionMode:
             == "bypassPermissions"
         )
 
-    def test_interview_mode_uses_read_only_for_codex(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_interview_mode_uses_read_only_for_codex(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Codex interview flows use read-only sandbox (no file writes)."""
         monkeypatch.setattr(
             "ouroboros.providers.factory.get_llm_permission_mode",
@@ -203,6 +201,4 @@ class TestResolveLLMPermissionMode:
             lambda backend=None: "default",  # noqa: ARG005
         )
 
-        assert (
-            resolve_llm_permission_mode(backend="opencode", use_case="interview") == "default"
-        )
+        assert resolve_llm_permission_mode(backend="opencode", use_case="interview") == "default"
