@@ -5,6 +5,14 @@ use serde_json::Value;
 
 use crate::state::*;
 
+pub struct SessionRow {
+    pub aggregate_id: String,
+    pub goal: String,
+    pub status: String,
+    pub event_count: usize,
+    pub timestamp: String,
+}
+
 pub struct EventRow {
     pub id: String,
     pub aggregate_type: String,
@@ -138,29 +146,85 @@ impl OuroborosDb {
         rows
     }
 
-    pub fn distinct_sessions(&self) -> Vec<(String, String, String, usize)> {
+    /// Returns sessions matching Python TUI behavior:
+    /// only aggregate_ids that have an `orchestrator.session.started` event,
+    /// with goal and status extracted from events.
+    pub fn distinct_sessions(&self) -> Vec<SessionRow> {
+        // Find all session-started events
         let mut stmt = match self.conn.prepare(
-            "SELECT aggregate_type, aggregate_id, \
-                    MIN(timestamp) as first_ts, COUNT(*) as cnt \
-             FROM events \
-             GROUP BY aggregate_type, aggregate_id \
-             ORDER BY first_ts DESC",
+            "SELECT e.aggregate_id, e.payload, e.timestamp \
+             FROM events e \
+             WHERE e.event_type = 'orchestrator.session.started' \
+             ORDER BY e.timestamp DESC",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
 
-        stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, usize>(3)?,
-            ))
-        })
-        .ok()
-        .map(|iter| iter.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+        let started: Vec<(String, Value, String)> = stmt
+            .query_map([], |row| {
+                let payload_str: String = row.get(1)?;
+                let payload: Value =
+                    serde_json::from_str(&payload_str).unwrap_or(Value::Null);
+                Ok((row.get(0)?, payload, row.get(2)?))
+            })
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        let mut sessions = Vec::new();
+        for (agg_id, payload, timestamp) in started {
+            let goal = payload
+                .get("seed_goal")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Count total events for this session
+            let event_count: usize = self
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM events WHERE aggregate_id = ?1",
+                    [&agg_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+
+            // Determine status from latest event
+            let status = self
+                .conn
+                .query_row(
+                    "SELECT event_type FROM events \
+                     WHERE aggregate_id = ?1 \
+                     ORDER BY timestamp DESC LIMIT 1",
+                    [&agg_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map(|et| {
+                    if et.contains("completed") {
+                        "done"
+                    } else if et.contains("failed") {
+                        "failed"
+                    } else if et.contains("cancelled") {
+                        "cancelled"
+                    } else if et.contains("paused") {
+                        "paused"
+                    } else {
+                        "running"
+                    }
+                    .to_string()
+                })
+                .unwrap_or_else(|_| "unknown".to_string());
+
+            sessions.push(SessionRow {
+                aggregate_id: agg_id,
+                goal,
+                status,
+                event_count,
+                timestamp,
+            });
+        }
+        sessions
     }
 }
 

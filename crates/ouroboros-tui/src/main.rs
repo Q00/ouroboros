@@ -91,27 +91,28 @@ fn main() -> std::io::Result<()> {
                         "db",
                         &format!("{} events, {} sessions", event_count, sessions.len()),
                     );
-                    for (agg_type, agg_id, first_ts, cnt) in &sessions {
-                        state.add_log(
-                            LogLevel::Info,
-                            "db.session",
-                            &format!("{agg_type}/{agg_id} ({cnt} events)"),
-                        );
+                    for s in &sessions {
                         state.sessions.push(state::SessionInfo {
-                            aggregate_type: agg_type.clone(),
-                            aggregate_id: agg_id.clone(),
-                            event_count: *cnt,
-                            first_ts: first_ts.clone(),
+                            aggregate_type: "session".into(),
+                            aggregate_id: s.aggregate_id.clone(),
+                            event_count: s.event_count,
+                            first_ts: s.timestamp.clone(),
                         });
                     }
                     state.session_list = slt::ListState::new(
-                        state
-                            .sessions
+                        sessions
                             .iter()
                             .map(|s| {
+                                let goal_short = if s.goal.len() > 50 {
+                                    format!("{}...", &s.goal[..47])
+                                } else if s.goal.is_empty() {
+                                    "(no goal)".to_string()
+                                } else {
+                                    s.goal.clone()
+                                };
                                 format!(
-                                    "{} — {} ({} events)",
-                                    s.aggregate_type, s.aggregate_id, s.event_count
+                                    "[{}] {} ({} events)",
+                                    s.status, goal_short, s.event_count
                                 )
                             })
                             .collect::<Vec<_>>(),
@@ -192,18 +193,7 @@ fn main() -> std::io::Result<()> {
                                     // Preserve sessions list
                                     new_state.sessions = state.sessions.clone();
                                     new_state.session_list = slt::ListState::new(
-                                        new_state
-                                            .sessions
-                                            .iter()
-                                            .map(|s| {
-                                                format!(
-                                                    "{} — {} ({} events)",
-                                                    s.aggregate_type,
-                                                    s.aggregate_id,
-                                                    s.event_count
-                                                )
-                                            })
-                                            .collect::<Vec<_>>(),
+                                        state.session_list.items.clone(),
                                     );
                                     let events = conn.read_events_for_session(&agg_id);
                                     db::populate_state_from_events(&mut new_state, &events);
