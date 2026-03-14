@@ -7,7 +7,7 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 from __future__ import annotations
 
 import asyncio
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -47,7 +47,7 @@ app = typer.Typer(
 )
 
 
-class AgentRuntimeBackend(str, Enum):
+class AgentRuntimeBackend(StrEnum):
     """Supported orchestrator runtime backends for CLI selection."""
 
     CLAUDE = "claude"

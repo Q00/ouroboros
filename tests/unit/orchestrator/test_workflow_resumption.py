@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -322,7 +321,7 @@ class TestResumePromptWithACState:
             patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
             patch.object(runner, "_reconstruct_ac_state", AsyncMock(return_value=[1])),
         ):
-            result = await runner.resume_session("sess_1", sample_seed)
+            await runner.resume_session("sess_1", sample_seed)
 
         assert len(captured_prompt) == 1
         prompt = captured_prompt[0]

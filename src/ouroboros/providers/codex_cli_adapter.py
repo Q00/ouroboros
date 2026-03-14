@@ -191,8 +191,8 @@ class CodexCliLLMAdapter:
             return value.strip()
 
         if isinstance(value, list):
-            parts = [self._extract_text(item) for item in value]
-            return "\n".join(part for part in parts if part)
+            list_parts = [self._extract_text(item) for item in value]
+            return "\n".join(part for part in list_parts if part)
 
         if isinstance(value, dict):
             preferred_keys = (

@@ -6,7 +6,7 @@ Start and manage the MCP (Model Context Protocol) server.
 from __future__ import annotations
 
 import asyncio
-from enum import Enum
+from enum import StrEnum
 import os
 from pathlib import Path
 from typing import Annotated
@@ -24,14 +24,14 @@ _PID_FILE = _PID_DIR / "mcp-server.pid"
 _stderr_console = Console(stderr=True)
 
 
-class AgentRuntimeBackend(str, Enum):
+class AgentRuntimeBackend(StrEnum):
     """Supported orchestrator runtime backends for MCP commands."""
 
     CLAUDE = "claude"
     CODEX = "codex"
 
 
-class LLMBackend(str, Enum):
+class LLMBackend(StrEnum):
     """Supported LLM-only backends for MCP commands."""
 
     CLAUDE_CODE = "claude_code"

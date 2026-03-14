@@ -11,8 +11,8 @@ from ouroboros.codex.artifacts import (
     CodexPackagedAssets,
     install_codex_rules,
     install_codex_skills,
-    load_packaged_codex_skill,
     load_packaged_codex_rules,
+    load_packaged_codex_skill,
     resolve_packaged_codex_assets,
     resolve_packaged_codex_skill_path,
 )

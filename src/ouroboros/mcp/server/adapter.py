@@ -81,6 +81,70 @@ def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.S
     return inspect.Signature(parameters=sig_params)
 
 
+def _looks_like_project_root(path: object) -> bool:
+    """Return True when the given path looks like a project root."""
+    from pathlib import Path
+
+    if not isinstance(path, Path):
+        return False
+
+    return (
+        (path / "pyproject.toml").exists()
+        or (path / "setup.py").exists()
+        or (path / "package.json").exists()
+    )
+
+
+def _project_dir_from_seed(seed: Any) -> str | None:
+    """Extract a likely project directory from seed metadata or brownfield context."""
+    if seed is None:
+        return None
+
+    seed_meta = getattr(seed, "metadata", None)
+    if seed_meta:
+        project_dir = getattr(seed_meta, "project_dir", None) or getattr(
+            seed_meta,
+            "working_directory",
+            None,
+        )
+        if project_dir:
+            return str(project_dir)
+
+    brownfield_context = getattr(seed, "brownfield_context", None)
+    context_references = getattr(brownfield_context, "context_references", ()) or ()
+
+    for reference in context_references:
+        path = getattr(reference, "path", None)
+        role = getattr(reference, "role", None)
+        if isinstance(path, str) and path and role == "primary":
+            return path
+
+    for reference in context_references:
+        path = getattr(reference, "path", None)
+        if isinstance(path, str) and path:
+            return path
+
+    return None
+
+
+def _project_dir_from_artifact(artifact: str) -> str | None:
+    """Extract a likely project root from Write/Edit tool output."""
+    from pathlib import Path
+    import re
+
+    write_matches = re.findall(r"(?:Write|Edit): (/[^\s]+)", artifact)
+    for path_str in write_matches:
+        candidate = Path(path_str).parent
+        for _ in range(10):
+            if _looks_like_project_root(candidate):
+                return str(candidate)
+            if candidate == candidate.parent:
+                break
+            candidate = candidate.parent
+
+    return None
+
+
 class MCPServerAdapter:
     """Concrete implementation of MCPServer protocol.
 

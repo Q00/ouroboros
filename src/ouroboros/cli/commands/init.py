@@ -5,7 +5,7 @@ Supports both LiteLLM (external API) and Claude Code (Max Plan) modes.
 """
 
 import asyncio
-from enum import Enum, auto
+from enum import Enum, StrEnum, auto
 from pathlib import Path
 from typing import Annotated
 
@@ -40,14 +40,14 @@ class SeedGenerationResult(Enum):
     CONTINUE_INTERVIEW = auto()
 
 
-class AgentRuntimeBackend(str, Enum):
+class AgentRuntimeBackend(StrEnum):
     """Supported orchestrator runtime backends for workflow handoff."""
 
     CLAUDE = "claude"
     CODEX = "codex"
 
 
-class LLMBackend(str, Enum):
+class LLMBackend(StrEnum):
     """Supported interview/seed LLM backends."""
 
     CLAUDE_CODE = "claude_code"
