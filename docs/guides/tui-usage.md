@@ -15,6 +15,25 @@ uv run ouroboros tui monitor
 uv run ouroboros tui monitor --db-path ~/.ouroboros/ouroboros.db
 ```
 
+### Native SLT Backend (optional)
+
+A native Rust TUI backend built with [SuperLightTUI](https://github.com/subinium/SuperLightTUI) is available as an alternative. It provides the same screens and keybindings with faster startup and no Python runtime dependency.
+
+```bash
+# Install the native binary
+cd crates/ouroboros-tui
+cargo install --path .
+
+# Launch via CLI flag
+ouroboros tui monitor --backend slt
+
+# Or run the standalone binary directly
+ouroboros-tui
+ouroboros-tui --mock    # demo mode without DB
+```
+
+See the [ouroboros-tui README](../../crates/ouroboros-tui/README.md) for full details.
+
 ## Getting Started
 
 When launched, the TUI opens with a **Session Selector** screen where you pick an existing session to monitor. Once selected, it switches to the Dashboard.

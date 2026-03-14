@@ -40,15 +40,13 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
 
         let filter_text = state.log_filter.value.to_lowercase();
 
-        if !filter_text.is_empty() {
-            state.log_table.set_filter(&filter_text);
-        } else {
-            state.log_table.set_filter("");
-        }
-
-        if let Some(level) = state.log_level_filter {
-            state.log_table.set_filter(level.label());
-        }
+        let combined_filter = match (filter_text.is_empty(), state.log_level_filter) {
+            (false, Some(level)) => format!("{} {}", level.label(), filter_text),
+            (false, None) => filter_text,
+            (true, Some(level)) => level.label().to_string(),
+            (true, None) => String::new(),
+        };
+        state.log_table.set_filter(&combined_filter);
 
         state.log_table.page_size = 50;
 
@@ -64,14 +62,9 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
             });
 
         ui.container().bg(surface_hover).px(3).py(0).row(|ui| {
-            let total_pages = state.log_table.total_pages();
-            let page = if total_pages > 0 {
-                total_pages.min(total_pages)
-            } else {
-                1
-            };
-            let total = state.log_table.total_pages().max(1);
-            ui.text(format!("Page {page}/{total}")).fg(text);
+            let total_pages = state.log_table.total_pages().max(1);
+            let page = (state.log_table.page + 1).min(total_pages);
+            ui.text(format!("Page {page}/{total_pages}")).fg(text);
             ui.text("  ").fg(dim);
             ui.text("Click header to sort").fg(dim);
             ui.text("  ").fg(dim);

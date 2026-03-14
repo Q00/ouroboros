@@ -362,8 +362,9 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
 
 fn short_payload(payload: &Value) -> String {
     let s = payload.to_string();
-    if s.len() > 120 {
-        format!("{}...", &s[..117])
+    if s.chars().count() > 120 {
+        let t: String = s.chars().take(117).collect();
+        format!("{t}...")
     } else {
         s
     }

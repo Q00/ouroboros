@@ -575,16 +575,23 @@ ouroboros tui monitor [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--db-path PATH` | Path to the Ouroboros database file (default: `~/.ouroboros/ouroboros.db`) |
+| `--backend TEXT` | TUI backend: `textual` (default) or `slt` (native Rust) |
 
 #### Examples
 
 ```bash
-# Launch TUI monitor
+# Launch TUI monitor (default Textual backend)
 ouroboros tui monitor
 
 # Monitor with a specific database file
 ouroboros tui monitor --db-path ~/.ouroboros/ouroboros.db
+
+# Use the native SLT backend
+ouroboros tui monitor --backend slt
 ```
+
+> **Note:** The `slt` backend requires the `ouroboros-tui` binary. Install with:
+> `cd crates/ouroboros-tui && cargo install --path .`
 
 #### TUI Screens
 
