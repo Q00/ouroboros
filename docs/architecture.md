@@ -46,7 +46,7 @@ Ouroboros is a **specification-first AI workflow engine** that transforms vague 
 ## Core Components Overview
 
 ### 1. Plugin Layer
-**Auto-discovery of skills and agents through Claude Code plugin system**
+**Auto-discovery of skills and agents through the plugin system**
 - Skills: 9 core workflow skills (interview, seed, run, evaluate, etc.)
 - Agents: 9 specialized agents for different thinking modes
 - Hot-reload capabilities without restart
@@ -307,8 +307,10 @@ src/ouroboros/
 +-- evaluation/     # Phase 4: Three-stage evaluation
 +-- secondary/      # Phase 5: TODO registry and scheduling
 |
-+-- orchestrator/   # Claude Agent SDK integration
-|   +-- adapter.py     # Claude Agent SDK wrapper
++-- orchestrator/   # Runtime abstraction and orchestration
+|   +-- adapter.py     # AgentRuntime protocol, ClaudeAgentAdapter
+|   +-- codex_cli_runtime.py  # CodexCliRuntime adapter
+|   +-- runtime_factory.py    # create_agent_runtime() factory
 |   +-- runner.py      # Orchestration logic
 |   +-- session.py     # Session state tracking
 |   +-- events.py      # Orchestrator events
@@ -403,15 +405,231 @@ Drift measurement tracks how far execution has strayed from the original Seed:
 - Automatic retrospective every N cycles
 - High drift triggers re-examination of the Seed
 
+## Runtime Abstraction Layer
+
+Ouroboros decouples workflow orchestration from the agent runtime that executes
+tasks. The runtime abstraction layer allows different AI coding tools to serve
+as runtime backends while the core engine (event sourcing, six-phase pipeline,
+evaluation) remains unchanged.
+
+### Architecture overview
+
+```
+                          ┌──────────────────────────┐
+                          │   Orchestrator / Runner   │
+                          │  (runtime-agnostic core)  │
+                          └────────────┬─────────────┘
+                                       │ uses AgentRuntime protocol
+                          ┌────────────┴─────────────┐
+                          │      RuntimeFactory       │
+                          │  create_agent_runtime()   │
+                          └────┬──────────┬──────┬───┘
+                               │          │      │
+              ┌────────────────┘          │      └────────────────┐
+              ▼                           ▼                      ▼
+  ┌───────────────────┐     ┌───────────────────┐    ┌───────────────────┐
+  │ ClaudeAgentAdapter│     │  CodexCliRuntime   │    │  (future adapter) │
+  │  backend="claude" │     │  backend="codex"   │    │                   │
+  └───────────────────┘     └───────────────────┘    └───────────────────┘
+         │                          │
+         ▼                          ▼
+  Claude Code CLI /          OpenAI Codex CLI
+  Claude Agent SDK           (subprocess)
+```
+
+### The `AgentRuntime` protocol
+
+Every runtime adapter must satisfy the `AgentRuntime` protocol defined in
+`src/ouroboros/orchestrator/adapter.py`:
+
+```python
+class AgentRuntime(Protocol):
+    """Protocol for autonomous agent runtimes used by the orchestrator."""
+
+    def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+    ) -> AsyncIterator[AgentMessage]:
+        """Execute a task and stream normalized messages."""
+        ...
+
+    async def execute_task_to_result(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+    ) -> Result[TaskResult, ProviderError]:
+        """Execute a task and return the collected final result."""
+        ...
+```
+
+Key types:
+
+| Type | Purpose |
+|------|---------|
+| `AgentMessage` | Normalized streaming message (assistant text, tool calls, results) |
+| `RuntimeHandle` | Backend-neutral, frozen dataclass carrying session/resume state |
+| `TaskResult` | Collected outcome of a completed task execution |
+
+`AgentMessage` and `RuntimeHandle` are backend-neutral -- the orchestrator
+never inspects backend-specific internals. Each adapter is responsible for
+mapping its native events into these shared types.
+
+### `RuntimeHandle` -- portable session state
+
+`RuntimeHandle` is a frozen dataclass that captures everything needed to
+resume, observe, or terminate a runtime session regardless of backend:
+
+```python
+@dataclass(frozen=True, slots=True)
+class RuntimeHandle:
+    backend: str                              # "claude" | "codex" | ...
+    kind: str = "agent_runtime"
+    native_session_id: str | None = None      # backend-native session id
+    conversation_id: str | None = None        # durable thread id
+    previous_response_id: str | None = None   # turn-chaining token
+    transcript_path: str | None = None        # CLI transcript file
+    cwd: str | None = None                    # working directory
+    approval_mode: str | None = None          # sandbox / permission mode
+    updated_at: str | None = None             # ISO timestamp
+    metadata: dict[str, Any] = field(...)     # backend-specific extras
+```
+
+The handle exposes computed properties (`lifecycle_state`, `is_terminal`,
+`can_resume`, `can_observe`, `can_terminate`) and methods (`observe()`,
+`terminate()`, `snapshot()`, `to_dict()`, `from_dict()`) so the orchestrator
+can manage runtime lifecycle without knowing which backend is running.
+
+### Shipped adapters
+
+#### `ClaudeAgentAdapter` (backend `"claude"`)
+
+Wraps the Claude Agent SDK / Claude Code CLI. Supports streaming via
+`claude_agent_sdk.query()`, automatic transient-error retry, and session
+resumption through native session IDs.
+
+**Module:** `src/ouroboros/orchestrator/adapter.py`
+
+#### `CodexCliRuntime` (backend `"codex"`)
+
+Drives the OpenAI Codex CLI as a subprocess (`codex` or `codex-cli`).
+Parses newline-delimited JSON events from stdout, maps them to
+`AgentMessage` / `RuntimeHandle`, and supports skill-command interception
+for deterministic MCP tool dispatch.
+
+**Module:** `src/ouroboros/orchestrator/codex_cli_runtime.py`
+
+> **Note:** Claude Code and Codex CLI have different tool sets, permission
+> models, and streaming semantics. Ouroboros normalizes these differences
+> at the adapter boundary, but feature parity is not guaranteed across
+> runtimes. See the runtime-specific guides under `docs/` for details on
+> each backend's capabilities and caveats.
+
+### Runtime factory
+
+`create_agent_runtime()` in `src/ouroboros/orchestrator/runtime_factory.py`
+resolves the backend name and returns the appropriate adapter:
+
+```python
+from ouroboros.orchestrator.runtime_factory import create_agent_runtime
+
+runtime = create_agent_runtime(
+    backend="codex",        # or "claude", read from config if omitted
+    permission_mode="auto-edit",
+    model="o4-mini",
+    cwd="/path/to/project",
+)
+```
+
+The backend can be set via:
+
+1. `OUROBOROS_RUNTIME_BACKEND` environment variable
+2. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
+3. Explicit `backend=` parameter
+
+Accepted aliases: `claude` / `claude_code`, `codex` / `codex_cli`.
+
+### How to add a new runtime adapter
+
+1. **Create the adapter module**
+
+   Add a new file under `src/ouroboros/orchestrator/`, for example
+   `my_runtime.py`.
+
+2. **Implement the `AgentRuntime` protocol**
+
+   Your adapter must provide `execute_task()` (async generator yielding
+   `AgentMessage`) and `execute_task_to_result()`. Use the existing
+   adapters as reference:
+
+   ```python
+   from collections.abc import AsyncIterator
+   from ouroboros.core.errors import ProviderError
+   from ouroboros.core.types import Result
+   from ouroboros.orchestrator.adapter import (
+       AgentMessage,
+       AgentRuntime,
+       RuntimeHandle,
+       TaskResult,
+   )
+
+   class MyRuntime:
+       """Custom runtime adapter."""
+
+       async def execute_task(
+           self,
+           prompt: str,
+           tools: list[str] | None = None,
+           system_prompt: str | None = None,
+           resume_handle: RuntimeHandle | None = None,
+       ) -> AsyncIterator[AgentMessage]:
+           # Launch the external tool, parse its output,
+           # yield AgentMessage instances as progress occurs.
+           ...
+
+       async def execute_task_to_result(
+           self,
+           prompt: str,
+           tools: list[str] | None = None,
+           system_prompt: str | None = None,
+           resume_handle: RuntimeHandle | None = None,
+       ) -> Result[TaskResult, ProviderError]:
+           messages = []
+           async for msg in self.execute_task(prompt, tools, system_prompt, resume_handle):
+               messages.append(msg)
+           # Build and return a TaskResult from collected messages
+           ...
+   ```
+
+3. **Register in the runtime factory**
+
+   Open `src/ouroboros/orchestrator/runtime_factory.py` and:
+   - Add a backend name set (e.g., `_MY_BACKENDS = {"my_runtime"}`).
+   - Extend `resolve_agent_runtime_backend()` to recognize the new name.
+   - Add a branch in `create_agent_runtime()` to instantiate your adapter.
+
+4. **Emit `RuntimeHandle` with your backend tag**
+
+   Every `AgentMessage` your adapter yields should carry a `RuntimeHandle`
+   with `backend="my_runtime"`. The orchestrator uses this handle for
+   session tracking, checkpoint persistence, and resume.
+
+5. **Add the backend to the config schema**
+
+   Update the `runtime_backend` `Literal` in
+   `src/ouroboros/config/models.py` to include your new backend name.
+
+6. **Write tests**
+
+   Add unit tests under `tests/unit/` that verify your adapter satisfies
+   `AgentRuntime` (structural subtyping check) and correctly maps native
+   events to `AgentMessage` / `RuntimeHandle`.
+
 ## Integration Points
-
-### Claude Agent SDK
-
-The orchestrator module integrates with Claude Agent SDK for:
-- Streaming task execution
-- Tool use (Read, Write, Edit, Bash, etc.)
-- Session management
-- Resume capability
 
 ### MCP (Model Context Protocol)
 
@@ -637,17 +855,17 @@ OPENAI_API_KEY=sk-xxx
 
 # TUI settings
 TERM=xterm-256color
-Ouroboros_TUI_THEME=dark
+OUROBOROS_TUI_THEME=dark
 
 # Performance
-Ouroboros_MAX_AGENTS=10
-Ouroboros_EVENT_CACHE_SIZE=1000
+OUROBOROS_MAX_AGENTS=10
+OUROBOROS_EVENT_CACHE_SIZE=1000
 ```
 
 ### 2. Configuration Files
 ```yaml
 # ~/.ouroboros/config.yaml
-event_store_path: ~/.ouroboros/events.db
+event_store_path: ~/.ouroboros/ouroboros.db
 max_concurrent_agents: 10
 checkpoint_interval: 300  # seconds
 theme: dark
@@ -656,24 +874,38 @@ log_level: INFO
 
 ## Deployment
 
-### 1. Plugin Mode
+### 1. Claude Code Runtime
 ```bash
-# Install plugin
+# Install via Claude Code marketplace (terminal)
 claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
 
-# Use skills
+# Use ooo skill shortcuts inside a Claude Code session
 ooo interview "Build an app"
 ```
 
-### 2. Full Mode
+See the [Claude Code runtime guide](runtime-guides/claude-code.md) for full details.
+
+### 2. Codex CLI Runtime
 ```bash
-# Install with uv
+pip install ouroboros-ai
+npm install -g @openai/codex
+ouroboros setup --runtime codex
+ouroboros init "Build an app"
+```
+
+See the [Codex CLI runtime guide](runtime-guides/codex.md) for full details.
+
+### 3. Standalone CLI
+```bash
+# Install with uv (from source)
 uv sync
+
+# Or with pip
 pip install ouroboros-ai
 
 # Run with full features
-ouroboros run --seed project.yaml --ui tui
+ouroboros run workflow project.yaml
 ```
 
 ## Future Extensions

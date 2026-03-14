@@ -90,7 +90,7 @@ from ouroboros.core import (
 
 seed = Seed(
     goal="Build a task management CLI",
-    constraints=("Python 3.14+", "SQLite storage"),
+    constraints=("Python >= 3.12", "SQLite storage"),
     acceptance_criteria=(
         "Tasks can be created",
         "Tasks can be listed",

@@ -2,17 +2,25 @@
 
 > The serpent that devours itself to be reborn anew.
 
-Ouroboros is a self-improving AI workflow system that transforms ambiguous human requirements into clear, executable specifications through Socratic questioning and ontological analysis.
+Ouroboros is a specification-first workflow engine for AI coding agents. It transforms ambiguous human requirements into clear, executable specifications through Socratic questioning and ontological analysis -- then runs them on your choice of runtime backend.
 
 ## Documentation Index
 
 ### Getting Started
 
 - [Getting Started Guide](./getting-started.md) - Installation, configuration, and quick start tutorial
+- [Platform Support](./platform-support.md) - Python versions, OS compatibility, and supported runtime backends
+
+### Runtime Guides
+
+- [Claude Code](./runtime-guides/claude-code.md) - Setup, configuration, and usage with the Claude Code runtime backend
+- [Codex CLI](./runtime-guides/codex.md) - Setup, configuration, and usage with the OpenAI Codex CLI runtime backend
+- [Runtime Capability Matrix](./runtime-capability-matrix.md) - Feature comparison across runtime backends
 
 ### Architecture
 
-- [System Architecture](./architecture.md) - Overview of the six-phase architecture and core concepts
+- [System Architecture](./architecture.md) - Six-phase architecture, runtime abstraction layer, and core concepts
+- [CLI Reference](./cli-reference.md) - Command-line interface flags and options
 
 ### API Reference
 
@@ -35,12 +43,9 @@ Ouroboros is a self-improving AI workflow system that transforms ambiguous human
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
 
-### Design Documents
+### Security
 
-- [Execution Deep Dive](./design/execution-deep-dive.md) - Recursive decomposition, atomicity, parallel execution
-- [Evaluation Pipeline Deep Dive](./design/evaluation-pipeline-deep-dive.md) - Three stages, trigger matrix, deliberative consensus
-- [Evaluation Pipeline Flexibility](./design/evaluation-pipeline-flexibility.md) - Supporting non-code workflows
-- [CLI UX Redesign](./design/cli-ux-redesign.md) - v0.8.0 CLI shorthand and orchestrator defaults
+- [Security Policy](../SECURITY.md) - Vulnerability reporting and security model
 
 ## Key Concepts
 

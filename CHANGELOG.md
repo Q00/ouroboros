@@ -71,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ralph` - Self-referential loop with verifier verification (includes ultrawork)
   - `ultrapilot` - Parallel autopilot with file ownership partitioning
   - `ecomode` - Token-efficient execution using haiku and sonnet
-  - `swarm` - N coordinated agents using Claude Code native teams
+  - `swarm` - N coordinated agents using native runtime teams
   - `pipeline` - Sequential agent chaining with data passing
   - `tutorial` - Interactive guided tour for new users
   - `swarm` - Team coordination mode
@@ -224,7 +224,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resilience (Phase 3) - Stagnation detection and lateral thinking
 - Evaluation (Phase 4) - Mechanical, semantic, and consensus evaluation
 - Secondary Loop (Phase 5) - TODO registry and batch scheduler
-- Orchestrator (Epic 8) - Claude Agent SDK integration
+- Orchestrator (Epic 8) - Runtime abstraction and orchestration
 - CLI interface with Typer
 - Event sourcing with SQLite persistence
 - Structured logging with structlog

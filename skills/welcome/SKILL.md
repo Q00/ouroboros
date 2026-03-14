@@ -132,7 +132,7 @@ cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo 
     "question": "Ouroboros has a Python backend for advanced features (TUI dashboard, 3-stage evaluation, drift tracking). Set it up now?",
     "header": "MCP Setup",
     "options": [
-      { "label": "Set up now (Recommended)", "description": "Register MCP server (requires Python 3.14+)" },
+      { "label": "Set up now (Recommended)", "description": "Register MCP server (requires Python >= 3.12)" },
       { "label": "Skip for now", "description": "Use basic features first (interview, seed, unstuck)" }
     ],
     "multiSelect": false

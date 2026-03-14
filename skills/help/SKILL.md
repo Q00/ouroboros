@@ -50,7 +50,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo ralph` | Self-referential loop until verified ("don't stop") | Plugin + MCP |
 
 **Plugin** = Works immediately after `ooo setup`.
-**MCP** = Requires `ooo setup` (Python 3.14+ auto-detected). Run setup once to unlock all features.
+**MCP** = Requires `ooo setup` (Python >= 3.12 auto-detected). Run setup once to unlock all features.
 
 ## Natural Language Triggers
 
@@ -110,8 +110,8 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 
 ## Setup
 
-After installing the plugin, run `ooo setup` once to register the MCP server.
-This connects Claude Code to the Ouroboros Python core and unlocks all features.
+After installing Ouroboros, run `ooo setup` once to register the MCP server.
+This connects your runtime backend to the Ouroboros Python core and unlocks all features.
 
 ```
 ooo setup    # One-time setup (~1 minute)

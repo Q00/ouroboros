@@ -5,7 +5,7 @@ description: "Check for updates and upgrade Ouroboros to the latest version"
 
 # /ouroboros:update
 
-Check for updates and upgrade Ouroboros (PyPI package + Claude Code plugin).
+Check for updates and upgrade Ouroboros (PyPI package + runtime integration).
 
 ## Usage
 
@@ -65,7 +65,7 @@ When the user invokes this skill:
    uv pip install --upgrade ouroboros-ai
    ```
 
-   b. **Update Claude Code plugin**:
+   b. **Update runtime integration** (Claude Code only):
    ```bash
    claude plugin update ouroboros@ouroboros
    ```
@@ -105,5 +105,5 @@ When the user invokes this skill:
 ## Notes
 
 - The update check uses PyPI as the source of truth for the latest version.
-- Plugin update pulls the latest from the Claude Code marketplace.
+- Plugin update (Claude Code) pulls the latest from the marketplace.
 - No data is lost during updates — event stores and session data are preserved.

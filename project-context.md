@@ -22,7 +22,7 @@
 
 | Rule | Details |
 |------|---------|
-| **Version** | Python 3.14+ required |
+| **Version** | Python >= 3.12 required |
 | **Async I/O** | ALL I/O operations MUST be `async def` |
 | **Sync CPU** | CPU-bound operations (parsing, validation) stay sync |
 | **Blocking** | Use `asyncio.to_thread()` for blocking in async context |
