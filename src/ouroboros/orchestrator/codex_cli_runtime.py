@@ -729,9 +729,7 @@ class CodexCliRuntime:
                     buffer_size=len(buffer),
                     limit=_MAX_LINE_BUFFER_BYTES,
                 )
-                raise ProviderError(
-                    f"JSONL line buffer exceeded {_MAX_LINE_BUFFER_BYTES} bytes"
-                )
+                raise ProviderError(f"JSONL line buffer exceeded {_MAX_LINE_BUFFER_BYTES} bytes")
             while True:
                 newline_index = buffer.find("\n")
                 if newline_index < 0:
