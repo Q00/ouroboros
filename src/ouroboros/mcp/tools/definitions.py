@@ -3261,9 +3261,7 @@ class StartExecuteSeedHandler:
             if not seed_candidate.is_absolute():
                 seed_candidate = resolved_cwd / seed_candidate
             try:
-                seed_content = await asyncio.to_thread(
-                    seed_candidate.read_text, encoding="utf-8"
-                )
+                seed_content = await asyncio.to_thread(seed_candidate.read_text, encoding="utf-8")
                 arguments = {**arguments, "seed_content": seed_content}
             except FileNotFoundError:
                 return Result.err(
