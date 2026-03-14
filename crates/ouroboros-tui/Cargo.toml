@@ -1,0 +1,12 @@
+[package]
+name = "ouroboros-tui"
+version = "0.1.0"
+edition = "2021"
+description = "A modern TUI dashboard for Ouroboros workflow monitoring, built with SuperLightTUI"
+license = "MIT"
+rust-version = "1.74"
+
+[dependencies]
+superlighttui = "0.6"
+rusqlite = { version = "0.33", features = ["bundled"] }
+serde_json = "1"

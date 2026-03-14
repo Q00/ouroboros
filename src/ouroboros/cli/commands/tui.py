@@ -35,12 +35,36 @@ def monitor_command(
             show_default=True,
         ),
     ] = DEFAULT_DB_PATH,
+    backend: Annotated[
+        str,
+        typer.Option(
+            "--backend",
+            help="TUI backend: 'python' (default, Textual) or 'rust' (ouroboros-tui).",
+        ),
+    ] = "python",
 ) -> None:
     """Launch interactive TUI monitor.
 
     Starts a terminal UI that shows a list of all sessions found in the
     database. You can then select a session to monitor in real-time.
+
+    Use --backend rust for the native Rust TUI (requires `cargo install`
+    from crates/ouroboros-tui or `ouroboros-tui` in PATH).
     """
+    if backend == "rust":
+        import shutil
+        import subprocess
+
+        bin_path = shutil.which("ouroboros-tui")
+        if bin_path is None:
+            print_error(
+                "ouroboros-tui not found in PATH. Install with:\n"
+                "  cd crates/ouroboros-tui && cargo install --path .",
+            )
+            raise typer.Exit(1)
+        args = [bin_path, "monitor", "--db-path", str(db_path)]
+        raise SystemExit(subprocess.call(args))
+
     print_info(f"Connecting to database: {db_path}")
 
     try:
