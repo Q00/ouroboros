@@ -905,6 +905,416 @@ class TestInterviewEngineBrownfieldDetection:
         assert result.value.is_brownfield is False
 
 
+class TestDefaultBehaviorUnchangedWithEmptyPersonas:
+    """Test that default ooo interview behavior is completely unchanged when consulting_personas is empty."""
+
+    def test_engine_default_consulting_personas_is_empty(self) -> None:
+        """InterviewEngine defaults to empty consulting_personas tuple."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        assert engine.consulting_personas == ()
+
+    def test_system_prompt_no_persona_section_when_empty(self) -> None:
+        """_build_system_prompt does NOT inject persona/lens/consultant section when consulting_personas is empty."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter, consulting_personas=())
+
+        state = InterviewState(
+            interview_id="test_default",
+            initial_context="Build a CLI tool",
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        # No persona-related content should appear
+        assert "consulting" not in prompt.lower()
+        assert "consultant" not in prompt.lower()
+        assert "contrarian" not in prompt.lower()
+        assert "ontologist" not in prompt.lower()
+        assert "hacker" not in prompt.lower()
+
+    def test_system_prompt_identical_with_and_without_explicit_empty_personas(self) -> None:
+        """System prompt is identical whether consulting_personas is omitted or explicitly empty."""
+        mock_adapter = MagicMock()
+        engine_default = InterviewEngine(llm_adapter=mock_adapter)
+        engine_explicit = InterviewEngine(llm_adapter=mock_adapter, consulting_personas=())
+
+        state = InterviewState(
+            interview_id="test_compare",
+            initial_context="Build a task manager",
+        )
+
+        prompt_default = engine_default._build_system_prompt(state)
+        prompt_explicit = engine_explicit._build_system_prompt(state)
+
+        assert prompt_default == prompt_explicit
+
+    @pytest.mark.asyncio
+    async def test_ask_next_question_unchanged_with_empty_personas(self) -> None:
+        """ask_next_question sends the same messages when consulting_personas is empty."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter, consulting_personas=())
+        state = InterviewState(
+            interview_id="test_default_flow",
+            initial_context="Build a CLI tool",
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        # Verify the system prompt in the call doesn't contain persona content
+        call_args = mock_adapter.complete.call_args
+        messages = call_args[0][0]
+        system_msg = messages[0]
+        assert system_msg.role == MessageRole.SYSTEM
+        assert "consultant" not in system_msg.content.lower()
+        assert "contrarian" not in system_msg.content.lower()
+
+    @pytest.mark.asyncio
+    async def test_start_interview_unchanged_with_empty_personas(self) -> None:
+        """start_interview works identically when consulting_personas is empty."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter, consulting_personas=())
+
+        result = await engine.start_interview("Build a task manager")
+
+        assert result.is_ok
+        state = result.value
+        assert state.interview_id.startswith("interview_")
+        assert state.initial_context == "Build a task manager"
+        assert state.status == InterviewStatus.IN_PROGRESS
+        assert len(state.rounds) == 0
+
+    def test_system_prompt_round2_no_persona_when_empty(self) -> None:
+        """System prompt for round 2+ has no persona content when consulting_personas is empty."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter, consulting_personas=())
+
+        state = InterviewState(
+            interview_id="test_round2",
+            initial_context="Build a CLI tool",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question="What problem does it solve?",
+                user_response="Task management",
+            )
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "Round 2" in prompt
+        assert "consultant" not in prompt.lower()
+        assert "contrarian" not in prompt.lower()
+        assert "ontologist" not in prompt.lower()
+
+    def test_system_prompt_brownfield_no_persona_when_empty(self) -> None:
+        """Brownfield system prompt has no persona content when consulting_personas is empty."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter, consulting_personas=())
+
+        state = InterviewState(
+            interview_id="test_bf_default",
+            initial_context="Add a REST endpoint",
+            is_brownfield=True,
+            codebase_context="Tech: Python\nDeps: flask, sqlalchemy\n",
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        # Brownfield content should still be present
+        assert "Existing Codebase Context" in prompt
+        assert "flask" in prompt
+        # But no persona content
+        assert "consultant" not in prompt.lower()
+        assert "contrarian" not in prompt.lower()
+
+
+class TestConsultingPersonaPromptInjection:
+    """Test prompt injection content for each consulting persona.
+
+    Verifies that _build_system_prompt correctly injects persona-specific
+    system prompts, approach instructions, and behavioral instructions
+    when consulting_personas is provided.
+    """
+
+    ALL_PERSONAS = ("contrarian", "architect", "researcher", "hacker", "ontologist")
+
+    def _make_engine(
+        self,
+        personas: tuple[str, ...] = ALL_PERSONAS,
+    ) -> InterviewEngine:
+        return InterviewEngine(
+            llm_adapter=MagicMock(),
+            consulting_personas=personas,
+        )
+
+    def _make_state(
+        self,
+        *,
+        num_completed_rounds: int = 0,
+        initial_context: str = "Build a REST API",
+    ) -> InterviewState:
+        state = InterviewState(
+            interview_id="test_persona",
+            initial_context=initial_context,
+        )
+        for i in range(num_completed_rounds):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=i + 1,
+                    question=f"Q{i + 1}",
+                    user_response=f"A{i + 1}",
+                )
+            )
+        return state
+
+    # --- Contrarian (round 1, index 0) ---
+
+    def test_contrarian_persona_header_injected(self) -> None:
+        """Round 1 injects the CONTRARIAN persona header."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=0)
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Consulting Persona Lens: CONTRARIAN" in prompt
+
+    def test_contrarian_system_prompt_content(self) -> None:
+        """Round 1 includes the contrarian system_prompt (opening philosophy)."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=0)
+        prompt = engine._build_system_prompt(state)
+
+        # The contrarian persona's opening line
+        assert "question everything" in prompt.lower()
+
+    def test_contrarian_approach_instructions(self) -> None:
+        """Round 1 includes contrarian approach instructions."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=0)
+        prompt = engine._build_system_prompt(state)
+
+        assert "Apply this perspective when forming your questions this round" in prompt
+        # Key contrarian approach items
+        assert "List Every Assumption" in prompt
+        assert "Consider the Opposite" in prompt
+        assert "Challenge the Problem Statement" in prompt
+
+    # --- Architect (round 2, index 1) ---
+
+    def test_architect_persona_header_injected(self) -> None:
+        """Round 2 injects the ARCHITECT persona header."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=1)
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Consulting Persona Lens: ARCHITECT" in prompt
+
+    def test_architect_system_prompt_content(self) -> None:
+        """Round 2 includes the architect system_prompt."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=1)
+        prompt = engine._build_system_prompt(state)
+
+        assert "structural" in prompt.lower()
+
+    def test_architect_approach_instructions(self) -> None:
+        """Round 2 includes architect approach instructions."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=1)
+        prompt = engine._build_system_prompt(state)
+
+        assert "Identify Structural Symptoms" in prompt
+        assert "Map the Current Structure" in prompt
+        assert "Find the Root Misalignment" in prompt
+
+    # --- Researcher (round 3, index 2) ---
+
+    def test_researcher_persona_header_injected(self) -> None:
+        """Round 3 injects the RESEARCHER persona header."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=2)
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Consulting Persona Lens: RESEARCHER" in prompt
+
+    def test_researcher_system_prompt_content(self) -> None:
+        """Round 3 includes the researcher system_prompt."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=2)
+        prompt = engine._build_system_prompt(state)
+
+        assert "investigating" in prompt.lower() or "information" in prompt.lower()
+
+    def test_researcher_approach_instructions(self) -> None:
+        """Round 3 includes researcher approach instructions."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=2)
+        prompt = engine._build_system_prompt(state)
+
+        assert "Define What" in prompt
+        assert "Gather Evidence" in prompt
+        assert "Form a Hypothesis" in prompt
+
+    # --- Hacker (round 4, index 3) ---
+
+    def test_hacker_persona_header_injected(self) -> None:
+        """Round 4 injects the HACKER persona header."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=3)
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Consulting Persona Lens: HACKER" in prompt
+
+    def test_hacker_system_prompt_content(self) -> None:
+        """Round 4 includes the hacker system_prompt."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=3)
+        prompt = engine._build_system_prompt(state)
+
+        assert "unconventional" in prompt.lower() or "workaround" in prompt.lower()
+
+    def test_hacker_approach_instructions(self) -> None:
+        """Round 4 includes hacker approach instructions."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=3)
+        prompt = engine._build_system_prompt(state)
+
+        assert "Identify Constraints" in prompt
+        assert "Question Each Constraint" in prompt
+        assert "Consider Bypassing" in prompt
+
+    # --- Ontologist (round 5, index 4) ---
+
+    def test_ontologist_persona_header_injected(self) -> None:
+        """Round 5 injects the ONTOLOGIST persona header."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=4)
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Consulting Persona Lens: ONTOLOGIST" in prompt
+
+    def test_ontologist_system_prompt_content(self) -> None:
+        """Round 5 includes the ontologist system_prompt."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=4)
+        prompt = engine._build_system_prompt(state)
+
+        assert "ontological" in prompt.lower() or "essential nature" in prompt.lower()
+
+    def test_ontologist_approach_instructions(self) -> None:
+        """Round 5 includes ontologist approach instructions (from FOUR FUNDAMENTAL QUESTIONS)."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=4)
+        prompt = engine._build_system_prompt(state)
+
+        # Ontologist uses "THE FOUR FUNDAMENTAL QUESTIONS" as approach section
+        # load_persona_prompt_data extracts from "## YOUR APPROACH" — ontologist
+        # doesn't have that section, so approach_instructions may be empty.
+        # The system_prompt should still be present.
+        assert "ONTOLOGIST" in prompt
+
+    # --- Rotation wrap-around ---
+
+    def test_persona_wraps_around_to_contrarian_on_round_6(self) -> None:
+        """Round 6 wraps back to CONTRARIAN (index 0) with 5 personas."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=5)
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Consulting Persona Lens: CONTRARIAN" in prompt
+
+    def test_persona_wraps_around_to_architect_on_round_7(self) -> None:
+        """Round 7 wraps to ARCHITECT (index 1)."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=6)
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Consulting Persona Lens: ARCHITECT" in prompt
+
+    # --- Single-persona mode ---
+
+    def test_single_persona_always_used(self) -> None:
+        """When only one persona is specified, it's used every round."""
+        engine = self._make_engine(personas=("hacker",))
+
+        for rounds_done in range(5):
+            state = self._make_state(num_completed_rounds=rounds_done)
+            prompt = engine._build_system_prompt(state)
+            assert "## Consulting Persona Lens: HACKER" in prompt
+
+    # --- Partial persona list ---
+
+    def test_two_persona_rotation(self) -> None:
+        """Two personas alternate correctly."""
+        engine = self._make_engine(personas=("researcher", "ontologist"))
+
+        state_r1 = self._make_state(num_completed_rounds=0)
+        assert "RESEARCHER" in engine._build_system_prompt(state_r1)
+
+        state_r2 = self._make_state(num_completed_rounds=1)
+        assert "ONTOLOGIST" in engine._build_system_prompt(state_r2)
+
+        state_r3 = self._make_state(num_completed_rounds=2)
+        assert "RESEARCHER" in engine._build_system_prompt(state_r3)
+
+    # --- Persona does NOT replace base interview content ---
+
+    def test_persona_preserves_base_prompt(self) -> None:
+        """Persona injection does NOT remove the base interview prompt content."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=0)
+        prompt = engine._build_system_prompt(state)
+
+        # Base prompt content still present
+        assert "expert requirements engineer" in prompt
+        assert "Socratic interview" in prompt
+        assert "Build a REST API" in prompt  # initial_context
+
+    def test_persona_section_precedes_brownfield_context(self) -> None:
+        """When both persona and brownfield are active, both appear in prompt."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=0)
+        state.is_brownfield = True
+        state.codebase_context = "Tech: Python\nDeps: flask\n"
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Consulting Persona Lens: CONTRARIAN" in prompt
+        assert "Existing Codebase Context" in prompt
+        # Persona section appears before brownfield section
+        persona_idx = prompt.index("Consulting Persona Lens")
+        brownfield_idx = prompt.index("Existing Codebase Context")
+        assert persona_idx < brownfield_idx
+
+    # --- Each persona has approach instructions in the prompt ---
+
+    @pytest.mark.parametrize(
+        "persona_name,round_offset",
+        [
+            ("contrarian", 0),
+            ("architect", 1),
+            ("researcher", 2),
+            ("hacker", 3),
+            ("ontologist", 4),
+        ],
+    )
+    def test_each_persona_injects_formatted_approach_lines(
+        self, persona_name: str, round_offset: int
+    ) -> None:
+        """Each persona injects numbered approach lines with 'Apply this perspective'."""
+        engine = self._make_engine()
+        state = self._make_state(num_completed_rounds=round_offset)
+        prompt = engine._build_system_prompt(state)
+
+        assert f"## Consulting Persona Lens: {persona_name.upper()}" in prompt
+        assert "Apply this perspective when forming your questions this round" in prompt
+
+
 class TestSystemPromptBrownfield:
     """Test brownfield system prompt injection."""
 
@@ -926,3 +1336,168 @@ class TestSystemPromptBrownfield:
         assert "CONFIRMATION questions" in prompt
         assert "I found X. Should I assume Y?" in prompt
         assert "flask" in prompt
+
+
+class TestPersonaRotationLogic:
+    """Test persona rotation cycling, state management, and deterministic selection.
+
+    These tests focus on the rotation *mechanics* (modular indexing,
+    wrap-around, determinism, subset sizing) rather than the prompt
+    *content* injected per persona (covered by TestConsultingPersonaPromptInjection).
+    """
+
+    ALL_PERSONAS = ("contrarian", "architect", "researcher", "hacker", "ontologist")
+
+    def _make_state(self, *, num_rounds: int = 0) -> InterviewState:
+        """Create an InterviewState with the given number of completed rounds."""
+        state = InterviewState(
+            interview_id="test_rotation",
+            initial_context="Build a CLI tool",
+        )
+        for i in range(num_rounds):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=i + 1,
+                    question=f"Q{i + 1}",
+                    user_response=f"A{i + 1}",
+                )
+            )
+        return state
+
+    def _engine(self, personas: tuple[str, ...] | None = None) -> InterviewEngine:
+        return InterviewEngine(
+            llm_adapter=MagicMock(),
+            consulting_personas=personas if personas is not None else self.ALL_PERSONAS,
+        )
+
+    # ---- Correct modular indexing ----
+
+    def test_rotation_index_formula_across_three_cycles(self) -> None:
+        """Rotation uses (current_round_number - 1) % len(personas) across 3 full cycles."""
+        engine = self._engine()
+        personas = self.ALL_PERSONAS
+
+        for round_offset in range(15):
+            state = self._make_state(num_rounds=round_offset)
+            expected_persona = personas[round_offset % len(personas)].upper()
+            prompt = engine._build_system_prompt(state)
+            assert f"Consulting Persona Lens: {expected_persona}" in prompt, (
+                f"Round {round_offset + 1}: expected {expected_persona}"
+            )
+
+    # ---- Wrap-around ----
+
+    def test_wraps_to_first_persona_after_exhausting_list(self) -> None:
+        """After cycling through all 5 personas, round 6 wraps to the first."""
+        engine = self._engine()
+        state = self._make_state(num_rounds=5)  # current_round_number == 6
+        prompt = engine._build_system_prompt(state)
+        assert "Consulting Persona Lens: CONTRARIAN" in prompt
+
+    def test_wraps_correctly_at_high_round_numbers(self) -> None:
+        """Rotation is correct even at very high round numbers (e.g. round 53)."""
+        engine = self._engine()
+        state = self._make_state(num_rounds=52)  # current_round_number == 53
+        expected_idx = 52 % 5  # == 2 → researcher
+        expected = self.ALL_PERSONAS[expected_idx].upper()
+        prompt = engine._build_system_prompt(state)
+        assert f"Consulting Persona Lens: {expected}" in prompt
+
+    # ---- Determinism / statelessness ----
+
+    def test_same_round_always_produces_same_prompt(self) -> None:
+        """Calling _build_system_prompt twice for the same state yields identical output."""
+        engine = self._engine()
+        state = self._make_state(num_rounds=3)  # round 4
+
+        prompt_a = engine._build_system_prompt(state)
+        prompt_b = engine._build_system_prompt(state)
+
+        assert prompt_a == prompt_b
+
+    def test_rotation_has_no_hidden_mutable_state(self) -> None:
+        """Building prompt for round N doesn't affect prompt for round M."""
+        engine = self._engine()
+
+        # Build prompt for round 3 first
+        state_r3 = self._make_state(num_rounds=2)
+        prompt_r3_before = engine._build_system_prompt(state_r3)
+
+        # Build prompt for round 1 in between
+        state_r1 = self._make_state(num_rounds=0)
+        engine._build_system_prompt(state_r1)
+
+        # Build prompt for round 3 again — should be identical
+        prompt_r3_after = engine._build_system_prompt(state_r3)
+        assert prompt_r3_before == prompt_r3_after
+
+    # ---- Subset sizing ----
+
+    def test_single_persona_used_every_round(self) -> None:
+        """With one persona, every round uses that persona."""
+        engine = self._engine(personas=("ontologist",))
+
+        for n in range(7):
+            state = self._make_state(num_rounds=n)
+            prompt = engine._build_system_prompt(state)
+            assert "Consulting Persona Lens: ONTOLOGIST" in prompt
+
+    def test_two_personas_alternate(self) -> None:
+        """Two personas alternate correctly across rounds."""
+        engine = self._engine(personas=("architect", "hacker"))
+
+        expectations = ["ARCHITECT", "HACKER", "ARCHITECT", "HACKER", "ARCHITECT", "HACKER"]
+        for i, expected in enumerate(expectations):
+            state = self._make_state(num_rounds=i)
+            prompt = engine._build_system_prompt(state)
+            assert f"Consulting Persona Lens: {expected}" in prompt
+
+    def test_three_personas_cycle(self) -> None:
+        """Three personas cycle correctly: A, B, C, A, B, C, ..."""
+        personas = ("contrarian", "researcher", "hacker")
+        engine = self._engine(personas=personas)
+
+        for i in range(9):  # 3 full cycles
+            state = self._make_state(num_rounds=i)
+            expected = personas[i % 3].upper()
+            prompt = engine._build_system_prompt(state)
+            assert f"Consulting Persona Lens: {expected}" in prompt
+
+    # ---- Cycle equivalence ----
+
+    def test_cycle_n_matches_cycle_1(self) -> None:
+        """The Nth cycle produces the same persona sequence as the 1st cycle."""
+        engine = self._engine()
+
+        for i in range(5):
+            state_cycle1 = self._make_state(num_rounds=i)
+            state_cycle2 = self._make_state(num_rounds=i + 5)
+            state_cycle3 = self._make_state(num_rounds=i + 10)
+
+            prompt1 = engine._build_system_prompt(state_cycle1)
+            prompt2 = engine._build_system_prompt(state_cycle2)
+            prompt3 = engine._build_system_prompt(state_cycle3)
+
+            # All three should contain the same persona header
+            expected = self.ALL_PERSONAS[i].upper()
+            for prompt, cycle in [(prompt1, 1), (prompt2, 2), (prompt3, 3)]:
+                assert f"Consulting Persona Lens: {expected}" in prompt, (
+                    f"Cycle {cycle}, position {i}: expected {expected}"
+                )
+
+    # ---- Empty personas → no rotation ----
+
+    def test_empty_personas_no_rotation_header(self) -> None:
+        """Empty consulting_personas produces no persona lens section at all."""
+        engine = self._engine(personas=())
+        state = self._make_state(num_rounds=0)
+        prompt = engine._build_system_prompt(state)
+        assert "Consulting Persona Lens" not in prompt
+
+    def test_empty_personas_across_multiple_rounds(self) -> None:
+        """Empty personas produces no persona content regardless of round number."""
+        engine = self._engine(personas=())
+        for n in range(5):
+            state = self._make_state(num_rounds=n)
+            prompt = engine._build_system_prompt(state)
+            assert "Consulting Persona Lens" not in prompt

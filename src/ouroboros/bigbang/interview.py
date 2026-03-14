@@ -90,6 +90,7 @@ class InterviewState(BaseModel):
     explore_completed: bool = False
     ambiguity_score: float | None = Field(default=None, ge=0.0, le=1.0)
     ambiguity_breakdown: dict[str, Any] | None = None
+    consulting_personas: tuple[str, ...] = ()
 
     @property
     def current_round_number(self) -> int:
@@ -167,6 +168,7 @@ class InterviewEngine:
     model: str = _FALLBACK_MODEL
     temperature: float = 0.7
     max_tokens: int = 2048
+    consulting_personas: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -490,7 +492,7 @@ class InterviewEngine:
         """
         import os
 
-        from ouroboros.agents.loader import load_agent_prompt
+        from ouroboros.agents.loader import load_agent_prompt, load_persona_prompt_data
 
         round_info = f"Round {state.current_round_number}"
         preferred_web_tool = os.environ.get("OUROBOROS_WEB_SEARCH_TOOL", "").strip()
@@ -519,6 +521,23 @@ class InterviewEngine:
 
         if web_search_hint:
             base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
+
+        # Inject consulting persona lens when interview+ mode is active
+        if self.consulting_personas:
+            persona_name = self.consulting_personas[
+                (state.current_round_number - 1) % len(self.consulting_personas)
+            ]
+            persona_data = load_persona_prompt_data(persona_name)
+            approach_lines = "\n".join(
+                f"  {i}. {instr}"
+                for i, instr in enumerate(persona_data.approach_instructions, 1)
+            )
+            dynamic_header += (
+                f"\n\n## Consulting Persona Lens: {persona_name.upper()}\n"
+                f"{persona_data.system_prompt}\n\n"
+                f"Apply this perspective when forming your questions this round:\n"
+                f"{approach_lines}\n"
+            )
 
         # Inject codebase context for brownfield projects
         if state.is_brownfield and state.codebase_context:
