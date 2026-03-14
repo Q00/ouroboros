@@ -19,11 +19,14 @@ from ouroboros.providers.factory import (
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
 
 def __getattr__(name: str) -> object:
-    """Lazy import for optional adapters to avoid hard dependency on codex_permissions."""
+    """Lazy import for optional adapters to avoid hard dependency on optional packages."""
+    if name == "LiteLLMAdapter":
+        from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+        return LiteLLMAdapter
     if name == "CodexCliLLMAdapter":
         from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 

@@ -14,7 +14,7 @@
 <p align="center">
   <strong>Stop prompting. Start specifying.</strong>
   <br/>
-  <sub>A Claude Code plugin that turns vague ideas into validated specs — before AI writes a single line of code.</sub>
+  <sub>A specification-first AI development system that turns vague ideas into validated specs — before AI writes a single line of code.</sub>
 </p>
 
 <p align="center">
@@ -78,24 +78,35 @@ The first diamond is **Socratic**: diverge into questions, converge into ontolog
 
 ## Quick Start
 
-**Step 1 — Install the plugin** (in your terminal):
+### Option A: Claude Code Plugin (recommended)
+
 ```bash
+# In your terminal:
 claude plugin marketplace add Q00/ouroboros
 claude plugin install ouroboros@ouroboros
-```
 
-**Step 2 — Run setup** (inside a Claude Code session):
-```
-# Start Claude Code, then type:
+# Inside a Claude Code session:
 ooo setup
+ooo interview "I want to build a task management CLI"
 ```
 
 > `ooo` commands are Claude Code skills — they run **inside a Claude Code session**, not in your terminal.
-> Setup registers the MCP server globally (one-time) and optionally adds an Ouroboros reference block to your project's CLAUDE.md.
 
-**Step 3 — Start building:**
+### Option B: Standalone Install (Codex, Claude, or LiteLLM)
+
+```bash
+pip install ouroboros-ai            # Codex users (minimal deps)
+pip install ouroboros-ai[claude]    # Claude Code standalone
+pip install ouroboros-ai[all]       # Everything
+
+ouroboros setup                     # auto-detects your runtime
+ouroboros init start "I want to build a task management CLI"
 ```
-ooo interview "I want to build a task management CLI"
+
+### Option C: One-liner
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 ```
 
 <details>
