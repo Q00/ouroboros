@@ -1716,7 +1716,7 @@ class TestCancellationPolling:
         # Ensure clean state
         _cancellation_registry.discard("sess_inmem")
 
-        request_cancellation("sess_inmem")
+        await request_cancellation("sess_inmem")
         try:
             # Should return True without even querying the event store
             result = await runner._check_cancellation("sess_inmem")
@@ -1724,7 +1724,7 @@ class TestCancellationPolling:
             # Event store query should NOT have been called (fast path)
             mock_event_store.query_events.assert_not_called()
         finally:
-            clear_cancellation("sess_inmem")
+            await clear_cancellation("sess_inmem")
 
     @pytest.mark.asyncio
     async def test_handle_cancellation_clears_in_memory_registry(
@@ -1739,7 +1739,7 @@ class TestCancellationPolling:
             request_cancellation,
         )
 
-        request_cancellation("sess_clear")
+        await request_cancellation("sess_clear")
 
         with patch.object(runner._session_repo, "mark_cancelled", AsyncMock(return_value=None)):
             await runner._handle_cancellation(
@@ -1749,7 +1749,7 @@ class TestCancellationPolling:
                 start_time=datetime.now(UTC),
             )
 
-        assert is_cancellation_requested("sess_clear") is False
+        assert await is_cancellation_requested("sess_clear") is False
 
 
 class TestCancellationRegistry:
@@ -1767,18 +1767,20 @@ class TestCancellationRegistry:
 
         _cancellation_registry.clear()
 
-    def test_request_cancellation_adds_session(self) -> None:
+    @pytest.mark.asyncio
+    async def test_request_cancellation_adds_session(self) -> None:
         """Test that request_cancellation adds the session ID to the registry."""
         from ouroboros.orchestrator.runner import (
             is_cancellation_requested,
             request_cancellation,
         )
 
-        assert is_cancellation_requested("sess_1") is False
-        request_cancellation("sess_1")
-        assert is_cancellation_requested("sess_1") is True
+        assert await is_cancellation_requested("sess_1") is False
+        await request_cancellation("sess_1")
+        assert await is_cancellation_requested("sess_1") is True
 
-    def test_clear_cancellation_removes_session(self) -> None:
+    @pytest.mark.asyncio
+    async def test_clear_cancellation_removes_session(self) -> None:
         """Test that clear_cancellation removes the session ID."""
         from ouroboros.orchestrator.runner import (
             clear_cancellation,
@@ -1786,33 +1788,36 @@ class TestCancellationRegistry:
             request_cancellation,
         )
 
-        request_cancellation("sess_2")
-        assert is_cancellation_requested("sess_2") is True
-        clear_cancellation("sess_2")
-        assert is_cancellation_requested("sess_2") is False
+        await request_cancellation("sess_2")
+        assert await is_cancellation_requested("sess_2") is True
+        await clear_cancellation("sess_2")
+        assert await is_cancellation_requested("sess_2") is False
 
-    def test_clear_cancellation_is_idempotent(self) -> None:
+    @pytest.mark.asyncio
+    async def test_clear_cancellation_is_idempotent(self) -> None:
         """Test that clearing a non-existent session does not raise."""
         from ouroboros.orchestrator.runner import clear_cancellation
 
         # Should not raise
-        clear_cancellation("nonexistent_session")
+        await clear_cancellation("nonexistent_session")
 
-    def test_get_pending_cancellations_returns_frozenset(self) -> None:
+    @pytest.mark.asyncio
+    async def test_get_pending_cancellations_returns_frozenset(self) -> None:
         """Test that get_pending_cancellations returns a frozenset snapshot."""
         from ouroboros.orchestrator.runner import (
             get_pending_cancellations,
             request_cancellation,
         )
 
-        request_cancellation("sess_a")
-        request_cancellation("sess_b")
+        await request_cancellation("sess_a")
+        await request_cancellation("sess_b")
 
-        pending = get_pending_cancellations()
+        pending = await get_pending_cancellations()
         assert isinstance(pending, frozenset)
         assert pending == frozenset({"sess_a", "sess_b"})
 
-    def test_get_pending_cancellations_is_snapshot(self) -> None:
+    @pytest.mark.asyncio
+    async def test_get_pending_cancellations_is_snapshot(self) -> None:
         """Test that the returned frozenset is a snapshot, not a live view."""
         from ouroboros.orchestrator.runner import (
             clear_cancellation,
@@ -1820,17 +1825,18 @@ class TestCancellationRegistry:
             request_cancellation,
         )
 
-        request_cancellation("sess_snap")
-        snapshot = get_pending_cancellations()
-        clear_cancellation("sess_snap")
+        await request_cancellation("sess_snap")
+        snapshot = await get_pending_cancellations()
+        await clear_cancellation("sess_snap")
 
         # Snapshot should still contain the session
         assert "sess_snap" in snapshot
         # But the registry should not
-        new_snapshot = get_pending_cancellations()
+        new_snapshot = await get_pending_cancellations()
         assert "sess_snap" not in new_snapshot
 
-    def test_multiple_sessions_tracked_independently(self) -> None:
+    @pytest.mark.asyncio
+    async def test_multiple_sessions_tracked_independently(self) -> None:
         """Test that multiple sessions can be tracked independently."""
         from ouroboros.orchestrator.runner import (
             clear_cancellation,
@@ -1838,27 +1844,28 @@ class TestCancellationRegistry:
             request_cancellation,
         )
 
-        request_cancellation("sess_x")
-        request_cancellation("sess_y")
+        await request_cancellation("sess_x")
+        await request_cancellation("sess_y")
 
-        assert is_cancellation_requested("sess_x") is True
-        assert is_cancellation_requested("sess_y") is True
+        assert await is_cancellation_requested("sess_x") is True
+        assert await is_cancellation_requested("sess_y") is True
 
-        clear_cancellation("sess_x")
-        assert is_cancellation_requested("sess_x") is False
-        assert is_cancellation_requested("sess_y") is True
+        await clear_cancellation("sess_x")
+        assert await is_cancellation_requested("sess_x") is False
+        assert await is_cancellation_requested("sess_y") is True
 
-    def test_request_cancellation_is_idempotent(self) -> None:
+    @pytest.mark.asyncio
+    async def test_request_cancellation_is_idempotent(self) -> None:
         """Test that requesting cancellation twice is safe."""
         from ouroboros.orchestrator.runner import (
             get_pending_cancellations,
             request_cancellation,
         )
 
-        request_cancellation("sess_dup")
-        request_cancellation("sess_dup")
+        await request_cancellation("sess_dup")
+        await request_cancellation("sess_dup")
 
-        assert len(get_pending_cancellations()) == 1
+        assert len(await get_pending_cancellations()) == 1
 
 
 class TestExecutionCancelledError:

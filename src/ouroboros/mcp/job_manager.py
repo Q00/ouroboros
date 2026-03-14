@@ -394,7 +394,7 @@ class JobManager:
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
         if snapshot.links.session_id:
-            request_cancellation(snapshot.links.session_id)
+            await request_cancellation(snapshot.links.session_id)
         else:
             task = self._tasks.get(job_id)
             if task is not None:

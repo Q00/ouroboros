@@ -57,8 +57,10 @@ def resolve_llm_permission_mode(
 
     resolved = resolve_llm_backend(backend)
     if use_case == "interview" and resolved in ("claude_code", "codex", "opencode"):
-        # Interview needs broad read access regardless of backend.
-        return "bypassPermissions" if resolved == "claude_code" else "acceptEdits"
+        # Interview needs broad read access but must NOT write files.
+        # claude_code: bypassPermissions allows unrestricted reads.
+        # codex/opencode: "default" maps to read-only sandbox.
+        return "bypassPermissions" if resolved == "claude_code" else "default"
 
     return get_llm_permission_mode(backend=resolved)
 

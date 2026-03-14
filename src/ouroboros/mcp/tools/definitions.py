@@ -242,6 +242,7 @@ class ExecuteSeedHandler:
             runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
             resolved_llm_backend = resolve_llm_backend(self.llm_backend)
             event_store = self.event_store or EventStore()
+            owns_event_store = self.event_store is None
             await event_store.initialize()
             # Use stderr: in MCP stdio mode, stdout is the JSON-RPC channel.
             console = Console(stderr=True)
@@ -303,6 +304,8 @@ class ExecuteSeedHandler:
                 _resume_existing: bool,
                 _skip_qa: bool,
                 _session_repo: SessionRepository = session_repo,
+                _event_store: EventStore = event_store,
+                _owns_event_store: bool = owns_event_store,
             ) -> None:
                 try:
                     if _resume_existing:
@@ -360,6 +363,12 @@ class ExecuteSeedHandler:
                         )
                     except Exception:
                         log.exception("mcp.tool.execute_seed.mark_failed_error")
+                finally:
+                    if _owns_event_store:
+                        try:
+                            await _event_store.close()
+                        except Exception:
+                            log.exception("mcp.tool.execute_seed.event_store_close_error")
 
             task = asyncio.create_task(
                 _run_in_background(runner, seed, tracker, seed_content, bool(session_id), skip_qa)

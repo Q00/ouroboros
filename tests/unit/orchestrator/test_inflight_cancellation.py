@@ -115,9 +115,9 @@ class TestCancellationSignalHandling:
         runner._register_session("exec_1", "sess_1")
         await runner.cancel_execution("exec_1", reason="User cancelled")
 
-        assert is_cancellation_requested("sess_1")
+        assert await is_cancellation_requested("sess_1")
         # Registry should contain exactly the one session
-        assert get_pending_cancellations() == frozenset({"sess_1"})
+        assert await get_pending_cancellations() == frozenset({"sess_1"})
 
     @pytest.mark.asyncio
     async def test_check_cancellation_fast_path_no_io(
@@ -126,7 +126,7 @@ class TestCancellationSignalHandling:
         mock_event_store: AsyncMock,
     ) -> None:
         """Fast path (in-memory registry) should NOT query event store."""
-        request_cancellation("sess_fast")
+        await request_cancellation("sess_fast")
         result = await runner._check_cancellation("sess_fast")
 
         assert result is True
@@ -182,7 +182,7 @@ class TestCancellationSignalHandling:
         # Simulate: cancel fires while check is pending
         async def delayed_cancel():
             await asyncio.sleep(0.01)
-            request_cancellation("sess_c")
+            await request_cancellation("sess_c")
 
         asyncio.create_task(delayed_cancel())
 
@@ -246,7 +246,7 @@ class TestCancellationCleanup:
     ) -> None:
         """_handle_cancellation clears registry, unregisters session, and marks repo."""
         runner._register_session("exec_clean", "sess_clean")
-        request_cancellation("sess_clean")
+        await request_cancellation("sess_clean")
         self._mock_running_session(runner, "sess_clean")
 
         with patch.object(
@@ -260,7 +260,7 @@ class TestCancellationCleanup:
             )
 
         # All three cleanup steps should have happened
-        assert not is_cancellation_requested("sess_clean")
+        assert not await is_cancellation_requested("sess_clean")
         assert "exec_clean" not in runner.active_sessions
         mock_mark.assert_called_once_with(
             "sess_clean",
@@ -288,7 +288,7 @@ class TestCancellationCleanup:
             )
 
         assert result.is_ok
-        assert not is_cancellation_requested("sess_idem")
+        assert not await is_cancellation_requested("sess_idem")
 
     @pytest.mark.asyncio
     async def test_handle_cancellation_result_has_correct_message_count(
@@ -347,7 +347,7 @@ class TestCancellationCleanup:
         assert result1.is_ok
         assert result2.is_ok
         # Both should succeed; registry should still have the session
-        assert is_cancellation_requested("sess_dbl")
+        assert await is_cancellation_requested("sess_dbl")
 
     @pytest.mark.asyncio
     async def test_unregister_after_cancel_prevents_second_inflight_cancel(
@@ -428,7 +428,7 @@ class TestCancellationErrorScenarios:
         OrchestratorResult. This ensures the execution stops even if persistence fails.
         """
         runner._register_session("exec_fail", "sess_fail")
-        request_cancellation("sess_fail")
+        await request_cancellation("sess_fail")
         self._mock_running_session(runner, "sess_fail")
 
         with (
@@ -458,7 +458,7 @@ class TestCancellationErrorScenarios:
         assert result.value.success is False
         assert result.value.messages_processed == 7
         # Cleanup should still happen even if persistence failed
-        assert not is_cancellation_requested("sess_fail")
+        assert not await is_cancellation_requested("sess_fail")
         assert "exec_fail" not in runner.active_sessions
 
     @pytest.mark.asyncio
@@ -491,7 +491,7 @@ class TestCancellationErrorScenarios:
 
         # Despite the exception, registry and session should have been
         # cleaned up before mark_cancelled was called
-        assert not is_cancellation_requested("sess_raise")
+        assert not await is_cancellation_requested("sess_raise")
         assert "exec_raise" not in runner.active_sessions
 
     @pytest.mark.asyncio
@@ -726,23 +726,25 @@ class TestInFlightCancellationGraceful:
 class TestCancellationRegistryConcurrency:
     """Tests for cancellation registry behavior under concurrent access patterns."""
 
-    def test_request_and_clear_different_sessions_independent(self) -> None:
+    @pytest.mark.asyncio
+    async def test_request_and_clear_different_sessions_independent(self) -> None:
         """Clearing one session doesn't affect another."""
-        request_cancellation("sess_a")
-        request_cancellation("sess_b")
-        clear_cancellation("sess_a")
+        await request_cancellation("sess_a")
+        await request_cancellation("sess_b")
+        await clear_cancellation("sess_a")
 
-        assert not is_cancellation_requested("sess_a")
-        assert is_cancellation_requested("sess_b")
+        assert not await is_cancellation_requested("sess_a")
+        assert await is_cancellation_requested("sess_b")
 
-    def test_pending_cancellations_snapshot_is_immutable(self) -> None:
+    @pytest.mark.asyncio
+    async def test_pending_cancellations_snapshot_is_immutable(self) -> None:
         """Modifying the registry after getting pending doesn't change the snapshot."""
-        request_cancellation("sess_snap")
-        snapshot = get_pending_cancellations()
-        request_cancellation("sess_snap_2")
+        await request_cancellation("sess_snap")
+        snapshot = await get_pending_cancellations()
+        await request_cancellation("sess_snap_2")
 
         assert "sess_snap_2" not in snapshot
-        assert "sess_snap_2" in get_pending_cancellations()
+        assert "sess_snap_2" in await get_pending_cancellations()
 
     @pytest.mark.asyncio
     async def test_multiple_sessions_cancel_independently(
@@ -757,9 +759,9 @@ class TestCancellationRegistryConcurrency:
         # Cancel only sess_2
         await runner.cancel_execution("exec_2", reason="Cancel middle")
 
-        assert not is_cancellation_requested("sess_1")
-        assert is_cancellation_requested("sess_2")
-        assert not is_cancellation_requested("sess_3")
+        assert not await is_cancellation_requested("sess_1")
+        assert await is_cancellation_requested("sess_2")
+        assert not await is_cancellation_requested("sess_3")
 
     @pytest.mark.asyncio
     async def test_cancel_nonexistent_execution_returns_error(

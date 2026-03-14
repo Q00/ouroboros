@@ -8,7 +8,10 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
+
+log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from ouroboros.mcp.server.adapter import MCPServerAdapter
@@ -82,6 +85,12 @@ class CodexCommandDispatcher:
 
         session_id = tool_result.meta.get("session_id")
         if not isinstance(session_id, str) or not session_id.strip():
+            if session_id is not None:
+                log.warning(
+                    "command_dispatcher.resume_handle.invalid_session_id",
+                    session_id_type=type(session_id).__name__,
+                    session_id_value=repr(session_id),
+                )
             return current_handle
 
         metadata = dict(current_handle.metadata) if current_handle is not None else {}
