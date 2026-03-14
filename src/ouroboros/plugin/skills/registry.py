@@ -33,11 +33,10 @@ try:
 except ImportError:
     WATCHDOG_AVAILABLE = False
 
-    # Create stub classes for type hints
-    class FileSystemEventHandler:  # type: ignore
+    class FileSystemEventHandler:  # type: ignore[no-redef]
         pass
 
-    class Observer:  # type: ignore
+    class Observer:  # type: ignore[no-redef]
         pass
 
 
