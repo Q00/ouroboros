@@ -36,6 +36,23 @@ class _FakeStream:
         return chunk
 
 
+class _FakeStdin:
+    """Minimal stdin stub that captures written bytes."""
+
+    def __init__(self) -> None:
+        self.data = b""
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        self.data += data
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeProcess:
     def __init__(
         self,
@@ -46,6 +63,7 @@ class _FakeProcess:
         wait_forever: bool = False,
         read_size: int | None = None,
     ) -> None:
+        self.stdin = _FakeStdin()
         self.stdout = _FakeStream(stdout, read_size=read_size)
         self.stderr = _FakeStream(stderr, read_size=read_size)
         self.returncode = None if wait_forever else returncode
@@ -167,8 +185,8 @@ class TestCodexCliLLMAdapter:
             Path(command[output_index]).write_text("Final answer", encoding="utf-8")
             assert "--model" not in command
             assert kwargs["cwd"] == "/tmp/project"
-            # Prompt should be passed as the last positional argument
-            assert command[-1] != "--ephemeral"  # prompt comes after flags
+            # Prompt is now fed via stdin, not as a positional argument
+            assert kwargs.get("stdin") is not None
             return _FakeProcess(
                 stdout=json.dumps({"type": "thread.started", "thread_id": "thread-123"}),
                 returncode=0,
@@ -349,21 +367,8 @@ class TestCodexCliLLMAdapter:
         assert callback_events == [("thinking", "Still working...")]
         assert process_holder["process"].terminated or process_holder["process"].killed
 
-    def test_build_command_includes_prompt_as_positional_arg(self) -> None:
-        """Prompt is passed as the last positional argument, not via stdin."""
-        adapter = CodexCliLLMAdapter(cli_path="codex", cwd="/tmp/project")
-
-        command = adapter._build_command(
-            output_last_message_path="/tmp/out.txt",
-            output_schema_path=None,
-            model=None,
-            prompt="Explain this code",
-        )
-
-        assert command[-1] == "Explain this code"
-
-    def test_build_command_without_prompt_omits_positional_arg(self) -> None:
-        """When prompt is None, no positional argument is appended."""
+    def test_build_command_does_not_include_prompt_as_positional_arg(self) -> None:
+        """Prompt is fed via stdin, not as a positional CLI argument."""
         adapter = CodexCliLLMAdapter(cli_path="codex", cwd="/tmp/project")
 
         command = adapter._build_command(
@@ -372,7 +377,7 @@ class TestCodexCliLLMAdapter:
             model=None,
         )
 
-        # Last element should be a flag or path, not a prompt
+        # Last element should be a flag, not user-supplied text
         assert command[-1] in ("--ephemeral", "/tmp/out.txt") or command[-1].startswith("--")
 
 
