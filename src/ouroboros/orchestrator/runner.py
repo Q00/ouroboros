@@ -780,14 +780,17 @@ class OrchestratorRunner:
             )
 
         # Guard: do not overwrite a terminal state (completed/failed/cancelled)
-        _terminal_event_types = frozenset({
-            "orchestrator.session.completed",
-            "orchestrator.session.failed",
-            "orchestrator.session.cancelled",
-        })
+        _terminal_event_types = frozenset(
+            {
+                "orchestrator.session.completed",
+                "orchestrator.session.failed",
+                "orchestrator.session.cancelled",
+            }
+        )
         try:
             session_events = await self._event_store.query_events(
-                aggregate_id=session_id, limit=100,
+                aggregate_id=session_id,
+                limit=100,
             )
             for ev in session_events:
                 if ev.type in _terminal_event_types:
