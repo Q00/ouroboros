@@ -18,12 +18,15 @@ import shutil
 import tempfile
 from typing import Any
 
+import structlog
+
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
     resolve_codex_permission_mode,
 )
 from ouroboros.config import get_codex_cli_path
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -32,6 +35,8 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
+
+log = structlog.get_logger()
 
 _RETRYABLE_ERROR_PATTERNS = (
     "rate limit",
@@ -169,12 +174,10 @@ class CodexCliLLMAdapter:
         output_last_message_path: str,
         output_schema_path: str | None,
         model: str | None,
-        prompt: str | None = None,
     ) -> list[str]:
         """Build the `codex exec` command for a one-shot completion.
 
-        When *prompt* is provided it is appended as the positional argument.
-        Otherwise the caller must feed the prompt via stdin.
+        The prompt is always fed via stdin to avoid ARG_MAX limits.
         """
         command = [
             self._cli_path,
@@ -197,9 +200,6 @@ class CodexCliLLMAdapter:
 
         if model:
             command.extend(["--model", model])
-
-        if prompt is not None:
-            command.append(prompt)
 
         return command
 
@@ -229,6 +229,7 @@ class CodexCliLLMAdapter:
                 "content",
                 "summary",
                 "details",
+                "command",
             )
             dict_parts: list[str] = []
             for key in preferred_keys:
@@ -239,8 +240,8 @@ class CodexCliLLMAdapter:
             if dict_parts:
                 return "\n".join(dict_parts)
 
-            fallback_parts = [self._extract_text(item) for item in value.values()]
-            return "\n".join(part for part in fallback_parts if part)
+            # Do not recurse into arbitrary dict values to prevent data leakage
+            return ""
 
         return ""
 
@@ -463,6 +464,20 @@ class CodexCliLLMAdapter:
         except FileNotFoundError:
             return ""
 
+    @staticmethod
+    def _truncate_if_oversized(content: str, model: str) -> str:
+        """Validate and truncate oversized LLM responses."""
+        is_valid, _ = InputValidator.validate_llm_response(content)
+        if not is_valid:
+            log.warning(
+                "llm.response.truncated",
+                model=model,
+                original_length=len(content),
+                max_length=MAX_LLM_RESPONSE_LENGTH,
+            )
+            return content[:MAX_LLM_RESPONSE_LENGTH]
+        return content
+
     def _is_retryable_error(self, message: str) -> bool:
         """Check whether an error looks transient."""
         lowered = message.lower()
@@ -473,7 +488,11 @@ class CodexCliLLMAdapter:
         process: Any,
     ) -> tuple[list[str], list[str], str | None, str]:
         """Fallback for tests or wrappers that only expose communicate()."""
-        stdout_bytes, stderr_bytes = await process.communicate()
+        if self._timeout is not None:
+            async with asyncio.timeout(self._timeout):
+                stdout_bytes, stderr_bytes = await process.communicate()
+        else:
+            stdout_bytes, stderr_bytes = await process.communicate()
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
         stdout_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
@@ -519,13 +538,15 @@ class CodexCliLLMAdapter:
             output_last_message_path=str(output_path),
             output_schema_path=str(schema_path) if schema_path else None,
             model=normalized_model,
-            prompt=prompt,
         )
+
+        prompt_bytes = prompt.encode("utf-8")
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=self._cwd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -551,6 +572,12 @@ class CodexCliLLMAdapter:
                     details={"cli_path": self._cli_path, "error_type": type(exc).__name__},
                 )
             )
+
+        # Feed prompt via stdin to avoid ARG_MAX limits
+        if process.stdin is not None:
+            process.stdin.write(prompt_bytes)
+            await process.stdin.drain()
+            process.stdin.close()
 
         if not hasattr(process, "stdout") or not callable(getattr(process, "wait", None)):
             (
@@ -592,6 +619,8 @@ class CodexCliLLMAdapter:
                         details={"session_id": session_id},
                     )
                 )
+
+            content = self._truncate_if_oversized(content, normalized_model or "default")
 
             return Result.ok(
                 CompletionResponse(
@@ -726,6 +755,8 @@ class CodexCliLLMAdapter:
                     details={"session_id": session_id},
                 )
             )
+
+        content = self._truncate_if_oversized(content, normalized_model or "default")
 
         return Result.ok(
             CompletionResponse(

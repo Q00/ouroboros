@@ -43,6 +43,8 @@ _SKILL_COMMAND_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _MCP_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+_MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,7 @@ class CodexCliRuntime:
     _tempfile_prefix = "ouroboros-codex-"
     _skills_package_uri = "packaged://ouroboros.codex/skills"
     _process_shutdown_timeout_seconds = 5.0
+    _max_resume_retries = 3
 
     def __init__(
         self,
@@ -180,35 +183,14 @@ class CodexCliRuntime:
                 metadata=dict(current_handle.metadata),
             )
 
+        # current_handle is guaranteed None here (early return above).
         return RuntimeHandle(
-            backend=(
-                current_handle.backend
-                if current_handle is not None
-                else self._runtime_handle_backend
-            ),
-            kind=current_handle.kind if current_handle is not None else "agent_runtime",
+            backend=self._runtime_handle_backend,
+            kind="agent_runtime",
             native_session_id=session_id,
-            conversation_id=(
-                current_handle.conversation_id if current_handle is not None else None
-            ),
-            previous_response_id=(
-                current_handle.previous_response_id if current_handle is not None else None
-            ),
-            transcript_path=(
-                current_handle.transcript_path if current_handle is not None else None
-            ),
-            cwd=(
-                current_handle.cwd
-                if current_handle is not None and current_handle.cwd
-                else self._cwd
-            ),
-            approval_mode=(
-                current_handle.approval_mode
-                if current_handle is not None and current_handle.approval_mode
-                else self._permission_mode
-            ),
+            cwd=self._cwd,
+            approval_mode=self._permission_mode,
             updated_at=datetime.now(UTC).isoformat(),
-            metadata=dict(current_handle.metadata) if current_handle is not None else {},
         )
 
     def _compose_prompt(
@@ -638,6 +620,11 @@ class CodexCliRuntime:
         """Build the Codex CLI command for a new or resumed session."""
         command = [self._cli_path, "exec"]
         if resume_session_id:
+            if not _SAFE_SESSION_ID_PATTERN.match(resume_session_id):
+                raise ValueError(
+                    f"Invalid resume_session_id: contains disallowed characters: "
+                    f"{resume_session_id!r}"
+                )
             command.extend(["resume", resume_session_id])
 
         command.extend(
@@ -725,13 +712,26 @@ class CodexCliRuntime:
 
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         buffer = ""
+        buffer_byte_estimate = 0
 
         while True:
             chunk = await stream.read(chunk_size)
             if not chunk:
                 break
 
-            buffer += decoder.decode(chunk)
+            decoded = decoder.decode(chunk)
+            buffer += decoded
+            # Track byte size incrementally: worst-case 4 bytes per char (UTF-8).
+            buffer_byte_estimate += len(decoded) * 4
+            if buffer_byte_estimate > _MAX_LINE_BUFFER_BYTES:
+                log.error(
+                    f"{self._log_namespace}.line_buffer_overflow",
+                    buffer_size=len(buffer),
+                    limit=_MAX_LINE_BUFFER_BYTES,
+                )
+                raise ProviderError(
+                    f"JSONL line buffer exceeded {_MAX_LINE_BUFFER_BYTES} bytes"
+                )
             while True:
                 newline_index = buffer.find("\n")
                 if newline_index < 0:
@@ -739,6 +739,8 @@ class CodexCliRuntime:
 
                 line = buffer[:newline_index]
                 buffer = buffer[newline_index + 1 :]
+                # Recalculate estimate after draining consumed lines.
+                buffer_byte_estimate = len(buffer) * 4
                 yield line.rstrip("\r")
 
         buffer += decoder.decode(b"", final=True)
@@ -1277,6 +1279,7 @@ class CodexCliRuntime:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        _resume_depth: int = 0,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task via Codex CLI and stream normalized messages."""
         # Note: CODEX_SANDBOX_NETWORK_DISABLED=1 does NOT necessarily mean
@@ -1484,6 +1487,22 @@ class CodexCliRuntime:
                 stderr_lines=stderr_lines,
             )
             if resume_recovery is not None:
+                if _resume_depth >= self._max_resume_retries:
+                    log.error(
+                        f"{self._log_namespace}.resume_depth_exceeded",
+                        depth=_resume_depth,
+                        limit=self._max_resume_retries,
+                    )
+                    yield AgentMessage(
+                        type="result",
+                        content=(
+                            f"{self._display_name} resume recovery exhausted "
+                            f"after {self._max_resume_retries} attempts."
+                        ),
+                        data={"subtype": "error", "error_type": self._runtime_error_type},
+                        resume_handle=current_handle,
+                    )
+                    return
                 recovery_handle, recovery_message = resume_recovery
                 if recovery_message is not None:
                     yield recovery_message
@@ -1492,6 +1511,7 @@ class CodexCliRuntime:
                     tools=tools,
                     system_prompt=system_prompt,
                     resume_handle=recovery_handle,
+                    _resume_depth=_resume_depth + 1,
                 ):
                     yield message
                 return

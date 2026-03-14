@@ -73,14 +73,30 @@ def project_runtime_message(message: AgentMessage) -> ProjectedRuntimeMessage:
     tool_input = message_tool_input(message)
     tool_result = message_tool_result(message)
     thinking = _message_thinking(message)
-    message_type = normalized_message_type(message)
-    runtime_signal, runtime_status = derive_runtime_signal(
-        message_type=message_type,
-        runtime_event_type=runtime_event_type(message),
-        subtype=message_subtype(message),
+    # Cache shared inputs and derive message_type + runtime signal in two passes
+    # to avoid 3x redundant derive_runtime_signal() calls.
+    _event_type = runtime_event_type(message)
+    _subtype = message_subtype(message)
+    _signal_kwargs = dict(
+        runtime_event_type=_event_type,
+        subtype=_subtype,
         is_final=message.is_final,
         is_error=message.is_error,
     )
+    # First pass: derive signal from raw message.type to normalize message_type.
+    _raw_signal, _raw_status = derive_runtime_signal(
+        message_type=message.type, **_signal_kwargs,
+    )
+    message_type = _normalized_message_type_from_signal(
+        message, tool_name, _raw_signal, _raw_status,
+    )
+    # Second pass only if message_type changed (e.g. subtype → "tool_result").
+    if message_type == message.type:
+        runtime_signal, runtime_status = _raw_signal, _raw_status
+    else:
+        runtime_signal, runtime_status = derive_runtime_signal(
+            message_type=message_type, **_signal_kwargs,
+        )
 
     content = message.content.strip()
     if not content and message_type == "tool":
@@ -114,9 +130,6 @@ def project_runtime_message(message: AgentMessage) -> ProjectedRuntimeMessage:
 
 def normalized_message_type(message: AgentMessage) -> str:
     """Collapse runtime-specific message details into shared progress categories."""
-    subtype = message.data.get("subtype")
-    if subtype == "tool_result":
-        return "tool_result"
     runtime_signal, runtime_status = derive_runtime_signal(
         message_type=message.type,
         runtime_event_type=runtime_event_type(message),
@@ -124,9 +137,24 @@ def normalized_message_type(message: AgentMessage) -> str:
         is_final=message.is_final,
         is_error=message.is_error,
     )
+    return _normalized_message_type_from_signal(
+        message, message_tool_name(message), runtime_signal, runtime_status,
+    )
+
+
+def _normalized_message_type_from_signal(
+    message: AgentMessage,
+    tool_name: str | None,
+    runtime_signal: str | None,
+    runtime_status: str | None,
+) -> str:
+    """Derive normalized message type from pre-computed runtime signal."""
+    subtype = message.data.get("subtype")
+    if subtype == "tool_result":
+        return "tool_result"
     if runtime_signal is not None and runtime_status in {"completed", "failed"}:
         return "result"
-    if message_tool_name(message):
+    if tool_name:
         return "tool"
     if message.is_final:
         return "result"

@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -125,10 +126,13 @@ class ExecutionCancelledError(OuroborosError):
 
 # Module-level set of session IDs marked for cancellation.
 # The MCP cancel tool adds IDs here; the runner's execution loop checks it.
+# Guarded by _cancellation_lock to prevent races between MCP cancel calls
+# and the runner's message loop reading the set concurrently.
 _cancellation_registry: set[str] = set()
+_cancellation_lock: asyncio.Lock = asyncio.Lock()
 
 
-def request_cancellation(session_id: str) -> None:
+async def request_cancellation(session_id: str) -> None:
     """Mark a session for cancellation.
 
     Called by the MCP cancel tool to signal that the runner should
@@ -137,10 +141,11 @@ def request_cancellation(session_id: str) -> None:
     Args:
         session_id: Session to cancel.
     """
-    _cancellation_registry.add(session_id)
+    async with _cancellation_lock:
+        _cancellation_registry.add(session_id)
 
 
-def is_cancellation_requested(session_id: str) -> bool:
+async def is_cancellation_requested(session_id: str) -> bool:
     """Check whether cancellation has been requested for a session.
 
     Args:
@@ -149,10 +154,11 @@ def is_cancellation_requested(session_id: str) -> bool:
     Returns:
         True if cancellation was requested.
     """
-    return session_id in _cancellation_registry
+    async with _cancellation_lock:
+        return session_id in _cancellation_registry
 
 
-def clear_cancellation(session_id: str) -> None:
+async def clear_cancellation(session_id: str) -> None:
     """Remove a session from the cancellation registry.
 
     Called after the runner has acknowledged the cancellation and
@@ -161,16 +167,18 @@ def clear_cancellation(session_id: str) -> None:
     Args:
         session_id: Session to clear.
     """
-    _cancellation_registry.discard(session_id)
+    async with _cancellation_lock:
+        _cancellation_registry.discard(session_id)
 
 
-def get_pending_cancellations() -> frozenset[str]:
+async def get_pending_cancellations() -> frozenset[str]:
     """Return a snapshot of all pending cancellation session IDs.
 
     Returns:
         Frozen set of session IDs awaiting cancellation.
     """
-    return frozenset(_cancellation_registry)
+    async with _cancellation_lock:
+        return frozenset(_cancellation_registry)
 
 
 # =============================================================================
@@ -698,7 +706,7 @@ class OrchestratorRunner:
 
         if session_id is not None:
             # In-flight cancellation: signal via the cancellation registry
-            request_cancellation(session_id)
+            await request_cancellation(session_id)
             log.info(
                 "orchestrator.runner.cancellation_requested",
                 execution_id=execution_id,
@@ -769,6 +777,41 @@ class OrchestratorRunner:
                     message=f"No session found for execution {execution_id}",
                     details={"execution_id": execution_id},
                 )
+            )
+
+        # Guard: do not overwrite a terminal state (completed/failed/cancelled)
+        _terminal_event_types = frozenset({
+            "orchestrator.session.completed",
+            "orchestrator.session.failed",
+            "orchestrator.session.cancelled",
+        })
+        try:
+            session_events = await self._event_store.query_events(
+                aggregate_id=session_id, limit=100,
+            )
+            for ev in session_events:
+                if ev.type in _terminal_event_types:
+                    log.info(
+                        "orchestrator.runner.cancel_skipped_terminal",
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        terminal_event=ev.type,
+                    )
+                    return Result.ok(
+                        {
+                            "execution_id": execution_id,
+                            "session_id": session_id,
+                            "status": "already_terminal",
+                            "terminal_event": ev.type,
+                            "reason": reason,
+                        }
+                    )
+        except Exception as e:
+            log.warning(
+                "orchestrator.runner.terminal_check_failed",
+                execution_id=execution_id,
+                session_id=session_id,
+                error=str(e),
             )
 
         # Mark as cancelled via repository
@@ -909,7 +952,7 @@ class OrchestratorRunner:
         """
         # Fast path: check the in-memory cancellation set first.
         # This is O(1) and requires no I/O.
-        if is_cancellation_requested(session_id):
+        if await is_cancellation_requested(session_id):
             return True
 
         # Slow path: check event store for externally-persisted cancellation
@@ -958,7 +1001,7 @@ class OrchestratorRunner:
         )
 
         # Clear the in-memory cancellation flag so it doesn't linger
-        clear_cancellation(session_id)
+        await clear_cancellation(session_id)
 
         # Clean up session tracking
         self._unregister_session(execution_id, session_id)
@@ -1620,7 +1663,7 @@ class OrchestratorRunner:
 
         # Clean up session tracking
         self._unregister_session(exec_id, tracker.session_id)
-        clear_cancellation(tracker.session_id)
+        await clear_cancellation(tracker.session_id)
 
         return Result.ok(
             OrchestratorResult(
@@ -1887,7 +1930,7 @@ Note: This is a resumed session. Please continue from where execution was interr
             )
 
             # Clear the in-memory cancellation flag so it doesn't linger
-            clear_cancellation(session_id)
+            await clear_cancellation(session_id)
 
             # Clean up session tracking
             self._unregister_session(tracker.execution_id, session_id)
