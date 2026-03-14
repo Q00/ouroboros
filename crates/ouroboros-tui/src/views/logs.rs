@@ -4,66 +4,12 @@ use crate::state::*;
 
 pub fn render(ui: &mut Context, state: &mut AppState) {
     let dim = ui.theme().text_dim;
+    let accent = ui.theme().accent;
     let surface = ui.theme().surface;
     let surface_hover = ui.theme().surface_hover;
     let text = ui.theme().text;
-    let secondary = ui.theme().secondary;
-    let accent = ui.theme().accent;
-    let error = ui.theme().error;
-
-    let filter_text = state.log_filter.value.to_lowercase();
-    let filtered: Vec<&LogEntry> = state
-        .logs
-        .iter()
-        .filter(|l| {
-            if let Some(lv) = state.log_level_filter {
-                if l.level != lv {
-                    return false;
-                }
-            }
-            if !filter_text.is_empty()
-                && !l.message.to_lowercase().contains(&filter_text)
-                && !l.source.to_lowercase().contains(&filter_text)
-            {
-                return false;
-            }
-            true
-        })
-        .collect();
 
     ui.container().grow(1).gap(0).col(|ui| {
-        ui.container()
-            .grow(1)
-            .border(Border::Single)
-            .bg(surface)
-            .col(|ui| {
-                if filtered.is_empty() {
-                    ui.container().grow(1).center().col(|ui| {
-                        ui.text("No log entries").fg(dim);
-                    });
-                } else {
-                    ui.scrollable(&mut state.log_scroll).grow(1).col(|ui| {
-                        for (i, e) in filtered.iter().rev().enumerate() {
-                            let lc = match e.level {
-                                LogLevel::Debug => dim,
-                                LogLevel::Info => secondary,
-                                LogLevel::Warning => accent,
-                                LogLevel::Error => error,
-                            };
-
-                            let bg = if i % 2 == 0 { surface } else { surface_hover };
-                            ui.container().bg(bg).px(2).py(0).row(|ui| {
-                                ui.text(&e.timestamp).fg(dim);
-                                ui.text("  ").fg(dim);
-                                ui.text(format!("{:<4}", e.level.label())).fg(lc);
-                                ui.text("  ").fg(dim);
-                                ui.text(&e.message).fg(text);
-                            });
-                        }
-                    });
-                }
-            });
-
         ui.container().bg(surface_hover).px(3).py(0).row(|ui| {
             ui.text("Filter ").fg(dim);
             ui.container().grow(1).mr(2).row(|ui| {
@@ -88,8 +34,48 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
                 }
             }
             ui.text("  ").fg(dim);
-            ui.text(format!("{}/{}", filtered.len(), state.logs.len()))
+            ui.text(format!("{} rows", state.log_table.rows.len()))
                 .fg(dim);
+        });
+
+        let filter_text = state.log_filter.value.to_lowercase();
+
+        if !filter_text.is_empty() {
+            state.log_table.set_filter(&filter_text);
+        } else {
+            state.log_table.set_filter("");
+        }
+
+        if let Some(level) = state.log_level_filter {
+            state.log_table.set_filter(level.label());
+        }
+
+        state.log_table.page_size = 50;
+
+        ui.container()
+            .grow(1)
+            .mt(1)
+            .border(Border::Single)
+            .bg(surface)
+            .col(|ui| {
+                ui.container().grow(1).col(|ui| {
+                    ui.table(&mut state.log_table);
+                });
+            });
+
+        ui.container().bg(surface_hover).px(3).py(0).row(|ui| {
+            let total_pages = state.log_table.total_pages();
+            let page = if total_pages > 0 {
+                total_pages.min(total_pages)
+            } else {
+                1
+            };
+            let total = state.log_table.total_pages().max(1);
+            ui.text(format!("Page {page}/{total}")).fg(text);
+            ui.text("  ").fg(dim);
+            ui.text("Click header to sort").fg(dim);
+            ui.text("  ").fg(dim);
+            ui.text("PgUp/PgDn to navigate").fg(dim);
         });
     });
 }

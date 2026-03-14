@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use slt::{
-    CommandPaletteState, ListState, PaletteCommand, ScrollState, TabsState, TextInputState,
-    TreeNode, TreeState,
+    CommandPaletteState, ListState, PaletteCommand, ScrollState, TableState, TabsState,
+    TextInputState, TreeNode, TreeState,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -285,9 +285,11 @@ pub struct AppState {
     pub selected_lineage_idx: Option<usize>,
     pub lineage_scroll: ScrollState,
 
-    // Execution timeline
+    // Execution
     pub execution_events: Vec<ExecutionEvent>,
     pub execution_scroll: ScrollState,
+    pub phase_outputs: HashMap<String, Vec<String>>,
+    pub log_table: TableState,
 
     // Session selector
     pub sessions: Vec<SessionInfo>,
@@ -366,6 +368,11 @@ impl AppState {
 
             execution_events: Vec::new(),
             execution_scroll: ScrollState::new(),
+            phase_outputs: HashMap::new(),
+            log_table: TableState::new(
+                vec!["Time", "Level", "Source", "Message"],
+                Vec::<Vec<&str>>::new(),
+            ),
 
             sessions: Vec::new(),
             session_list: ListState::new(Vec::<&str>::new()),
@@ -464,13 +471,22 @@ impl AppState {
     pub fn add_log(&mut self, level: LogLevel, source: &str, message: &str) {
         let now = chrono_lite_now();
         self.logs.push(LogEntry {
-            timestamp: now,
+            timestamp: now.clone(),
             level,
             source: source.to_string(),
             message: message.to_string(),
         });
         if self.logs.len() > 200 {
             self.logs.drain(..self.logs.len() - 200);
+        }
+        self.log_table.rows.push(vec![
+            now,
+            level.label().to_string(),
+            source.to_string(),
+            message.to_string(),
+        ]);
+        if self.log_table.rows.len() > 200 {
+            self.log_table.rows.drain(..self.log_table.rows.len() - 200);
         }
     }
 

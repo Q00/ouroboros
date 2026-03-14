@@ -260,6 +260,19 @@ pub fn populate_state_from_events(state: &mut AppState, events: &[EventRow]) {
                         _ => state.current_phase,
                     };
                 }
+                if let Some(detail) = ev.payload.get("activity_detail").and_then(|v| v.as_str()) {
+                    let phase_key = ev
+                        .payload
+                        .get("current_phase")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("discover")
+                        .to_lowercase();
+                    state
+                        .phase_outputs
+                        .entry(phase_key)
+                        .or_default()
+                        .push(detail.to_string());
+                }
             }
             "execution.tool.started" => {
                 let ac_id = ev

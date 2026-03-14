@@ -130,8 +130,11 @@ fn render_detail(ui: &mut Context, state: &mut AppState) {
         .p(1)
         .gap(0)
         .col(|ui| {
-            kv(ui, "ID", &nid, accent, dim);
-            ui.row(|ui| {
+            ui.line(|ui| {
+                ui.text("ID        ").fg(dim);
+                ui.text(&nid).fg(accent);
+            });
+            ui.line(|ui| {
                 ui.text("Status    ").fg(dim);
                 let sc = match status {
                     ACStatus::Completed => Color::Green,
@@ -144,20 +147,29 @@ fn render_detail(ui: &mut Context, state: &mut AppState) {
                     .fg(sc)
                     .bold();
             });
-            kv(ui, "Depth", &depth.to_string(), text_c, dim);
-            kv(
-                ui,
-                "Atomic",
-                if atomic { "Yes" } else { "No" },
-                if atomic { Color::Green } else { dim },
-                dim,
-            );
+            ui.line(|ui| {
+                ui.text("Depth     ").fg(dim);
+                ui.text(format!("{depth}")).fg(text_c);
+            });
+            ui.line(|ui| {
+                ui.text("Atomic    ").fg(dim);
+                if atomic {
+                    ui.text("Yes").fg(Color::Green);
+                } else {
+                    ui.text("No").fg(dim);
+                }
+            });
             if children > 0 {
-                kv(ui, "Children", &children.to_string(), accent, dim);
+                ui.line(|ui| {
+                    ui.text("Children  ").fg(dim);
+                    ui.text(format!("{children}")).fg(accent);
+                });
             }
 
             ui.separator();
-            ui.text_wrap(&content);
+            ui.line_wrap(|ui| {
+                ui.text(&content).fg(text_c);
+            });
 
             if let Some(ref t) = thinking {
                 ui.separator();
@@ -193,13 +205,6 @@ fn render_detail(ui: &mut Context, state: &mut AppState) {
                 });
             }
         });
-}
-
-fn kv(ui: &mut Context, label: &str, value: &str, vc: Color, dim: Color) {
-    ui.row(|ui| {
-        ui.text(format!("{:<10}", label)).fg(dim);
-        ui.text(value).fg(vc);
-    });
 }
 
 fn drift_color(v: f64) -> Color {

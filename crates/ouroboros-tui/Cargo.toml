@@ -7,6 +7,6 @@ license = "MIT"
 rust-version = "1.74"
 
 [dependencies]
-superlighttui = "0.6"
+superlighttui = "0.6.1"
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde_json = "1"

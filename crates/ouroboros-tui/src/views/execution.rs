@@ -14,142 +14,62 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
     let primary = ui.theme().primary;
 
     ui.container().grow(1).gap(1).row(|ui| {
-        ui.container()
-            .grow(1)
-            .border(Border::Single)
-            .title(" Timeline ")
-            .bg(surface)
-            .col(|ui| {
-                if state.execution_events.is_empty() && state.raw_events.is_empty() {
-                    ui.container().grow(1).center().col(|ui| {
-                        ui.text("No execution events").fg(dim);
-                        ui.text("Start a workflow to see timeline").fg(dim);
-                    });
-                } else {
+        ui.container().grow(1).gap(1).col(|ui| {
+            ui.container()
+                .border(Border::Single)
+                .title(" Phase Outputs ")
+                .bg(surface)
+                .grow(1)
+                .col(|ui| {
                     ui.scrollable(&mut state.execution_scroll)
                         .grow(1)
+                        .p(1)
+                        .gap(1)
                         .col(|ui| {
-                            let events: Vec<ExecutionEvent> = if state.execution_events.is_empty() {
-                                state
-                                    .raw_events
-                                    .iter()
-                                    .map(|e| ExecutionEvent {
-                                        timestamp: e.timestamp.clone(),
-                                        event_type: e.event_type.clone(),
-                                        detail: e.data_preview.clone(),
-                                        phase: None,
-                                    })
-                                    .collect()
-                            } else {
-                                state.execution_events.clone()
-                            };
+                            for phase in Phase::ALL {
+                                let done = phase.index() < state.current_phase.index();
+                                let active = phase == state.current_phase;
+                                let (icon, color) = if done {
+                                    ("●", success)
+                                } else if active {
+                                    ("◐", accent)
+                                } else {
+                                    ("○", dim)
+                                };
 
-                            for (i, ev) in events.iter().rev().enumerate() {
-                                let bg = if i % 2 == 0 { surface } else { surface_hover };
+                                let phase_key = phase.label().to_lowercase();
 
-                                let (icon, type_color) = event_visual(
-                                    &ev.event_type,
-                                    success,
-                                    secondary,
-                                    error,
-                                    accent,
-                                    dim,
-                                );
+                                ui.container()
+                                    .border(Border::Single)
+                                    .bg(surface_hover)
+                                    .p(1)
+                                    .col(|ui| {
+                                        ui.line(|ui| {
+                                            ui.text(format!("{icon} ")).fg(color);
+                                            ui.text(format!("{} ", phase.label())).fg(color).bold();
+                                            if done {
+                                                ui.text("(Converge)").fg(dim);
+                                            } else if active {
+                                                ui.text("(Diverge)").fg(dim);
+                                            }
+                                        });
 
-                                ui.container().bg(bg).px(2).py(0).row(|ui| {
-                                    ui.text(format!(" {icon} ")).fg(type_color);
-                                    ui.text(&ev.timestamp).fg(dim);
-                                    ui.text("  ").fg(dim);
-                                    ui.text(&ev.event_type).fg(type_color).bold();
-                                    if let Some(ref p) = ev.phase {
-                                        ui.text(format!(" [{p}]")).fg(secondary);
-                                    }
-                                    if !ev.detail.is_empty() {
-                                        ui.spacer();
-                                        ui.text(truncate(&ev.detail, 40)).fg(dim);
-                                    }
-                                });
+                                        if let Some(outputs) = state.phase_outputs.get(&phase_key) {
+                                            for line in outputs.iter().rev().take(5) {
+                                                ui.line(|ui| {
+                                                    ui.text("  • ").fg(dim);
+                                                    ui.text(line).fg(text);
+                                                });
+                                            }
+                                        } else if done || active {
+                                            ui.text("  No output recorded").fg(dim).italic();
+                                        }
+                                    });
                             }
                         });
-                }
-
-                ui.container().bg(surface_hover).px(3).py(0).row(|ui| {
-                    let count = if state.execution_events.is_empty() {
-                        state.raw_events.len()
-                    } else {
-                        state.execution_events.len()
-                    };
-                    ui.text(format!("{count} events")).fg(dim);
-                });
-            });
-
-        ui.container().w_pct(35).gap(1).col(|ui| {
-            ui.container()
-                .border(Border::Single)
-                .title(" Phase ")
-                .bg(surface)
-                .p(1)
-                .gap(0)
-                .col(|ui| {
-                    for phase in Phase::ALL {
-                        let done = phase.index() < state.current_phase.index();
-                        let active = phase == state.current_phase;
-                        let (icon, color) = if done {
-                            ("●", success)
-                        } else if active {
-                            ("◐", accent)
-                        } else {
-                            ("○", dim)
-                        };
-
-                        ui.row(|ui| {
-                            ui.text(format!(" {icon} {:<10}", phase.label())).fg(color);
-                            if done {
-                                ui.text("  ✓").fg(success);
-                            } else if active {
-                                ui.text("  ...").fg(accent);
-                            }
-                        });
-                    }
-
-                    ui.separator();
-
-                    let (done, total) = state.ac_progress();
-                    if total > 0 {
-                        ui.progress(done as f64 / total as f64);
-                        ui.text(format!("  {done}/{total} AC")).fg(text);
-                    }
                 });
 
             ui.container()
-                .border(Border::Single)
-                .title(" Tools ")
-                .bg(surface)
-                .p(1)
-                .gap(0)
-                .col(|ui| {
-                    if state.active_tools.is_empty() {
-                        ui.text("  idle").fg(dim).italic();
-                    } else {
-                        for (ac_id, tool) in &state.active_tools {
-                            ui.row(|ui| {
-                                ui.text(" ● ").fg(accent);
-                                ui.text(ac_id).fg(secondary);
-                                ui.text(format!(" {} ", tool.tool_name)).fg(text);
-                                ui.text(&tool.tool_detail).fg(dim);
-                            });
-                        }
-                    }
-
-                    let total_tools: usize = state.tool_history.values().map(|v| v.len()).sum();
-                    if total_tools > 0 {
-                        ui.separator();
-                        ui.text(format!("  {total_tools} total calls")).fg(dim);
-                    }
-                });
-
-            ui.container()
-                .grow(1)
                 .border(Border::Single)
                 .title(" Metrics ")
                 .bg(surface)
@@ -157,47 +77,106 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
                 .gap(0)
                 .col(|ui| {
                     ui.row(|ui| {
-                        ui.text("  Drift    ").fg(dim);
-                        ui.text(format!("{:.3}", state.drift.combined))
-                            .fg(drift_color(state.drift.combined));
-                    });
-                    if !state.drift.history.is_empty() {
-                        ui.row(|ui| {
-                            ui.text("           ").fg(dim);
-                            ui.sparkline(&state.drift.history, 18);
+                        ui.line(|ui| {
+                            ui.text("Drift ").fg(dim);
+                            ui.text(format!("{:.3} ", state.drift.combined))
+                                .fg(drift_color(state.drift.combined));
                         });
-                    }
-
-                    ui.separator();
-
-                    ui.row(|ui| {
-                        ui.text("  Cost     ").fg(dim);
-                        ui.text(format!("${:.2}", state.cost.total_cost_usd))
-                            .fg(success);
-                    });
-                    ui.row(|ui| {
-                        ui.text("  Tokens   ").fg(dim);
-                        ui.text(format!("{}", state.cost.total_tokens)).fg(text);
-                    });
-                    if !state.cost.history.is_empty() {
-                        ui.row(|ui| {
-                            ui.text("           ").fg(dim);
-                            ui.sparkline(&state.cost.history, 18);
+                        if !state.drift.history.is_empty() {
+                            ui.sparkline(&state.drift.history, 14);
+                        }
+                        ui.text("    ").fg(dim);
+                        ui.line(|ui| {
+                            ui.text("Cost ").fg(dim);
+                            ui.text(format!("${:.2} ", state.cost.total_cost_usd))
+                                .fg(success);
                         });
-                    }
-
-                    ui.separator();
-
-                    ui.row(|ui| {
-                        ui.text("  Iter     ").fg(dim);
-                        ui.text(format!("{}", state.iteration)).fg(primary);
-                    });
-                    ui.row(|ui| {
-                        ui.text("  Elapsed  ").fg(dim);
-                        ui.text(&state.elapsed).fg(text);
+                        if !state.cost.history.is_empty() {
+                            ui.sparkline(&state.cost.history, 14);
+                        }
+                        ui.text("    ").fg(dim);
+                        ui.line(|ui| {
+                            ui.text("Iter ").fg(dim);
+                            ui.text(format!("{}", state.iteration)).fg(primary);
+                        });
                     });
                 });
         });
+
+        ui.container()
+            .w_pct(40)
+            .border(Border::Single)
+            .title(" Event Timeline ")
+            .bg(surface)
+            .col(|ui| {
+                if state.execution_events.is_empty() && state.raw_events.is_empty() {
+                    ui.container().grow(1).center().col(|ui| {
+                        ui.text("No events yet").fg(dim);
+                    });
+                } else {
+                    ui.scrollable(&mut state.detail_scroll).grow(1).col(|ui| {
+                        let events: Vec<ExecutionEvent> = if state.execution_events.is_empty() {
+                            state
+                                .raw_events
+                                .iter()
+                                .map(|e| ExecutionEvent {
+                                    timestamp: e.timestamp.clone(),
+                                    event_type: e.event_type.clone(),
+                                    detail: e.data_preview.clone(),
+                                    phase: None,
+                                })
+                                .collect()
+                        } else {
+                            state.execution_events.clone()
+                        };
+
+                        for (i, ev) in events.iter().rev().enumerate() {
+                            let bg = if i % 2 == 0 { surface } else { surface_hover };
+                            let (icon, type_color) = event_visual(
+                                &ev.event_type,
+                                success,
+                                secondary,
+                                error,
+                                accent,
+                                dim,
+                            );
+
+                            ui.container().bg(bg).px(1).py(0).col(|ui| {
+                                ui.line(|ui| {
+                                    ui.text(format!("{icon} ")).fg(type_color);
+                                    ui.text(&ev.timestamp).fg(dim);
+                                    ui.text("  ").fg(dim);
+                                    ui.text(&ev.event_type).fg(type_color).bold();
+                                });
+                                if !ev.detail.is_empty() {
+                                    ui.text_wrap(truncate(&ev.detail, 60)).fg(dim);
+                                }
+                            });
+                        }
+                    });
+                }
+
+                ui.container().bg(surface_hover).px(2).py(0).row(|ui| {
+                    let count = if state.execution_events.is_empty() {
+                        state.raw_events.len()
+                    } else {
+                        state.execution_events.len()
+                    };
+                    ui.line(|ui| {
+                        ui.text(format!("{count}")).fg(text);
+                        ui.text(" events").fg(dim);
+                    });
+                    ui.spacer();
+                    if !state.active_tools.is_empty() {
+                        for tool in state.active_tools.values() {
+                            ui.line(|ui| {
+                                ui.text("● ").fg(accent);
+                                ui.text(&tool.tool_name).fg(text);
+                            });
+                        }
+                    }
+                });
+            });
     });
 }
 
@@ -209,7 +188,7 @@ fn event_visual(
     accent: slt::Color,
     dim: slt::Color,
 ) -> (&'static str, slt::Color) {
-    if event_type.contains("started") || event_type.contains("started") {
+    if event_type.contains("started") {
         ("▶", success)
     } else if event_type.contains("completed") {
         ("✓", secondary)
