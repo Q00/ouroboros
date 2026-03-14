@@ -2485,7 +2485,9 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                         ac_index=parent_ac_index * 100 + i,
                         ac_content=sub_acs[i],
                         success=False,
-                        error=str(result) if isinstance(result, BaseException) else "Task cancelled or produced no result",
+                        error=str(result)
+                        if isinstance(result, BaseException)
+                        else "Task cancelled or produced no result",
                         retry_attempt=retry_attempt,
                         depth=depth,
                     )
