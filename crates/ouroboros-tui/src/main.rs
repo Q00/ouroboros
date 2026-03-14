@@ -189,18 +189,20 @@ fn main() -> std::io::Result<()> {
 }
 
 fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
+    let on_logs = state.tabs.selected == 2;
+
     if ui.key('q') {
         ui.quit();
     }
     if ui.key_mod('p', KeyModifiers::CONTROL) {
         state.command_palette.open = !state.command_palette.open;
     }
-    if ui.key('p') && !state.command_palette.open {
+    if ui.key('p') && !state.command_palette.open && !on_logs {
         state.is_paused = true;
         state.status = ExecutionStatus::Paused;
         state.add_log(LogLevel::Info, "tui", "Execution paused by user");
     }
-    if ui.key('r') && !state.command_palette.open {
+    if ui.key('r') && !state.command_palette.open && !on_logs {
         state.is_paused = false;
         state.status = ExecutionStatus::Running;
         state.add_log(LogLevel::Info, "tui", "Execution resumed");
@@ -220,13 +222,13 @@ fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
     if ui.key('5') {
         state.tabs.selected = 4;
     }
-    if ui.key('l') {
+    if ui.key('l') && !on_logs {
         state.tabs.selected = 2;
     }
-    if ui.key('d') {
+    if ui.key('d') && !on_logs {
         state.tabs.selected = 3;
     }
-    if ui.key('e') {
+    if ui.key('e') && !on_logs {
         state.tabs.selected = 4;
     }
     if ui.key('s') && !state.command_palette.open {

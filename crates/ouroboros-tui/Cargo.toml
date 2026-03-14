@@ -13,6 +13,6 @@ name = "ouroboros-tui"
 path = "src/main.rs"
 
 [dependencies]
-superlighttui = "0.6.1"
+superlighttui = "0.7.1"
 rusqlite = { version = "0.33", features = ["bundled"] }
 serde_json = "1"
