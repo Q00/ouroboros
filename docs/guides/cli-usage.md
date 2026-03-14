@@ -12,7 +12,7 @@ uv sync
 uv run ouroboros --help
 
 # Using pip
-pip install ouroboros
+pip install ouroboros-ai
 ouroboros --help
 ```
 
@@ -52,7 +52,7 @@ ouroboros init "Build an API"    # = ouroboros init start "Build an API"
 ouroboros monitor                # = ouroboros tui monitor
 ```
 
-Orchestrator mode (Claude Agent SDK) is now the default for `run workflow`.
+Orchestrator mode (runtime backend execution) is now the default for `run workflow`.
 
 ---
 
@@ -151,7 +151,7 @@ ouroboros run [workflow] SEED_FILE [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--orchestrator/--no-orchestrator` | Use Claude Agent SDK (default: enabled) |
+| `--orchestrator/--no-orchestrator` | Use runtime backend execution (default: enabled) |
 | `--resume`, `-r ID` | Resume a previous orchestrator session |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix PREFIX` | Prefix to add to all MCP tool names (e.g., 'mcp_') |
@@ -189,7 +189,7 @@ ouroboros run seed.yaml --debug
 
 #### Orchestrator Mode
 
-Orchestrator mode is now the default. The workflow is executed via Claude Agent SDK:
+Orchestrator mode is now the default. The workflow is executed via the configured runtime backend:
 
 1. Seed is loaded and validated
 2. ClaudeAgentAdapter initialized

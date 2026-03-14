@@ -8,7 +8,7 @@ description: "Guided onboarding wizard for Ouroboros setup"
 Guided onboarding wizard that converts users into power users.
 
 > **Standalone users** (Codex, pip install): Use `ouroboros setup --runtime codex` in your terminal instead.
-> This skill runs inside Claude Code. For non-Claude-Code environments, the CLI `ouroboros setup` command handles configuration.
+> This skill runs inside a Claude Code session. For other runtime backends, the CLI `ouroboros setup` command handles configuration.
 
 ## Usage
 
@@ -96,13 +96,13 @@ which uvx 2>/dev/null && uvx --version 2>/dev/null
 which claude 2>/dev/null
 ```
 
-**IMPORTANT: If system Python is < 3.14 but uvx is available, also check uv-managed Python:**
+**IMPORTANT: If system Python is < 3.12 but uvx is available, also check uv-managed Python:**
 
 ```bash
-uv python list 2>/dev/null | grep "cpython-3.14"
+uv python list 2>/dev/null | grep "cpython-3.1[2-9]"
 ```
 
-If `uv python list` shows Python 3.14+ available, this counts as **Full Mode** because `uvx ouroboros-ai mcp serve` automatically uses uv-managed Python 3.14+ (not system Python).
+If `uv python list` shows Python >= 3.12 available, this counts as **Full Mode** because `uvx ouroboros-ai mcp serve` automatically uses uv-managed Python >= 3.12 (not system Python).
 
 **Report results with personality:**
 
@@ -110,32 +110,32 @@ If `uv python list` shows Python 3.14+ available, this counts as **Full Mode** b
 Environment Detected:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-System Python 3.13         [!] Below 3.14
-uv Python 3.14+            [✓] Available (uvx will use this)
+System Python 3.11         [!] Below 3.12
+uv Python 3.12+            [✓] Available (uvx will use this)
 uvx package runner         [✓] Available
-Claude Code CLI            [✓] Detected
+Runtime backend            [✓] Detected
 
-→ Full Mode Available (via uvx + uv-managed Python 3.14)
+→ Full Mode Available (via uvx + uv-managed Python >= 3.12)
 ```
 
 **Decision Matrix:**
 
 | Environment | Mode | Action |
 |:------------|:-----|:-------|
-| uvx + uv Python 3.14+ | **Ready** | Proceed to MCP registration |
-| System Python 3.14+ | **Ready** | Proceed to MCP registration |
-| uvx + Python < 3.14 only | **Install needed** | Run `uv python install 3.14` then proceed |
-| No uvx | **Install needed** | Run `curl -LsSf https://astral.sh/uv/install.sh \| sh` then `uv python install 3.14` |
+| uvx + uv Python >= 3.12 | **Ready** | Proceed to MCP registration |
+| System Python >= 3.12 | **Ready** | Proceed to MCP registration |
+| uvx + Python < 3.12 only | **Install needed** | Run `uv python install 3.12` then proceed |
+| No uvx | **Install needed** | Run `curl -LsSf https://astral.sh/uv/install.sh \| sh` then `uv python install 3.12` |
 
-**IMPORTANT**: If Python 3.14+ is not available, DO NOT skip to "Plugin-Only mode". Guide the user to install the prerequisites. MCP is required for the full Ouroboros experience.
+**IMPORTANT**: If Python >= 3.12 is not available, DO NOT skip to "Plugin-Only mode". Guide the user to install the prerequisites. MCP is required for the full Ouroboros experience.
 
 **If prerequisites are missing, show:**
 ```
-Ouroboros requires Python 3.14+ for the MCP server.
+Ouroboros requires Python >= 3.12 for the MCP server.
 
 Quick install (< 1 minute):
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  uv python install 3.14
+  uv python install 3.12
 
 Then re-run: ooo setup
 ```
@@ -161,7 +161,7 @@ ls -la ~/.claude/mcp.json 2>/dev/null && echo "EXISTS" || echo "NOT_FOUND"
   Registering MCP Server...
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Connecting Ouroboros Python core to Claude Code.
+Connecting Ouroboros Python core to your runtime backend.
 This enables:
 
   Visual TUI Dashboard    [Watch execution in real-time]
@@ -317,7 +317,7 @@ Display with celebration:
   Ouroboros Setup Complete!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Mode:                     Full Mode (Python 3.14 + MCP)
+Mode:                     Full Mode (Python >= 3.12 + MCP)
 Skills Registered:        15 workflow skills
 Agents Available:         9 specialized agents
 MCP Server:               ✓ Registered
@@ -422,9 +422,9 @@ Plugin mode still works! You can use:
 - ooo seed
 - ooo unstuck
 
-For Full Mode, install Python 3.14+:
-  macOS: brew install python@3.14
-  Ubuntu: sudo apt install python3.14
+For Full Mode, install Python >= 3.12:
+  macOS: brew install python@3.12
+  Ubuntu: sudo apt install python3.12
   Windows: python.org/downloads
 ```
 

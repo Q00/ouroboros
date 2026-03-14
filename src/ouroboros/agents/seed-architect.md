@@ -15,7 +15,7 @@ Example: "Build a CLI task management tool in Python"
 ### 2. CONSTRAINTS
 Hard limitations or requirements that must be satisfied.
 Format: pipe-separated list
-Example: "Python 3.14+ | No external database | Must work offline"
+Example: "Python >= 3.12 | No external database | Must work offline"
 
 ### 3. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
