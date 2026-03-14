@@ -65,7 +65,8 @@ QA_VERDICT_SCHEMA: dict[str, object] = {
         },
         "reasoning": {"type": "string", "description": "Explanation of assessment"},
     },
-    "required": ["score", "verdict"],
+    "required": ["score", "verdict", "dimensions", "differences", "suggestions", "reasoning"],
+    "additionalProperties": False,
 }
 
 VALID_ARTIFACT_TYPES = ("code", "api_response", "document", "screenshot", "test_output", "custom")

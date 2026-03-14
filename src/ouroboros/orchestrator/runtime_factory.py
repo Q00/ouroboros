@@ -77,11 +77,10 @@ def create_agent_runtime(
             **runtime_kwargs,
         )
 
-    # TODO: uncomment when OpenCode runtime is shipped
-    # return OpenCodeRuntime(
-    #     cli_path=cli_path or get_opencode_cli_path(),
-    #     **runtime_kwargs,
-    # )
+    if resolved_backend == "opencode":
+        msg = "OpenCode runtime is not yet available. Supported backends: claude, codex"
+        raise NotImplementedError(msg)
+
     msg = f"Unsupported orchestrator runtime backend: {resolved_backend}"
     raise ValueError(msg)
 

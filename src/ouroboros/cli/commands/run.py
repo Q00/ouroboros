@@ -4,8 +4,6 @@ Execute workflows and manage running operations.
 Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
-from __future__ import annotations
-
 import asyncio
 from enum import Enum
 from pathlib import Path
@@ -55,7 +53,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     OPENCODE = "opencode"
 
 
-def _derive_quality_bar(seed: Seed) -> str:
+def _derive_quality_bar(seed: "Seed") -> str:
     """Derive a quality bar string from seed acceptance criteria."""
     ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
     return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
@@ -92,7 +90,7 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
 async def _initialize_mcp_manager(
     config_path: Path,
     tool_prefix: str,  # noqa: ARG001
-) -> MCPClientManager | None:
+) -> "MCPClientManager | None":
     """Initialize MCPClientManager from config file.
 
     Args:
@@ -403,18 +401,22 @@ def workflow(
                 "[yellow]Warning: --resume requires --orchestrator flag. "
                 "Enabling orchestrator mode.[/yellow]"
             )
-        asyncio.run(
-            _run_orchestrator(
-                seed_file,
-                resume_session,
-                mcp_config,
-                mcp_tool_prefix,
-                debug,
-                parallel=not sequential,
-                no_qa=no_qa,
-                runtime_backend=runtime.value if runtime else None,
+        try:
+            asyncio.run(
+                _run_orchestrator(
+                    seed_file,
+                    resume_session,
+                    mcp_config,
+                    mcp_tool_prefix,
+                    debug,
+                    parallel=not sequential,
+                    no_qa=no_qa,
+                    runtime_backend=runtime.value if runtime else None,
+                )
             )
-        )
+        except (ValueError, NotImplementedError) as e:
+            print_error(str(e))
+            raise typer.Exit(1) from e
     else:
         # Standard workflow (placeholder)
         print_info(f"Would execute workflow from: {seed_file}")
