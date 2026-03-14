@@ -2476,16 +2476,16 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     raise
                 sub_results[idx] = e
 
-        # Convert exceptions to failed results
+        # Convert exceptions and None sentinels to failed results
         final_results: list[ACExecutionResult] = []
         for i, result in enumerate(sub_results):
-            if isinstance(result, BaseException):
+            if isinstance(result, BaseException) or result is None:
                 final_results.append(
                     ACExecutionResult(
                         ac_index=parent_ac_index * 100 + i,
                         ac_content=sub_acs[i],
                         success=False,
-                        error=str(result),
+                        error=str(result) if isinstance(result, BaseException) else "Task cancelled or produced no result",
                         retry_attempt=retry_attempt,
                         depth=depth,
                     )
