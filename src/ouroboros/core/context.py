@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import litellm
 import structlog
 
 from ouroboros.config import get_context_compression_model
@@ -159,7 +158,11 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
         The number of tokens in the text.
     """
     try:
+        import litellm
+
         return litellm.token_counter(model=model, text=text)
+    except ImportError:
+        return len(text) // 4
     except Exception as e:
         # Fallback to rough estimation if token counting fails
         log.warning(

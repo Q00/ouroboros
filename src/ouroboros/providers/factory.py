@@ -17,7 +17,6 @@ from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 
 # TODO: uncomment when OpenCode adapter is shipped
 # from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
 _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
@@ -111,6 +110,8 @@ def create_llm_adapter(
             "Supported backends: claude_code, codex, litellm"
         )
         raise NotImplementedError(msg)
+
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
     return LiteLLMAdapter(
         api_key=api_key,

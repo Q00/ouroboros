@@ -7,6 +7,9 @@ description: "Guided onboarding wizard for Ouroboros setup"
 
 Guided onboarding wizard that converts users into power users.
 
+> **Standalone users** (Codex, pip install): Use `ouroboros setup --runtime codex` in your terminal instead.
+> This skill runs inside Claude Code. For non-Claude-Code environments, the CLI `ouroboros setup` command handles configuration.
+
 ## Usage
 
 ```
