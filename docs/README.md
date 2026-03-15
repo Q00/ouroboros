@@ -34,6 +34,7 @@ Ouroboros is a self-improving AI workflow system that transforms ambiguous human
 - [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
+- [Issue Quality Policy](./contributing/issue-quality-policy.md) - Quality bar for actionable issues and PRD-lite feature requests
 
 ### Design Documents
 

@@ -41,6 +41,7 @@ uv run pytest tests/unit/ -q
 - Check [GitHub Issues](https://github.com/Q00/ouroboros/issues) for open tasks
 - For new features, open an issue first to discuss the approach
 - Label your issue with appropriate tags: `bug`, `enhancement`, `documentation`, etc.
+- Treat actionable issues as structured work artifacts, not casual notes. See [Issue Quality Policy](./docs/contributing/issue-quality-policy.md).
 
 ### 2. Branch
 
@@ -100,44 +101,25 @@ uv run mypy src/ouroboros
 
 ### Bug Reports
 
-Found a bug? Please open an issue with:
+Found a bug? Please use the bug report form and include enough detail for someone else to reproduce the problem and verify a fix.
 
-1. **Clear title**: Summarize the bug
-2. **Description**: Steps to reproduce, expected vs actual behavior
-3. **Environment**: Python version, OS, `uv run ouroboros --version`
-4. **Logs**: Relevant error messages or stack traces
-
-```markdown
-## Bug Description
-[What went wrong]
-
-## Steps to Reproduce
-1. Run `ooo interview "test"`
-2. Enter X when prompted
-3. Observe error
-
-## Expected Behavior
-[What should happen]
-
-## Environment
-- Python: 3.14.0
-- Ouroboros: v0.9.0
-- OS: macOS 15.2
-
-## Logs
-```
-[paste error output]
-```
-```
+See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for the rationale behind structured bug reports.
 
 ### Feature Proposals
 
-Have an idea? Open an issue with:
+Have an idea? Open an issue only when it is structured enough to act on.
 
-1. **Problem statement**: What problem does this solve?
-2. **Proposed solution**: How should it work?
-3. **Alternatives considered**: What other approaches did you think about?
-4. **Scope**: Is this a breaking change? Can it be incremental?
+Feature issues should focus on:
+
+1. **Problem**: What problem exists today?
+2. **Desired behavior**: What should happen instead?
+3. **Acceptance criteria**: What would make this done?
+
+Additional context like timing, constraints, and non-goals is welcome when it helps maintainers or tooling understand the proposal.
+
+If the idea is still fuzzy, use GitHub Discussions or Discord first, then turn it into a structured issue.
+
+See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for the full feature issue standard.
 
 ### Pull Requests
 
@@ -429,35 +411,14 @@ class ExecutionStrategy(Protocol):
 
 - **GitHub Issues**: [Report bugs or request features](https://github.com/Q00/ouroboros/issues)
 - **GitHub Discussions**: [Ask questions or share ideas](https://github.com/Q00/ouroboros/discussions)
+- **Security Reports**: See [SECURITY.md](./SECURITY.md) before reporting vulnerabilities
+- **Community Conduct**: See [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)
 
 ---
 
 ## Code of Conduct
 
-### Our Pledge
-
-We pledge to make participation in our community a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, gender identity and expression, level of experience, nationality, personal appearance, race, religion, or sexual identity and orientation.
-
-### Our Standards
-
-**Positive behavior includes**:
-- Being respectful and inclusive
-- Gracefully accepting constructive criticism
-- Focusing on what is best for the community
-- Showing empathy towards other community members
-
-**Unacceptable behavior includes**:
-- Harassment, trolling, or derogatory comments
-- Personal or political attacks
-- Public or private harassment
-- Publishing private information without permission
-- Any other conduct which could reasonably be considered inappropriate
-
-### Enforcement
-
-Project maintainers may remove, edit, or reject comments, commits, code, wiki edits, issues, and other contributions that are not aligned with this Code of Conduct.
-
-**Contact**: For any questions or concerns, please open a GitHub issue with the `conduct` label.
+The canonical community rules live in [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md). Please read that file before participating.
 
 ---
 
