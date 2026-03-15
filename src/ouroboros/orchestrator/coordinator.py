@@ -196,24 +196,12 @@ class LevelCoordinator:
         runtime_scope = build_level_coordinator_runtime_scope(execution_id, level_number)
         cache_key = (execution_id, level_number)
         seeded_handle = self._level_runtime_handles.get(cache_key)
-        backend_candidates = (
-            getattr(self._adapter, "_runtime_handle_backend", None),
-            getattr(self._adapter, "_provider_name", None),
-            getattr(self._adapter, "_runtime_backend", None),
-        )
-        backend = next(
-            (
-                candidate.strip()
-                for candidate in backend_candidates
-                if isinstance(candidate, str) and candidate.strip()
-            ),
-            None,
-        )
-        if backend is None:
+        backend = self._adapter.runtime_backend
+        if not backend:
             return None
 
-        cwd = getattr(self._adapter, "_cwd", None)
-        approval_mode = getattr(self._adapter, "_permission_mode", None)
+        cwd = self._adapter.working_directory
+        approval_mode = self._adapter.permission_mode
         native_session_id = seeded_handle.native_session_id if seeded_handle is not None else None
         if native_session_id is None and previous_review is not None:
             if previous_review.level_number == level_number:

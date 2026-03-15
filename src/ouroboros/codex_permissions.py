@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from typing import Literal
 
+import structlog
+
+log = structlog.get_logger(__name__)
+
 CodexPermissionMode = Literal["default", "acceptEdits", "bypassPermissions"]
 
 _VALID_PERMISSION_MODES = frozenset({"default", "acceptEdits", "bypassPermissions"})
@@ -44,6 +48,10 @@ def build_codex_exec_permission_args(
         return ["--sandbox", "read-only"]
     if resolved == "acceptEdits":
         return ["--full-auto"]
+    log.warning(
+        "permissions.bypass_activated",
+        mode="bypassPermissions",
+    )
     return ["--dangerously-bypass-approvals-and-sandbox"]
 
 

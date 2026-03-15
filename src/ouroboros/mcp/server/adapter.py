@@ -310,8 +310,11 @@ class MCPServerAdapter:
             return Result.err(security_result.error)
 
         try:
-            timeout = getattr(handler, "TIMEOUT_SECONDS", 30.0)
-            result = await asyncio.wait_for(handler.handle(arguments), timeout=timeout)
+            timeout = getattr(handler, "TIMEOUT_SECONDS", None)
+            if timeout is not None and timeout > 0:
+                result = await asyncio.wait_for(handler.handle(arguments), timeout=timeout)
+            else:
+                result = await handler.handle(arguments)
             return result
         except TimeoutError:
             log.error("mcp.server.tool_timeout", tool=name)
