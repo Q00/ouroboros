@@ -11,6 +11,7 @@ Security Level: MEDIUM
 - Size limits to prevent DoS attacks
 """
 
+from pathlib import Path
 import re
 from typing import Any
 
@@ -306,6 +307,33 @@ class InputValidator:
         if file_size > MAX_SEED_FILE_SIZE:
             return False, f"Seed file exceeds maximum size ({MAX_SEED_FILE_SIZE // 1024}KB)"
 
+        return True, ""
+
+    @staticmethod
+    def validate_path_containment(
+        path: str | Path,
+        allowed_root: str | Path,
+    ) -> tuple[bool, str]:
+        """Validate that a resolved path is contained within an allowed root.
+
+        Prevents path traversal attacks by ensuring the resolved (symlink-free,
+        canonicalized) path stays within the expected directory tree.
+
+        Args:
+            path: The path to validate.
+            allowed_root: The root directory that must contain *path*.
+
+        Returns:
+            Tuple of (is_valid, error_message). error_message is empty if valid.
+        """
+        try:
+            resolved = Path(path).resolve()
+            root = Path(allowed_root).resolve()
+        except (OSError, ValueError) as exc:
+            return False, f"Path resolution failed: {exc}"
+
+        if not resolved.is_relative_to(root):
+            return False, (f"Path escapes allowed root: {resolved} is not under {root}")
         return True, ""
 
     @staticmethod

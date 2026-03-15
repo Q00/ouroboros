@@ -197,6 +197,18 @@ class _StubCoordinatorRuntime:
         self._cwd = "/tmp/project"
         self._permission_mode = "acceptEdits"
 
+    @property
+    def runtime_backend(self) -> str:
+        return self._runtime_handle_backend
+
+    @property
+    def working_directory(self) -> str | None:
+        return self._cwd
+
+    @property
+    def permission_mode(self) -> str | None:
+        return self._permission_mode
+
     async def execute_task(
         self,
         prompt: str,

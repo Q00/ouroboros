@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import ModuleType
 from typing import Any
 from unittest.mock import patch
 
@@ -13,6 +14,7 @@ from ouroboros.orchestrator.adapter import (
     ClaudeAgentAdapter,
     RuntimeHandle,
     TaskResult,
+    _clone_runtime_handle_data,
 )
 
 
@@ -24,6 +26,24 @@ def _create_mock_sdk_message(class_name: str, **attrs: Any) -> Any:
     for key, value in attrs.items():
         setattr(instance, key, value)
     return instance
+
+
+def _build_mock_claude_agent_sdk(
+    *,
+    query_impl: Any,
+    options_sink: list[dict[str, Any]] | None = None,
+) -> ModuleType:
+    """Build a minimal Claude SDK module stub for adapter execution tests."""
+    module = ModuleType("claude_agent_sdk")
+
+    class _MockClaudeAgentOptions:
+        def __init__(self, **kwargs: Any) -> None:
+            if options_sink is not None:
+                options_sink.append(kwargs)
+
+    module.ClaudeAgentOptions = _MockClaudeAgentOptions
+    module.query = query_impl
+    return module
 
 
 class TestAgentMessage:
@@ -127,9 +147,261 @@ class TestRuntimeHandle:
 
         assert restored == handle
 
-    def test_invalid_dict_returns_none(self) -> None:
-        """Test invalid runtime handle payloads are rejected."""
-        assert RuntimeHandle.from_dict({"native_session_id": "sess_123"}) is None
+    def test_to_dict_writes_only_canonical_backend_field(self) -> None:
+        """New runtime payload writes should emit only the canonical backend selector."""
+        handle = RuntimeHandle(
+            backend="claude_code",
+            native_session_id="sess_123",
+            cwd="/tmp/project",
+        )
+
+        serialized = handle.to_dict()
+
+        assert serialized["backend"] == "claude"
+        assert "provider" not in serialized
+
+    @pytest.mark.parametrize(
+        ("selector", "expected_backend"),
+        [
+            ("claude_code", "claude"),
+            ("codex", "codex_cli"),
+            ("opencode_cli", "opencode"),
+        ],
+    )
+    def test_init_normalizes_legacy_backend_aliases(
+        self,
+        selector: str,
+        expected_backend: str,
+    ) -> None:
+        """Legacy backend aliases should normalize immediately on construction."""
+        handle = RuntimeHandle(
+            backend=selector,
+            native_session_id="sess_123",
+            cwd="/tmp/project",
+        )
+
+        assert handle.backend == expected_backend
+        assert handle == RuntimeHandle(
+            backend=expected_backend,
+            native_session_id="sess_123",
+            cwd="/tmp/project",
+        )
+
+    def test_non_dict_payload_returns_none(self) -> None:
+        """Missing runtime payloads still deserialize to None."""
+        assert RuntimeHandle.from_dict(None) is None
+
+    @pytest.mark.parametrize(
+        ("payload", "expected"),
+        [
+            pytest.param(
+                {
+                    "backend": "claude_code",
+                    "native_session_id": "sess_123",
+                    "cwd": "/tmp/project",
+                },
+                RuntimeHandle(
+                    backend="claude",
+                    native_session_id="sess_123",
+                    cwd="/tmp/project",
+                ),
+                id="backend-alias-only",
+            ),
+            pytest.param(
+                {
+                    "provider": "codex",
+                    "kind": "agent_runtime",
+                    "native_session_id": "thread-123",
+                    "cwd": "/tmp/project",
+                },
+                RuntimeHandle(
+                    backend="codex_cli",
+                    kind="agent_runtime",
+                    native_session_id="thread-123",
+                    cwd="/tmp/project",
+                ),
+                id="provider-only-alias",
+            ),
+            pytest.param(
+                {
+                    "backend": "opencode_cli",
+                    "provider": "opencode",
+                    "native_session_id": "oc-session-123",
+                },
+                RuntimeHandle(
+                    backend="opencode",
+                    native_session_id="oc-session-123",
+                ),
+                id="matching-backend-provider-aliases",
+            ),
+        ],
+    )
+    def test_from_dict_accepts_legacy_selector_aliases(
+        self,
+        payload: dict[str, Any],
+        expected: RuntimeHandle,
+    ) -> None:
+        """Supported backend/provider aliases should deserialize to the canonical backend."""
+        restored = RuntimeHandle.from_dict(payload)
+
+        assert restored == expected
+
+    def test_provider_only_payload_serializes_back_to_canonical_backend_on_new_write(self) -> None:
+        """Legacy provider-only reads should emit canonical backend data on new writes."""
+        payload = {
+            "provider": "opencode_cli",
+            "kind": "implementation_session",
+            "native_session_id": "oc-session-123",
+            "cwd": "/tmp/project",
+            "approval_mode": "acceptEdits",
+            "metadata": {"server_session_id": "server-42"},
+        }
+
+        restored = RuntimeHandle.from_dict(payload)
+
+        assert restored is not None
+        assert payload == {
+            "provider": "opencode_cli",
+            "kind": "implementation_session",
+            "native_session_id": "oc-session-123",
+            "cwd": "/tmp/project",
+            "approval_mode": "acceptEdits",
+            "metadata": {"server_session_id": "server-42"},
+        }
+        assert restored.to_dict() == {
+            "backend": "opencode",
+            "kind": "implementation_session",
+            "native_session_id": "oc-session-123",
+            "conversation_id": None,
+            "previous_response_id": None,
+            "transcript_path": None,
+            "cwd": "/tmp/project",
+            "approval_mode": "acceptEdits",
+            "updated_at": None,
+            "metadata": {"server_session_id": "server-42"},
+        }
+
+    def test_from_dict_detaches_legacy_provider_only_payload_from_source_metadata(self) -> None:
+        """Legacy payload reads should not retain mutable aliases to persisted metadata."""
+        payload = {
+            "provider": "opencode_cli",
+            "kind": "implementation_session",
+            "cwd": "/tmp/project",
+            "metadata": {
+                "server_session_id": "server-42",
+                "tool_catalog": [{"name": "Read"}],
+            },
+        }
+
+        restored = RuntimeHandle.from_dict(payload)
+        assert restored is not None
+
+        restored.metadata["server_session_id"] = "server-99"
+        restored.metadata["tool_catalog"][0]["name"] = "Write"
+
+        assert payload["metadata"] == {
+            "server_session_id": "server-42",
+            "tool_catalog": [{"name": "Read"}],
+        }
+
+    def test_from_dict_rejects_payload_without_selector(self) -> None:
+        """Selector-less payloads should fail eagerly."""
+        with pytest.raises(ValueError) as exc_info:
+            RuntimeHandle.from_dict({"native_session_id": "sess_123"})
+
+        assert exc_info.type is ValueError
+        assert "selector" in str(exc_info.value).lower()
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(
+                {
+                    "backend": "   ",
+                    "provider": "\t",
+                    "native_session_id": "sess_123",
+                },
+                id="blank-backend-and-provider",
+            ),
+            pytest.param(
+                {
+                    "backend": None,
+                    "provider": "",
+                    "native_session_id": "sess_123",
+                },
+                id="empty-provider-without-backend",
+            ),
+        ],
+    )
+    def test_from_dict_rejects_unresolvable_selector_shapes(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        """Ambiguous selector payloads should keep the existing boundary failure semantics."""
+        with pytest.raises(ValueError) as exc_info:
+            RuntimeHandle.from_dict(payload)
+
+        assert exc_info.type is ValueError
+        assert "selector" in str(exc_info.value).lower()
+        assert "determined" in str(exc_info.value).lower()
+
+    def test_init_rejects_unknown_backend_selector(self) -> None:
+        """Unknown backend aliases should fail with the public exception type."""
+        with pytest.raises(ValueError) as exc_info:
+            RuntimeHandle(backend="mystery-runtime")
+
+        assert exc_info.type is ValueError
+        assert "unsupported" in str(exc_info.value).lower()
+        assert "backend" in str(exc_info.value).lower()
+
+    @pytest.mark.parametrize(
+        ("payload", "field_name"),
+        [
+            pytest.param(
+                {
+                    "backend": "mystery-runtime",
+                    "native_session_id": "sess_123",
+                },
+                "backend",
+                id="unknown-backend",
+            ),
+            pytest.param(
+                {
+                    "provider": "mystery-runtime",
+                    "native_session_id": "sess_123",
+                },
+                "provider",
+                id="unknown-provider",
+            ),
+        ],
+    )
+    def test_from_dict_rejects_unknown_selector_aliases(
+        self,
+        payload: dict[str, Any],
+        field_name: str,
+    ) -> None:
+        """Unknown selector spellings should fail eagerly instead of widening alias support."""
+        with pytest.raises(ValueError) as exc_info:
+            RuntimeHandle.from_dict(payload)
+
+        assert exc_info.type is ValueError
+        assert "unsupported" in str(exc_info.value).lower()
+        assert field_name in str(exc_info.value).lower()
+
+    def test_from_dict_rejects_conflicting_backend_and_provider(self) -> None:
+        """Conflicting canonical selectors should fail eagerly at the boundary."""
+        with pytest.raises(ValueError) as exc_info:
+            RuntimeHandle.from_dict(
+                {
+                    "backend": "codex_cli",
+                    "provider": "opencode_cli",
+                    "native_session_id": "sess_123",
+                }
+            )
+
+        assert exc_info.type is ValueError
+        assert "backend/provider" in str(exc_info.value).lower()
+        assert "conflict" in str(exc_info.value).lower()
 
     def test_opencode_session_state_dict_keeps_only_resume_fields(self) -> None:
         """OpenCode session persistence should strip transient runtime fields."""
@@ -387,58 +659,451 @@ class TestClaudeAgentAdapter:
         adapter = ClaudeAgentAdapter(api_key="test")
 
         with patch.dict("sys.modules", {"claude_agent_sdk": None}):
-            # Simulate ImportError by patching the import
-            messages = []
-            async for msg in adapter.execute_task("test prompt"):
-                messages.append(msg)
+            messages = [msg async for msg in adapter.execute_task("test prompt")]
 
-            # Should yield an error message when SDK not available
-            # Note: Actual behavior depends on import mechanism
+        assert len(messages) == 1
+        assert messages[0] == AgentMessage(
+            type="result",
+            content="Claude Agent SDK is not installed. Run: pip install claude-agent-sdk",
+            data={"subtype": "error"},
+        )
 
     @pytest.mark.asyncio
-    async def test_execute_task_to_result_success(self) -> None:
-        """Test execute_task_to_result with successful execution."""
+    async def test_execute_task_rejects_foreign_runtime_handle_before_sdk_dispatch_as_error_result(
+        self,
+    ) -> None:
+        """Foreign runtime handles should fail at the streaming boundary before SDK dispatch."""
         adapter = ClaudeAgentAdapter(api_key="test")
-        runtime_handle = RuntimeHandle(backend="claude", native_session_id="sess_123")
+        query_calls = 0
 
-        # Mock the execute_task method
-        async def mock_execute(*args: Any, **kwargs: Any):
-            yield AgentMessage(type="assistant", content="Working...")
-            yield AgentMessage(
-                type="result",
-                content="Task completed",
-                data={"subtype": "success", "session_id": "sess_123"},
-                resume_handle=runtime_handle,
+        async def mock_query(*args: Any, **kwargs: Any):
+            nonlocal query_calls
+            query_calls += 1
+            if False:
+                yield args, kwargs
+
+        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+            messages = [
+                message
+                async for message in adapter.execute_task(
+                    "test prompt",
+                    resume_handle=RuntimeHandle(
+                        backend="opencode",
+                        native_session_id="oc-session-123",
+                    ),
+                )
+            ]
+
+        assert query_calls == 0
+        assert len(messages) == 1
+        assert messages[0] == AgentMessage(
+            type="result",
+            content="Task execution failed: runtime handle is incompatible with this runtime.",
+            data={
+                "subtype": "error",
+                "error_type": "RuntimeHandleError",
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_execute_task_yields_error_result_without_propagating_sdk_exception(
+        self,
+    ) -> None:
+        """SDK exceptions should stay on the streamed error path with resume context intact."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
+
+        async def mock_query(*, prompt: str, options: Any):
+            assert prompt == "test prompt"
+            assert options is not None
+            yield _create_mock_sdk_message(
+                "SystemMessage",
+                subtype="init",
+                data={"session_id": "sess_456"},
+            )
+            raise RuntimeError("boom")
+
+        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+            messages = [message async for message in adapter.execute_task("test prompt")]
+
+        assert len(messages) == 2
+        assert messages[0].type == "system"
+        assert messages[0].data["session_id"] == "sess_456"
+        assert messages[0].resume_handle is not None
+        assert messages[0].resume_handle.backend == "claude"
+        assert messages[0].resume_handle.native_session_id == "sess_456"
+        assert messages[0].resume_handle.cwd == "/tmp/project"
+        assert messages[0].resume_handle.approval_mode == "acceptEdits"
+        assert messages[0].resume_handle.updated_at is not None
+        assert messages[1].type == "result"
+        assert messages[1].content == "Task execution failed: boom"
+        assert messages[1].data == {
+            "subtype": "error",
+            "error_type": "RuntimeError",
+            "session_id": "sess_456",
+        }
+        assert messages[1].resume_handle == messages[0].resume_handle
+
+    @pytest.mark.asyncio
+    async def test_execute_task_to_result_preserves_runtime_handle_contract(self) -> None:
+        """Result aggregation should preserve the streamed RuntimeHandle contract."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
+
+        async def mock_query(*, prompt: str, options: Any):
+            assert prompt == "test prompt"
+            assert options is not None
+            yield _create_mock_sdk_message(
+                "SystemMessage",
+                subtype="init",
+                data={"session_id": "sess_456"},
+            )
+            yield _create_mock_sdk_message(
+                "AssistantMessage",
+                content=[_create_mock_sdk_message("TextBlock", text="Working...")],
+            )
+            yield _create_mock_sdk_message(
+                "ResultMessage",
+                result="Task completed",
+                subtype="success",
             )
 
-        with patch.object(adapter, "execute_task", mock_execute):
-            result = await adapter.execute_task_to_result("test prompt")
+        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+            result = await adapter.execute_task_to_result(
+                "test prompt",
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="sess_123",
+                ),
+                resume_session_id="legacy-session-id",
+            )
 
         assert result.is_ok
-        assert result.value.success is True
-        assert result.value.final_message == "Task completed"
-        assert len(result.value.messages) == 2
-        assert result.value.session_id == "sess_123"
-        assert result.value.resume_handle == runtime_handle
+        task_result = result.value
+        assert task_result.success is True
+        assert task_result.final_message == "Task completed"
+        assert task_result.session_id == "sess_456"
+        runtime_handle = task_result.resume_handle
+        assert runtime_handle is not None
+        assert runtime_handle.backend == "claude"
+        assert runtime_handle.native_session_id == "sess_456"
+        assert runtime_handle.cwd == "/tmp/project"
+        assert runtime_handle.approval_mode == "acceptEdits"
+        assert runtime_handle.updated_at is not None
+        assert [message.type for message in task_result.messages] == [
+            "system",
+            "assistant",
+            "result",
+        ]
+        assert [message.content for message in task_result.messages] == [
+            "Session initialized: sess_456",
+            "Working...",
+            "Task completed",
+        ]
+        assert all(message.resume_handle == runtime_handle for message in task_result.messages)
 
     @pytest.mark.asyncio
     async def test_execute_task_to_result_failure(self) -> None:
-        """Test execute_task_to_result with failed execution."""
-        adapter = ClaudeAgentAdapter(api_key="test")
+        """Failure aggregation should preserve existing ProviderError details."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
 
-        async def mock_execute(*args: Any, **kwargs: Any):
-            yield AgentMessage(type="assistant", content="Working...")
-            yield AgentMessage(
-                type="result",
-                content="Task failed: error",
-                data={"subtype": "error"},
+        async def mock_query(*, prompt: str, options: Any):
+            assert prompt == "test prompt"
+            assert options is not None
+            yield _create_mock_sdk_message(
+                "SystemMessage",
+                subtype="init",
+                data={"session_id": "sess_456"},
             )
+            raise RuntimeError("boom")
 
-        with patch.object(adapter, "execute_task", mock_execute):
+        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
             result = await adapter.execute_task_to_result("test prompt")
 
         assert result.is_err
-        assert "Task failed" in str(result.error)
+        assert result.error.message == "Task execution failed: boom"
+        assert result.error.provider is None
+        assert result.error.status_code is None
+        assert result.error.details == {
+            "messages": [
+                "Session initialized: sess_456",
+                "Task execution failed: boom",
+            ]
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_task_to_result_rejects_foreign_runtime_handle_before_sdk_dispatch(
+        self,
+    ) -> None:
+        """Foreign runtime handles should stay on the existing ProviderError result path."""
+        adapter = ClaudeAgentAdapter(api_key="test")
+        query_calls = 0
+
+        async def mock_query(*args: Any, **kwargs: Any):
+            nonlocal query_calls
+            query_calls += 1
+            if False:
+                yield args, kwargs
+
+        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+            result = await adapter.execute_task_to_result(
+                "test prompt",
+                resume_handle=RuntimeHandle(
+                    backend="opencode",
+                    native_session_id="oc-session-123",
+                ),
+            )
+
+        assert result.is_err
+        assert result.error.message == (
+            "Task execution failed: runtime handle is incompatible with this runtime."
+        )
+        assert result.error.provider is None
+        assert result.error.status_code is None
+        assert result.error.details == {
+            "messages": ["Task execution failed: runtime handle is incompatible with this runtime."]
+        }
+        assert query_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_execute_task_to_result_preserves_sdk_not_installed_error_precedence(
+        self,
+    ) -> None:
+        """Aggregation should preserve the streaming path's SDK import error precedence."""
+        adapter = ClaudeAgentAdapter(api_key="test")
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": None}):
+            result = await adapter.execute_task_to_result(
+                "test prompt",
+                resume_handle=RuntimeHandle(
+                    backend="opencode",
+                    native_session_id="oc-session-123",
+                ),
+            )
+
+        assert result.is_err
+        assert result.error.message == (
+            "Claude Agent SDK is not installed. Run: pip install claude-agent-sdk"
+        )
+        assert result.error.provider is None
+        assert result.error.status_code is None
+        assert result.error.details == {
+            "messages": ["Claude Agent SDK is not installed. Run: pip install claude-agent-sdk"]
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_task_streams_runtime_handle_contract_across_messages(
+        self,
+    ) -> None:
+        """Streaming execution should attach one canonical RuntimeHandle to each message."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
+
+        async def mock_query(*, prompt: str, options: Any):
+            assert prompt == "test prompt"
+            assert options is not None
+            yield _create_mock_sdk_message(
+                "SystemMessage",
+                subtype="init",
+                data={"session_id": "sess_456"},
+            )
+            yield _create_mock_sdk_message(
+                "AssistantMessage",
+                content=[
+                    _create_mock_sdk_message(
+                        "TextBlock",
+                        text="Inspecting repository state.",
+                    )
+                ],
+            )
+            yield _create_mock_sdk_message(
+                "ResultMessage",
+                result="Task completed",
+                subtype="success",
+                session_id="sess_456",
+            )
+
+        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+            stream = adapter.execute_task(
+                "test prompt",
+                resume_handle=RuntimeHandle(
+                    backend="claude",
+                    native_session_id="sess_123",
+                ),
+            )
+            first_message = await anext(stream)
+            second_message = await anext(stream)
+            final_message = await anext(stream)
+
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+
+        assert first_message.type == "system"
+        assert first_message.content == "Session initialized: sess_456"
+        runtime_handle = first_message.resume_handle
+        assert runtime_handle is not None
+        assert runtime_handle.backend == "claude"
+        assert runtime_handle.native_session_id == "sess_456"
+        assert runtime_handle.cwd == "/tmp/project"
+        assert runtime_handle.approval_mode == "acceptEdits"
+        assert runtime_handle.updated_at is not None
+        assert runtime_handle.to_dict()["backend"] == "claude"
+        assert "provider" not in runtime_handle.to_dict()
+
+        assert second_message.type == "assistant"
+        assert second_message.content == "Inspecting repository state."
+        assert second_message.resume_handle == runtime_handle
+
+        assert final_message.type == "result"
+        assert final_message.content == "Task completed"
+        assert final_message.resume_handle == runtime_handle
+
+
+class TestCloneRuntimeHandleData:
+    """Tests for _clone_runtime_handle_data deep-clone behavior."""
+
+    def test_clones_nested_dict_list_structures(self) -> None:
+        """Nested mutable structures should be fully detached from the source."""
+        source = {"a": [{"b": 1}, {"c": [2, 3]}], "d": {"e": "f"}}
+        cloned = _clone_runtime_handle_data(source)
+
+        assert cloned == source
+        cloned["a"][0]["b"] = 99
+        cloned["d"]["e"] = "changed"
+        assert source["a"][0]["b"] == 1
+        assert source["d"]["e"] == "f"
+
+    def test_clones_tuple_contents(self) -> None:
+        """Tuple values should be recursively cloned."""
+        inner = {"key": [1, 2]}
+        source = {"data": (inner, "scalar")}
+        cloned = _clone_runtime_handle_data(source)
+
+        assert cloned["data"] == ({"key": [1, 2]}, "scalar")
+        assert isinstance(cloned["data"], tuple)
+        cloned["data"][0]["key"].append(3)
+        assert inner["key"] == [1, 2]
+
+    def test_scalars_pass_through(self) -> None:
+        """Scalar values should pass through unchanged."""
+        assert _clone_runtime_handle_data("hello") == "hello"
+        assert _clone_runtime_handle_data(42) == 42
+        assert _clone_runtime_handle_data(None) is None
+        assert _clone_runtime_handle_data(True) is True
+
+
+class TestRuntimeHandleIdentityAliases:
+    """Tests for identity alias mappings (canonical → canonical)."""
+
+    @pytest.mark.parametrize(
+        ("canonical_backend",),
+        [
+            ("claude",),
+            ("codex_cli",),
+            ("opencode",),
+        ],
+    )
+    def test_init_preserves_canonical_backend_as_is(
+        self,
+        canonical_backend: str,
+    ) -> None:
+        """Canonical backend values should pass through normalization unchanged."""
+        handle = RuntimeHandle(
+            backend=canonical_backend,
+            native_session_id="sess_123",
+        )
+        assert handle.backend == canonical_backend
+
+
+class TestBuildRuntimeHandleFreshPath:
+    """Tests for _build_runtime_handle when no seeded handle is provided."""
+
+    def test_build_runtime_handle_creates_fresh_handle_without_seeded_handle(self) -> None:
+        """When no current_handle is provided, a fresh handle should be created."""
+        adapter = ClaudeAgentAdapter(
+            api_key="test",
+            cwd="/tmp/project",
+            permission_mode="acceptEdits",
+        )
+        handle = adapter._build_runtime_handle(
+            native_session_id="sess_789",
+            current_handle=None,
+        )
+
+        assert handle is not None
+        assert handle.backend == "claude"
+        assert handle.kind == "agent_runtime"
+        assert handle.native_session_id == "sess_789"
+        assert handle.cwd == "/tmp/project"
+        assert handle.approval_mode == "acceptEdits"
+        assert handle.metadata == {}
+        assert handle.updated_at is not None
+
+    def test_build_runtime_handle_returns_none_without_session_id(self) -> None:
+        """When no session_id is provided, no handle should be created."""
+        adapter = ClaudeAgentAdapter(api_key="test")
+        handle = adapter._build_runtime_handle(
+            native_session_id=None,
+            current_handle=None,
+        )
+        assert handle is None
+
+    def test_build_runtime_handle_deep_clones_seeded_metadata(self) -> None:
+        """Seeded handle metadata should be deep-cloned, not shallow-copied."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
+        nested_metadata = {"tools": [{"name": "Read"}], "config": {"key": "val"}}
+        seeded = RuntimeHandle(
+            backend="claude",
+            native_session_id="sess_old",
+            cwd="/tmp/project",
+            metadata=nested_metadata,
+        )
+
+        handle = adapter._build_runtime_handle(
+            native_session_id="sess_new",
+            current_handle=seeded,
+        )
+
+        assert handle is not None
+        handle.metadata["tools"][0]["name"] = "Write"
+        handle.metadata["config"]["key"] = "changed"
+        assert nested_metadata["tools"][0]["name"] == "Read"
+        assert nested_metadata["config"]["key"] == "val"
+
+
+class TestNonStringSelectorErrorMessage:
+    """Tests for improved error messages when selectors are non-string types."""
+
+    @pytest.mark.parametrize(
+        ("selector_value", "expected_type"),
+        [
+            (42, "int"),
+            (["claude"], "list"),
+            (True, "bool"),
+        ],
+    )
+    def test_init_rejects_non_string_backend_with_type_info(
+        self,
+        selector_value: Any,
+        expected_type: str,
+    ) -> None:
+        """Non-string backend selectors should report the actual type in the error."""
+        with pytest.raises(ValueError, match=f"must be a string, got {expected_type}"):
+            RuntimeHandle(backend=selector_value)
+
+    def test_from_dict_rejects_non_string_backend_with_type_info(self) -> None:
+        """Non-string backend in persisted payload should report type in the error."""
+        with pytest.raises(ValueError, match="must be a string, got int"):
+            RuntimeHandle.from_dict({"backend": 123, "native_session_id": "sess"})
 
 
 class TestDefaultTools:

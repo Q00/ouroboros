@@ -397,7 +397,16 @@ class OrchestratorRunner:
 
     def _deserialize_runtime_handle(self, progress: dict[str, Any]) -> RuntimeHandle | None:
         """Deserialize runtime resume state from session progress."""
-        runtime_handle = RuntimeHandle.from_dict(progress.get("runtime"))
+        runtime_payload = progress.get("runtime")
+        try:
+            runtime_handle = RuntimeHandle.from_dict(runtime_payload)
+        except ValueError as exc:
+            log.warning(
+                "orchestrator.runner.runtime_handle_deserialize_failed",
+                error=str(exc),
+                runtime_keys=sorted(runtime_payload) if isinstance(runtime_payload, dict) else None,
+            )
+            runtime_handle = None
         if runtime_handle is not None:
             return runtime_handle
 
@@ -418,29 +427,18 @@ class OrchestratorRunner:
         tool_catalog: SessionToolCatalog | None = None,
     ) -> RuntimeHandle | None:
         """Seed a runtime handle with startup metadata before execution begins."""
-        backend_candidates = (
-            runtime_handle.backend if runtime_handle is not None else None,
-            getattr(self._adapter, "_runtime_handle_backend", None),
-            getattr(self._adapter, "_provider_name", None),
-            getattr(self._adapter, "_runtime_backend", None),
-        )
-        backend = next(
-            (
-                candidate.strip()
-                for candidate in backend_candidates
-                if isinstance(candidate, str) and candidate.strip()
-            ),
-            None,
-        )
-        if backend is None:
+        backend = (
+            runtime_handle.backend if runtime_handle is not None else None
+        ) or self._adapter.runtime_backend
+        if not backend:
             return runtime_handle
 
         metadata = dict(runtime_handle.metadata) if runtime_handle is not None else {}
         if tool_catalog is not None:
             metadata["tool_catalog"] = serialize_tool_catalog(tool_catalog)
 
-        cwd = getattr(self._adapter, "_cwd", None)
-        approval_mode = getattr(self._adapter, "_permission_mode", None)
+        cwd = self._adapter.working_directory
+        approval_mode = self._adapter.permission_mode
 
         if runtime_handle is not None:
             return replace(

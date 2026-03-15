@@ -172,6 +172,9 @@ class TestOrchestratorRunner:
     def mock_adapter(self) -> MagicMock:
         """Create a mock Claude agent adapter."""
         adapter = MagicMock()
+        adapter.runtime_backend = "opencode"
+        adapter.working_directory = "/tmp/project"
+        adapter.permission_mode = "acceptEdits"
         return adapter
 
     @pytest.fixture
@@ -813,6 +816,40 @@ class TestOrchestratorRunner:
 
         assert handle == RuntimeHandle(backend="claude", native_session_id="sess_legacy")
 
+    def test_deserialize_runtime_handle_falls_back_from_invalid_runtime_payload(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Malformed runtime payloads should not block the legacy session-id fallback."""
+        handle = runner._deserialize_runtime_handle(
+            {
+                "runtime": {
+                    "native_session_id": "sess_ignored",
+                    "metadata": {"server_session_id": "server-42"},
+                },
+                "agent_session_id": "sess_legacy",
+                "runtime_backend": "claude",
+            }
+        )
+
+        assert handle == RuntimeHandle(backend="claude", native_session_id="sess_legacy")
+
+    def test_deserialize_runtime_handle_returns_none_when_invalid_payload_has_no_fallback(
+        self,
+        runner: OrchestratorRunner,
+    ) -> None:
+        """Malformed runtime payloads without legacy fallback data should be ignored."""
+        handle = runner._deserialize_runtime_handle(
+            {
+                "runtime": {
+                    "native_session_id": "sess_ignored",
+                    "metadata": {"server_session_id": "server-42"},
+                }
+            }
+        )
+
+        assert handle is None
+
     def test_build_progress_update_round_trips_persisted_opencode_resume_handle(
         self,
         runner: OrchestratorRunner,
@@ -1192,6 +1229,9 @@ class TestOrchestratorRunnerWithMCP:
     def mock_adapter(self) -> MagicMock:
         """Create a mock Claude agent adapter."""
         adapter = MagicMock()
+        adapter.runtime_backend = "opencode"
+        adapter.working_directory = "/tmp/project"
+        adapter.permission_mode = "acceptEdits"
         return adapter
 
     @pytest.fixture
@@ -1460,7 +1500,11 @@ class TestCancellationPolling:
     @pytest.fixture
     def mock_adapter(self) -> MagicMock:
         """Create a mock Claude agent adapter."""
-        return MagicMock()
+        adapter = MagicMock()
+        adapter.runtime_backend = "opencode"
+        adapter.working_directory = "/tmp/project"
+        adapter.permission_mode = "acceptEdits"
+        return adapter
 
     @pytest.fixture
     def mock_event_store(self) -> AsyncMock:

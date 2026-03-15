@@ -28,9 +28,8 @@ Example:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import UTC, datetime
-from enum import Enum
 import json
 import re
 from typing import TYPE_CHECKING, Any
@@ -57,6 +56,13 @@ from ouroboros.orchestrator.level_context import (
     extract_level_context,
 )
 from ouroboros.orchestrator.mcp_tools import serialize_tool_catalog
+from ouroboros.orchestrator.parallel_executor_models import (
+    ACExecutionOutcome,
+    ACExecutionResult,
+    ParallelExecutionResult,
+    ParallelExecutionStageResult,
+    StageExecutionOutcome,
+)
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
@@ -122,207 +128,9 @@ _AC_RUNTIME_SCOPE_METADATA_KEYS = frozenset(
 _AC_RUNTIME_RESUME_METADATA_KEYS = frozenset({"runtime_event_type", "server_session_id"})
 
 
-# =============================================================================
-# Data Models
-# =============================================================================
-
-
-class ACExecutionOutcome(str, Enum):  # noqa: UP042
-    """Normalized outcome for a single AC execution."""
-
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    BLOCKED = "blocked"
-    INVALID = "invalid"
-
-
-@dataclass(frozen=True, slots=True)
-class ACExecutionResult:
-    """Result of executing a single AC, including Sub-ACs if decomposed.
-
-    Attributes:
-        ac_index: 0-based AC index.
-        ac_content: AC description.
-        success: Whether execution succeeded.
-        messages: All agent messages from execution.
-        final_message: Final result message content.
-        error: Error message if failed.
-        duration_seconds: Execution duration.
-        session_id: Claude session ID for this AC.
-        retry_attempt: Retry attempt number (0 for the first execution).
-        is_decomposed: Whether this AC was decomposed into Sub-ACs.
-        sub_results: Results from Sub-AC parallel executions.
-        depth: Depth in decomposition tree (0 = root AC).
-        outcome: Normalized result classification for aggregation.
-        runtime_handle: Backend-neutral runtime handle for same-attempt resume.
-    """
-
-    ac_index: int
-    ac_content: str
-    success: bool
-    messages: tuple[AgentMessage, ...] = field(default_factory=tuple)
-    final_message: str = ""
-    error: str | None = None
-    duration_seconds: float = 0.0
-    session_id: str | None = None
-    retry_attempt: int = 0
-    is_decomposed: bool = False
-    sub_results: tuple[ACExecutionResult, ...] = field(default_factory=tuple)
-    depth: int = 0
-    outcome: ACExecutionOutcome | None = None
-    runtime_handle: RuntimeHandle | None = None
-
-    def __post_init__(self) -> None:
-        """Normalize outcome so callers do not infer from error strings."""
-        if self.outcome is None:
-            object.__setattr__(self, "outcome", self._infer_outcome())
-
-    def _infer_outcome(self) -> ACExecutionOutcome:
-        if self.success:
-            return ACExecutionOutcome.SUCCEEDED
-
-        error_text = (self.error or "").lower()
-        if "not included in dependency graph" in error_text:
-            return ACExecutionOutcome.INVALID
-        if "skipped: dependency failed" in error_text or "blocked: dependency" in error_text:
-            return ACExecutionOutcome.BLOCKED
-        return ACExecutionOutcome.FAILED
-
-    @property
-    def is_blocked(self) -> bool:
-        """True when the AC was blocked by an upstream dependency outcome."""
-        return self.outcome == ACExecutionOutcome.BLOCKED
-
-    @property
-    def is_failure(self) -> bool:
-        """True when the AC executed and failed."""
-        return self.outcome == ACExecutionOutcome.FAILED
-
-    @property
-    def is_invalid(self) -> bool:
-        """True when the AC was not representable in the execution plan."""
-        return self.outcome == ACExecutionOutcome.INVALID
-
-    @property
-    def attempt_number(self) -> int:
-        """Human-readable execution attempt number (1-based)."""
-        return self.retry_attempt + 1
-
-
-class StageExecutionOutcome(str, Enum):  # noqa: UP042
-    """Aggregate outcome for a serial execution stage."""
-
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    BLOCKED = "blocked"
-    PARTIAL = "partial"
-
-
-@dataclass(frozen=True, slots=True)
-class ParallelExecutionStageResult:
-    """Aggregate result for one serial stage of AC execution."""
-
-    stage_index: int
-    ac_indices: tuple[int, ...]
-    results: tuple[ACExecutionResult, ...] = field(default_factory=tuple)
-    started: bool = True
-    coordinator_review: CoordinatorReview | None = None
-
-    @property
-    def level_number(self) -> int:
-        """Legacy 1-based level number."""
-        return self.stage_index + 1
-
-    @property
-    def success_count(self) -> int:
-        """Number of successful ACs in this stage."""
-        return sum(1 for result in self.results if result.outcome == ACExecutionOutcome.SUCCEEDED)
-
-    @property
-    def failure_count(self) -> int:
-        """Number of failed ACs in this stage."""
-        return sum(1 for result in self.results if result.outcome == ACExecutionOutcome.FAILED)
-
-    @property
-    def blocked_count(self) -> int:
-        """Number of dependency-blocked ACs in this stage."""
-        return sum(1 for result in self.results if result.outcome == ACExecutionOutcome.BLOCKED)
-
-    @property
-    def invalid_count(self) -> int:
-        """Number of invalidly planned ACs in this stage."""
-        return sum(1 for result in self.results if result.outcome == ACExecutionOutcome.INVALID)
-
-    @property
-    def skipped_count(self) -> int:
-        """Legacy alias for blocked and invalid ACs."""
-        return self.blocked_count + self.invalid_count
-
-    @property
-    def outcome(self) -> StageExecutionOutcome:
-        """Aggregate stage outcome for hybrid execution handling."""
-        if not self.results:
-            return (
-                StageExecutionOutcome.BLOCKED
-                if not self.started
-                else StageExecutionOutcome.SUCCEEDED
-            )
-        if self.failure_count == 0 and self.blocked_count == 0 and self.invalid_count == 0:
-            return StageExecutionOutcome.SUCCEEDED
-        if self.success_count == 0 and self.failure_count == 0:
-            return StageExecutionOutcome.BLOCKED
-        if self.success_count == 0 and self.blocked_count == 0 and self.invalid_count == 0:
-            return StageExecutionOutcome.FAILED
-        return StageExecutionOutcome.PARTIAL
-
-    @property
-    def has_terminal_issue(self) -> bool:
-        """True when the stage should block some downstream work."""
-        return self.failure_count > 0 or self.blocked_count > 0
-
-
-@dataclass(frozen=True, slots=True)
-class ParallelExecutionResult:
-    """Result of parallel AC execution.
-
-    Attributes:
-        results: Individual results for each AC.
-        success_count: Number of successful ACs.
-        failure_count: Number of failed ACs.
-        skipped_count: Number of skipped ACs (due to failed dependencies).
-        blocked_count: Number of ACs blocked by dependency failures.
-        invalid_count: Number of ACs missing from the execution plan.
-        stages: Per-stage aggregated outcomes.
-        reconciled_level_contexts: Current shared-workspace handoff contexts
-            accumulated after each completed stage. Retry/reopen orchestration
-            can pass these back into a later execution attempt so reopened ACs
-            start from the post-reconcile workspace state instead of the
-            original pre-failure context.
-        total_messages: Total messages processed across all ACs.
-        total_duration_seconds: Total execution time.
-    """
-
-    results: tuple[ACExecutionResult, ...]
-    success_count: int
-    failure_count: int
-    skipped_count: int = 0
-    blocked_count: int = 0
-    invalid_count: int = 0
-    stages: tuple[ParallelExecutionStageResult, ...] = field(default_factory=tuple)
-    reconciled_level_contexts: tuple[LevelContext, ...] = field(default_factory=tuple)
-    total_messages: int = 0
-    total_duration_seconds: float = 0.0
-
-    @property
-    def all_succeeded(self) -> bool:
-        """Return True if all ACs succeeded."""
-        return self.failure_count == 0 and self.blocked_count == 0 and self.invalid_count == 0
-
-    @property
-    def any_succeeded(self) -> bool:
-        """Return True if at least one AC succeeded."""
-        return self.success_count > 0
-
+# Data models re-exported from parallel_executor_models for backwards compat.
+# (ACExecutionOutcome, ACExecutionResult, ParallelExecutionStageResult,
+#  ParallelExecutionResult, StageExecutionOutcome are imported above.)
 
 # =============================================================================
 # Parallel Executor
@@ -356,6 +164,7 @@ class ParallelACExecutor:
         self._coordinator = LevelCoordinator(adapter)
         self._semaphore = anyio.Semaphore(max_concurrent)
         self._ac_runtime_handles: dict[str, RuntimeHandle] = {}
+        self._execution_counters_lock = asyncio.Lock()
 
     def _flush_console(self) -> None:
         """Flush console output to ensure progress is visible immediately."""
@@ -588,24 +397,12 @@ class ParallelACExecutor:
         )
         if cached_seeded_handle is not None and seeded_handle is None:
             self._ac_runtime_handles.pop(runtime_identity.cache_key, None)
-        backend_candidates = (
-            getattr(self._adapter, "_runtime_handle_backend", None),
-            getattr(self._adapter, "_provider_name", None),
-            getattr(self._adapter, "_runtime_backend", None),
-        )
-        backend = next(
-            (
-                candidate.strip()
-                for candidate in backend_candidates
-                if isinstance(candidate, str) and candidate.strip()
-            ),
-            None,
-        )
-        if backend is None:
+        backend = self._adapter.runtime_backend
+        if not backend:
             return None
 
-        cwd = getattr(self._adapter, "_cwd", None)
-        approval_mode = getattr(self._adapter, "_permission_mode", None)
+        cwd = self._adapter.working_directory
+        approval_mode = self._adapter.permission_mode
         metadata: dict[str, Any] = dict(seeded_handle.metadata) if seeded_handle is not None else {}
         metadata.update(runtime_identity.to_metadata())
         metadata.setdefault("turn_number", 1)
@@ -719,7 +516,20 @@ class ParallelACExecutor:
             if event.type not in _REUSABLE_RUNTIME_EVENT_TYPES:
                 continue
 
-            runtime_handle = RuntimeHandle.from_dict(event_data.get("runtime"))
+            runtime_payload = event_data.get("runtime")
+            try:
+                runtime_handle = RuntimeHandle.from_dict(runtime_payload)
+            except ValueError as exc:
+                log.warning(
+                    "parallel_executor.persisted_runtime_handle_invalid",
+                    aggregate_id=event.aggregate_id,
+                    event_type=event.type,
+                    error=str(exc),
+                    runtime_keys=sorted(runtime_payload)
+                    if isinstance(runtime_payload, dict)
+                    else None,
+                )
+                continue
             if runtime_handle is None:
                 continue
             runtime_handle = self._normalize_ac_runtime_handle(
@@ -2451,9 +2261,10 @@ When complete, explicitly state: [TASK_COMPLETE]
 
                 messages.append(message)
                 if execution_counters is not None:
-                    execution_counters["messages_count"] = (
-                        execution_counters.get("messages_count", 0) + 1
-                    )
+                    async with self._execution_counters_lock:
+                        execution_counters["messages_count"] = (
+                            execution_counters.get("messages_count", 0) + 1
+                        )
                 projected = project_runtime_message(message)
 
                 persisted_session_id = self._runtime_resume_session_id(runtime_handle)
@@ -2497,9 +2308,10 @@ When complete, explicitly state: [TASK_COMPLETE]
 
                 if projected.is_tool_call and projected.tool_name is not None:
                     if execution_counters is not None:
-                        execution_counters["tool_calls_count"] = (
-                            execution_counters.get("tool_calls_count", 0) + 1
-                        )
+                        async with self._execution_counters_lock:
+                            execution_counters["tool_calls_count"] = (
+                                execution_counters.get("tool_calls_count", 0) + 1
+                            )
                     tool_input = projected.tool_input
                     tool_detail = self._format_tool_detail(projected.tool_name, tool_input)
                     self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")

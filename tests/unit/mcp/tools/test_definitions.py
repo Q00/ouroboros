@@ -109,15 +109,15 @@ class TestExecuteSeedHandler:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
                 return_value=mock_runtime,
             ) as mock_create_runtime,
             patch(
-                "ouroboros.mcp.tools.definitions.EventStore",
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
                 return_value=mock_event_store,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
             ),
         ):
@@ -147,15 +147,15 @@ class TestExecuteSeedHandler:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
                 return_value=mock_runtime,
             ) as mock_create_runtime,
             patch(
-                "ouroboros.mcp.tools.definitions.EventStore",
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
                 return_value=mock_event_store,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
             ),
         ):
@@ -184,15 +184,15 @@ class TestExecuteSeedHandler:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
                 return_value=mock_runtime,
             ) as mock_create_runtime,
             patch(
-                "ouroboros.mcp.tools.definitions.EventStore",
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
                 return_value=mock_event_store,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
             ),
         ):
@@ -253,15 +253,15 @@ metadata:
 """
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
                 return_value=mock_runtime,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.EventStore",
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
                 return_value=mock_event_store,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
             ),
         ):
@@ -315,19 +315,21 @@ metadata:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
                 return_value=mock_runtime,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.EventStore",
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
                 return_value=mock_event_store,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
             ),
         ):
-            result = await handler.handle({"seed_path": str(seed_file), "skip_qa": True})
+            result = await handler.handle(
+                {"seed_path": str(seed_file), "cwd": str(tmp_path), "skip_qa": True}
+            )
             background_tasks = tuple(handler._background_tasks)
             await asyncio.gather(*background_tasks)
 
@@ -377,15 +379,15 @@ metadata:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
                 return_value=mock_runtime,
             ) as mock_create_runtime,
             patch(
-                "ouroboros.mcp.tools.definitions.EventStore",
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
                 return_value=mock_event_store,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
             ),
         ):
@@ -438,19 +440,19 @@ metadata:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_agent_runtime",
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
                 return_value=mock_runtime,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.EventStore",
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
                 return_value=mock_event_store,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.SessionRepository.reconstruct_session",
+                "ouroboros.mcp.tools.execution_handlers.SessionRepository.reconstruct_session",
                 new=AsyncMock(return_value=Result.ok(resumed_tracker)),
             ),
         ):
@@ -769,11 +771,11 @@ class TestOuroborosTools:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_llm_adapter",
+                "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
                 return_value=mock_adapter,
             ) as mock_create_adapter,
             patch(
-                "ouroboros.mcp.tools.definitions.InterviewEngine",
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
                 return_value=mock_engine,
             ),
         ):
@@ -793,19 +795,19 @@ class TestOuroborosTools:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_llm_adapter",
+                "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
                 return_value=mock_adapter,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.InterviewEngine",
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
                 return_value=mock_interview_engine,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.SeedGenerator",
+                "ouroboros.mcp.tools.authoring_handlers.SeedGenerator",
                 return_value=mock_seed_generator,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.get_clarification_model",
+                "ouroboros.mcp.tools.authoring_handlers.get_clarification_model",
                 return_value="default",
             ) as mock_get_model,
         ):
@@ -840,11 +842,11 @@ metadata:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.create_llm_adapter",
+                "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
                 return_value=mock_adapter,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.get_semantic_model",
+                "ouroboros.mcp.tools.evaluation_handlers.get_semantic_model",
                 return_value="default",
             ) as mock_get_model,
             patch(
@@ -1343,7 +1345,7 @@ class TestInterviewHandlerCwd:
         mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
 
         with patch(
-            "ouroboros.mcp.tools.definitions.InterviewEngine",
+            "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
             return_value=mock_engine,
         ):
             result = await handler.handle({"session_id": "sess-123", "answer": "Manage tasks"})
@@ -1416,7 +1418,7 @@ class TestGenerateSeedHandlerAmbiguity:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.AmbiguityScorer",
+                "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
                 return_value=mock_scorer,
             ) as mock_scorer_cls,
         ):
@@ -1474,7 +1476,7 @@ class TestGenerateSeedHandlerAmbiguity:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.AmbiguityScorer",
+                "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
             ) as mock_scorer_cls,
         ):
             await handler.handle({"session_id": "sess-123"})
