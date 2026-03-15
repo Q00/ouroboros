@@ -1,6 +1,56 @@
+<!--
+doc_maintenance:
+  score: 43
+  rank: 4
+  scored_on: "2026-03-15"
+  scoring_formula: "findings_count*2 + code_deps_count + downstream_dependents + open_findings*5"
+  findings_total: 15
+  findings_open: 0
+  open_finding_ids: []
+  # code_deps_count: DERIVED — computed from docs/claim-registry.yaml (schema v1.3, Sub-AC 2a)
+  # Derivation: count unique code_deps entries across all CR-NNN claims whose locations[] include this doc.
+  # Legacy value was 10; authoritative claim-level code_deps now live in claim-registry.yaml.
+  downstream_dependents: 3
+  review_trigger: "Any change to src/ouroboros/cli/commands/*.py or src/ouroboros/cli/main.py"
+  registry_ref: "docs/contributing/findings-registry.md"
+  ranking_ref: "docs/doc-maintenance-ranking.yaml"
+  runtime_scope: [local, claude, codex, ci]
+
+canonical_source:
+  # [v1.2] Upgraded from claim_ownership schema v1.0 (2026-03-15).
+  # defers_to now uses canonical_doc + claim_patterns[] with claim_pattern_ids from claim_patterns: registry.
+  # Note: v1.0 "cli-commands" → v1.2 "cli-options"; "tui-shortcuts" merged into "cli-options".
+  schema_version: "1.2"
+  generated: "2026-03-15"
+  # This guide adds narrative context to CLI usage.
+  # ALL CLI option definitions, defaults, and package install commands DEFER to their canonical owners.
+  canonical_for: []   # narrative guide; no shared claim pattern is authoritative here
+  defers_to:
+    - canonical_doc: docs/cli-reference.md
+      claim_patterns: [cli-options, pkg-install]
+      # cli-options: narrative option tables derived from cli-reference.md; must be kept in sync.
+      #   claim_registry_refs: [CR-005–CR-015, CR-010 (TUI shortcuts), CR-014]
+      # pkg-install: pip install commands repeated here for discoverability;
+      #   claim_inventory_refs: [C-001, C-002]
+    - canonical_doc: docs/config-reference.md
+      claim_patterns: [install-paths, config-keys]
+      # install-paths: path references (e.g., ~/.ouroboros/, ~/.claude/mcp.json)
+      #   claim_inventory_refs: [A-001, A-002, A-007]; update config-reference.md first if paths change.
+-->
+
 # CLI Usage Guide
 
 Ouroboros provides a command-line interface built with Typer and Rich for interactive workflow management.
+
+> **Maintenance Warning — Score 43/100 (Rank #4 of 42, scored 2026-03-15)**
+> This guide has the highest per-document finding count in the corpus: **15
+> audit findings** (all resolved). It tracks **10 source files** and mirrors
+> [`docs/cli-reference.md`](../cli-reference.md) — **both files must be updated
+> together** whenever CLI options change. Any change to
+> `src/ouroboros/cli/commands/*.py` or `src/ouroboros/cli/main.py` **must**
+> trigger a review of this file. See
+> [`docs/doc-maintenance-ranking.yaml`](../doc-maintenance-ranking.yaml) for
+> the full scoring breakdown.
 
 ## Installation
 
@@ -33,10 +83,12 @@ ouroboros [OPTIONS] COMMAND [ARGS]
 
 | Command | Description |
 |---------|-------------|
+| `ouroboros setup` | Detect runtimes and configure Ouroboros for your environment (one-time). Supports `claude` and `codex`; `opencode` is detected but cannot be configured via `setup` — see [CLI Reference: setup](../cli-reference.md#ouroboros-setup) |
 | `ouroboros init` | Start interactive interview (Big Bang phase) |
 | `ouroboros run` | Execute workflows |
-| `ouroboros config` | Manage configuration |
-| `ouroboros status` | Check system status |
+| `ouroboros cancel` | Cancel stuck or orphaned executions |
+| `ouroboros config` | Manage configuration (scaffolding — placeholder output only) |
+| `ouroboros status` | Check system status (placeholder output only) |
 | `ouroboros tui` | Interactive TUI monitor |
 | `ouroboros monitor` | Shorthand for `tui monitor` |
 | `ouroboros mcp` | MCP server commands |
@@ -76,6 +128,10 @@ ouroboros init [CONTEXT] [OPTIONS]
 |--------|-------------|
 | `--resume`, `-r ID` | Resume an existing interview by ID |
 | `--state-dir PATH` | Custom directory for interview state files |
+| `-o, --orchestrator` | Use Claude Code (Max Plan) for the interview/seed flow — no API key required |
+| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`. (`opencode` is in the CLI enum but out of scope.) Custom adapters registered in `runtime_factory.py` are also accepted. |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`). (`opencode` is in the CLI enum but out of scope) |
+| `-d, --debug` | Show verbose logs including debug messages |
 
 #### Examples
 
@@ -85,6 +141,15 @@ ouroboros init "I want to build a task management CLI tool"
 
 # Start new interview interactively
 ouroboros init
+
+# Start with Claude Code (no API key needed)
+ouroboros init --orchestrator "Build a REST API"
+
+# Specify runtime backend for the workflow execution step
+ouroboros init --orchestrator --runtime codex "Build a REST API"
+
+# Use Codex as the LLM backend for interview and seed generation
+ouroboros init --llm-backend codex "Build a REST API"
 
 # Resume a previous interview
 ouroboros init --resume interview_20260125_120000
@@ -100,6 +165,21 @@ ouroboros init --state-dir /path/to/states "Build a REST API"
 3. After 3+ rounds, you can choose to continue or finish early
 4. Interview completes when ambiguity score <= 0.2
 5. State is saved for later seed generation
+
+#### Error Handling
+
+| Situation | Behavior |
+|-----------|----------|
+| API key missing or invalid | Command exits with error code 1. Set `ANTHROPIC_API_KEY` or use `--orchestrator`. |
+| LLM rate limit during a question | Error is shown with a `Retry? [Y/n]` prompt. Session state is preserved. |
+| State save fails mid-interview | Warning printed; interview continues. Progress not persisted. Fix directory permissions. |
+| Empty response given | Rejected immediately; the same question is re-displayed. |
+| Ambiguity score > 0.2 at generation time | Presents three choices: continue the interview, force-generate, or cancel. |
+| Seed generation LLM failure | "Failed to generate Seed" error. Resume the session to retry generation. |
+| Seed file write fails | "Failed to save Seed" error. Fix disk space or permissions, then resume. |
+| Ctrl+C at any time | Progress saved; exits with code 0. Resume with `--resume`. |
+
+For a detailed walkthrough of each failure mode, see [Seed Authoring — Failure Modes & Troubleshooting](./seed-authoring.md#failure-modes--troubleshooting).
 
 ### `ouroboros init list`
 
@@ -151,12 +231,14 @@ ouroboros run [workflow] SEED_FILE [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--orchestrator/--no-orchestrator` | Use runtime backend execution (default: enabled) |
+| `-o/-O, --orchestrator/--no-orchestrator` | Use runtime backend execution (default: enabled) |
+| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`). Uses configured default if omitted. (`opencode` is in the CLI enum but out of scope) |
 | `--resume`, `-r ID` | Resume a previous orchestrator session |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix PREFIX` | Prefix to add to all MCP tool names (e.g., 'mcp_') |
 | `--sequential`, `-s` | Execute ACs sequentially instead of in parallel |
-| `--dry-run`, `-n` | Validate seed without executing |
+| `--no-qa` | Skip post-execution QA evaluation |
+| `--dry-run`, `-n` | Validate seed without executing. **Currently only takes effect with `--no-orchestrator`.** In default orchestrator mode this flag is accepted but has no effect — the full workflow executes |
 | `--debug`, `-d` | Show logs and agent thinking (verbose output) |
 
 #### Examples
@@ -168,9 +250,6 @@ ouroboros run seed.yaml
 # Explicit subcommand (equivalent)
 ouroboros run workflow seed.yaml
 
-# Legacy standard mode (placeholder)
-ouroboros run seed.yaml --no-orchestrator
-
 # With external MCP tools
 ouroboros run seed.yaml --mcp-config mcp.yaml
 
@@ -178,7 +257,7 @@ ouroboros run seed.yaml --mcp-config mcp.yaml
 ouroboros run seed.yaml --mcp-config mcp.yaml --mcp-tool-prefix "ext_"
 
 # Dry run to validate seed
-ouroboros run seed.yaml --dry-run --no-orchestrator
+ouroboros run seed.yaml --dry-run
 
 # Resume a previous orchestrator session
 ouroboros run seed.yaml --resume orch_abc123
@@ -192,7 +271,7 @@ ouroboros run seed.yaml --debug
 Orchestrator mode is now the default. The workflow is executed via the configured runtime backend:
 
 1. Seed is loaded and validated
-2. ClaudeAgentAdapter initialized
+2. The configured runtime adapter is initialized
 3. If `--mcp-config` provided, connects to external MCP servers
 4. OrchestratorRunner executes the seed with merged tools
 5. Progress is streamed to console
@@ -246,6 +325,8 @@ See [MCP Client Configuration](#mcp-client-configuration) for full schema detail
 
 Resume a paused or failed execution.
 
+> **Current state:** this helper is still placeholder-oriented. Prefer `ouroboros run seed.yaml --resume <session_id>` for real orchestrator sessions.
+
 ```bash
 ouroboros run resume [EXECUTION_ID]
 ```
@@ -257,11 +338,8 @@ ouroboros run resume [EXECUTION_ID]
 #### Example
 
 ```bash
-# Resume specific execution
-ouroboros run resume exec_abc123
-
-# Resume most recent execution
-ouroboros run resume
+# Preferred pattern for real orchestrator sessions
+ouroboros run seed.yaml --resume orch_abc123
 ```
 
 ---
@@ -269,6 +347,8 @@ ouroboros run resume
 ## `ouroboros config` - Configuration Commands
 
 The `config` command group manages Ouroboros configuration.
+
+> **Current state:** these commands are scaffolding. They print placeholder output and do not yet update `~/.ouroboros/config.yaml`.
 
 ### `ouroboros config show`
 
@@ -312,7 +392,7 @@ Initialize Ouroboros configuration.
 ouroboros config init
 ```
 
-Creates default configuration files at `~/.ouroboros/` if they don't exist.
+Creates `~/.ouroboros/config.yaml` and `~/.ouroboros/credentials.yaml` with default templates. Sets `chmod 600` on `credentials.yaml`. If the files already exist they are not overwritten.
 
 ### `ouroboros config set`
 
@@ -330,11 +410,8 @@ ouroboros config set KEY VALUE
 #### Examples
 
 ```bash
-# Set log level
-ouroboros config set logging.level DEBUG
-
-# Set default provider
-ouroboros config set providers.default anthropic/claude-3-5-sonnet
+# Placeholder command surface
+ouroboros config set orchestrator.runtime_backend codex
 ```
 
 > **Note:** Sensitive values (API keys) should be set via environment variables.
@@ -348,12 +425,15 @@ ouroboros config validate
 ```
 
 Checks configuration files for errors and missing required values.
+Currently this command is informational only.
 
 ---
 
 ## `ouroboros status` - Status Commands
 
 The `status` command group checks system status and execution history.
+
+> **Current state:** these commands return lightweight placeholder summaries. Use them as smoke checks only, not as authoritative workflow state.
 
 ### `ouroboros status executions`
 
@@ -455,12 +535,18 @@ System Health
 
 ## Environment Variables
 
+The table below lists the most commonly used variables. For the full list (including all per-model overrides such as `OUROBOROS_QA_MODEL`, `OUROBOROS_SEMANTIC_MODEL`, etc.), see the [Configuration Reference](../config-reference.md#environment-variables).
+
 | Variable | Description |
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude |
-| `OPENAI_API_KEY` | OpenAI API key |
-| `OUROBOROS_CONFIG` | Path to config file (default: `~/.ouroboros/config.yaml`) |
-| `OUROBOROS_LOG_LEVEL` | Log level override |
+| `OPENAI_API_KEY` | OpenAI API key for Codex / LiteLLM-backed flows |
+| `OPENROUTER_API_KEY` | OpenRouter API key for consensus and LiteLLM-backed flows |
+| `OUROBOROS_AGENT_RUNTIME` | Override `orchestrator.runtime_backend` (`claude`, `codex`) |
+| `OUROBOROS_AGENT_PERMISSION_MODE` | Override `orchestrator.permission_mode` |
+| `OUROBOROS_LLM_BACKEND` | Override `llm.backend` |
+| `OUROBOROS_CLI_PATH` | Override `orchestrator.cli_path` (path to Claude CLI binary) |
+| `OUROBOROS_CODEX_CLI_PATH` | Override `orchestrator.codex_cli_path` |
 
 ---
 
@@ -468,38 +554,18 @@ System Health
 
 Default location: `~/.ouroboros/config.yaml`
 
+For all available options, see the [Configuration Reference](../config-reference.md). A minimal example:
+
 ```yaml
-# LLM Provider Settings
-providers:
-  default: anthropic/claude-3-5-sonnet
-  frugal: anthropic/claude-3-haiku
-  standard: anthropic/claude-3-5-sonnet
-  frontier: anthropic/claude-3-opus
-
-# Database Settings
-database:
-  path: ~/.ouroboros/ouroboros.db
-
-# Logging Settings
-logging:
-  level: INFO
-  format: json  # or "text"
-
-# Interview Settings
-interview:
-  max_rounds: 10
-  ambiguity_threshold: 0.2
-
-# Orchestrator Settings
 orchestrator:
-  permission_mode: acceptEdits
-  default_tools:
-    - Read
-    - Write
-    - Edit
-    - Bash
-    - Glob
-    - Grep
+  runtime_backend: codex
+  codex_cli_path: /usr/local/bin/codex  # optional if already on PATH
+
+llm:
+  backend: codex
+
+logging:
+  level: info
 ```
 
 ---
@@ -509,27 +575,21 @@ orchestrator:
 ### Complete Workflow Example
 
 ```bash
-# 1. Initialize configuration
-ouroboros config init
+# 1. Configure a runtime
+ouroboros setup --runtime codex
 
-# 2. Validate configuration
-ouroboros config validate
-
-# 3. Check system health
-ouroboros status health
-
-# 4. Start an interview
+# 2. Start an interview
 ouroboros init "Build a Python library for parsing markdown"
 
-# 5. (Answer questions interactively)
+# 3. (Answer questions interactively)
 
-# 6. Execute the generated seed (orchestrator is default)
-ouroboros run ~/.ouroboros/seeds/latest.yaml
+# 4. Execute the generated seed (replace with the path printed by the interview)
+ouroboros run seed.yaml
 
-# 7. Monitor progress
+# 5. Monitor progress
 ouroboros monitor
 
-# 8. Check specific execution
+# 6. Check specific execution
 ouroboros status execution exec_abc123 --events
 ```
 
@@ -548,15 +608,14 @@ ouroboros run seed.yaml --resume orch_abc123
 ### CI/CD Usage
 
 ```bash
-# Non-interactive execution with dry-run validation
-ouroboros run seed.yaml --dry-run --no-orchestrator
+# Non-interactive dry-run validation
+ouroboros run seed.yaml --dry-run
 
 # Execute with debug output (shows logs and agent thinking)
 ouroboros run seed.yaml --debug
-
-# Execute with full debug logging via environment variable
-OUROBOROS_LOG_LEVEL=DEBUG ouroboros run seed.yaml
 ```
+
+> **Note:** `OUROBOROS_LOG_LEVEL` is **not** a recognized environment variable. To control log verbosity, set `logging.level: debug` in `~/.ouroboros/config.yaml` or use `--debug` on the CLI.
 
 ---
 
@@ -564,12 +623,14 @@ OUROBOROS_LOG_LEVEL=DEBUG ouroboros run seed.yaml
 
 The `tui` command group provides an interactive terminal user interface for monitoring workflow execution in real-time.
 
+> **Equivalent invocations:** `ouroboros tui` (no subcommand), `ouroboros tui monitor`, and `ouroboros monitor` are all equivalent — they all launch the TUI monitor.
+
 ### `ouroboros tui monitor`
 
 Launch the interactive TUI monitor.
 
 ```bash
-ouroboros tui monitor [OPTIONS]
+ouroboros tui [monitor] [OPTIONS]
 ```
 
 | Option | Description |
@@ -595,7 +656,7 @@ ouroboros tui monitor --backend slt
 
 #### TUI Screens
 
-The TUI provides 4 screens, accessible via number keys:
+The TUI provides 6 screens / views:
 
 | Key | Screen | Description |
 |-----|--------|-------------|
@@ -603,14 +664,19 @@ The TUI provides 4 screens, accessible via number keys:
 | `2` | Execution | Execution details, timeline, phase outputs |
 | `3` | Logs | Filterable log viewer with level filtering |
 | `4` | Debug | State inspector, raw events, configuration |
+| `s` | Session Selector | Browse and switch between monitored sessions |
+| `e` | Lineage | View evolutionary lineage across generations (evolve/ralph) |
 
 #### Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `1-4` | Switch screens |
+| `1-4` | Switch to numbered screen |
+| `s` | Session Selector |
+| `e` | Lineage view |
 | `q` | Quit |
-| `r` | Resume |
+| `p` | Pause execution |
+| `r` | Resume execution |
 | `↑/↓` | Scroll |
 | `Tab` | Next widget |
 
@@ -640,6 +706,9 @@ ouroboros mcp serve [OPTIONS]
 | `--host`, `-h HOST` | Host to bind to (default: localhost) |
 | `--port`, `-p PORT` | Port to bind to (default: 8080) |
 | `--transport`, `-t TYPE` | Transport type: `stdio` or `sse` (default: stdio) |
+| `--db TEXT` | Path to the EventStore database file (default: `~/.ouroboros/ouroboros.db`) |
+| `--runtime TEXT` | Runtime backend for orchestrator-driven tools (`claude`, `codex`). (`opencode` is in the CLI enum but out of scope) |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`). (`opencode` is in the CLI enum but out of scope) |
 
 #### Examples
 
@@ -650,20 +719,49 @@ ouroboros mcp serve
 # Start with SSE transport on custom port
 ouroboros mcp serve --transport sse --port 9000
 
+# Start with Codex-backed orchestrator tools
+ouroboros mcp serve --runtime codex --llm-backend codex
+
 # Start on specific host
 ouroboros mcp serve --host 0.0.0.0 --port 8080 --transport sse
 ```
 
-#### Claude Desktop Integration
+#### Startup behavior
 
-Add to your Claude Desktop config (`~/.config/claude/config.json`):
+On startup, `mcp serve` automatically cancels any sessions left in `RUNNING` or `PAUSED` state for more than 1 hour. These are treated as orphaned from a previous crash. Cancelled sessions are reported on stderr (or console when using SSE transport).
+
+#### Claude Desktop / Claude Code CLI Integration
+
+`ouroboros setup --runtime claude` writes this automatically to `~/.claude/mcp.json`.
+To register manually, add to `~/.claude/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "ouroboros": {
+      "command": "uvx",
+      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+      "timeout": 600,
+      "env": {
+        "OUROBOROS_AGENT_RUNTIME": "claude"
+      }
+    }
+  }
+}
+```
+
+If Ouroboros is installed directly (not via `uvx`), replace the `command`/`args` block with:
 
 ```json
 {
   "mcpServers": {
     "ouroboros": {
       "command": "ouroboros",
-      "args": ["mcp", "serve"]
+      "args": ["mcp", "serve"],
+      "timeout": 600,
+      "env": {
+        "OUROBOROS_AGENT_RUNTIME": "claude"
+      }
     }
   }
 }
@@ -674,8 +772,13 @@ Add to your Claude Desktop config (`~/.config/claude/config.json`):
 Show MCP server information and available tools.
 
 ```bash
-ouroboros mcp info
+ouroboros mcp info [OPTIONS]
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`). Affects which tool variants are instantiated |
 
 #### Example
 
@@ -849,10 +952,10 @@ Tool call timed out after 3 retries: file_read
 
 #### Debugging
 
-Enable verbose logging to see MCP communication:
+Enable verbose logging to see MCP communication. Use the `--debug` flag (there is no `OUROBOROS_LOG_LEVEL` environment variable):
 
 ```bash
-OUROBOROS_LOG_LEVEL=DEBUG ouroboros run seed.yaml --mcp-config mcp.yaml
+ouroboros run seed.yaml --mcp-config mcp.yaml --debug
 ```
 
 This will show:

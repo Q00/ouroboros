@@ -1,3 +1,8 @@
+<!--
+doc_metadata:
+  runtime_scope: [local, claude, codex]
+-->
+
 # Common Workflow Scenarios
 
 Practical recipes for typical Ouroboros use cases.
@@ -11,7 +16,8 @@ Generate a complete Python library from scratch.
 uv run ouroboros init "Build a Python library for parsing and validating YAML configurations"
 
 # Step 2: Execute
-uv run ouroboros run ~/.ouroboros/seeds/latest.yaml
+# Use the generated seed path printed by the interview
+uv run ouroboros run seed.yaml
 
 # Step 3: Monitor (separate terminal)
 uv run ouroboros tui monitor
@@ -163,6 +169,10 @@ uv run ouroboros run seed.yaml --resume orch_abc123
 
 The orchestrator resumes from the last checkpoint, skipping completed ACs.
 
+> `status` currently provides lightweight placeholder summaries. The authoritative handle for resume is the `session_id` printed by `ouroboros run`.
+
+For a complete guide covering agent crashes, dependency failures, stagnation, parallel conflict resolution, and cancellation recovery, see [Execution Failure Modes](./execution-failure-modes.md).
+
 ## 6. Dry Run Validation
 
 Validate a seed file without executing:
@@ -179,21 +189,21 @@ This checks:
 
 ## 7. Debug Mode
 
-When things go wrong, enable verbose output:
+When things go wrong, enable verbose output with the `--debug` flag:
 
 ```bash
-# CLI debug flag
 uv run ouroboros run seed.yaml --debug
-
-# Or via environment variable
-OUROBOROS_LOG_LEVEL=DEBUG uv run ouroboros run seed.yaml
 ```
+
+> **Note:** `OUROBOROS_LOG_LEVEL` is **not** a recognized environment variable. Use `--debug` or set `logging.level: debug` in `~/.ouroboros/config.yaml` for persistent verbose logging.
 
 Debug mode shows:
 - Agent thinking and reasoning
 - Tool call inputs and outputs
 - Model tier selection decisions
 - Evaluation scores and verdicts
+
+For a complete explanation of evaluation stages, failure modes, and how to interpret the scores, see the [Evaluation Pipeline Guide](./evaluation-pipeline.md).
 
 ## 8. Parallel vs Sequential Execution
 
@@ -230,18 +240,24 @@ uv run ouroboros mcp serve
 uv run ouroboros mcp serve --transport sse --port 9000
 ```
 
-Add to Claude Desktop config (`~/.config/claude/config.json`):
+Add to `~/.claude/mcp.json` (`ouroboros setup --runtime claude` writes this automatically):
 
 ```json
 {
   "mcpServers": {
     "ouroboros": {
-      "command": "ouroboros",
-      "args": ["mcp", "serve"]
+      "command": "uvx",
+      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+      "timeout": 600,
+      "env": {
+        "OUROBOROS_AGENT_RUNTIME": "claude"
+      }
     }
   }
 }
 ```
+
+> If Ouroboros is installed directly (not via `uvx`), replace `"command": "uvx"` and `"args"` with `"command": "ouroboros"` and `"args": ["mcp", "serve"]`.
 
 Available MCP tools:
 - `ouroboros_execute_seed` -- execute a seed specification
