@@ -13,7 +13,7 @@ Usage:
     from ouroboros.secondary import TodoRegistry, Todo, Priority, TodoStatus
     from ouroboros.persistence import EventStore
 
-    store = EventStore("sqlite+aiosqlite:///ouroboros.db")
+    store = EventStore()  # defaults to ~/.ouroboros/ouroboros.db
     await store.initialize()
 
     registry = TodoRegistry(store)

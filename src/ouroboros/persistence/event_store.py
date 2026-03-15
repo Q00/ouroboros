@@ -21,7 +21,7 @@ class EventStore:
     All operations are transactional for atomicity.
 
     Usage:
-        store = EventStore("sqlite+aiosqlite:///ouroboros.db")
+        store = EventStore()  # defaults to ~/.ouroboros/ouroboros.db
         await store.initialize()
 
         # Append event
@@ -57,6 +57,10 @@ class EventStore:
         For aiosqlite, uses StaticPool (default) which maintains a single
         connection. This avoids connection accumulation while supporting
         :memory: databases in tests.
+
+        Enables WAL journal mode and busy timeout for concurrent session
+        support. WAL allows concurrent readers with a single writer,
+        eliminating 'database is locked' errors in multi-session scenarios.
         """
         if self._engine is None:
             self._engine = create_async_engine(
@@ -67,6 +71,15 @@ class EventStore:
         # Create all tables defined in metadata
         async with self._engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
+
+        # Enable WAL mode and busy timeout for concurrent access.
+        # WAL (Write-Ahead Logging) allows multiple readers + one writer
+        # without blocking. busy_timeout makes SQLite retry on lock
+        # contention instead of immediately raising SQLITE_BUSY.
+        if "sqlite" in self._database_url:
+            async with self._engine.begin() as conn:
+                await conn.execute(text("PRAGMA journal_mode=WAL"))
+                await conn.execute(text("PRAGMA busy_timeout=5000"))
 
     async def append(self, event: BaseEvent) -> None:
         """Append an event to the store.
