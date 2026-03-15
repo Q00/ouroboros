@@ -39,6 +39,7 @@ const LOG_MESSAGES: &[(&str, &str)] = &[
 pub fn init_mock_state(state: &mut AppState) {
     state.execution_id = "exec_a1b2c3d4".to_string();
     state.session_id = "ses_x9y8z7".to_string();
+    state.seed_goal = "Build a robust data processing pipeline with validation and tests".to_string();
     state.status = ExecutionStatus::Running;
     state.current_phase = Phase::Define;
     state.iteration = 2;
@@ -49,12 +50,12 @@ pub fn init_mock_state(state: &mut AppState) {
         constraint: 0.12,
         ontology: 0.05,
         combined: 0.09,
-        history: vec![0.0, 0.02, 0.05, 0.08, 0.12, 0.09, 0.07, 0.08, 0.10, 0.09],
+        history: vec![0.0, 0.02, 0.05, 0.08, 0.12, 0.09, 0.07, 0.08, 0.10, 0.09].into(),
     };
     state.cost = CostMetrics {
         total_tokens: 12_400,
         total_cost_usd: 0.42,
-        history: vec![0.02, 0.05, 0.08, 0.14, 0.22, 0.28, 0.35, 0.42],
+        history: vec![0.02, 0.05, 0.08, 0.14, 0.22, 0.28, 0.35, 0.42].into(),
     };
 
     state.ac_root = vec![
@@ -231,26 +232,49 @@ pub fn init_mock_state(state: &mut AppState) {
         state.add_log(level, source, msg);
     }
 
-    state.raw_events.push(RawEvent {
-        event_type: "orchestrator.session.started".into(),
-        aggregate_id: "ses_x9y8z7".into(),
-        timestamp: "00:00:01".into(),
-        data_preview: r#"{"execution_id": "exec_a1b2c3d4", "seed_goal": "Build data pipeline"}"#
-            .into(),
-    });
-    state.raw_events.push(RawEvent {
-        event_type: "execution.phase.completed".into(),
-        aggregate_id: "exec_a1b2c3d4".into(),
-        timestamp: "00:01:12".into(),
-        data_preview: r#"{"phase": "discover", "iteration": 1}"#.into(),
-    });
-    state.raw_events.push(RawEvent {
-        event_type: "workflow.progress.updated".into(),
-        aggregate_id: "exec_a1b2c3d4".into(),
-        timestamp: "00:01:45".into(),
-        data_preview: r#"{"completed_count": 1, "total_count": 5, "current_phase": "Define"}"#
-            .into(),
-    });
+    // Populate raw_events with a realistic event stream
+    let mock_events = [
+        ("00:00:01", "orchestrator.session.started", "ses_x9y8z7",
+         r#"{"execution_id": "exec_a1b2c3d4", "seed_goal": "Build data pipeline"}"#),
+        ("00:00:03", "execution.started", "exec_a1b2c3d4",
+         r#"{"seed_id": "seed_pipeline_v2", "phase": "discover"}"#),
+        ("00:00:15", "execution.tool.called", "exec_a1b2c3d4",
+         r#"{"tool": "Read", "detail": "src/pipeline/config.rs", "ac_id": "ac_0"}"#),
+        ("00:00:22", "execution.tool.completed", "exec_a1b2c3d4",
+         r#"{"tool": "Read", "success": true, "duration_secs": 0.8}"#),
+        ("00:00:30", "observability.drift.measured", "exec_a1b2c3d4",
+         r#"{"goal_drift": 0.02, "constraint_drift": 0.01, "ontology_drift": 0.0, "combined_drift": 0.01}"#),
+        ("00:00:45", "observability.cost.updated", "exec_a1b2c3d4",
+         r#"{"total_tokens": 2400, "total_cost_usd": 0.08}"#),
+        ("00:01:12", "execution.phase.completed", "exec_a1b2c3d4",
+         r#"{"phase": "discover", "iteration": 1}"#),
+        ("00:01:15", "workflow.progress.updated", "exec_a1b2c3d4",
+         r#"{"completed_count": 1, "total_count": 5, "current_phase": "Define"}"#),
+        ("00:01:30", "execution.tool.called", "exec_a1b2c3d4",
+         r#"{"tool": "Write", "detail": "src/pipeline/validator.rs", "ac_id": "sub_ac_0_0"}"#),
+        ("00:01:48", "execution.tool.completed", "exec_a1b2c3d4",
+         r#"{"tool": "Write", "success": true, "duration_secs": 2.1}"#),
+        ("00:02:00", "observability.drift.measured", "exec_a1b2c3d4",
+         r#"{"goal_drift": 0.05, "constraint_drift": 0.08, "ontology_drift": 0.03, "combined_drift": 0.05}"#),
+        ("00:02:05", "observability.cost.updated", "exec_a1b2c3d4",
+         r#"{"total_tokens": 6800, "total_cost_usd": 0.22}"#),
+        ("00:02:15", "execution.tool.called", "exec_a1b2c3d4",
+         r#"{"tool": "Bash", "detail": "cargo test --lib validator", "ac_id": "sub_ac_0_1"}"#),
+        ("00:02:34", "execution.tool.completed", "exec_a1b2c3d4",
+         r#"{"tool": "Bash", "success": true, "duration_secs": 4.2}"#),
+        ("00:02:34", "observability.cost.updated", "exec_a1b2c3d4",
+         r#"{"total_tokens": 12400, "total_cost_usd": 0.42}"#),
+        ("00:02:34", "observability.drift.measured", "exec_a1b2c3d4",
+         r#"{"goal_drift": 0.08, "constraint_drift": 0.12, "ontology_drift": 0.05, "combined_drift": 0.09}"#),
+    ];
+    for (ts, etype, agg, data) in &mock_events {
+        state.raw_events.push(RawEvent {
+            event_type: etype.to_string(),
+            aggregate_id: agg.to_string(),
+            timestamp: ts.to_string(),
+            data_preview: data.to_string(),
+        });
+    }
 
     state.lineages = vec![
         Lineage {
@@ -260,30 +284,85 @@ pub fn init_mock_state(state: &mut AppState) {
                 LineageGeneration {
                     number: 1,
                     status: ACStatus::Completed,
+                    phase: "completed".into(),
                     score: 0.65,
                     ac_pass_count: 3,
                     ac_total: 5,
                     summary: "Initial implementation with basic validation".into(),
+                    seed_id: "seed_001".into(),
+                    created_at: "2026-03-15T10:00:00Z".into(),
+                    highest_stage: 2,
+                    drift_score: 0.08,
+                    final_approved: false,
+                    failure_reason: "AC 3/5 failed: missing edge case handling".into(),
+                    wonder_questions: Vec::new(),
+                    ontology_name: "DataPipeline".into(),
+                    ontology_fields: vec![
+                        OntologyFieldEntry { name: "input_schema".into(), field_type: "JSONSchema".into(), description: "Schema for input validation".into(), required: true },
+                        OntologyFieldEntry { name: "transform_rules".into(), field_type: "Vec<Rule>".into(), description: "Ordered transformation rules".into(), required: true },
+                        OntologyFieldEntry { name: "output_format".into(), field_type: "String".into(), description: "Target output format".into(), required: true },
+                        OntologyFieldEntry { name: "error_strategy".into(), field_type: "ErrorStrategy".into(), description: "How to handle validation errors".into(), required: false },
+                    ],
+                    ontology_delta: Vec::new(),
+                    execution_output: "Compiled successfully. 3/5 tests passed. Failed: test_empty_input, test_malformed_json".into(),
                 },
                 LineageGeneration {
                     number: 2,
                     status: ACStatus::Completed,
+                    phase: "completed".into(),
                     score: 0.82,
                     ac_pass_count: 4,
                     ac_total: 5,
                     summary: "Added edge case handling and error recovery".into(),
+                    seed_id: "seed_002".into(),
+                    created_at: "2026-03-15T10:15:00Z".into(),
+                    highest_stage: 2,
+                    drift_score: 0.12,
+                    final_approved: false,
+                    failure_reason: "AC 4/5: performance benchmark not met".into(),
+                    wonder_questions: vec![
+                        "Could we use streaming instead of batch processing?".into(),
+                        "What if the schema evolves between pipeline runs?".into(),
+                    ],
+                    ontology_name: "DataPipeline".into(),
+                    ontology_fields: vec![
+                        OntologyFieldEntry { name: "input_schema".into(), field_type: "JSONSchema".into(), description: "Schema for input validation".into(), required: true },
+                        OntologyFieldEntry { name: "transform_rules".into(), field_type: "Vec<Rule>".into(), description: "Ordered transformation rules".into(), required: true },
+                        OntologyFieldEntry { name: "output_format".into(), field_type: "String".into(), description: "Target output format".into(), required: true },
+                        OntologyFieldEntry { name: "error_strategy".into(), field_type: "ErrorStrategy".into(), description: "How to handle validation errors".into(), required: false },
+                    ],
+                    ontology_delta: vec![
+                        "+Added: retry_policy (RetryConfig)".into(),
+                        "~Modified: error_strategy (String->ErrorStrategy)".into(),
+                    ],
+                    execution_output: "Compiled successfully. 4/5 tests passed. Failed: test_large_payload_perf (timeout 3.2s > 2s limit)".into(),
                 },
                 LineageGeneration {
                     number: 3,
                     status: ACStatus::Executing,
+                    phase: "executing".into(),
                     score: 0.0,
                     ac_pass_count: 0,
                     ac_total: 5,
                     summary: "Optimizing performance and adding tests".into(),
+                    seed_id: "seed_003".into(),
+                    created_at: "2026-03-15T10:30:00Z".into(),
+                    highest_stage: 0,
+                    drift_score: 0.0,
+                    final_approved: false,
+                    failure_reason: String::new(),
+                    wonder_questions: Vec::new(),
+                    ontology_name: "DataPipeline".into(),
+                    ontology_fields: Vec::new(),
+                    ontology_delta: Vec::new(),
+                    execution_output: String::new(),
                 },
             ],
             current_gen: 3,
-            converged: false,
+            status: "active".into(),
+            convergence_similarity: 0.0,
+            convergence_reason: String::new(),
+            created_at: "2026-03-15T10:00:00Z".into(),
         },
         Lineage {
             id: "lin_def456".into(),
@@ -291,20 +370,53 @@ pub fn init_mock_state(state: &mut AppState) {
             generations: vec![LineageGeneration {
                 number: 1,
                 status: ACStatus::Completed,
+                phase: "completed".into(),
                 score: 0.90,
                 ac_pass_count: 4,
                 ac_total: 4,
                 summary: "Full implementation with JWT auth".into(),
+                seed_id: "seed_010".into(),
+                created_at: "2026-03-15T08:00:00Z".into(),
+                highest_stage: 3,
+                drift_score: 0.03,
+                final_approved: true,
+                failure_reason: String::new(),
+                wonder_questions: Vec::new(),
+                ontology_name: "RestAPI".into(),
+                ontology_fields: vec![
+                    OntologyFieldEntry { name: "endpoints".into(), field_type: "Vec<Endpoint>".into(), description: "API endpoint definitions".into(), required: true },
+                    OntologyFieldEntry { name: "auth_middleware".into(), field_type: "JWTConfig".into(), description: "JWT authentication config".into(), required: true },
+                    OntologyFieldEntry { name: "rate_limiter".into(), field_type: "RateLimitConfig".into(), description: "Rate limiting configuration".into(), required: false },
+                ],
+                ontology_delta: Vec::new(),
+                execution_output: "All 4 acceptance criteria passed. JWT auth middleware verified with RS256.".into(),
             }],
             current_gen: 1,
-            converged: true,
+            status: "converged".into(),
+            convergence_similarity: 0.95,
+            convergence_reason: "All acceptance criteria passed with score >= 0.9".into(),
+            created_at: "2026-03-15T08:00:00Z".into(),
         },
     ];
     state.lineage_list = slt::ListState::new(
         state
             .lineages
             .iter()
-            .map(|l| format!("{} — {}", l.id, truncate(&l.seed_goal, 40)))
+            .map(|l| {
+                let status_icon = match l.status.as_str() {
+                    "converged" => "●",
+                    "exhausted" => "✖",
+                    "aborted" => "⊘",
+                    _ => "◐",
+                };
+                format!(
+                    "{} {} — {} (gen {})",
+                    status_icon,
+                    l.id,
+                    &l.seed_goal,
+                    l.current_gen,
+                )
+            })
             .collect(),
     );
 
@@ -319,18 +431,18 @@ pub fn tick_mock(state: &mut AppState) {
     if tick % 60 == 0 {
         let drift_val = 0.08 + 0.04 * ((tick as f64 / 30.0).sin());
         state.drift.combined = drift_val;
-        state.drift.history.push(drift_val);
+        state.drift.history.push_back(drift_val);
         if state.drift.history.len() > 30 {
-            state.drift.history.remove(0);
+            state.drift.history.pop_front();
         }
     }
 
     if tick % 90 == 0 {
         state.cost.total_tokens += 200;
         state.cost.total_cost_usd += 0.01;
-        state.cost.history.push(state.cost.total_cost_usd);
+        state.cost.history.push_back(state.cost.total_cost_usd);
         if state.cost.history.len() > 20 {
-            state.cost.history.remove(0);
+            state.cost.history.pop_front();
         }
     }
 

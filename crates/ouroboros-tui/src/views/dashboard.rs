@@ -1,4 +1,4 @@
-use slt::{Border, Color, Context};
+use slt::{Border, Color, Context, KeyCode};
 
 use crate::state::*;
 
@@ -7,39 +7,85 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
     let dim = ui.theme().text_dim;
     let surface = ui.theme().surface;
     let success = ui.theme().success;
+    let warning = ui.theme().warning;
+    let accent = ui.theme().accent;
+    let text = ui.theme().text;
+    let error_c = Color::Rgb(235, 111, 146); // Rose Pine love
 
-    state.rebuild_tree_state();
+    // NOTE: rebuild_tree_state() is called in populate_state_from_events(),
+    // NOT here. Calling it every frame would destroy expand/collapse state.
 
     let surface_hover = ui.theme().surface_hover;
 
     ui.container().grow(1).gap(1).col(|ui| {
+        // Phase Outputs — compact horizontal phase cards
         ui.container()
-            .border(Border::Single)
             .bg(surface_hover)
-            .px(2)
+            .px(1)
             .py(0)
             .row(|ui| {
-                for (i, phase) in Phase::ALL.iter().enumerate() {
-                    if *phase == state.current_phase {
-                        ui.text(format!(" ◆ {} ", phase.label())).bold().fg(success);
-                    } else if phase.index() < state.current_phase.index() {
-                        ui.text(format!(" ● {} ", phase.label())).fg(primary);
+                for phase in Phase::ALL {
+                    let done = phase.index() < state.current_phase.index();
+                    let active = phase == state.current_phase;
+                    let (icon, color) = if done {
+                        ("●", success)
+                    } else if active {
+                        ("◐", accent)
                     } else {
-                        ui.text(format!(" ◇ {} ", phase.label())).fg(dim);
-                    }
-                    if i < 3 {
-                        ui.text(" → ").fg(dim);
-                    }
+                        ("○", dim)
+                    };
+
+                    ui.container()
+                        .grow(1)
+                        .border(Border::Single)
+                        .bg(if active { surface_hover } else { surface })
+                        .px(1)
+                        .py(0)
+                        .col(|ui| {
+                            ui.line(|ui| {
+                                ui.text(format!("{icon} ")).fg(color);
+                                ui.text(phase.label()).fg(color).bold();
+                                if done {
+                                    ui.text(" ✓").fg(success);
+                                } else if active {
+                                    ui.text(" …").fg(accent);
+                                }
+                            });
+                            let phase_key = phase.label().to_lowercase();
+                            if let Some(outputs) = state.phase_outputs.get(&phase_key) {
+                                for line in outputs.iter().rev().take(3) {
+                                    ui.line(|ui| {
+                                        ui.text("• ").fg(dim);
+                                        ui.text_wrap(line).fg(text);
+                                    });
+                                }
+                                if outputs.len() > 3 {
+                                    ui.text(format!("  +{} more", outputs.len() - 3)).fg(dim);
+                                }
+                            }
+                        });
                 }
-                ui.spacer();
-                if !state.drift.history.is_empty() {
-                    ui.text("drift ").fg(dim);
-                    ui.sparkline(&state.drift.history, 10);
-                    ui.text(format!(" {:.2}", state.drift.combined))
-                        .fg(drift_color(state.drift.combined));
-                }
+                // AC progress + metrics at the end
+                ui.container().min_w(18).px(1).py(0).col(|ui| {
+                    let (done, total) = state.ac_progress();
+                    if total > 0 {
+                        let ratio = done as f64 / total as f64;
+                        ui.row(|ui| {
+                            ui.text(format!("[{done}/{total} AC]")).fg(text).bold();
+                        });
+                        ui.progress(ratio);
+                    }
+                    ui.row(|ui| {
+                        ui.text(&state.elapsed).fg(dim);
+                    });
+                    ui.row(|ui| {
+                        ui.text(format!("${:.2}", state.cost.total_cost_usd)).fg(success);
+                        ui.text(format!(" {}k", state.cost.total_tokens / 1000)).fg(dim);
+                    });
+                });
             });
 
+        // Main content: AC Tree + Detail
         ui.container().grow(1).gap(0).row(|ui| {
             ui.container()
                 .grow(3)
@@ -50,18 +96,88 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
                     if state.ac_root.is_empty() {
                         ui.container().grow(1).center().col(|ui| {
                             ui.text("No AC data").bold().fg(primary);
-                            ui.text("Run ouroboros to generate").fg(dim);
-                            ui.text("or use --mock for demo").fg(dim);
+                            ui.text("").fg(dim);
+                            ui.text("Run ouroboros to generate ACs").fg(dim);
+                            ui.text("or use --mock for demo data").fg(dim);
                         });
                     } else {
+                        // Split borrows to avoid cloning the entire entries vec every frame
+                        let tree_height = state.ac_tree_entries.len().min(30).max(5);
+                        let selected_idx = state.ac_tree_list.selected;
+                        let entries = &state.ac_tree_entries;
+                        let list = &mut state.ac_tree_list;
+
                         ui.container().grow(1).p(1).col(|ui| {
-                            ui.tree(&mut state.ac_tree_state);
+                            ui.virtual_list(list, tree_height, |ui, idx| {
+                                if let Some(entry) = entries.get(idx) {
+                                    let is_selected = idx == selected_idx;
+                                    let status_color = match entry.status {
+                                        ACStatus::Completed => success,
+                                        ACStatus::Executing => warning,
+                                        ACStatus::Failed | ACStatus::Blocked => error_c,
+                                        _ => dim,
+                                    };
+
+                                    ui.row(|ui| {
+                                        // Selection cursor
+                                        if is_selected {
+                                            ui.text("▸ ").fg(primary).bold();
+                                        } else {
+                                            ui.text("  ").fg(dim);
+                                        }
+                                        // Tree connectors (dimmed)
+                                        if !entry.prefix.is_empty() {
+                                            ui.text(&entry.prefix).fg(dim);
+                                        }
+                                        // Expand/collapse icon
+                                        ui.text(entry.toggle_icon).fg(text);
+                                        // Status icon (colored by status)
+                                        ui.text(format!("{} ", entry.status.icon())).fg(status_color);
+                                        // Content text
+                                        if is_selected {
+                                            ui.text_wrap(&entry.content).fg(primary).bold();
+                                        } else {
+                                            ui.text_wrap(&entry.content).fg(text);
+                                        }
+                                        // Active tool indicator
+                                        if let Some(ref tool) = entry.active_tool {
+                                            ui.text(format!("  {tool}")).fg(accent);
+                                        }
+                                    });
+                                }
+                            });
                         });
-                        let flat_ids = state.flat_node_ids();
-                        let sel: usize = state.ac_tree_state.selected;
-                        if sel < flat_ids.len() {
-                            state.selected_node_id = Some(flat_ids[sel].clone());
+
+                        // Handle Enter/Space/Right for expand/collapse (AFTER virtual_list consumes j/k)
+                        if ui.key_code(KeyCode::Enter) || ui.key_code(KeyCode::Char(' ')) || ui.key_code(KeyCode::Right) {
+                            let sel = state.ac_tree_list.selected;
+                            if let Some(entry) = state.ac_tree_entries.get(sel) {
+                                if entry.has_children {
+                                    let nid = entry.node_id.clone();
+                                    state.toggle_ac_node(&nid);
+                                }
+                            }
                         }
+                        // Left arrow: collapse current node (or go to parent)
+                        if ui.key_code(KeyCode::Left) {
+                            let sel = state.ac_tree_list.selected;
+                            if let Some(entry) = state.ac_tree_entries.get(sel) {
+                                let nid = entry.node_id.clone();
+                                if entry.has_children && state.ac_expanded.contains(&nid) {
+                                    // Collapse current node
+                                    state.toggle_ac_node(&nid);
+                                }
+                                // If already collapsed or leaf, could navigate to parent
+                                // (skip for now — would require parent tracking)
+                            }
+                        }
+
+                        // Update selection tracking
+                        let sel = state.ac_tree_list.selected;
+                        if let Some(entry) = state.ac_tree_entries.get(sel) {
+                            state.selected_node_id = Some(entry.node_id.clone());
+                        }
+                        state.check_selection_changed();
                     }
                 });
 
@@ -77,26 +193,24 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
                 });
         });
 
+        // Live Activity Bar
         ui.container()
-            .border(Border::Single)
             .bg(surface_hover)
             .px(2)
             .py(0)
             .row(|ui| {
                 if !state.active_tools.is_empty() {
+                    ui.text("LIVE").fg(warning).bold();
+                    ui.text("  ").fg(dim);
                     for (ac_id, tool) in &state.active_tools {
                         let short = ac_id.replace("sub_ac_", "S").replace("ac_", "AC");
-                        ui.text(format!("◐ {short}")).fg(Color::Yellow);
-                        ui.text(format!(" → {} ", tool.tool_detail)).fg(dim);
+                        ui.text(format!("{short}")).fg(accent);
+                        ui.text(format!(" {} {} ", tool.tool_name, &tool.tool_detail)).fg(dim);
+                        ui.text("│ ").fg(dim);
                     }
                 } else {
-                    ui.text("idle").fg(dim).italic();
+                    ui.text("No active tool calls").fg(dim).italic();
                 }
-                ui.spacer();
-                ui.text(format!("${:.2}", state.cost.total_cost_usd))
-                    .fg(success);
-                ui.text(format!("  {}k tok", state.cost.total_tokens / 1000))
-                    .fg(dim);
             });
     });
 }
@@ -104,8 +218,10 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
 fn render_detail(ui: &mut Context, state: &mut AppState) {
     let Some(node) = state.selected_node() else {
         let dim = ui.theme().text_dim;
+        let primary = ui.theme().primary;
         ui.container().grow(1).center().col(|ui| {
-            ui.text("← Select a node").fg(dim);
+            ui.text("Select a node").fg(primary);
+            ui.text("Use ↑↓ to navigate the tree").fg(dim);
         });
         return;
     };
@@ -114,12 +230,18 @@ fn render_detail(ui: &mut Context, state: &mut AppState) {
     let dim = ui.theme().text_dim;
     let text_c = ui.theme().text;
     let warn = ui.theme().warning;
+    let success = ui.theme().success;
+    let secondary = ui.theme().secondary;
+    let error_c = Color::Rgb(235, 111, 146);
     let nid = node.id.clone();
     let content = node.content.clone();
     let depth = node.depth;
     let atomic = node.is_atomic;
-    let children = node.children.len();
     let status = node.status;
+
+    // Sub-AC summary
+    let children_count = node.children.len();
+    let children_completed = node.children.iter().filter(|c| c.status == ACStatus::Completed).count();
 
     let thinking = state.thinking.get(&nid).cloned();
     let tools = state.tool_history.get(&nid).cloned();
@@ -130,89 +252,93 @@ fn render_detail(ui: &mut Context, state: &mut AppState) {
         .p(1)
         .gap(0)
         .col(|ui| {
-            ui.line(|ui| {
-                ui.text("ID        ").fg(dim);
-                ui.text(&nid).fg(accent);
-            });
-            ui.line(|ui| {
-                ui.text("Status    ").fg(dim);
+            // Node header — ID + status on one prominent line
+            ui.row(|ui| {
                 let sc = match status {
-                    ACStatus::Completed => Color::Green,
-                    ACStatus::Executing => Color::Yellow,
-                    ACStatus::Failed | ACStatus::Blocked => Color::Red,
+                    ACStatus::Completed => success,
+                    ACStatus::Executing => warn,
+                    ACStatus::Failed | ACStatus::Blocked => error_c,
                     ACStatus::Pending => dim,
-                    _ => Color::Cyan,
+                    _ => accent,
                 };
-                ui.text(format!("{} {}", status.icon(), status.label()))
-                    .fg(sc)
-                    .bold();
+                ui.text(format!("{} ", status.icon())).fg(sc);
+                ui.text(&nid).fg(accent).bold();
+                ui.spacer();
+                ui.text(status.label()).fg(sc).bold();
             });
-            ui.line(|ui| {
-                ui.text("Depth     ").fg(dim);
+
+            // Content — the most important info
+            ui.text("").fg(dim);
+            ui.text_wrap(&content).fg(text_c);
+
+            // Metadata
+            ui.text("").fg(dim);
+            ui.row(|ui| {
+                ui.text("depth ").fg(dim);
                 ui.text(format!("{depth}")).fg(text_c);
-            });
-            ui.line(|ui| {
-                ui.text("Atomic    ").fg(dim);
+                ui.text("  ").fg(dim);
                 if atomic {
-                    ui.text("Yes").fg(Color::Green);
+                    ui.text("◆ atomic").fg(success);
                 } else {
-                    ui.text("No").fg(dim);
+                    ui.text("◇ composite").fg(secondary);
+                }
+                if children_count > 0 {
+                    ui.text("  ").fg(dim);
+                    let prog_color = if children_completed == children_count {
+                        success
+                    } else if children_completed > 0 {
+                        warn
+                    } else {
+                        dim
+                    };
+                    ui.text(format!("{children_completed}/{children_count} sub-ACs")).fg(prog_color);
                 }
             });
-            if children > 0 {
-                ui.line(|ui| {
-                    ui.text("Children  ").fg(dim);
-                    ui.text(format!("{children}")).fg(accent);
+
+            // Active tool — most urgent info, show first
+            if let Some(ref a) = active {
+                ui.text("").fg(dim);
+                ui.row(|ui| {
+                    ui.text("● RUNNING ").fg(warn).bold();
+                    ui.text(&a.tool_name).fg(accent).bold();
+                    ui.text(format!(" {}", a.tool_detail)).fg(text_c);
                 });
             }
 
-            ui.separator();
-            ui.line_wrap(|ui| {
-                ui.text(&content).fg(text_c);
-            });
-
+            // Thinking
             if let Some(ref t) = thinking {
+                ui.text("").fg(dim);
                 ui.separator();
-                ui.text("Thinking:").fg(dim);
-                ui.text_wrap(truncate(t, 300)).italic().fg(warn);
+                ui.text("Thinking").fg(dim).bold();
+                ui.text_wrap(t).italic().fg(warn);
             }
 
+            // Tool history
             if let Some(ref h) = tools {
+                ui.text("").fg(dim);
                 ui.separator();
-                ui.text("Tools:").fg(dim);
-                for e in h.iter().rev().take(10) {
+                ui.row(|ui| {
+                    ui.text("Recent Tools").fg(dim).bold();
+                    ui.text(format!(" ({})", h.len())).fg(dim);
+                });
+                for e in h.iter().rev().take(8) {
                     let (m, c) = if e.success {
-                        ("✓", Color::Green)
+                        ("✓", success)
                     } else {
-                        ("✗", Color::Red)
+                        ("✗", error_c)
                     };
                     ui.row(|ui| {
                         ui.text(format!(" {m} ")).fg(c);
-                        ui.text(format!("{:<6}", e.tool_name)).fg(accent);
-                        ui.text(&e.tool_detail);
+                        ui.text(&e.tool_name).fg(accent);
+                        ui.text(" ").fg(dim);
+                        ui.text_wrap(&e.tool_detail).fg(text_c);
                         ui.spacer();
-                        ui.text(format!("{:.1}s", e.duration_secs)).fg(dim);
+                        ui.text(format!("{:.1}s", e.duration_secs)).fg(secondary);
                     });
                 }
-            }
-
-            if let Some(ref a) = active {
-                ui.separator();
-                ui.row(|ui| {
-                    ui.text(" ● ").fg(Color::Yellow).bold();
-                    ui.text(format!("{} {}", a.tool_name, a.tool_detail))
-                        .fg(Color::Yellow);
-                });
+                if h.len() > 8 {
+                    ui.text(format!("  +{} more", h.len() - 8)).fg(dim);
+                }
             }
         });
-}
-
-fn drift_color(v: f64) -> Color {
-    if v < 0.1 {
-        Color::Green
-    } else if v < 0.2 {
-        Color::Yellow
-    } else {
-        Color::Red
-    }
 }

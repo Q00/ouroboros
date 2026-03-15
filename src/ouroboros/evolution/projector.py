@@ -97,6 +97,17 @@ class LineageProjector:
                 )
                 generations[gen_num] = record
 
+            elif event.type == "lineage.generation.phase_changed":
+                data = event.data
+                gen_num = data.get("generation_number", 0)
+                if gen_num and gen_num in generations:
+                    try:
+                        phase = GenerationPhase(data.get("phase", "wondering"))
+                    except ValueError:
+                        phase = GenerationPhase.WONDERING
+                    old = generations[gen_num]
+                    generations[gen_num] = old.model_copy(update={"phase": phase})
+
             elif event.type == "lineage.generation.failed":
                 data = event.data
                 gen_num = data["generation_number"]
@@ -184,6 +195,17 @@ class LineageProjector:
                 except ValueError:
                     continue  # Skip unknown phases (e.g., legacy "rewound" events)
                 if gen > last_gen:
+                    last_gen = gen
+                    last_phase = phase
+
+            elif event.type == "lineage.generation.phase_changed":
+                gen = event.data.get("generation_number", 0)
+                phase_str = event.data.get("phase", "wondering")
+                try:
+                    phase = GenerationPhase(phase_str)
+                except ValueError:
+                    continue
+                if gen >= last_gen:
                     last_gen = gen
                     last_phase = phase
 

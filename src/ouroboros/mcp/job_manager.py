@@ -240,6 +240,8 @@ class JobManager:
                 gen = data.get("generation_number")
                 phase = data.get("phase")
                 reason = data.get("reason")
+                if latest.type == "lineage.generation.phase_changed":
+                    return f"Generation {gen} | {phase}"
                 if latest.type == "lineage.generation.started":
                     return f"Generation {gen} | {phase}"
                 if latest.type == "lineage.generation.completed":

@@ -2,14 +2,15 @@ use slt::{Border, Context};
 
 use crate::state::*;
 
-pub fn render(ui: &mut Context, state: &mut AppState) {
+/// Render the log panel as a sub-panel (used inside Execution view).
+pub fn render_log_panel(ui: &mut Context, state: &mut AppState) {
     let dim = ui.theme().text_dim;
     let accent = ui.theme().accent;
     let surface = ui.theme().surface;
     let surface_hover = ui.theme().surface_hover;
     let text = ui.theme().text;
 
-    ui.container().grow(1).gap(0).col(|ui| {
+    ui.container().gap(0).col(|ui| {
         ui.container().bg(surface_hover).px(3).py(0).row(|ui| {
             ui.text("Filter ").fg(dim);
             ui.container().grow(1).mr(2).row(|ui| {
@@ -52,7 +53,6 @@ pub fn render(ui: &mut Context, state: &mut AppState) {
 
         ui.container()
             .grow(1)
-            .mt(1)
             .border(Border::Single)
             .bg(surface)
             .col(|ui| {
