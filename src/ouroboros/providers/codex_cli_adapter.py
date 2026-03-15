@@ -8,12 +8,12 @@ without requiring an API key.
 from __future__ import annotations
 
 import asyncio
-import codecs
 from collections.abc import AsyncIterator, Callable
 import contextlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Any
@@ -35,8 +35,15 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
+from ouroboros.providers.codex_cli_stream import (
+    collect_stream_lines,
+    iter_stream_lines,
+    terminate_process,
+)
 
 log = structlog.get_logger()
+
+_SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
 
 _RETRYABLE_ERROR_PATTERNS = (
     "rate limit",
@@ -69,7 +76,7 @@ class CodexCliLLMAdapter:
         on_message: Callable[[str, str], None] | None = None,
         max_retries: int = 3,
         ephemeral: bool = True,
-        timeout: float | None = 60.0,
+        timeout: float | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -113,10 +120,17 @@ class CodexCliLLMAdapter:
         return candidate
 
     def _normalize_model(self, model: str) -> str | None:
-        """Normalize a model name for Codex CLI."""
+        """Normalize a model name for Codex CLI.
+
+        Raises:
+            ValueError: If *model* contains characters outside the safe set.
+        """
         candidate = model.strip()
         if not candidate or candidate == "default":
             return None
+        if not _SAFE_MODEL_NAME_PATTERN.match(candidate):
+            msg = f"Unsafe model name rejected: {candidate!r}"
+            raise ValueError(msg)
         return candidate
 
     def _build_prompt(self, messages: list[Message]) -> str:
@@ -375,87 +389,22 @@ class CodexCliLLMAdapter:
         chunk_size: int = 16384,
     ) -> AsyncIterator[str]:
         """Yield decoded lines without relying on StreamReader.readline()."""
-        if stream is None:
-            return
-
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        buffer = ""
-
-        while True:
-            chunk = await stream.read(chunk_size)
-            if not chunk:
-                break
-
-            buffer += decoder.decode(chunk)
-            while True:
-                newline_index = buffer.find("\n")
-                if newline_index < 0:
-                    break
-
-                line = buffer[:newline_index]
-                buffer = buffer[newline_index + 1 :]
-                yield line.rstrip("\r")
-
-        buffer += decoder.decode(b"", final=True)
-        if buffer:
-            yield buffer.rstrip("\r")
+        async for line in iter_stream_lines(stream, chunk_size=chunk_size):
+            yield line
 
     async def _collect_stream_lines(
         self,
         stream: asyncio.StreamReader | None,
     ) -> list[str]:
         """Drain a subprocess stream without blocking stdout event parsing."""
-        if stream is None:
-            return []
-
-        lines: list[str] = []
-        async for line in self._iter_stream_lines(stream):
-            if line:
-                lines.append(line)
-        return lines
+        return await collect_stream_lines(stream)
 
     async def _terminate_process(self, process: Any) -> None:
         """Best-effort subprocess shutdown used for timeouts and cancellation."""
-        if getattr(process, "returncode", None) is not None:
-            return
-
-        terminate = getattr(process, "terminate", None)
-        kill = getattr(process, "kill", None)
-
-        try:
-            if callable(terminate):
-                terminate()
-            elif callable(kill):
-                kill()
-            else:
-                return
-        except ProcessLookupError:
-            return
-        except Exception:
-            return
-
-        try:
-            await asyncio.wait_for(
-                process.wait(),
-                timeout=self._process_shutdown_timeout_seconds,
-            )
-            return
-        except (TimeoutError, ProcessLookupError):
-            pass
-        except Exception:
-            return
-
-        if not callable(kill):
-            return
-
-        with contextlib.suppress(ProcessLookupError, Exception):
-            kill()
-
-        with contextlib.suppress(asyncio.TimeoutError, ProcessLookupError, Exception):
-            await asyncio.wait_for(
-                process.wait(),
-                timeout=self._process_shutdown_timeout_seconds,
-            )
+        await terminate_process(
+            process,
+            shutdown_timeout=self._process_shutdown_timeout_seconds,
+        )
 
     def _read_output_message(self, output_path: Path) -> str:
         """Read the output-last-message file if the backend wrote one."""

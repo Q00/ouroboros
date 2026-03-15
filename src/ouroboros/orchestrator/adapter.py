@@ -96,6 +96,24 @@ _RUNTIME_LIFECYCLE_STATE_BY_EVENT_TYPE = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeExecutionDispatch:
+    """Execution dispatch state for a single runtime invocation."""
+
+    backend: str
+    runtime_handle: RuntimeHandle | None
+    resume_session_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeExecutionDispatchFailure:
+    """Private execution-dispatch failure details for adapter logging."""
+
+    public_message: str
+    reason: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
 def _format_tool_detail(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Format a human-readable tool detail string.
 
@@ -176,6 +194,76 @@ def _build_delegated_tool_context_update(
         "hookEventName": "PreToolUse",
         "updatedInput": updated_input,
     }
+
+
+def _clone_runtime_handle_data(value: object) -> Any:
+    """Clone persisted runtime payload data without retaining mutable aliases."""
+    if isinstance(value, dict):
+        return {key: _clone_runtime_handle_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_runtime_handle_data(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_runtime_handle_data(item) for item in value)
+    return value
+
+
+# Keep this boundary map limited to canonical selectors and legacy spellings
+# already exercised by current runtimes or persisted RuntimeHandle payloads.
+_RUNTIME_HANDLE_BACKEND_ALIASES = {
+    "claude": "claude",
+    "claude_code": "claude",
+    "codex": "codex_cli",
+    "codex_cli": "codex_cli",
+    "opencode": "opencode",
+    "opencode_cli": "opencode",
+}
+
+
+def _normalize_runtime_handle_selector(
+    selector: object,
+    *,
+    field_name: str,
+) -> str | None:
+    """Normalize a boundary selector value onto the RuntimeHandle backend contract."""
+    if selector is None:
+        return None
+    if not isinstance(selector, str):
+        msg = f"RuntimeHandle {field_name} selector must be a string, got {type(selector).__name__}"
+        raise ValueError(msg)
+
+    normalized = selector.strip().lower()
+    if not normalized:
+        return None
+
+    canonical = _RUNTIME_HANDLE_BACKEND_ALIASES.get(normalized)
+    if canonical is None:
+        msg = f"Unsupported RuntimeHandle {field_name} selector: {selector}"
+        raise ValueError(msg)
+    return canonical
+
+
+def _resolve_runtime_handle_backend(
+    *,
+    backend: object,
+    provider: object = None,
+) -> str:
+    """Resolve backend/provider boundary selectors to the canonical backend value."""
+    normalized_backend = _normalize_runtime_handle_selector(backend, field_name="backend")
+    normalized_provider = _normalize_runtime_handle_selector(provider, field_name="provider")
+
+    if normalized_backend is None and normalized_provider is None:
+        msg = "RuntimeHandle selector cannot be determined"
+        raise ValueError(msg)
+    if (
+        normalized_backend is not None
+        and normalized_provider is not None
+        and normalized_backend != normalized_provider
+    ):
+        msg = "RuntimeHandle backend/provider conflict"
+        raise ValueError(msg)
+
+    # At least one is non-None (guarded above); `or` selects the non-None value.
+    return normalized_backend or normalized_provider  # type: ignore[return-value]
 
 
 def _runtime_handle_lifecycle_state(
@@ -272,6 +360,14 @@ class RuntimeHandle:
         repr=False,
         compare=False,
     )
+
+    def __post_init__(self) -> None:
+        """Normalize legacy backend aliases onto the canonical backend contract."""
+        object.__setattr__(
+            self,
+            "backend",
+            _resolve_runtime_handle_backend(backend=self.backend),
+        )
 
     @property
     def server_session_id(self) -> str | None:
@@ -391,7 +487,7 @@ class RuntimeHandle:
         return await self._terminate_callback(self)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the handle for progress persistence."""
+        """Serialize the handle for progress persistence using the canonical backend key."""
         return {
             "backend": self.backend,
             "kind": self.kind,
@@ -443,13 +539,16 @@ class RuntimeHandle:
         if not isinstance(value, dict):
             return None
 
-        backend = value.get("backend")
-        if not isinstance(backend, str) or not backend:
-            return None
+        backend = _resolve_runtime_handle_backend(
+            backend=value.get("backend"),
+            provider=value.get("provider"),
+        )
 
         metadata = value.get("metadata", {})
         if not isinstance(metadata, dict):
             metadata = {}
+        else:
+            metadata = _clone_runtime_handle_data(metadata)
 
         return cls(
             backend=backend,
@@ -515,6 +614,21 @@ class TaskResult:
 
 class AgentRuntime(Protocol):
     """Protocol for autonomous agent runtimes used by the orchestrator."""
+
+    @property
+    def runtime_backend(self) -> str:
+        """Canonical backend identifier (e.g. ``"claude"``, ``"codex_cli"``)."""
+        ...
+
+    @property
+    def working_directory(self) -> str | None:
+        """Working directory for task execution, or ``None`` if unset."""
+        ...
+
+    @property
+    def permission_mode(self) -> str | None:
+        """Active permission mode (e.g. ``"acceptEdits"``), or ``None``."""
+        ...
 
     def execute_task(
         self,
@@ -594,6 +708,10 @@ class ClaudeAgentAdapter:
                 print(f"Using tool: {message.tool_name}")
     """
 
+    _runtime_handle_backend = "claude"
+    _runtime_backend = "claude"
+    _provider_name = "claude"
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -630,6 +748,20 @@ class ClaudeAgentAdapter:
             cli_path=self._cli_path,
         )
 
+    # -- AgentRuntime protocol properties ----------------------------------
+
+    @property
+    def runtime_backend(self) -> str:
+        return self._runtime_handle_backend
+
+    @property
+    def working_directory(self) -> str | None:
+        return self._cwd
+
+    @property
+    def permission_mode(self) -> str | None:
+        return self._permission_mode
+
     def _is_transient_error(self, error: Exception) -> bool:
         """Check if an error is transient and worth retrying.
 
@@ -650,29 +782,114 @@ class ClaudeAgentAdapter:
         approval_mode: str | None = None,
     ) -> RuntimeHandle | None:
         """Build a normalized runtime handle for the current Claude session."""
-        if not native_session_id:
+        dispatch = self._dispatch_execution_runtime(
+            current_handle=current_handle,
+            resume_session_id=native_session_id,
+            prefer_current_handle_session_id=False,
+        )
+        if isinstance(dispatch, _RuntimeExecutionDispatchFailure):
             return None
 
-        if current_handle is not None:
+        if dispatch.resume_session_id is None:
+            return None
+
+        current_runtime_handle = dispatch.runtime_handle
+        if current_runtime_handle is not None:
             return replace(
-                current_handle,
-                backend=current_handle.backend or "claude",
-                kind=current_handle.kind or "agent_runtime",
-                native_session_id=native_session_id,
-                cwd=current_handle.cwd or self._cwd,
-                approval_mode=current_handle.approval_mode or self._permission_mode,
+                current_runtime_handle,
+                backend=dispatch.backend,
+                kind=current_runtime_handle.kind or "agent_runtime",
+                native_session_id=dispatch.resume_session_id,
+                cwd=current_runtime_handle.cwd or self._cwd,
+                approval_mode=current_runtime_handle.approval_mode or self._permission_mode,
                 updated_at=datetime.now(UTC).isoformat(),
-                metadata=dict(current_handle.metadata),
+                metadata=_clone_runtime_handle_data(current_runtime_handle.metadata),
             )
 
         return RuntimeHandle(
-            backend="claude",
+            backend=dispatch.backend,
             kind="agent_runtime",
-            native_session_id=native_session_id,
+            native_session_id=dispatch.resume_session_id,
             cwd=self._cwd,
             approval_mode=approval_mode or self._permission_mode,
             updated_at=datetime.now(UTC).isoformat(),
             metadata={},
+        )
+
+    def _dispatch_execution_runtime(
+        self,
+        *,
+        current_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        prefer_current_handle_session_id: bool = True,
+    ) -> _RuntimeExecutionDispatch | _RuntimeExecutionDispatchFailure:
+        """Resolve the single execution path for this adapter invocation."""
+        runtime_handle = current_handle
+        resolved_backend = self._runtime_handle_backend
+
+        if runtime_handle is not None:
+            try:
+                normalized_backend = _resolve_runtime_handle_backend(
+                    backend=runtime_handle.backend,
+                )
+            except ValueError as exc:
+                return _RuntimeExecutionDispatchFailure(
+                    public_message=(
+                        "Task execution failed: runtime handle is incompatible with this runtime."
+                    ),
+                    reason="unknown_runtime_backend",
+                    details={
+                        "backend": runtime_handle.backend,
+                        "error": str(exc),
+                    },
+                )
+            if normalized_backend != self._runtime_handle_backend:
+                return _RuntimeExecutionDispatchFailure(
+                    public_message=(
+                        "Task execution failed: runtime handle is incompatible with this runtime."
+                    ),
+                    reason="unsupported_runtime_backend",
+                    details={
+                        "backend": runtime_handle.backend,
+                        "normalized_backend": normalized_backend,
+                        "expected_backend": self._runtime_handle_backend,
+                    },
+                )
+            # __post_init__ already canonicalizes backend on construction,
+            # so runtime_handle.backend == normalized_backend is guaranteed here.
+            resolved_backend = normalized_backend
+
+        resolved_resume_session_id = resume_session_id
+        if (
+            prefer_current_handle_session_id
+            and runtime_handle is not None
+            and runtime_handle.native_session_id
+        ):
+            resolved_resume_session_id = runtime_handle.native_session_id
+
+        return _RuntimeExecutionDispatch(
+            backend=resolved_backend,
+            runtime_handle=runtime_handle,
+            resume_session_id=resolved_resume_session_id,
+        )
+
+    def _execution_dispatch_error_message(
+        self,
+        failure: _RuntimeExecutionDispatchFailure,
+    ) -> AgentMessage:
+        """Project a private dispatch failure into the existing result-message surface."""
+        log.error(
+            "orchestrator.adapter.execution_dispatch_failed",
+            reason=failure.reason,
+            **failure.details,
+        )
+        return AgentMessage(
+            type="result",
+            content=failure.public_message,
+            data={
+                "subtype": "error",
+                "error_type": "RuntimeHandleError",
+            },
         )
 
     async def execute_task(
@@ -728,15 +945,19 @@ class ClaudeAgentAdapter:
             resume_session_id=resume_session_id,
         )
 
+        dispatch = self._dispatch_execution_runtime(
+            current_handle=resume_handle,
+            resume_session_id=resume_session_id,
+        )
+        if isinstance(dispatch, _RuntimeExecutionDispatchFailure):
+            yield self._execution_dispatch_error_message(dispatch)
+            return
+
         # Retry loop for transient errors
         attempt = 0
         last_error: Exception | None = None
-        current_runtime_handle = resume_handle
-        current_session_id = (
-            resume_handle.native_session_id
-            if resume_handle and resume_handle.native_session_id
-            else resume_session_id
-        )
+        current_runtime_handle = dispatch.runtime_handle
+        current_session_id = dispatch.resume_session_id
 
         while attempt < MAX_RETRIES:
             attempt += 1

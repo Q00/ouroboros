@@ -112,6 +112,20 @@ class CodexCliRuntime:
             ),
         )
 
+    # -- AgentRuntime protocol properties ----------------------------------
+
+    @property
+    def runtime_backend(self) -> str:
+        return self._runtime_handle_backend
+
+    @property
+    def working_directory(self) -> str | None:
+        return self._cwd
+
+    @property
+    def permission_mode(self) -> str | None:
+        return self._permission_mode
+
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
         """Validate and normalize the runtime permission mode."""
         return resolve_codex_permission_mode(
@@ -1277,9 +1291,28 @@ class CodexCliRuntime:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
-        _resume_depth: int = 0,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task via Codex CLI and stream normalized messages."""
+        async for msg in self._execute_task_impl(
+            prompt=prompt,
+            tools=tools,
+            system_prompt=system_prompt,
+            resume_handle=resume_handle,
+            resume_session_id=resume_session_id,
+            _resume_depth=0,
+        ):
+            yield msg
+
+    async def _execute_task_impl(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+        _resume_depth: int = 0,
+    ) -> AsyncIterator[AgentMessage]:
+        """Internal implementation with resume-depth tracking."""
         # Note: CODEX_SANDBOX_NETWORK_DISABLED=1 does NOT necessarily mean
         # child codex exec will fail.  Codex may apply different seatbelt
         # profiles to MCP server children vs shell commands.  Log at debug
@@ -1504,7 +1537,7 @@ class CodexCliRuntime:
                 recovery_handle, recovery_message = resume_recovery
                 if recovery_message is not None:
                     yield recovery_message
-                async for message in self.execute_task(
+                async for message in self._execute_task_impl(
                     prompt=prompt,
                     tools=tools,
                     system_prompt=system_prompt,
