@@ -650,10 +650,7 @@ To register manually, add to `~/.claude/mcp.json`:
     "ouroboros": {
       "command": "uvx",
       "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-      "timeout": 600,
-      "env": {
-        "OUROBOROS_AGENT_RUNTIME": "claude"
-      }
+      "timeout": 600
     }
   }
 }
@@ -667,10 +664,7 @@ If Ouroboros is installed directly (not via `uvx`), use:
     "ouroboros": {
       "command": "ouroboros",
       "args": ["mcp", "serve"],
-      "timeout": 600,
-      "env": {
-        "OUROBOROS_AGENT_RUNTIME": "claude"
-      }
+      "timeout": 600
     }
   }
 }
