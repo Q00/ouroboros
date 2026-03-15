@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -87,6 +88,18 @@ class TestParallelACExecutor:
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
 
             async def execute_task(
                 self,
@@ -237,6 +250,18 @@ class TestParallelACExecutor:
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
 
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
             async def execute_task(
                 self,
                 prompt: str,
@@ -378,6 +403,18 @@ class TestParallelACExecutor:
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
 
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
             async def execute_task(
                 self,
                 prompt: str,
@@ -473,6 +510,18 @@ class TestParallelACExecutor:
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
 
             async def execute_task(
                 self,
@@ -590,6 +639,18 @@ class TestParallelACExecutor:
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
 
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
             async def execute_task(
                 self,
                 prompt: str,
@@ -690,6 +751,18 @@ class TestParallelACExecutor:
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
 
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
             async def execute_task(
                 self,
                 prompt: str,
@@ -785,6 +858,18 @@ class TestParallelACExecutor:
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
 
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
             async def execute_task(
                 self,
                 prompt: str,
@@ -876,6 +961,124 @@ class TestParallelACExecutor:
         assert result.runtime_handle.metadata == resume_handle.metadata
 
     @pytest.mark.asyncio
+    async def test_restarted_executor_ignores_invalid_persisted_runtime_handle_for_same_attempt(
+        self,
+    ) -> None:
+        """Malformed persisted runtime payloads should be skipped in favor of a fresh handle."""
+
+        class _StubInvalidPersistedHandleRuntime:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "tools": tools,
+                        "system_prompt": system_prompt,
+                        "resume_handle": resume_handle,
+                        "resume_session_id": resume_session_id,
+                    }
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=resume_handle,
+                )
+
+        event_store = AsyncMock()
+        event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="execution.session.started",
+                    aggregate_type="execution",
+                    aggregate_id="orch_123_ac_1",
+                    data={
+                        "retry_attempt": 0,
+                        "session_state_path": (
+                            "execution.workflows.orch_123.acceptance_criteria."
+                            "ac_1.implementation_session"
+                        ),
+                        "runtime": {
+                            "kind": "implementation_session",
+                            "cwd": "/tmp/project",
+                            "approval_mode": "acceptEdits",
+                            "metadata": {
+                                "scope": "ac",
+                                "session_role": "implementation",
+                                "retry_attempt": 0,
+                                "ac_index": 1,
+                                "session_scope_id": "orch_123_ac_1",
+                                "session_state_path": (
+                                    "execution.workflows.orch_123.acceptance_criteria."
+                                    "ac_1.implementation_session"
+                                ),
+                                "server_session_id": "server-invalid",
+                            },
+                        },
+                    },
+                )
+            ]
+        )
+        event_store.append = AsyncMock()
+        runtime = _StubInvalidPersistedHandleRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=1,
+            ac_content="Recover from malformed persisted runtime state",
+            session_id="orch_123",
+            tools=["Read", "Edit"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            retry_attempt=0,
+        )
+
+        resume_handle = runtime.calls[0]["resume_handle"]
+        assert isinstance(resume_handle, RuntimeHandle)
+        assert resume_handle.backend == "opencode"
+        assert resume_handle.native_session_id is None
+        assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_1"
+        assert resume_handle.metadata["session_role"] == "implementation"
+        assert "server_session_id" not in resume_handle.metadata
+        event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_1")
+        # Compare handles ignoring updated_at (timestamp set at creation time
+        # may differ by microseconds from the one stored in the result).
+        result_handle = replace(result.runtime_handle, updated_at=None)
+        expected_handle = replace(resume_handle, updated_at=None)
+        assert result_handle == expected_handle
+
+    @pytest.mark.asyncio
     async def test_restarted_executor_prefers_latest_resumed_runtime_handle_for_same_attempt(
         self,
     ) -> None:
@@ -887,6 +1090,18 @@ class TestParallelACExecutor:
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
 
             async def execute_task(
                 self,
@@ -1022,6 +1237,18 @@ class TestParallelACExecutor:
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
 
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
             async def execute_task(
                 self,
                 prompt: str,
@@ -1099,6 +1326,18 @@ class TestParallelACExecutor:
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
 
             async def execute_task(
                 self,
@@ -1220,6 +1459,18 @@ class TestParallelACExecutor:
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
                 self._attempt = 0
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
 
             async def execute_task(
                 self,
@@ -1354,6 +1605,18 @@ class TestParallelACExecutor:
                 self._runtime_handle_backend = "opencode"
                 self._cwd = "/tmp/project"
                 self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
 
             async def execute_task(
                 self,
@@ -2056,6 +2319,18 @@ class TestParallelACExecutor:
         class StubRuntime:
             _runtime_handle_backend = "opencode"
 
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return "/tmp/project"
+
+            @property
+            def permission_mode(self) -> str | None:
+                return "acceptEdits"
+
             async def execute_task(self, **kwargs: object):
                 resume_handle = kwargs["resume_handle"]
                 assert isinstance(resume_handle, RuntimeHandle)
@@ -2139,6 +2414,18 @@ class TestParallelACExecutor:
             _runtime_handle_backend = "opencode"
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
 
             async def execute_task(self, **kwargs: object):
                 resume_handle = kwargs["resume_handle"]
@@ -2232,6 +2519,18 @@ class TestParallelACExecutor:
             _cwd = "/tmp/project"
             _permission_mode = "acceptEdits"
 
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
             async def execute_task(self, **kwargs: object):
                 resume_handle = kwargs["resume_handle"]
                 assert isinstance(resume_handle, RuntimeHandle)
@@ -2284,3 +2583,137 @@ class TestParallelACExecutor:
         assert result.success is True
         assert tool_completed.data["tool_result_text"] == "[AC_COMPLETE: 1] Done!"
         assert tool_completed.data["tool_result"]["text_content"] == "[AC_COMPLETE: 1] Done!"
+
+    @pytest.mark.asyncio
+    async def test_restarted_executor_skips_invalid_event_and_resumes_from_valid_one(
+        self,
+    ) -> None:
+        """When an invalid persisted event precedes a valid one, resume from the valid event."""
+
+        class _StubResumeAfterInvalidRuntime:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "tools": tools,
+                        "system_prompt": system_prompt,
+                        "resume_handle": resume_handle,
+                        "resume_session_id": resume_session_id,
+                    }
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=resume_handle,
+                )
+
+        valid_handle = RuntimeHandle(
+            backend="opencode",
+            kind="implementation_session",
+            native_session_id="opencode-session-valid",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+            metadata={
+                "scope": "ac",
+                "session_role": "implementation",
+                "retry_attempt": 0,
+                "ac_index": 1,
+                "session_scope_id": "orch_123_ac_1",
+                "session_state_path": (
+                    "execution.workflows.orch_123.acceptance_criteria.ac_1.implementation_session"
+                ),
+                "server_session_id": "server-valid",
+            },
+        )
+        event_store = AsyncMock()
+        event_store.replay = AsyncMock(
+            return_value=[
+                # First event: valid handle
+                BaseEvent(
+                    type="execution.session.started",
+                    aggregate_type="execution",
+                    aggregate_id="orch_123_ac_1",
+                    data={
+                        "retry_attempt": 0,
+                        "session_state_path": (
+                            "execution.workflows.orch_123.acceptance_criteria."
+                            "ac_1.implementation_session"
+                        ),
+                        "runtime": valid_handle.to_dict(),
+                    },
+                ),
+                # Second event: invalid handle (no backend/provider)
+                BaseEvent(
+                    type="execution.session.resumed",
+                    aggregate_type="execution",
+                    aggregate_id="orch_123_ac_1",
+                    data={
+                        "retry_attempt": 0,
+                        "session_state_path": (
+                            "execution.workflows.orch_123.acceptance_criteria."
+                            "ac_1.implementation_session"
+                        ),
+                        "runtime": {
+                            "kind": "implementation_session",
+                            "cwd": "/tmp/project",
+                            "metadata": {},
+                        },
+                    },
+                ),
+            ]
+        )
+        event_store.append = AsyncMock()
+        runtime = _StubResumeAfterInvalidRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=1,
+            ac_content="Resume after skipping invalid persisted event",
+            session_id="orch_123",
+            tools=["Read", "Edit"],
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+            retry_attempt=0,
+        )
+
+        resume_handle = runtime.calls[0]["resume_handle"]
+        assert isinstance(resume_handle, RuntimeHandle)
+        # Should have resumed from the valid (first) event, not the invalid (second) one
+        assert resume_handle.native_session_id == "opencode-session-valid"
+        assert resume_handle.metadata["server_session_id"] == "server-valid"
+        assert result.runtime_handle is not None
+        assert result.runtime_handle.native_session_id == resume_handle.native_session_id
+        assert result.runtime_handle.metadata == resume_handle.metadata

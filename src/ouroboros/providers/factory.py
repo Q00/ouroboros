@@ -77,7 +77,7 @@ def create_llm_adapter(
     on_message: Callable[[str, str], None] | None = None,
     api_key: str | None = None,
     api_base: str | None = None,
-    timeout: float = 60.0,
+    timeout: float | None = None,
     max_retries: int = 3,
 ) -> LLMAdapter:
     """Create an LLM adapter from config or explicit options."""

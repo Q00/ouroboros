@@ -40,7 +40,11 @@ from ouroboros.orchestrator.session import SessionTracker
 @pytest.fixture
 def mock_adapter() -> MagicMock:
     """Create a mock Claude agent adapter."""
-    return MagicMock()
+    adapter = MagicMock()
+    adapter.runtime_backend = "opencode"
+    adapter.working_directory = "/tmp/project"
+    adapter.permission_mode = "acceptEdits"
+    return adapter
 
 
 @pytest.fixture
