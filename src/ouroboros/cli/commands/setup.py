@@ -59,31 +59,29 @@ def _setup_codex(codex_path: str) -> None:
     print_success(f"Configured Codex runtime (CLI: {codex_path})")
     print_info(f"Config saved to: {config_path}")
 
-    # Also register MCP server for Codex with correct env
+    # Also register MCP server for Codex users who also have Claude Code
     mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+    if mcp_config_path.exists() or (Path.home() / ".claude").is_dir():
+        mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
 
-    mcp_data: dict = {}
-    if mcp_config_path.exists():
-        mcp_data = json.loads(mcp_config_path.read_text())
+        mcp_data: dict = {}
+        if mcp_config_path.exists():
+            mcp_data = json.loads(mcp_config_path.read_text())
 
-    mcp_data.setdefault("mcpServers", {})
-    entry = mcp_data["mcpServers"].get("ouroboros", {})
-    if not entry:
-        entry = {
-            "command": "uvx",
-            "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-        }
-    entry["timeout"] = 600
-    entry.setdefault("env", {})
-    entry["env"]["OUROBOROS_AGENT_RUNTIME"] = "codex"
-    entry["env"]["OUROBOROS_LLM_BACKEND"] = "codex"
-    mcp_data["mcpServers"]["ouroboros"] = entry
+        mcp_data.setdefault("mcpServers", {})
+        entry = mcp_data["mcpServers"].get("ouroboros", {})
+        if not entry:
+            entry = {
+                "command": "uvx",
+                "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+            }
+        entry["timeout"] = 600
+        mcp_data["mcpServers"]["ouroboros"] = entry
 
-    with mcp_config_path.open("w") as f:
-        json.dump(mcp_data, f, indent=2)
+        with mcp_config_path.open("w") as f:
+            json.dump(mcp_data, f, indent=2)
 
-    print_success("Updated MCP server config with Codex env.")
+        print_info("Updated MCP server config with timeout.")
 
 
 def _setup_claude(claude_path: str) -> None:
@@ -110,28 +108,18 @@ def _setup_claude(claude_path: str) -> None:
             "command": "uvx",
             "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
             "timeout": 600,
-            "env": {
-                "OUROBOROS_AGENT_RUNTIME": "claude",
-            },
         }
         with mcp_config_path.open("w") as f:
             json.dump(mcp_data, f, indent=2)
         print_success("Registered MCP server in ~/.claude/mcp.json")
     else:
-        # Ensure existing entries have timeout and env
+        # Ensure existing entries have timeout
         entry = mcp_data["mcpServers"]["ouroboros"]
-        updated = False
         if "timeout" not in entry:
             entry["timeout"] = 600
-            updated = True
-        entry.setdefault("env", {})
-        if "OUROBOROS_AGENT_RUNTIME" not in entry["env"]:
-            entry["env"]["OUROBOROS_AGENT_RUNTIME"] = "claude"
-            updated = True
-        if updated:
             with mcp_config_path.open("w") as f:
                 json.dump(mcp_data, f, indent=2)
-            print_info("Updated MCP server config with timeout and env.")
+            print_info("Updated MCP server config with timeout.")
         else:
             print_info("MCP server already registered.")
 

@@ -248,10 +248,7 @@ Add to `~/.claude/mcp.json` (`ouroboros setup --runtime claude` writes this auto
     "ouroboros": {
       "command": "uvx",
       "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-      "timeout": 600,
-      "env": {
-        "OUROBOROS_AGENT_RUNTIME": "claude"
-      }
+      "timeout": 600
     }
   }
 }
