@@ -5,7 +5,7 @@ mod views;
 
 use std::path::PathBuf;
 
-use slt::{Color, Context, KeyModifiers, RunConfig, Theme};
+use slt::{Border, Color, Context, KeyModifiers, RunConfig, Theme};
 
 use crate::state::*;
 
@@ -97,36 +97,62 @@ fn main() -> std::io::Result<()> {
                             aggregate_id: s.aggregate_id.clone(),
                             event_count: s.event_count,
                             first_ts: s.timestamp.clone(),
+                            goal: s.goal.clone(),
+                            status: s.status.clone(),
                         });
                     }
+                    // Build session table rows
+                    let table_rows: Vec<Vec<String>> = sessions
+                        .iter()
+                        .map(|s| {
+                            let status_icon = match s.status.as_str() {
+                                "done" => "✓",
+                                "failed" => "✗",
+                                "running" => "▶",
+                                "paused" => "⏸",
+                                "cancelled" => "⊘",
+                                _ => "?",
+                            };
+                            let goal_short: String = if s.goal.is_empty() {
+                                "(no goal)".into()
+                            } else {
+                                s.goal.clone()
+                            };
+                            let id_short: String = s.aggregate_id.chars().skip(
+                                s.aggregate_id.len().saturating_sub(12)
+                            ).collect();
+                            let ts_compact: String = match (
+                                s.timestamp.get(5..7),
+                                s.timestamp.get(8..10),
+                                s.timestamp.get(11..16),
+                            ) {
+                                (Some(month), Some(day), Some(time)) => {
+                                    format!("{}/{} {}", month, day, time)
+                                }
+                                _ => s.timestamp.clone(),
+                            };
+                            vec![
+                                status_icon.to_string(),
+                                goal_short,
+                                format!("..{id_short}"),
+                                ts_compact,
+                                format!("{} events", s.event_count),
+                            ]
+                        })
+                        .collect();
+                    state.session_table = slt::TableState::new(
+                        vec!["", "Goal", "ID", "Time", "Events"],
+                        table_rows,
+                    );
+                    // Keep list for fallback selection tracking
                     state.session_list = slt::ListState::new(
-                        sessions
-                            .iter()
-                            .map(|s| {
-                                // Show: timestamp | status | short-id | goal
-                                let ts_short: String = s.timestamp.chars().take(16).collect();
-                                let id_short: String = s.aggregate_id.chars().skip(
-                                    s.aggregate_id.len().saturating_sub(8)
-                                ).collect();
-                                let goal_short: String = if s.goal.is_empty() {
-                                    "(no goal)".into()
-                                } else {
-                                    s.goal.chars().take(40).collect()
-                                };
-                                let status_icon = match s.status.as_str() {
-                                    "done" => "✓",
-                                    "failed" => "✗",
-                                    "running" => "▶",
-                                    "paused" => "⏸",
-                                    "cancelled" => "⊘",
-                                    _ => "?",
-                                };
-                                format!(
-                                    "{} {} ..{} │ {}",
-                                    status_icon, ts_short, id_short, goal_short
-                                )
-                            })
-                            .collect::<Vec<_>>(),
+                        sessions.iter().map(|s| {
+                            let status_icon = match s.status.as_str() {
+                                "done" => "✓", "failed" => "✗", "running" => "▶",
+                                "paused" => "⏸", "cancelled" => "⊘", _ => "?",
+                            };
+                            format!("{} {}", status_icon, &s.goal)
+                        }).collect::<Vec<_>>(),
                     );
                     // Load only the most recent session instead of all events
                     if let Some(latest) = state.sessions.first() {
@@ -142,6 +168,16 @@ fn main() -> std::io::Result<()> {
                             ),
                         );
                         db::populate_state_from_events(&mut state, &session_events);
+                    }
+                    // Load lineage events separately (they have independent aggregate_ids)
+                    let lineage_events = conn.read_all_lineage_events();
+                    if !lineage_events.is_empty() {
+                        state.add_log(
+                            LogLevel::Info,
+                            "db",
+                            &format!("Loaded {} lineage events", lineage_events.len()),
+                        );
+                        db::populate_state_from_events(&mut state, &lineage_events);
                     }
                     ouro_db = Some(conn);
                 }
@@ -164,21 +200,19 @@ fn main() -> std::io::Result<()> {
 
             if let Some(cmd_idx) = ui.command_palette(&mut state.command_palette) {
                 match cmd_idx {
-                    0 => state.tabs.selected = 0,
-                    1 => state.tabs.selected = 1,
-                    2 => state.tabs.selected = 2,
-                    3 => state.tabs.selected = 3,
-                    4 => state.tabs.selected = 4,
-                    5 => state.tabs.selected = 5,
-                    6 => {
+                    0 => state.tabs.selected = 0, // Dashboard
+                    1 => state.tabs.selected = 1, // Execution
+                    2 => state.tabs.selected = 2, // Lineage
+                    3 => state.tabs.selected = 3, // Sessions
+                    4 => {
                         state.is_paused = true;
                         state.status = ExecutionStatus::Paused;
                     }
-                    7 => {
+                    5 => {
                         state.is_paused = false;
                         state.status = ExecutionStatus::Running;
                     }
-                    8 => ui.quit(),
+                    6 => ui.quit(),
                     _ => {}
                 }
             }
@@ -191,8 +225,6 @@ fn main() -> std::io::Result<()> {
                 ui.container().grow(1).p(1).col(|ui| match state.screen {
                     Screen::Dashboard => views::dashboard::render(ui, &mut state),
                     Screen::Execution => views::execution::render(ui, &mut state),
-                    Screen::Logs => views::logs::render(ui, &mut state),
-                    Screen::Debug => views::debug::render(ui, &mut state),
                     Screen::Lineage => views::lineage::render(ui, &mut state),
                     Screen::SessionSelector => {
                         if let Some(idx) = views::session_selector::render(ui, &mut state) {
@@ -201,11 +233,19 @@ fn main() -> std::io::Result<()> {
                                 if let Some(ref mut conn) = ouro_db {
                                     // Reset state for new session
                                     let mut new_state = AppState::new();
-                                    // Preserve sessions list
+                                    // Preserve sessions list and table
                                     new_state.sessions = state.sessions.clone();
+                                    new_state.session_table = slt::TableState::new(
+                                        state.session_table.headers.clone(),
+                                        state.session_table.rows.clone(),
+                                    );
                                     new_state.session_list = slt::ListState::new(
                                         state.session_list.items.clone(),
                                     );
+                                    // Preserve lineage state (global, doesn't change per session)
+                                    new_state.lineages = state.lineages.clone();
+                                    new_state.lineage_list = slt::ListState::new(state.lineage_list.items.clone());
+                                    new_state.selected_lineage_idx = state.selected_lineage_idx;
                                     let events = conn.read_events_for_session(&agg_id);
                                     db::populate_state_from_events(&mut new_state, &events);
                                     new_state.add_log(
@@ -222,7 +262,7 @@ fn main() -> std::io::Result<()> {
                     }
                 });
 
-                render_footer(ui);
+                render_footer(ui, &state);
             });
 
             poll_counter += 1;
@@ -230,7 +270,16 @@ fn main() -> std::io::Result<()> {
                 if poll_counter % 30 == 0 {
                     let new_events = conn.read_new_events();
                     if !new_events.is_empty() {
-                        db::populate_state_from_events(&mut state, &new_events);
+                        // Filter to events belonging to current session or its execution
+                        let new_events: Vec<_> = new_events.into_iter().filter(|ev| {
+                            ev.aggregate_id == state.session_id
+                                || (!state.execution_id.is_empty() && ev.aggregate_id.starts_with(&state.execution_id))
+                                || ev.event_type.starts_with("lineage.")
+                                || ev.event_type.starts_with("observability.")
+                        }).collect();
+                        if !new_events.is_empty() {
+                            db::populate_state_from_events(&mut state, &new_events);
+                        }
                     }
                 }
             } else if state.auto_simulate && !state.is_paused {
@@ -241,7 +290,9 @@ fn main() -> std::io::Result<()> {
 }
 
 fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
-    let on_logs = state.tabs.selected == 2;
+    let on_execution = state.screen == Screen::Execution;
+    // Log panel has text input, so avoid consuming keys when it's active
+    let log_input_active = on_execution && state.show_log_panel;
 
     if ui.key('q') {
         ui.quit();
@@ -249,16 +300,17 @@ fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
     if ui.key_mod('p', KeyModifiers::CONTROL) {
         state.command_palette.open = !state.command_palette.open;
     }
-    if ui.key('p') && !state.command_palette.open && !on_logs {
+    if ui.key('p') && !state.command_palette.open && !log_input_active {
         state.is_paused = true;
         state.status = ExecutionStatus::Paused;
         state.add_log(LogLevel::Info, "tui", "Execution paused by user");
     }
-    if ui.key('r') && !state.command_palette.open && !on_logs {
+    if ui.key('r') && !state.command_palette.open && !log_input_active {
         state.is_paused = false;
         state.status = ExecutionStatus::Running;
         state.add_log(LogLevel::Info, "tui", "Execution resumed");
     }
+    // Tab navigation: 1=Dashboard, 2=Execution, 3=Lineage, s=Sessions
     if ui.key('1') {
         state.tabs.selected = 0;
     }
@@ -271,23 +323,17 @@ fn handle_global_keys(ui: &mut Context, state: &mut AppState) {
     if ui.key('4') {
         state.tabs.selected = 3;
     }
-    if ui.key('5') {
-        state.tabs.selected = 4;
+    if ui.key('e') && !log_input_active {
+        state.tabs.selected = 2; // Lineage shortcut
     }
-    if ui.key('l') && !on_logs {
-        state.tabs.selected = 2;
+    if ui.key('s') && !state.command_palette.open && !log_input_active {
+        state.tabs.selected = 3; // Sessions
     }
-    if ui.key('d') && !on_logs {
-        state.tabs.selected = 3;
-    }
-    if ui.key('e') && !on_logs {
-        state.tabs.selected = 4;
-    }
-    if ui.key('s') && !state.command_palette.open && !on_logs {
-        state.tabs.selected = 5;
-    }
-    if ui.key('6') {
-        state.tabs.selected = 5;
+    // Execution-specific toggles (only on Execution tab)
+    if on_execution && !log_input_active {
+        if ui.key('l') {
+            state.show_log_panel = !state.show_log_panel;
+        }
     }
 }
 
@@ -299,28 +345,13 @@ fn render_header(ui: &mut Context, state: &AppState) {
     let accent = ui.theme().accent;
     let secondary = ui.theme().secondary;
     let surface = ui.theme().surface;
+    let surface_hover = ui.theme().surface_hover;
 
-    ui.container().bg(surface).px(3).py(1).col(|ui| {
+    ui.container().bg(surface).px(3).py(0).col(|ui| {
+        // Line 1: Logo + Status + Metrics
         ui.row(|ui| {
             ui.text("◆ OUROBOROS").bold().fg(accent);
-
-            ui.spacer();
-
-            if !state.session_id.is_empty() {
-                let sid: String = state.session_id.chars().take(14).collect();
-                ui.text(&sid).fg(secondary);
-                ui.text("  ").fg(dim);
-            }
-
-            ui.text(format!("iter {}  ", state.iteration)).fg(dim);
-            ui.text(&state.elapsed).fg(dim);
             ui.text("  ").fg(dim);
-            ui.text(format!("${:.2}", state.cost.total_cost_usd))
-                .fg(success);
-            ui.text(format!("  {}k", state.cost.total_tokens / 1000))
-                .fg(dim);
-
-            ui.text("    ").fg(dim);
 
             let (sc, sl) = match state.status {
                 ExecutionStatus::Running => (success, "● RUN"),
@@ -331,69 +362,126 @@ fn render_header(ui: &mut Context, state: &AppState) {
             };
             ui.text(sl).fg(sc).bold();
 
+            ui.spacer();
+
             let (done, total) = state.ac_progress();
             if total > 0 {
-                ui.text(format!("  {done}/{total}")).fg(text);
+                ui.text(format!("[{done}/{total} AC]")).fg(text).bold();
+                ui.text("  ").fg(dim);
             }
+            ui.text(&state.elapsed).fg(dim);
+            ui.text("  ").fg(dim);
+            ui.text(format!("${:.2}", state.cost.total_cost_usd)).fg(success);
+            ui.text(format!("  {}k tok", state.cost.total_tokens / 1000)).fg(dim);
+            ui.text("  ").fg(dim);
+            ui.text(format!("iter {}", state.iteration)).fg(dim);
         });
+        // Line 2: Session Goal (most important context — prominent)
+        if !state.seed_goal.is_empty() {
+            ui.container().bg(surface_hover).px(0).py(0).row(|ui| {
+                ui.text("Goal ").fg(dim);
+                ui.text_wrap(&state.seed_goal).fg(text).bold();
+                ui.spacer();
+                if !state.session_id.is_empty() {
+                    let sid_short: String = if state.session_id.len() > 12 {
+                        format!("..{}", &state.session_id[state.session_id.len().saturating_sub(10)..])
+                    } else {
+                        state.session_id.clone()
+                    };
+                    ui.text(&sid_short).fg(secondary);
+                }
+            });
+        }
     });
 }
 
 fn render_tab_bar(ui: &mut Context, state: &mut AppState) {
-    let surface = ui.theme().surface;
+    let surface_hover = ui.theme().surface_hover;
     let accent = ui.theme().accent;
     let dim = ui.theme().text_dim;
     let text = ui.theme().text;
-    let tabs = ["Dashboard", "Execution", "Logs", "Debug", "Lineage", "Sessions"];
-    ui.container().bg(surface).px(2).py(0).row(|ui| {
-        for (i, label) in tabs.iter().enumerate() {
+    let selected_bg = ui.theme().selected_bg;
+    let tabs = [
+        ("1", "Dashboard"),
+        ("2", "Execution"),
+        ("3", "Lineage"),
+        ("4", "Sessions"),
+    ];
+    ui.container().bg(surface_hover).px(1).py(0).row(|ui| {
+        for (i, (key, label)) in tabs.iter().enumerate() {
             let active = state.tabs.selected == i;
-            let resp = ui.container().px(2).py(0).row(|ui| {
-                if active {
-                    ui.text("▸ ").fg(accent);
-                    ui.text(*label).fg(text).bold();
-                } else {
-                    ui.text("  ").fg(dim);
+            let resp = if active {
+                ui.container()
+                    .bg(selected_bg)
+                    .border(Border::Single)
+                    .px(1)
+                    .py(0)
+                    .row(|ui| {
+                        ui.text(*key).fg(accent).bold();
+                        ui.text(" ").fg(dim);
+                        ui.text(*label).fg(text).bold();
+                    })
+            } else {
+                ui.container().px(2).py(0).row(|ui| {
+                    ui.text(*key).fg(dim);
+                    ui.text(" ").fg(dim);
                     ui.text(*label).fg(dim);
-                }
-            });
+                })
+            };
             if resp.clicked {
                 state.tabs.selected = i;
             }
         }
         ui.spacer();
+        // Drift sparkline in tab bar (always visible)
+        let drift_success = ui.theme().success;
+        let drift_warning = ui.theme().warning;
+        let drift_error = ui.theme().error;
+        if !state.drift.history.is_empty() {
+            ui.text("drift ").fg(dim);
+            ui.sparkline(state.drift.history.make_contiguous(), 8);
+            ui.text(format!(" {:.2}", state.drift.combined)).fg(
+                if state.drift.combined < 0.1 { drift_success }
+                else if state.drift.combined < 0.2 { drift_warning }
+                else { drift_error }
+            );
+        }
     });
 
     state.screen = match state.tabs.selected {
         0 => Screen::Dashboard,
         1 => Screen::Execution,
-        2 => Screen::Logs,
-        3 => Screen::Debug,
-        4 => Screen::Lineage,
-        5 => Screen::SessionSelector,
+        2 => Screen::Lineage,
+        3 => Screen::SessionSelector,
         _ => Screen::Dashboard,
     };
 }
 
-fn render_footer(ui: &mut Context) {
+fn render_footer(ui: &mut Context, state: &AppState) {
     let surface = ui.theme().surface;
     let dim = ui.theme().text_dim;
     let accent = ui.theme().accent;
-    let text = ui.theme().text;
+
+    // Tab-specific hints
+    let extra_keys: &[(&str, &str)] = match state.screen {
+        Screen::Dashboard => &[("↑↓", "Navigate tree"), ("Enter", "Expand/Collapse")],
+        Screen::Execution => &[("l", "Log panel"), ("↑↓", "Scroll")],
+        Screen::Lineage => &[("↑↓", "Select lineage")],
+        Screen::SessionSelector => &[("Enter", "Load session"), ("←→", "Page"), ("Esc", "Back")],
+    };
 
     ui.container().bg(surface).px(3).py(0).row(|ui| {
-        let keys: &[(&str, &str)] = &[
-            ("q", "Quit"),
-            ("p/r", "Pause"),
-            ("^P", "Palette"),
-            ("↑↓", "Nav"),
-        ];
-        for (i, (key, desc)) in keys.iter().enumerate() {
+        // Global keys
+        for (key, desc) in &[("q", "Quit"), ("p/r", "Pause/Resume"), ("^P", "Palette")] {
             ui.text(*key).fg(accent);
-            ui.text(format!(" {} ", desc)).fg(dim);
-            if i < keys.len() - 1 {
-                ui.text("  ").fg(text);
-            }
+            ui.text(format!(" {}  ", desc)).fg(dim);
+        }
+        ui.text("│").fg(dim);
+        ui.text(" ").fg(dim);
+        // Tab-specific keys
+        for (key, desc) in extra_keys {
+            ui.text(*key).fg(accent);
+            ui.text(format!(" {}  ", desc)).fg(dim);
         }
     });
 }

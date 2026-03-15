@@ -74,6 +74,20 @@ def lineage_generation_completed(
     )
 
 
+def lineage_generation_phase_changed(
+    lineage_id: str,
+    generation_number: int,
+    phase: str,
+) -> BaseEvent:
+    """Create event when a generation transitions to a new phase."""
+    return BaseEvent(
+        type="lineage.generation.phase_changed",
+        aggregate_type="lineage",
+        aggregate_id=lineage_id,
+        data={"generation_number": generation_number, "phase": phase},
+    )
+
+
 def lineage_generation_failed(
     lineage_id: str,
     generation_number: int,

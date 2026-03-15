@@ -39,6 +39,7 @@ from ouroboros.events.lineage import (
     lineage_exhausted,
     lineage_generation_completed,
     lineage_generation_failed,
+    lineage_generation_phase_changed,
     lineage_generation_started,
     lineage_ontology_evolved,
     lineage_stagnated,
@@ -48,6 +49,7 @@ from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSign
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.wonder import WonderEngine, WonderOutput
+from ouroboros.observability.drift import DriftMeasuredEvent, DriftMeasurement
 from ouroboros.persistence.event_store import EventStore
 
 logger = logging.getLogger(__name__)
@@ -762,6 +764,15 @@ class EvolutionaryLoop:
                         )
                     )
 
+            # Phase transition: wondering → reflecting
+            await self.event_store.append(
+                lineage_generation_phase_changed(
+                    lineage.lineage_id,
+                    generation_number,
+                    GenerationPhase.REFLECTING.value,
+                )
+            )
+
             # Reflect phase (with retry on parse failure)
             if self.reflect_engine and wonder_output and prev_gen.evaluation_summary:
                 max_reflect_attempts = 2
@@ -813,6 +824,15 @@ class EvolutionaryLoop:
                         },
                     )
 
+                # Phase transition: reflecting → seeding
+                await self.event_store.append(
+                    lineage_generation_phase_changed(
+                        lineage.lineage_id,
+                        generation_number,
+                        GenerationPhase.SEEDING.value,
+                    )
+                )
+
                 # Generate evolved seed
                 if self.seed_generator:
                     seed_result = self.seed_generator.generate_from_reflect(
@@ -851,6 +871,15 @@ class EvolutionaryLoop:
                     current_seed.metadata.seed_id,
                 )
             )
+
+        # Phase transition: → executing
+        await self.event_store.append(
+            lineage_generation_phase_changed(
+                lineage.lineage_id,
+                generation_number,
+                GenerationPhase.EXECUTING.value,
+            )
+        )
 
         # Execute phase (placeholder - actual execution via OrchestratorRunner)
         execution_output: str | None = None
@@ -924,6 +953,15 @@ class EvolutionaryLoop:
                 )
                 validation_output = f"Validation skipped: {e}"
 
+        # Phase transition: → evaluating
+        await self.event_store.append(
+            lineage_generation_phase_changed(
+                lineage.lineage_id,
+                generation_number,
+                GenerationPhase.EVALUATING.value,
+            )
+        )
+
         # Evaluate phase (placeholder - actual evaluation via EvaluationPipeline)
         evaluation_summary: EvaluationSummary | None = None
         if execute and self.evaluator:
@@ -936,6 +974,29 @@ class EvolutionaryLoop:
             except Exception as e:
                 logger.warning(
                     "evolution.evaluation.failed",
+                    extra={"error": str(e), "generation": generation_number},
+                )
+
+        # Measure drift after evaluation
+        if execution_output:
+            try:
+                drift_measurement = DriftMeasurement()
+                drift_metrics = drift_measurement.measure(
+                    current_output=execution_output,
+                    constraint_violations=[],
+                    current_concepts=[],
+                    seed=current_seed,
+                )
+                drift_event = DriftMeasuredEvent(
+                    execution_id=lineage.lineage_id,
+                    seed_id=current_seed.metadata.seed_id,
+                    iteration=generation_number,
+                    metrics=drift_metrics,
+                )
+                await self.event_store.append(drift_event)
+            except Exception as e:
+                logger.warning(
+                    "evolution.drift.measurement_failed",
                     extra={"error": str(e), "generation": generation_number},
                 )
 
