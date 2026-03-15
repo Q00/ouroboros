@@ -176,7 +176,11 @@ This enables:
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
+      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+      "timeout": 600,
+      "env": {
+        "OUROBOROS_AGENT_RUNTIME": "claude"
+      }
     }
   }
 }
