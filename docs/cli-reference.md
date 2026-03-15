@@ -670,6 +670,15 @@ If Ouroboros is installed directly (not via `uvx`), use:
 }
 ```
 
+**Runtime selection** is configured in `~/.ouroboros/config.yaml` (written by `ouroboros setup`):
+
+```yaml
+orchestrator:
+  runtime_backend: claude   # or "codex"
+```
+
+Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
+
 ### `mcp info`
 
 Show MCP server information and available tools.
