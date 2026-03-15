@@ -256,6 +256,8 @@ Add to `~/.claude/mcp.json` (`ouroboros setup --runtime claude` writes this auto
 
 > If Ouroboros is installed directly (not via `uvx`), replace `"command": "uvx"` and `"args"` with `"command": "ouroboros"` and `"args": ["mcp", "serve"]`.
 
+Runtime selection is configured separately in `~/.ouroboros/config.yaml` (written by `ouroboros setup --runtime claude|codex`).
+
 Available MCP tools:
 - `ouroboros_execute_seed` -- execute a seed specification
 - `ouroboros_session_status` -- check session status
