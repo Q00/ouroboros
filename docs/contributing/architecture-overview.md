@@ -17,7 +17,7 @@ Immutable Seed (YAML)
 Phase 1: PAL Router ──> Select model tier (Frugal/Standard/Frontier)
     |
     v
-Phase 2: Double Diamond ──> Decompose ACs, execute via Claude Agent SDK
+Phase 2: Double Diamond ──> Decompose ACs, execute via runtime backend
     |                         (parallel or sequential)
     |
     v
@@ -93,13 +93,13 @@ Phase 5: Secondary Loop ──> Process deferred TODOs
 
 **Data flow**: `EvaluationContext` -> `MechanicalVerifier` -> `SemanticEvaluator` -> `ConsensusTrigger` -> `ConsensusEvaluator` -> `EvaluationResult`
 
-### orchestrator/ -- Claude Agent SDK Integration
+### orchestrator/ -- Runtime Abstraction and Orchestration
 
 **When to touch**: Modifying execution behavior, parallel scheduling, strategy patterns.
 
 | File | Purpose |
 |------|---------|
-| `adapter.py` | `ClaudeAgentAdapter` -- wraps Claude Agent SDK |
+| `adapter.py` | `ClaudeAgentAdapter` -- wraps Claude Agent SDK (one of several runtime adapters) |
 | `runner.py` | `OrchestratorRunner` -- main execution loop, AC iteration |
 | `parallel_executor.py` | Parallel AC execution with dependency analysis |
 | `execution_strategy.py` | `ExecutionStrategy` protocol + Code/Research/Analysis implementations |
@@ -159,7 +159,7 @@ When evaluation fails repeatedly, the resilience system detects stagnation patte
 1. Loads the Seed
 2. Gets the ExecutionStrategy for `seed.task_type`
 3. Iterates over ACs (parallel or sequential)
-4. Calls Claude Agent SDK via `ClaudeAgentAdapter`
+4. Calls the configured runtime backend (e.g., `ClaudeAgentAdapter`, `CodexCLIRuntime`)
 5. Collects results and emits events to `EventStore`
 6. TUI picks up events via polling
 

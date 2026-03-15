@@ -9,7 +9,7 @@ The scoring algorithm evaluates three key components:
 - Success Criteria Clarity (30%): How measurable the success criteria are
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any
@@ -18,10 +18,10 @@ from pydantic import BaseModel, Field
 import structlog
 
 from ouroboros.bigbang.interview import InterviewState
+from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
-from ouroboros.providers.base import CompletionConfig, Message, MessageRole
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
 
 log = structlog.get_logger()
 
@@ -38,8 +38,6 @@ BROWNFIELD_GOAL_CLARITY_WEIGHT = 0.35
 BROWNFIELD_CONSTRAINT_CLARITY_WEIGHT = 0.25
 BROWNFIELD_SUCCESS_CRITERIA_CLARITY_WEIGHT = 0.25
 BROWNFIELD_CONTEXT_CLARITY_WEIGHT = 0.15
-
-DEFAULT_MODEL = "claude-opus-4-6"
 
 # Temperature for reproducible scoring
 SCORING_TEMPERATURE = 0.1
@@ -134,7 +132,7 @@ class AmbiguityScorer:
         max_retries: Maximum retry attempts, or None for unlimited (default).
 
     Example:
-        scorer = AmbiguityScorer(llm_adapter=LiteLLMAdapter())
+        scorer = AmbiguityScorer(llm_adapter=adapter)
 
         result = await scorer.score(interview_state)
         if result.is_ok:
@@ -147,8 +145,8 @@ class AmbiguityScorer:
                 questions = scorer.generate_clarification_questions(ambiguity.breakdown)
     """
 
-    llm_adapter: LiteLLMAdapter
-    model: str = DEFAULT_MODEL
+    llm_adapter: LLMAdapter
+    model: str = field(default_factory=get_clarification_model)
     temperature: float = SCORING_TEMPERATURE
     initial_max_tokens: int = 2048
     max_retries: int | None = 10  # Default to 10 retries (None = unlimited)

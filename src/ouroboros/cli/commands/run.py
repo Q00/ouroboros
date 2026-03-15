@@ -1,12 +1,11 @@
 """Run command group for Ouroboros.
 
 Execute workflows and manage running operations.
-Supports both standard workflow execution and orchestrator mode (Claude Agent SDK).
+Supports both standard workflow execution and agent-runtime orchestrator mode.
 """
 
-from __future__ import annotations
-
 import asyncio
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -46,7 +45,15 @@ app = typer.Typer(
 )
 
 
-def _derive_quality_bar(seed: Seed) -> str:
+class AgentRuntimeBackend(str, Enum):  # noqa: UP042
+    """Supported orchestrator runtime backends for CLI selection."""
+
+    CLAUDE = "claude"
+    CODEX = "codex"
+    OPENCODE = "opencode"
+
+
+def _derive_quality_bar(seed: "Seed") -> str:
     """Derive a quality bar string from seed acceptance criteria."""
     ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
     return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
@@ -83,7 +90,7 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
 async def _initialize_mcp_manager(
     config_path: Path,
     tool_prefix: str,  # noqa: ARG001
-) -> MCPClientManager | None:
+) -> "MCPClientManager | None":
     """Initialize MCPClientManager from config file.
 
     Args:
@@ -150,8 +157,9 @@ async def _run_orchestrator(
     debug: bool = False,
     parallel: bool = True,
     no_qa: bool = False,
+    runtime_backend: str | None = None,
 ) -> None:
-    """Run workflow via orchestrator mode (Claude Agent SDK).
+    """Run workflow via orchestrator mode.
 
     Args:
         seed_file: Path to seed YAML file.
@@ -161,9 +169,10 @@ async def _run_orchestrator(
         debug: Show verbose logs and agent thinking.
         parallel: Execute independent ACs in parallel. Default: True.
         no_qa: Skip post-execution QA. Default: False.
+        runtime_backend: Optional orchestrator runtime backend override.
     """
     from ouroboros.core.seed import Seed
-    from ouroboros.orchestrator import ClaudeAgentAdapter, OrchestratorRunner
+    from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
     from ouroboros.persistence.event_store import EventStore
 
     # Load seed
@@ -194,7 +203,10 @@ async def _run_orchestrator(
     event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
     await event_store.initialize()
 
-    adapter = ClaudeAgentAdapter()
+    adapter = create_agent_runtime(
+        backend=runtime_backend,
+        cwd=Path.cwd(),
+    )
     runner = OrchestratorRunner(
         adapter,
         event_store,
@@ -282,7 +294,7 @@ def workflow(
         typer.Option(
             "--orchestrator/--no-orchestrator",
             "-o/-O",
-            help="Use Claude Agent SDK for execution. Enabled by default.",
+            help="Use the agent-runtime orchestrator for execution. Enabled by default.",
         ),
     ] = True,
     resume_session: Annotated[
@@ -323,6 +335,14 @@ def workflow(
             help="Execute ACs sequentially instead of in parallel (default: parallel).",
         ),
     ] = False,
+    runtime: Annotated[
+        AgentRuntimeBackend | None,
+        typer.Option(
+            "--runtime",
+            help="Agent runtime backend for orchestrator mode (claude, codex, or opencode).",
+            case_sensitive=False,
+        ),
+    ] = None,
     no_qa: Annotated[
         bool,
         typer.Option(
@@ -334,7 +354,7 @@ def workflow(
     """Execute a workflow from a seed file.
 
     Reads the seed YAML configuration and runs the Ouroboros workflow.
-    Orchestrator mode (Claude Agent SDK) is enabled by default.
+    Orchestrator mode is enabled by default.
 
     Use --no-orchestrator for legacy standard workflow mode.
     Use --resume to continue a previous session.
@@ -357,6 +377,12 @@ def workflow(
         # Resume a previous session
         ouroboros run seed.yaml --resume orch_abc123
 
+        # Use Codex CLI runtime
+        ouroboros run seed.yaml --runtime codex
+
+        # Use OpenCode runtime
+        ouroboros run seed.yaml --runtime opencode
+
         # Debug output
         ouroboros run seed.yaml --debug
 
@@ -375,17 +401,22 @@ def workflow(
                 "[yellow]Warning: --resume requires --orchestrator flag. "
                 "Enabling orchestrator mode.[/yellow]"
             )
-        asyncio.run(
-            _run_orchestrator(
-                seed_file,
-                resume_session,
-                mcp_config,
-                mcp_tool_prefix,
-                debug,
-                parallel=not sequential,
-                no_qa=no_qa,
+        try:
+            asyncio.run(
+                _run_orchestrator(
+                    seed_file,
+                    resume_session,
+                    mcp_config,
+                    mcp_tool_prefix,
+                    debug,
+                    parallel=not sequential,
+                    no_qa=no_qa,
+                    runtime_backend=runtime.value if runtime else None,
+                )
             )
-        )
+        except (ValueError, NotImplementedError) as e:
+            print_error(str(e))
+            raise typer.Exit(1) from e
     else:
         # Standard workflow (placeholder)
         print_info(f"Would execute workflow from: {seed_file}")

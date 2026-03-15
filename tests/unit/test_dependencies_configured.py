@@ -16,12 +16,11 @@ def test_runtime_dependencies_configured():
     # Extract dependency names, handling extras like sqlalchemy[asyncio]
     dep_names = {dep.split(">=")[0].split("==")[0].split("[")[0] for dep in deps}
 
-    required_deps = [
+    required_core_deps = [
         "typer",
         "httpx",
         "pydantic",
         "structlog",
-        "litellm",
         "sqlalchemy",
         "aiosqlite",
         "stamina",
@@ -29,8 +28,14 @@ def test_runtime_dependencies_configured():
         "pyyaml",
     ]
 
-    for dep in required_deps:
+    for dep in required_core_deps:
         assert dep in dep_names, f"Required dependency '{dep}' not found in pyproject.toml"
+
+    # Runtime-specific deps should be in optional extras, not core
+    optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
+    assert "claude" in optional_deps, "Missing 'claude' optional extra"
+    assert "litellm" in optional_deps, "Missing 'litellm' optional extra"
+    assert "all" in optional_deps, "Missing 'all' optional extra"
 
 
 def test_dev_dependencies_configured():
@@ -43,7 +48,7 @@ def test_dev_dependencies_configured():
 
     # Check for dev dependencies in optional dependencies or dev group
     dev_deps = pyproject.get("dependency-groups", {}).get("dev", [])
-    dep_names = {dep.split(">=")[0].split("==")[0] for dep in dev_deps}
+    dep_names = {dep.split(">=")[0].split("==")[0].split("[")[0] for dep in dev_deps}
 
     required_dev_deps = ["pytest", "pytest-asyncio", "pytest-cov", "ruff", "mypy", "pre-commit"]
 

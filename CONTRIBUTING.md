@@ -30,7 +30,7 @@ uv run ouroboros --version
 uv run pytest tests/unit/ -q
 ```
 
-**Requirements**: Python 3.14+, [uv](https://github.com/astral-sh/uv)
+**Requirements**: Python >= 3.12, [uv](https://github.com/astral-sh/uv)
 
 ---
 
@@ -120,7 +120,7 @@ Found a bug? Please open an issue with:
 [What should happen]
 
 ## Environment
-- Python: 3.14.0
+- Python: 3.12+
 - Ouroboros: v0.9.0
 - OS: macOS 15.2
 
@@ -237,9 +237,9 @@ uv run ruff format src/ tests/
 
 ### Type Checking
 
-- **Strict mode**: Enabled (`strict = true`)
-- **No untyped defs**: All functions must have type hints
-- **Tool**: mypy
+- **Tool**: mypy (Python 3.12 target)
+- **Missing imports**: Ignored (`ignore_missing_imports = true`)
+- See `pyproject.toml [tool.mypy]` for the full configuration
 
 ```bash
 # Type check
@@ -265,8 +265,8 @@ uv run ruff check src/ tests/
 
 ### Python Version
 
-- **Minimum**: Python 3.14
-- **Target**: Python 3.14+
+- **Minimum**: Python 3.12
+- **Target**: Python >= 3.12
 - Use modern Python features (type unions `|`, match statements, etc.)
 
 ---
@@ -341,7 +341,7 @@ src/ouroboros/
   resilience/    # Phase 3: Stagnation detection, lateral thinking
   evaluation/    # Phase 4: Three-stage evaluation pipeline
   secondary/     # Phase 5: TODO registry
-  orchestrator/  # Claude Agent SDK integration
+  orchestrator/  # Runtime abstraction and orchestration
   providers/     # LLM provider adapters (LiteLLM)
   persistence/   # Event sourcing, checkpoints
   tui/           # Terminal UI (Textual)
@@ -355,7 +355,7 @@ tests/
   e2e/           # End-to-end CLI tests
   fixtures/      # Shared test data
 
-.claude-plugin/  # Claude Code plugin definitions
+.claude-plugin/  # Plugin definitions (skills, agents, hooks)
   agents/        # Custom agent prompts
   skills/        # Plugin skill definitions
   hooks/         # Plugin hooks

@@ -99,7 +99,7 @@ pip install ouroboros-ai
 ouroboros mcp serve
 ```
 
-Then add to Claude Code's MCP configuration.
+Then add to your runtime's MCP configuration (e.g., `~/.claude/mcp.json` for Claude Code).
 
 ## Key Concepts
 

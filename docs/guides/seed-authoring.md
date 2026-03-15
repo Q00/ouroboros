@@ -68,7 +68,7 @@ Hard requirements that must always be satisfied. These are non-negotiable.
 
 ```yaml
 constraints:
-  - "Python 3.14+ with stdlib only"
+  - "Python >= 3.12 with stdlib only"
   - "Must work offline"
   - "Response time under 100ms for all operations"
 ```
@@ -206,7 +206,7 @@ goal: "Build a REST API for a todo application using Python and FastAPI"
 task_type: code
 
 constraints:
-  - "Python 3.14+"
+  - "Python >= 3.12"
   - "FastAPI framework"
   - "SQLite database via SQLAlchemy"
   - "Must include OpenAPI documentation"

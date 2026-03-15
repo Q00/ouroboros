@@ -12,6 +12,52 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+_EXCLUDED_PERSISTENCE_KEYS = frozenset(
+    {
+        "event_payload",
+        "event_payloads",
+        "raw_event",
+        "raw_events",
+        "raw_payload",
+        "raw_payloads",
+        "raw_subscribed_event",
+        "raw_subscribed_events",
+        "subscribed_event",
+        "subscribed_event_payload",
+        "subscribed_event_payloads",
+        "subscribed_events",
+        "subscribed_payload",
+        "subscribed_payloads",
+    }
+)
+
+
+def _should_exclude_from_persistence(key: str) -> bool:
+    """Return True when a nested payload key should not be persisted."""
+    normalized = key.strip().lower().replace("-", "_")
+    if normalized in _EXCLUDED_PERSISTENCE_KEYS:
+        return True
+    if normalized.startswith("raw_"):
+        return True
+    return normalized.startswith("subscribed_") and (
+        "event" in normalized or "payload" in normalized
+    )
+
+
+def sanitize_event_data_for_persistence(value: Any) -> Any:
+    """Recursively strip raw subscribed payloads from persisted event data."""
+    if isinstance(value, dict):
+        return {
+            key: sanitize_event_data_for_persistence(item)
+            for key, item in value.items()
+            if not _should_exclude_from_persistence(str(key))
+        }
+    if isinstance(value, list):
+        return [sanitize_event_data_for_persistence(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_event_data_for_persistence(item) for item in value]
+    return value
+
 
 class BaseEvent(BaseModel, frozen=True):
     """Base class for all Ouroboros events.
@@ -58,7 +104,7 @@ class BaseEvent(BaseModel, frozen=True):
             "timestamp": self.timestamp,
             "aggregate_type": self.aggregate_type,
             "aggregate_id": self.aggregate_id,
-            "payload": self.data,
+            "payload": sanitize_event_data_for_persistence(self.data),
             "consensus_id": self.consensus_id,
         }
 

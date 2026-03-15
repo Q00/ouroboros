@@ -208,7 +208,7 @@ The `Seed` is frozen after creation. Direction fields (goal, constraints, accept
 ```python
 seed = Seed(
     goal="Build a CLI tool",
-    constraints=("Python 3.14+",),
+    constraints=("Python >= 3.12",),
     acceptance_criteria=("Create main.py",),
     ontology_schema=OntologySchema(name="CLI", description="CLI tool"),
     metadata=SeedMetadata(ambiguity_score=0.15),

@@ -1,6 +1,10 @@
 ---
 name: interview
 description: "Socratic interview to crystallize vague requirements"
+mcp_tool: ouroboros_interview
+mcp_args:
+  initial_context: "$1"
+  cwd: "$CWD"
 ---
 
 # /ouroboros:interview
@@ -52,7 +56,7 @@ Compare the result with the current version in `.claude-plugin/plugin.json`.
          - `uv tool list 2>/dev/null | grep "^ouroboros-ai "` → if found, use `uv tool upgrade ouroboros-ai`
          - `pipx list 2>/dev/null | grep "^  ouroboros-ai "` → if found, use `pipx upgrade ouroboros-ai`
          - Otherwise, print: "Also upgrade the MCP server: `pip install --upgrade ouroboros-ai`" (do NOT run pip automatically)
-    4. Tell the user: "Updated! Restart Claude Code to apply, then run `ooo interview` again."
+    4. Tell the user: "Updated! Restart your session to apply, then run `ooo interview` again."
   - If "Skip": proceed immediately.
 - If versions match, the check fails (network error, timeout, rate limit 403/429), or parsing fails/returns empty: **silently skip** and proceed.
 
