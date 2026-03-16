@@ -56,21 +56,7 @@ Complete command reference for the Ouroboros CLI.
 
 ## Installation
 
-```bash
-pip install ouroboros-ai              # Base (core engine)
-pip install ouroboros-ai[claude]      # + Claude Code runtime deps
-pip install ouroboros-ai[litellm]     # + LiteLLM multi-provider support
-pip install ouroboros-ai[all]         # Everything (claude + litellm + dashboard)
-```
-
-> **Codex CLI** is an external prerequisite installed separately (`npm install -g @openai/codex`). No Python extras are required for Codex -- the base `ouroboros-ai` package is sufficient.
-
-**One-liner alternative** (auto-detects your runtime and installs accordingly):
-```bash
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
-```
-
-> The installer (`scripts/install.sh`) installs the `ouroboros-ai` package, detects the Codex CLI binary, and runs `ouroboros setup --runtime codex`. **Note:** Automatic installation of Codex skill artifacts into `~/.codex/` is **not** currently part of the installer. Codex users should use the `ouroboros` CLI commands documented in the [Codex CLI runtime guide](runtime-guides/codex.md) rather than `ooo` shortcuts.
+> For install instructions, onboarding, and first-run setup, see **[Getting Started](getting-started.md)**.
 
 ## Usage
 
@@ -91,19 +77,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 
 ## Quick Start
 
-```bash
-# Set up Ouroboros (detects available runtimes)
-ouroboros setup
-
-# Start an interview to create a seed specification
-ouroboros init "Build a REST API for task management"
-
-# Execute the generated seed
-ouroboros run seed.yaml
-
-# Monitor execution in real-time
-ouroboros monitor
-```
+> For the full first-run walkthrough (interview → seed → execute), see **[Getting Started](getting-started.md)**.
 
 ---
 
@@ -706,63 +680,8 @@ ouroboros mcp info [OPTIONS]
 
 ## Typical Workflows
 
-### First-Time Setup
-
-```bash
-# 1. Set up Ouroboros (auto-detects installed runtime backends)
-ouroboros setup
-
-# 2. Verify the CLI is available
-ouroboros --help
-
-# 3. Start interview to create seed
-ouroboros init "Build a user authentication system"
-
-# 4. Execute the generated seed
-# Replace seed.yaml with the path printed by the interview
-ouroboros run seed.yaml
-
-# 5. Monitor in real-time
-ouroboros monitor
-```
-
-### Using Claude Code Runtime
-
-No API key required -- uses your Claude Code Max Plan subscription.
-
-```bash
-ouroboros setup --runtime claude
-ouroboros init --orchestrator "Build a REST API"
-ouroboros run seed.yaml
-```
-
-### Using Codex CLI Runtime
-
-Requires an OpenAI API key (set via `OPENAI_API_KEY`) and Codex CLI on `PATH` (`npm install -g @openai/codex`).
-
-```bash
-ouroboros setup --runtime codex
-ouroboros init "Build a REST API"
-ouroboros run seed.yaml --runtime codex
-```
-
-> `ooo` skill shortcuts are not currently available inside Codex sessions — Codex skill artifact auto-installation is not yet part of the installer or `ouroboros setup`. Codex users should use the `ouroboros` CLI commands directly. See the [Codex CLI runtime guide](runtime-guides/codex.md) for full details.
-
-### Using LiteLLM for Interview / Seed Generation
-
-Requires API key (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, etc.). The interview/seed step can use LiteLLM-backed models, but workflow execution still happens through the configured runtime backend.
-
-```bash
-# 1. Export a provider API key
-export OPENROUTER_API_KEY="..."
-
-# 2. Start interview / seed generation
-ouroboros init "Build a REST API for task management"
-
-# 3. Execute the generated seed with your runtime backend
-ouroboros setup --runtime codex
-ouroboros run seed.yaml --runtime codex
-```
+> For first-time setup and the complete onboarding flow, see **[Getting Started](getting-started.md)**.
+> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md) and [Codex CLI](runtime-guides/codex.md) runtime guides.
 
 ### Cancelling Stuck Executions
 

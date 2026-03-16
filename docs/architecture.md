@@ -47,7 +47,7 @@ Ouroboros is a **specification-first AI workflow engine** that transforms vague 
 
 ### 1. Plugin Layer
 **Auto-discovery of skills and agents through the plugin system**
-- Skills: 9 core workflow skills (interview, seed, run, evaluate, etc.)
+- Skills: 14 core workflow skills (interview, seed, run, evaluate, evolve, cancel, unstuck, update, help, setup, ralph, tutorial, welcome, status)
 - Agents: 9 specialized agents for different thinking modes
 - Hot-reload capabilities without restart
 - Magic prefix detection (`/ouroboros:`)
@@ -61,7 +61,7 @@ Ouroboros is a **specification-first AI workflow engine** that transforms vague 
 
 ### 3. Execution Layer
 **Evolutionary execution with feedback loops**
-- Ralph: Self-referential persistence loop with verification
+- Self-referential persistence loop with verification
 - Dependency-aware parallel execution
 - Automatic scaling and resilience
 
@@ -116,19 +116,19 @@ Phase 5: SECONDARY LOOP   -> Process deferred TODOs
 
 ### Phase 0: Big Bang
 
-The Big Bang phase transforms vague ideas into crystallized specifications through iterative questioning.
+The Big Bang phase transforms vague ideas into crystallized specifications through iterative questioning. **The seed is auto-generated at the end of this phase** — users do not need to author seeds manually in the normal flow.
 
 **Components:**
-- `bigbang/interview.py` - InterviewEngine for conducting Socratic interviews
-- `bigbang/ambiguity.py` - Ambiguity score calculation
-- `bigbang/seed_generator.py` - Seed generation from interview results
+- `bigbang/interview.py` — InterviewEngine for conducting Socratic interviews
+- `bigbang/ambiguity.py` — Ambiguity score calculation
+- `bigbang/seed_generator.py` — Seed generation from interview results
 
 **Process:**
-1. User provides initial context/idea
+1. User provides initial context/idea (`ooo interview "..."` or `ouroboros interview "..."`)
 2. Engine asks clarifying questions (up to MAX_INTERVIEW_ROUNDS)
 3. Ambiguity score calculated after each response
 4. Interview completes when ambiguity <= 0.2
-5. Immutable Seed generated
+5. Immutable Seed auto-generated and stored in `~/.ouroboros/seeds/`
 
 **Gate:** Ambiguity <= 0.2
 
@@ -211,7 +211,7 @@ Key constraints:
 - `COMPRESSION_DEPTH = 3` — context truncated to 500 chars at depth 3+
 - Children are dependency-sorted and executed in parallel within each level
 
-See [Execution Deep Dive](./design/execution-deep-dive.md) for the full recursive algorithm and configuration reference.
+For the current recursive execution flow, see [parallel_executor.py](../src/ouroboros/orchestrator/parallel_executor.py) and [runner.py](../src/ouroboros/orchestrator/runner.py).
 
 ### Phase 3: Resilience
 
@@ -257,6 +257,9 @@ Three-stage progressive evaluation ensures quality while minimizing cost.
 
 **Stages:**
 1. **Mechanical ($0)** — Lint, build, test, static analysis, coverage (threshold: 70%)
+   - Auto-detects project language from marker files (e.g., `uv.lock` → Python/uv, `Cargo.toml` → Rust, `go.mod` → Go, `package-lock.json` → Node). Supported: Python, Rust, Go, Zig, Node (npm/pnpm/bun/yarn).
+   - Projects can override or extend commands via `.ouroboros/mechanical.toml`. Overrides are validated against an executable allowlist for security in CI/CD environments.
+   - If no language is detected, Stage 1 checks are skipped and evaluation proceeds to Stage 2.
    - If any check fails → pipeline stops, returns failure
 2. **Semantic ($$)** — AC compliance, goal alignment, drift, uncertainty scoring
    - If score >= 0.8 and no trigger → approved without consensus
@@ -273,7 +276,9 @@ Three-stage progressive evaluation ensures quality while minimizing cost.
 5. Stage 2 uncertainty > 0.3
 6. Lateral thinking adoption
 
-See [Evaluation Pipeline Deep Dive](./design/evaluation-pipeline-deep-dive.md) for thresholds, configuration, and deliberative consensus details.
+For the current evaluation flow, see [pipeline.py](../src/ouroboros/evaluation/pipeline.py) and [definitions.py](../src/ouroboros/mcp/tools/definitions.py).
+
+For failure modes, error-handling guidance, and configuration reference, see the [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md).
 
 ### Phase 5: Secondary Loop
 
@@ -345,14 +350,18 @@ src/ouroboros/
 
 ### The Seed
 
-The Seed is the "constitution" of a workflow - an immutable specification with:
-- **Goal** - Primary objective
-- **Constraints** - Hard requirements that must be satisfied
-- **Acceptance Criteria** - Specific criteria for success
-- **Ontology Schema** - Structure of workflow outputs
-- **Exit Conditions** - When to terminate
+The Seed is the "constitution" of a workflow — an immutable specification with:
+- **Goal** — Primary objective
+- **Constraints** — Hard requirements that must be satisfied
+- **Acceptance Criteria** — Specific criteria for success
+- **Ontology Schema** — Structure of workflow outputs
+- **Exit Conditions** — When to terminate
+
+**In the normal flow, seeds are auto-generated by the Socratic interview** (`ooo interview` / `ouroboros interview`). Most users never need to create or edit a seed manually — the interview handles crystallization automatically.
 
 Once generated, the Seed cannot be modified (frozen Pydantic model).
+
+> **Advanced:** For power users who want to hand-craft or edit seed YAML directly, see the [Seed Authoring Guide](guides/seed-authoring.md).
 
 ### Result Type
 
@@ -426,271 +435,65 @@ evaluation) remains unchanged.
                           └────┬──────────┬──────┬───┘
                                │          │      │
               ┌────────────────┘          │      └────────────────┐
-              ▼                           ▼                      ▼
-  ┌───────────────────┐     ┌───────────────────┐    ┌───────────────────┐
-  │ ClaudeAgentAdapter│     │  CodexCliRuntime   │    │  (future adapter) │
-  │  backend="claude" │     │  backend="codex"   │    │                   │
-  └───────────────────┘     └───────────────────┘    └───────────────────┘
-         │                          │
-         ▼                          ▼
-  Claude Code CLI /          OpenAI Codex CLI
-  Claude Agent SDK           (subprocess)
+              ▼                           ▼                       ▼
+  ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────┐
+  │  ClaudeAgentAdapter │   │   CodexCliRuntime    │   │   (future adapter)  │
+  │   backend="claude"  │   │   backend="codex"    │   │                     │
+  │  session-oriented   │   │   session-oriented   │   │                     │
+  └─────────────────────┘   └─────────────────────┘   └─────────────────────┘
 ```
 
-### The `AgentRuntime` protocol
+> Both `ClaudeAgentAdapter` and `CodexCliRuntime` expose the same `AgentRuntime`
+> protocol and provide equivalent session-oriented workflow capabilities.
+> The orchestrator interacts with each backend exclusively through normalized
+> `AgentMessage` / `RuntimeHandle` types — backend-specific communication
+> details are fully encapsulated inside the adapters.
 
-Every runtime adapter must satisfy the `AgentRuntime` protocol defined in
-`src/ouroboros/orchestrator/adapter.py`:
+### Key abstractions
 
-```python
-class AgentRuntime(Protocol):
-    """Protocol for autonomous agent runtimes used by the orchestrator."""
-
-    def execute_task(
-        self,
-        prompt: str,
-        tools: list[str] | None = None,
-        system_prompt: str | None = None,
-        resume_handle: RuntimeHandle | None = None,
-    ) -> AsyncIterator[AgentMessage]:
-        """Execute a task and stream normalized messages."""
-        ...
-
-    async def execute_task_to_result(
-        self,
-        prompt: str,
-        tools: list[str] | None = None,
-        system_prompt: str | None = None,
-        resume_handle: RuntimeHandle | None = None,
-    ) -> Result[TaskResult, ProviderError]:
-        """Execute a task and return the collected final result."""
-        ...
-```
-
-Key types:
+Every runtime adapter satisfies the `AgentRuntime` protocol (defined in `src/ouroboros/orchestrator/adapter.py`), which requires two methods: `execute_task()` (async streaming) and `execute_task_to_result()` (collected result).
 
 | Type | Purpose |
 |------|---------|
 | `AgentMessage` | Normalized streaming message (assistant text, tool calls, results) |
-| `RuntimeHandle` | Backend-neutral, frozen dataclass carrying session/resume state |
+| `RuntimeHandle` | Backend-neutral frozen dataclass for session resume/observe/terminate |
 | `TaskResult` | Collected outcome of a completed task execution |
 
-`AgentMessage` and `RuntimeHandle` are backend-neutral -- the orchestrator
-never inspects backend-specific internals. Each adapter is responsible for
-mapping its native events into these shared types.
-
-### `RuntimeHandle` -- portable session state
-
-`RuntimeHandle` is a frozen dataclass that captures everything needed to
-resume, observe, or terminate a runtime session regardless of backend:
-
-```python
-@dataclass(frozen=True, slots=True)
-class RuntimeHandle:
-    backend: str                              # "claude" | "codex" | ...
-    kind: str = "agent_runtime"
-    native_session_id: str | None = None      # backend-native session id
-    conversation_id: str | None = None        # durable thread id
-    previous_response_id: str | None = None   # turn-chaining token
-    transcript_path: str | None = None        # CLI transcript file
-    cwd: str | None = None                    # working directory
-    approval_mode: str | None = None          # sandbox / permission mode
-    updated_at: str | None = None             # ISO timestamp
-    metadata: dict[str, Any] = field(...)     # backend-specific extras
-```
-
-The handle exposes computed properties (`lifecycle_state`, `is_terminal`,
-`can_resume`, `can_observe`, `can_terminate`) and methods (`observe()`,
-`terminate()`, `snapshot()`, `to_dict()`, `from_dict()`) so the orchestrator
-can manage runtime lifecycle without knowing which backend is running.
+The orchestrator never inspects backend-specific internals — each adapter maps its native events into these shared types.
 
 ### Shipped adapters
 
-#### `ClaudeAgentAdapter` (backend `"claude"`)
+- **`ClaudeAgentAdapter`** (`backend="claude"`) — Wraps Claude Agent SDK / Claude Code CLI with streaming, retry, and session resumption. Module: `src/ouroboros/orchestrator/adapter.py`
+- **`CodexCliRuntime`** (`backend="codex"`) — Drives the OpenAI Codex CLI as a session-oriented runtime with NDJSON event parsing. Module: `src/ouroboros/orchestrator/codex_cli_runtime.py`
 
-Wraps the Claude Agent SDK / Claude Code CLI. Supports streaming via
-`claude_agent_sdk.query()`, automatic transient-error retry, and session
-resumption through native session IDs.
-
-**Module:** `src/ouroboros/orchestrator/adapter.py`
-
-#### `CodexCliRuntime` (backend `"codex"`)
-
-Drives the OpenAI Codex CLI as a subprocess (`codex` or `codex-cli`).
-Parses newline-delimited JSON events from stdout, maps them to
-`AgentMessage` / `RuntimeHandle`, and supports skill-command interception
-for deterministic MCP tool dispatch.
-
-**Module:** `src/ouroboros/orchestrator/codex_cli_runtime.py`
-
-> **Note:** Claude Code and Codex CLI have different tool sets, permission
-> models, and streaming semantics. Ouroboros normalizes these differences
-> at the adapter boundary, but feature parity is not guaranteed across
-> runtimes. See the runtime-specific guides under `docs/` for details on
-> each backend's capabilities and caveats.
+> Claude Code and Codex CLI have different tool sets, permission models, and streaming semantics. Ouroboros normalizes these differences at the adapter boundary, but feature parity is not guaranteed across runtimes.
 
 ### Runtime factory
 
-`create_agent_runtime()` in `src/ouroboros/orchestrator/runtime_factory.py`
-resolves the backend name and returns the appropriate adapter:
+`create_agent_runtime()` in `src/ouroboros/orchestrator/runtime_factory.py` resolves the backend name and returns the appropriate adapter. The backend can be set via:
 
-```python
-from ouroboros.orchestrator.runtime_factory import create_agent_runtime
-
-runtime = create_agent_runtime(
-    backend="codex",        # or "claude", read from config if omitted
-    permission_mode="auto-edit",
-    model="o4-mini",
-    cwd="/path/to/project",
-)
-```
-
-The backend can be set via:
-
-1. `OUROBOROS_RUNTIME_BACKEND` environment variable
+1. `OUROBOROS_AGENT_RUNTIME` environment variable
 2. `orchestrator.runtime_backend` in `~/.ouroboros/config.yaml`
 3. Explicit `backend=` parameter
 
 Accepted aliases: `claude` / `claude_code`, `codex` / `codex_cli`.
 
-### How to add a new runtime adapter
-
-1. **Create the adapter module**
-
-   Add a new file under `src/ouroboros/orchestrator/`, for example
-   `my_runtime.py`.
-
-2. **Implement the `AgentRuntime` protocol**
-
-   Your adapter must provide `execute_task()` (async generator yielding
-   `AgentMessage`) and `execute_task_to_result()`. Use the existing
-   adapters as reference:
-
-   ```python
-   from collections.abc import AsyncIterator
-   from ouroboros.core.errors import ProviderError
-   from ouroboros.core.types import Result
-   from ouroboros.orchestrator.adapter import (
-       AgentMessage,
-       AgentRuntime,
-       RuntimeHandle,
-       TaskResult,
-   )
-
-   class MyRuntime:
-       """Custom runtime adapter."""
-
-       async def execute_task(
-           self,
-           prompt: str,
-           tools: list[str] | None = None,
-           system_prompt: str | None = None,
-           resume_handle: RuntimeHandle | None = None,
-       ) -> AsyncIterator[AgentMessage]:
-           # Launch the external tool, parse its output,
-           # yield AgentMessage instances as progress occurs.
-           ...
-
-       async def execute_task_to_result(
-           self,
-           prompt: str,
-           tools: list[str] | None = None,
-           system_prompt: str | None = None,
-           resume_handle: RuntimeHandle | None = None,
-       ) -> Result[TaskResult, ProviderError]:
-           messages = []
-           async for msg in self.execute_task(prompt, tools, system_prompt, resume_handle):
-               messages.append(msg)
-           # Build and return a TaskResult from collected messages
-           ...
-   ```
-
-3. **Register in the runtime factory**
-
-   Open `src/ouroboros/orchestrator/runtime_factory.py` and:
-   - Add a backend name set (e.g., `_MY_BACKENDS = {"my_runtime"}`).
-   - Extend `resolve_agent_runtime_backend()` to recognize the new name.
-   - Add a branch in `create_agent_runtime()` to instantiate your adapter.
-
-4. **Emit `RuntimeHandle` with your backend tag**
-
-   Every `AgentMessage` your adapter yields should carry a `RuntimeHandle`
-   with `backend="my_runtime"`. The orchestrator uses this handle for
-   session tracking, checkpoint persistence, and resume.
-
-5. **Add the backend to the config schema**
-
-   Update the `runtime_backend` `Literal` in
-   `src/ouroboros/config/models.py` to include your new backend name.
-
-6. **Write tests**
-
-   Add unit tests under `tests/unit/` that verify your adapter satisfies
-   `AgentRuntime` (structural subtyping check) and correctly maps native
-   events to `AgentMessage` / `RuntimeHandle`.
+For API details, see the source in `src/ouroboros/orchestrator/adapter.py`. For contributing a new runtime adapter, see [Contributing](contributing/).
 
 ## Integration Points
 
 ### MCP (Model Context Protocol)
 
-Ouroboros functions as an **MCP Hub**, capable of both consuming and exposing MCP:
+Ouroboros functions as a **bidirectional MCP Hub**:
 
-#### MCP Server Mode
-Expose Ouroboros as an MCP server for other AI agents:
-```bash
-ouroboros mcp serve
-```
-- Provides tools: `ouroboros_execute_seed`, `ouroboros_session_status`, `ouroboros_query_events`
-- Integrates with Claude Desktop and other MCP clients
+- **Server mode** (`ouroboros mcp serve`) — Exposes tools (`ouroboros_execute_seed`, `ouroboros_session_status`, `ouroboros_query_events`) to Claude Desktop and other MCP clients
+- **Client mode** (`ouroboros run --mcp-config mcp.yaml`) — Discovers and consumes tools from external MCP servers (filesystem, GitHub, databases, etc.), merged with built-in tools
 
-#### MCP Client Mode
-Connect to external MCP servers during workflow execution:
-```bash
-ouroboros run --mcp-config mcp.yaml seed.yaml
-```
-- Discovers tools from configured MCP servers
-- Merges with built-in tools (Read, Write, Edit, Bash, Glob, Grep)
-- Provides additional capabilities (filesystem, GitHub, databases, etc.)
-
-**Tool Precedence:**
-1. Built-in tools always win
-2. First MCP server in config wins for duplicate tool names
-3. Use `--mcp-tool-prefix` to namespace MCP tools
-
-**Architecture:**
-```
-                           +------------------+
-                           |   Ouroboros      |
-                           | (MCP Hub)        |
-                           +--------+---------+
-                                    |
-              +---------------------+---------------------+
-              |                                           |
-    +---------v---------+                       +---------v---------+
-    | MCP Server Mode   |                       | MCP Client Mode   |
-    | (expose tools)    |                       | (consume tools)   |
-    +---------+---------+                       +---------+---------+
-              |                                           |
-    +---------v---------+                       +---------v---------+
-    | Claude Desktop    |                       | External MCP      |
-    | MCP Clients       |                       | Servers           |
-    +-------------------+                       +-------------------+
-                                                         |
-                                    +--------------------+--------------------+
-                                    |                    |                    |
-                           +--------v-------+   +--------v-------+   +--------v-------+
-                           | filesystem     |   | github         |   | postgres       |
-                           | server         |   | server         |   | server         |
-                           +----------------+   +----------------+   +----------------+
-```
+Tool precedence: built-in tools win over MCP tools; first MCP server in config wins for duplicates.
 
 ### LiteLLM
 
-All LLM calls go through LiteLLM for:
-- Provider abstraction (100+ models)
-- Automatic retries
-- Cost tracking
-- Streaming support
+All LLM calls go through LiteLLM for provider abstraction (100+ models), automatic retries, cost tracking, and streaming support.
 
 ## Design Principles
 
@@ -702,224 +505,20 @@ All LLM calls go through LiteLLM for:
 
 ## Extension Points
 
-### 1. Skill Development
-Create new skills in `skills/`:
+- **Skills** — Add YAML-defined skills in `skills/` with magic prefix detection and tool declarations
+- **Agents** — Add markdown-defined specialist agents in `agents/` with role, capabilities, and tool access
+- **MCP integration** — Bidirectional: expose Ouroboros tools as an MCP server, or consume external MCP servers during execution
+- **Runtime adapters** — Implement the `AgentRuntime` protocol and register in the runtime factory
 
-```yaml
-# SKILL.md
-name: custom-skill
-version: 1.0.0
-description: Custom skill description
+## Error Handling & Recovery
 
-magic_prefixes:
-  - "custom:"
-
-triggers:
-  - "do custom thing"
-
-mode: standard
-agents:
-  - executor
-  - verifier
-
-tools:
-  - Read
-  - Write
-```
-
-### 2. Agent Development
-Create custom agents in `agents/`:
-
-```markdown
-# custom-agent.md
-You are a custom specialist agent.
-
-## Role
-Provide specific expertise for domain.
-
-## Capabilities
-- First capability
-- Second capability
-
-## Tools
-- Read
-- Write
-- Edit
-```
-
-### 3. MCP Integration
-Ouroboros exposes bidirectional MCP support:
-
-```python
-# Server mode - exposes Ouroboros tools
-@tool
-async def ouroboros_execute_seed(seed_id: str) -> dict:
-    """Execute a seed specification."""
-
-# Client mode - connects to external MCP servers
-mcp_client = MCPClient(server_url="...")
-tools = await mcp_client.list_tools()
-```
-
-### 4. Custom Hook Points
-Add custom hooks for extensibility:
-
-```python
-# Event hooks
-async def pre_tool_execution(tool_name: str, **kwargs):
-    """Custom logic before tool execution."""
-    pass
-
-async def post_tool_execution(tool_name: result, **kwargs):
-    """Custom logic after tool execution."""
-    pass
-```
-
-## Performance Characteristics
-
-### 1. Event Store Performance
-- **Append latency** - < 10ms p99
-- **Query latency** - < 50ms for 1000 events
-- **Storage** - ~1KB per event
-- **Compression** - 80% reduction at checkpoints
-
-### 2. TUI Performance
-- **Refresh rate** - 500ms polling
-- **Event processing** - < 100ms per update
-- **Widget updates** - Optimized with batch rendering
-
-### 3. Memory Usage
-- **Base memory** - 50MB
-- **Per session** - 10-100MB depending on complexity
-- **Event cache** - LRU cache of recent events
-
-### 4. Concurrency
-- **Agent pool** - 2-10 parallel agents
-- **Task queue** - Priority-based with async processing
-- **Event processing** - Async with backpressure handling
-
-## Error Handling
-
-### 1. Error Categories
-- **Validation errors** - Invalid seed specifications
-- **Execution errors** - Agent failures, timeouts
-- **System errors** - Network, resource constraints
-- **Business errors** - Ambiguity > 0.2, stagnation
-
-### 2. Recovery Mechanisms
-- **Session replay** - From last checkpoint
-- **Agent respawn** - Automatic replacement of failed agents
-- **Tier escalation** - Move to more powerful model
-- **Persona switching** - When stagnation detected
-
-### 3. Error Reporting
-- **TUI alerts** - Visual indicators for errors
-- **Event logging** - Complete audit trail
-- **Structured errors** - Pydantic validation with context
-- **User-friendly messages** - Clear action items
-
-## Testing Architecture
-
-### 1. Test Structure
-```
-tests/
-├── unit/           # Component tests
-│   ├── test_seed.py
-│   ├── test_router.py
-│   └── ...
-├── integration/    # Workflow tests
-│   ├── test_interview.py
-│   ├── test_execution.py
-│   └── ...
-├── e2e/           # End-to-end tests
-│   ├── test_full_workflow.py
-│   └── ...
-└── fixtures/      # Test data
-    ├── sample_seeds/
-    └── ...
-```
-
-### 2. Test Coverage
-- **Unit tests** - 1,000+ tests, 97% coverage
-- **Integration tests** - 200+ workflows
-- **E2E tests** - 50+ full lifecycle tests
-- **Performance tests** - Load and latency benchmarks
+Ouroboros handles errors through four categories: validation errors (invalid seeds), execution errors (agent failures/timeouts), system errors (network/resource), and business errors (ambiguity > 0.2, stagnation). Recovery mechanisms include session replay from checkpoints, agent respawn, tier escalation, and persona switching.
 
 ## Configuration
 
-### 1. Environment Variables
-```bash
-# API keys
-ANTHROPIC_API_KEY=sk-ant-xxx
-OPENAI_API_KEY=sk-xxx
+For environment variables, `config.yaml` schema, and all configuration options, see **[config-reference.md](config-reference.md)**.
 
-# TUI settings
-TERM=xterm-256color
-OUROBOROS_TUI_THEME=dark
+---
 
-# Performance
-OUROBOROS_MAX_AGENTS=10
-OUROBOROS_EVENT_CACHE_SIZE=1000
-```
-
-### 2. Configuration Files
-```yaml
-# ~/.ouroboros/config.yaml
-event_store_path: ~/.ouroboros/ouroboros.db
-max_concurrent_agents: 10
-checkpoint_interval: 300  # seconds
-theme: dark
-log_level: INFO
-```
-
-## Deployment
-
-### 1. Claude Code Runtime
-```bash
-# Install via Claude Code marketplace (terminal)
-claude plugin marketplace add Q00/ouroboros
-claude plugin install ouroboros@ouroboros
-
-# Use ooo skill shortcuts inside a Claude Code session
-ooo interview "Build an app"
-```
-
-See the [Claude Code runtime guide](runtime-guides/claude-code.md) for full details.
-
-### 2. Codex CLI Runtime
-```bash
-pip install ouroboros-ai
-npm install -g @openai/codex
-ouroboros setup --runtime codex
-ouroboros init "Build an app"
-```
-
-See the [Codex CLI runtime guide](runtime-guides/codex.md) for full details.
-
-### 3. Standalone CLI
-```bash
-# Install with uv (from source)
-uv sync
-
-# Or with pip
-pip install ouroboros-ai
-
-# Run with full features
-ouroboros run workflow project.yaml
-```
-
-## Future Extensions
-
-### 1. Planned Features
-- **Seed marketplace** - Template sharing and discovery
-- **Workflow builder** - Visual drag-and-drop interface
-- **Advanced analytics** - Performance insights and optimization
-- **Enterprise features** - RBAC, audit logs, compliance
-
-### 2. Architecture Extensions
-- **Multi-project support** - Workspace management
-- **Collaborative features** - Team workflows
-- **API-first approach** - REST/gRPC API for external integrations
-- **Cloud deployment** - Managed service options
-
-This architecture enables Ouroboros to deliver **specification-first quality** with **visual workflow tracking** and **cost optimization** - setting it apart from traditional AI development tools.
+> For install instructions and first-run onboarding, see **[Getting Started](getting-started.md)**.
+> For backend-specific configuration, see the [Claude Code](runtime-guides/claude-code.md) and [Codex CLI](runtime-guides/codex.md) runtime guides.
