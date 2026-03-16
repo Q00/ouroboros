@@ -33,9 +33,9 @@ That's it. `ooo interview` runs a Socratic interview that auto-generates a seed 
 
 ---
 
-### Fallback: Standalone CLI (`ouroboros`)
+### Alternative: Standalone CLI (`ouroboros`)
 
-Use this path if you are not using Claude Code, or prefer a standalone terminal workflow.
+Use this path if you prefer a standalone terminal workflow, or are using a non-Claude runtime (e.g., Codex CLI).
 
 **Requires Python >= 3.12.**
 
@@ -163,7 +163,7 @@ For the full list of configuration keys, see [Configuration Reference](config-re
 
 ## Your First Workflow
 
-This tutorial walks through a complete workflow. The primary path uses `ooo` skills inside Claude Code; the fallback CLI equivalent is shown in callouts.
+This tutorial walks through a complete workflow. Examples use `ooo` skills (Claude Code); CLI equivalents are shown in callouts for terminal-based workflows.
 
 ### Step 1: Interview
 
@@ -172,7 +172,7 @@ Inside a Claude Code session:
 ooo interview "I want to build a personal finance tracker"
 ```
 
-> **CLI fallback:** `ouroboros interview "I want to build a personal finance tracker"`
+> **CLI equivalent:** `ouroboros interview "I want to build a personal finance tracker"`
 
 The Socratic Interviewer asks clarifying questions:
 - "What platforms do you want to track?" (Bank accounts, credit cards, investments)
@@ -205,7 +205,7 @@ metadata:
 ooo run
 ```
 
-> **CLI fallback:** `ouroboros run` (auto-picks the latest seed, or pass a path explicitly: `ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml`)
+> **CLI equivalent:** `ouroboros run` (auto-picks the latest seed, or pass a path explicitly: `ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml`)
 
 Ouroboros decomposes the seed into tasks via the Double Diamond (Discover -> Define -> Design -> Deliver) and executes them through your configured runtime backend.
 
@@ -236,7 +236,7 @@ ooo status            # Check drift and session state
 ooo evolve            # Start evolutionary refinement loop
 ```
 
-> **CLI fallback:** `ouroboros run --resume <session_id>` to resume, `ouroboros run --debug` for verbose output.
+> **CLI equivalent:** `ouroboros run --resume <session_id>` to resume, `ouroboros run --debug` for verbose output.
 
 ---
 
@@ -263,7 +263,7 @@ ooo interview "Add real-time notifications to the chat app"
 ooo run
 ```
 
-> **CLI users:** Replace `ooo interview "..."` with `ouroboros interview "..."` and `ooo run` with `ouroboros run`.
+> **Terminal users:** Replace `ooo interview "..."` with `ouroboros interview "..."` and `ooo run` with `ouroboros run`.
 
 ---
 
