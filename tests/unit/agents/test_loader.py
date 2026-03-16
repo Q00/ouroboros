@@ -320,7 +320,7 @@ class TestLoadPersonaPromptData:
 
 
 class TestResolutionOrder:
-    """Test the 3-tier resolution order for agent files."""
+    """Test the explicit override resolution order for agent files."""
 
     def test_env_var_takes_priority(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """OUROBOROS_AGENTS_DIR env var takes priority over bundled agents."""
@@ -348,11 +348,11 @@ class TestResolutionOrder:
         assert "Custom Hacker Agent" in content
 
     def test_fallback_to_bundle(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-        """Loader falls back to bundled agents when env var and CWD don't match."""
+        """Loader falls back to bundled agents when no override is configured."""
         # Ensure no env var is set
         monkeypatch.delenv("OUROBOROS_AGENTS_DIR", raising=False)
 
-        # Change to a directory that doesn't have agents/
+        # Change to an unrelated working directory
         monkeypatch.chdir(tmp_path)
 
         # Clear the cache
@@ -366,10 +366,10 @@ class TestResolutionOrder:
         assert len(content) > 0
         assert "hacker" in content.lower() or "Hacker" in content
 
-    def test_cwd_relative_takes_priority_over_bundle(
+    def test_cwd_agents_are_ignored_without_explicit_override(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """CWD agents/ takes priority over bundled agents."""
+        """CWD-relative agents/ should not shadow the packaged canonical prompts."""
         # Create agents/ in tmp directory
         cwd_agents_dir = tmp_path / "agents"
         cwd_agents_dir.mkdir(parents=True)
@@ -390,19 +390,19 @@ class TestResolutionOrder:
         # Load the agent
         content = load_agent_prompt("hacker")
 
-        # Should load the CWD version
-        assert "MARKER_CWD_67890" in content
-        assert "CWD Hacker Agent" in content
+        # Should load the packaged version instead of the CWD override
+        assert "MARKER_CWD_67890" not in content
+        assert "CWD Hacker Agent" not in content
 
-    def test_env_var_takes_priority_over_cwd(
+    def test_env_var_takes_priority_over_cwd_filesystem_noise(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """OUROBOROS_AGENTS_DIR env var takes priority over CWD agents/."""
+        """OUROBOROS_AGENTS_DIR remains the only supported override path."""
         # Create both directories
         env_agents_dir = tmp_path / "env_agents"
         env_agents_dir.mkdir()
 
-        cwd_agents_dir = tmp_path / ".claude-plugin" / "agents"
+        cwd_agents_dir = tmp_path / "agents"
         cwd_agents_dir.mkdir(parents=True)
 
         # Create agent files in both locations with different content
@@ -424,6 +424,6 @@ class TestResolutionOrder:
         # Load the agent
         content = load_agent_prompt("hacker")
 
-        # Should load the ENV version (higher priority)
+        # Should load the explicit env override
         assert "ENV_MARKER_11111" in content
         assert "CWD_MARKER_22222" not in content

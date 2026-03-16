@@ -1,15 +1,13 @@
 """Agent prompt loader -- single source of truth for all agent system prompts.
 
-Loads agent .md files with a 3-tier resolution strategy:
+Loads agent .md files with an explicit 2-tier resolution strategy:
 
-1. ``OUROBOROS_AGENTS_DIR`` env var  -- user-editable plugin agents
-2. ``agents/`` (CWD)               -- plugin / developer mode
-3. ``.claude-plugin/agents/`` (CWD) -- legacy fallback
-4. ``importlib.resources`` bundle   -- installed-package fallback
+1. ``OUROBOROS_AGENTS_DIR`` env var -- user-managed override directory
+2. ``importlib.resources`` bundle   -- canonical packaged prompts
 
-This allows plugin users to customise agent behaviour by editing
-the ``.md`` files in their plugin directory.  Changes take effect
-after an MCP server restart.
+This keeps ``src/ouroboros/agents`` as the authoritative default source while
+still allowing deliberate overrides without depending on the current working
+directory.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ import re
 
 @functools.lru_cache(maxsize=64)
 def _resolve_agent_path(agent_name: str) -> Path | None:
-    """Find an agent .md file using the 3-tier resolution strategy.
+    """Find an agent .md file using the explicit override resolution strategy.
 
     Returns the first existing path, or ``None`` to signal that the
     caller should fall back to ``importlib.resources``.
@@ -38,24 +36,14 @@ def _resolve_agent_path(agent_name: str) -> Path | None:
     """
     filename = f"{agent_name}.md"
 
-    # Tier 1: explicit env var (plugin install)
+    # Tier 1: explicit env var override
     agents_dir = os.environ.get("OUROBOROS_AGENTS_DIR")
     if agents_dir:
         path = Path(agents_dir) / filename
         if path.exists():
             return path
 
-    # Tier 2: CWD-relative agents/ (plugin convention)
-    cwd_path = Path.cwd() / "agents" / filename
-    if cwd_path.exists():
-        return cwd_path
-
-    # Tier 3: CWD-relative .claude-plugin/agents/ (legacy fallback)
-    legacy_path = Path.cwd() / ".claude-plugin/agents" / filename
-    if legacy_path.exists():
-        return legacy_path
-
-    # Tier 4: fall through to importlib.resources
+    # Tier 2: fall through to importlib.resources
     return None
 
 
@@ -89,8 +77,7 @@ def load_agent_prompt(agent_name: str) -> str:
     except (FileNotFoundError, TypeError):
         raise FileNotFoundError(
             f"Agent prompt not found: {agent_name}.md "
-            f"(searched OUROBOROS_AGENTS_DIR, agents/, "
-            f".claude-plugin/agents/, and ouroboros.agents package)"
+            f"(searched OUROBOROS_AGENTS_DIR and ouroboros.agents package)"
         ) from None
 
 
