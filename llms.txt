@@ -1,0 +1,127 @@
+# Ouroboros
+
+> Specification-first workflow engine for AI coding agents
+
+Ouroboros transforms vague ideas into verified, working codebases by replacing ad-hoc prompting with a structured workflow: interview, crystallize, execute, evaluate, evolve. It sits between the user and their AI runtime (Claude Code, Codex CLI, or others).
+
+## Core Concepts
+
+- Seed Spec: An immutable YAML specification auto-generated from a Socratic interview. Contains project description, acceptance criteria (AC) tree, constraints, and architecture decisions. The seed is the single source of truth for what should be built. In the happy path, users never create seeds manually — the interview produces one automatically. Manual seed authoring is an advanced workflow (see `docs/guides/seed-authoring.md`).
+- Acceptance Criteria (AC) Tree: A hierarchical decomposition of requirements. Each AC has a status (pending, in_progress, passed, failed) and can contain children. The tree is the unit of progress tracking.
+- Interview: A Socratic dialogue that extracts hidden assumptions and crystallizes vague requirements into a structured seed spec. Auto-generates the seed on completion.
+- Evaluation Pipeline: Three-stage verification (mechanical checks, LLM-based review, consensus gating) that determines whether acceptance criteria are met.
+- Event Sourcing: All state changes are persisted as immutable events in a SQLite EventStore (~/.ouroboros/ouroboros.db). The system can reconstruct any past state from events.
+- Evolution Loop: After evaluation, the system can evolve the spec and re-execute, creating an iterative refinement cycle.
+- Drift Detection: Monitors whether execution is diverging from the original seed spec intent.
+- Lineage: Tracks the causal chain of events and decisions through the workflow.
+
+## Architecture Layers
+
+- Plugin Layer: Skills (Claude Code slash commands via `ooo`) and agents that interface with the user. Skills map to `commands/*.md` and `skills/*/SKILL.md`.
+- Core Layer: Seed spec management, AC tree lifecycle, event sourcing, lineage tracking. Located in `src/ouroboros/core/`.
+- Orchestrator: Coordinates execution strategy, manages level context, routes tasks to appropriate backends. Located in `src/ouroboros/orchestrator/`.
+- Evaluation: Three-stage pipeline (mechanical, LLM, consensus), artifact collection, language-specific checks. Located in `src/ouroboros/evaluation/`.
+- Execution: Subagent management for parallel AC execution. Located in `src/ouroboros/execution/`.
+- Routing: Complexity analysis, task routing, model escalation/downgrade. Located in `src/ouroboros/routing/`.
+- Persistence: SQLAlchemy-based event store with migration support. Located in `src/ouroboros/persistence/`.
+- Presentation: Textual TUI (dashboard, execution, logs, debug, lineage screens) and Typer CLI. Located in `src/ouroboros/tui/` and `src/ouroboros/cli/`.
+- MCP: Model Context Protocol server/client for tool integration. Located in `src/ouroboros/mcp/`.
+- Observability: Drift detection and retrospective analysis. Located in `src/ouroboros/observability/`.
+- Resilience: Retry and recovery strategies. Located in `src/ouroboros/resilience/`.
+
+## Two CLI Paths
+
+- `ooo` (Claude Code): Slash-command skills invoked inside a Claude Code session. Primary recommended path. Commands: `ooo setup`, `ooo interview "idea"`, `ooo run`, `ooo evaluate`, `ooo evolve`, `ooo status`, `ooo unstuck`, `ooo cancel`.
+- `ouroboros` (Typer CLI): Standalone CLI installed via `pip install ouroboros-ai`. Fallback path. Subcommands: `ouroboros interview`, `ouroboros run`, `ouroboros config`, `ouroboros status`, `ouroboros cancel`, `ouroboros setup`, `ouroboros tui`, `ouroboros mcp`.
+
+## Commands / Skills
+
+- setup: Guided onboarding wizard. Configures runtime backend and project settings.
+- interview (aliases: socratic): Socratic interview to crystallize vague requirements into a seed spec. Auto-generates the seed on completion.
+- seed (aliases: crystallize): Generate validated seed specifications from interview results. Automatically invoked by interview in the happy path — most users never call this directly. Manual seed authoring is an advanced workflow.
+- run (aliases: execute): Execute a seed specification through the workflow engine. Decomposes ACs into tasks and runs them via the configured backend.
+- evaluate (aliases: eval): Three-stage verification pipeline. Runs mechanical checks, LLM review, and consensus gating against acceptance criteria.
+- evolve: Start or monitor an evolutionary development loop. Iterates on evaluation findings.
+- status (aliases: drift): Check session status and measure goal drift against the seed spec.
+- unstuck (aliases: stuck, lateral): Break through stagnation with lateral thinking personas.
+- cancel (aliases: kill, abort): Cancel stuck or orphaned executions.
+- help: Show available commands and usage.
+- welcome: First-run welcome message and orientation.
+- tutorial: Interactive tutorial walkthrough.
+
+## Key File Structure
+
+```
+ouroboros/
+  commands/           # Claude Code slash-command definitions (*.md)
+  skills/             # Skill implementations (*/SKILL.md)
+  src/ouroboros/
+    cli/              # Typer CLI entry point and command groups
+      main.py         # App definition, registers: init, run, config, status, cancel, mcp, setup, tui
+      commands/       # CLI command implementations
+      formatters/     # Rich console output (tables, panels, progress)
+    core/             # Seed spec, lineage, file locking, text utilities
+    orchestrator/     # Execution strategy, level context, MCP config
+    evaluation/       # Pipeline, trigger, models, artifact collector, mechanical checks
+    execution/        # Subagent management
+    events/           # Event definitions (decomposition, evaluation, interview, ontology, lineage)
+    persistence/      # SQLAlchemy event store, migrations
+    routing/          # Complexity analysis, router, escalation, downgrade
+    tui/              # Textual TUI application
+      screens/        # Dashboard v2/v3, execution, logs, debug, lineage, confirm-rewind
+      widgets/        # AC tree, cost tracker, phase progress, drift meter, parallel graph
+      components/     # Event log, progress, token tracker, agents panel
+    mcp/              # Model Context Protocol integration
+      server/         # MCP server with security
+      client/         # MCP client manager, protocol, adapter
+      tools/          # Tool registry, dashboard tools
+      resources/      # Resource handlers
+    observability/    # Drift detection, retrospective
+    resilience/       # Retry and recovery
+    config/           # Configuration models
+    agents/           # Agent loader
+    plugin/           # Plugin system (skills, agents, orchestration)
+    providers/        # Runtime backend providers
+    evolution/        # Regression detection, projector
+    verification/     # Verifier models
+    strategies/       # Execution strategies
+    bigbang/          # Project bootstrapping
+    codex/            # Codex CLI integration
+  docs/
+    getting-started.md        # Single onboarding source of truth
+    architecture.md           # System design and component overview
+    config-reference.md       # Configuration keys and defaults
+    platform-support.md       # Supported platforms and runtimes
+    runtime-capability-matrix.md  # Feature comparison across backends
+    guides/                   # User guides (seed authoring, TUI, evaluation)
+    runtime-guides/           # Backend-specific configuration (claude-code, codex)
+    api/                      # API reference (core, MCP)
+    contributing/             # Contributor guides (architecture, testing, patterns)
+  tests/              # Test suite
+  examples/           # Example projects
+  pyproject.toml      # Package metadata: ouroboros-ai, requires Python >=3.12
+```
+
+## Runtime Backends
+
+Ouroboros supports multiple AI runtime backends configured via `orchestrator.runtime_backend`:
+- Claude Code: Primary recommended backend. Uses Claude Code sessions with MCP tool integration.
+- Codex CLI: OpenAI Codex CLI as an alternative backend.
+- Additional backends can be integrated via the provider system.
+
+## Event Model
+
+All workflow state is event-sourced. Key event categories:
+- Decomposition events: AC tree creation and updates
+- Evaluation events: Stage results, consensus outcomes
+- Interview events: Question-answer pairs, crystallization
+- Ontology events: Concept and relationship tracking
+- Lineage events: Causal chain tracking
+
+## Documentation
+
+- Onboarding: `docs/getting-started.md`
+- Architecture: `docs/architecture.md`
+- API Reference: `docs/api/core.md`, `docs/api/mcp.md`
+- Runtime Guides: `docs/runtime-guides/claude-code.md`, `docs/runtime-guides/codex.md`
+- Contributing: `docs/contributing/`
