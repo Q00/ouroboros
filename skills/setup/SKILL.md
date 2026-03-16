@@ -9,6 +9,7 @@ Guided onboarding wizard that converts users into power users.
 
 > **Standalone users** (Codex, pip install): Use `ouroboros setup --runtime codex` in your terminal instead.
 > This skill runs inside a Claude Code session. For other runtime backends, the CLI `ouroboros setup` command handles configuration.
+> For full install and onboarding instructions, see [Getting Started](docs/getting-started.md).
 
 ## Usage
 
@@ -433,7 +434,7 @@ For Full Mode, install Python >= 3.12:
 ```
 uvx is recommended but not required. Alternative:
 
-Install Ouroboros globally:
+Install Ouroboros globally (see docs/getting-started.md for all options):
   pip install ouroboros-ai
 
 Then update ~/.claude/mcp.json with:

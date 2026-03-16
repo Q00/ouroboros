@@ -125,9 +125,39 @@ If the `ouroboros_interview` MCP tool is available (loaded via ToolSearch above)
    ```
    The tool records the answer, generates the next question, and returns it.
 
-4. **Repeat steps 2-3** until the user says "done" or requirements are clear.
+4. **Keep a visible ambiguity ledger while interviewing**:
+   Before or during the first 1-2 questions, identify the independent ambiguity tracks in the user's request.
+   Examples:
+   - For a feature request: scope, constraints, outputs, verification
+   - For a PR/review task: item-by-item validity, allowed code paths, non-goals, expected deliverables
+   - For a migration: source of truth, compatibility constraints, rollout boundaries
 
-5. After completion, suggest the next step in `📍 Next:` format:
+   Maintain this ledger mentally and do NOT let the interview collapse onto a single deep subtopic unless you have already checked whether the other tracks are resolved.
+
+5. **Run periodic breadth checks**:
+   Every few rounds, or sooner if one thread has become very detailed, ask a breadth-check question that revisits unresolved tracks.
+   Good examples:
+   - "We seem aligned on the adapter refactor. Are the review adjudication output and path constraints also fixed now?"
+   - "We have the implementation path. Do we still need to settle acceptance tests or output format?"
+
+   Use breadth checks especially when:
+   - The original request contains a list of review findings, bugs, subproblems, or deliverables
+   - The user mentions both implementation work and a written output
+   - The conversation starts refining one file or one abstraction for many consecutive rounds
+
+6. **Repeat steps 2-5** until the user says "done" or requirements are clear.
+
+7. **Prefer stopping over over-interviewing**:
+   When the following are already explicit, do not keep drilling into narrower sub-questions:
+   - In-scope vs out-of-scope boundaries
+   - Required outputs or deliverables
+   - Acceptance-test or verification expectations
+   - Important non-goals / frozen public contracts
+   - Enough detail to generate a Seed without inventing missing behavior
+
+   At that point, ask a closure question or suggest moving to `ooo seed` instead of opening a new deep thread.
+
+8. After completion, suggest the next step in `📍 Next:` format:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 **Advantages of MCP mode**: State persists to disk (survives session restarts), ambiguity scoring, direct integration with `ooo seed` via session ID, structured input with AskUserQuestion.
@@ -141,9 +171,14 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 3. Ask clarifying questions based on the user's topic and codebase context
 4. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)
 5. Use Read, Glob, Grep, WebFetch to explore further context if needed
-6. Continue until the user says "done"
-7. Interview results live in conversation context (not persisted)
-8. After completion, suggest the next step in `📍 Next:` format:
+6. Maintain the same ambiguity ledger and breadth-check behavior as in Path A:
+   - Track multiple independent ambiguity threads
+   - Revisit unresolved threads every few rounds
+   - Do not let one detailed subtopic crowd out the rest of the original request
+7. Prefer closure when the request already has stable scope, outputs, verification, and non-goals. Ask whether to move to `ooo seed` rather than continuing to generate narrower questions.
+8. Continue until the user says "done"
+9. Interview results live in conversation context (not persisted)
+10. After completion, suggest the next step in `📍 Next:` format:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 ## Interviewer Behavior (Both Modes)
@@ -151,6 +186,8 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 The interviewer is **ONLY a questioner**:
 - Always ends responses with a question
 - Targets the biggest source of ambiguity
+- Preserves breadth across independent ambiguity tracks instead of over-focusing on one thread
+- Periodically checks whether the interview is already specific enough to stop
 - NEVER writes code, edits files, or runs commands
 
 ## Example Session

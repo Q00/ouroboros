@@ -362,9 +362,10 @@ class IPhase(ABC):
 | User config | `~/.ouroboros/` |
 
 ### Commands
+
+> For install and first-run instructions, see [Getting Started](./docs/getting-started.md).
+
 ```bash
-uv run ouroboros run seed.yaml      # Run workflow
-uv run ouroboros validate seed.yaml # Validate seed
 uv run pytest                        # Run tests
 uv run ruff check src/              # Lint
 uv run mypy src/                    # Type check
@@ -385,6 +386,6 @@ uv run mypy src/                    # Type check
 
 ## Architecture Reference
 
-Full architecture document: `_bmad-output/planning-artifacts/architecture.md`
+Full architecture document: [docs/architecture.md](./docs/architecture.md)
 
-**When in doubt, check the architecture document.**
+**When in doubt, check the architecture document.** For onboarding and install, see [Getting Started](./docs/getting-started.md).
