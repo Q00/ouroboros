@@ -183,8 +183,7 @@ class ExecuteSeedHandler:
                 )
             )
 
-        session_id = arguments.get("session_id")
-        _ = session_id_override  # consumed downstream via arguments
+        session_id = arguments.get("session_id") or session_id_override
         model_tier = arguments.get("model_tier", "medium")
         max_iterations = arguments.get("max_iterations", 10)
 

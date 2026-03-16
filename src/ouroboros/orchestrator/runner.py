@@ -1019,9 +1019,10 @@ class OrchestratorRunner:
         # Clean up session tracking
         self._unregister_session(execution_id, session_id)
 
-        # Only mark cancelled if not already cancelled by another path
+        # Only mark cancelled if not already in a terminal state
         session_result = await self._session_repo.reconstruct_session(session_id)
-        if session_result.is_ok and session_result.value.status != SessionStatus.CANCELLED:
+        _terminal = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
+        if session_result.is_ok and session_result.value.status not in _terminal:
             cancel_result = await self._session_repo.mark_cancelled(
                 session_id,
                 reason="Cancellation detected during execution",

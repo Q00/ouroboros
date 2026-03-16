@@ -51,6 +51,22 @@ class _FailingReadlineStream(_FakeStream):
         raise AssertionError(msg)
 
 
+class _FakeStdin:
+    """Fake stdin that captures written data."""
+
+    def __init__(self) -> None:
+        self.written = bytearray()
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 class _FakeProcess:
     def __init__(
         self,
@@ -61,6 +77,7 @@ class _FakeProcess:
         stdout_stream: _FakeStream | None = None,
         stderr_stream: _FakeStream | None = None,
     ) -> None:
+        self.stdin = _FakeStdin()
         self.stdout = stdout_stream or _FakeStream(stdout_lines)
         self.stderr = stderr_stream or _FakeStream(stderr_lines)
         self._returncode = returncode
@@ -122,7 +139,7 @@ class TestCodexCliRuntime:
         return skill_md
 
     def test_build_command_for_new_session(self) -> None:
-        """Builds a new-session exec command."""
+        """Builds a new-session exec command (prompt fed via stdin, not args)."""
         runtime = CodexCliRuntime(
             cli_path="/usr/local/bin/codex",
             permission_mode="acceptEdits",
@@ -132,7 +149,6 @@ class TestCodexCliRuntime:
 
         command = runtime._build_command(
             output_last_message_path="/tmp/out.txt",
-            prompt="Fix the bug",
         )
 
         assert command[:2] == ["/usr/local/bin/codex", "exec"]
@@ -142,7 +158,6 @@ class TestCodexCliRuntime:
         assert "o3" in command
         assert "-C" in command
         assert "/tmp/project" in command
-        assert command[-1] == "Fix the bug"
 
     def test_build_command_for_resume(self) -> None:
         """Builds an exec resume command when a session id is provided."""
@@ -150,7 +165,6 @@ class TestCodexCliRuntime:
 
         command = runtime._build_command(
             output_last_message_path="/tmp/out.txt",
-            prompt="Continue",
             resume_session_id="thread-123",
         )
 
@@ -162,7 +176,6 @@ class TestCodexCliRuntime:
 
         command = runtime._build_command(
             output_last_message_path="/tmp/out.txt",
-            prompt="Inspect the repo",
         )
 
         assert "--sandbox" in command
@@ -174,7 +187,6 @@ class TestCodexCliRuntime:
 
         command = runtime._build_command(
             output_last_message_path="/tmp/out.txt",
-            prompt="Apply the fix",
         )
 
         assert "--dangerously-bypass-approvals-and-sandbox" in command
@@ -497,11 +509,15 @@ class TestCodexCliRuntime:
             skill_dispatcher=dispatcher,
         )
 
+        captured_processes: list[_FakeProcess] = []
+
         async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
-            assert command[-1] == "ooo help"
+            # Prompt is now fed via stdin, not as CLI arg
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("Codex fallback", encoding="utf-8")
-            return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            proc = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            captured_processes.append(proc)
+            return proc
 
         with (
             patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
@@ -512,6 +528,7 @@ class TestCodexCliRuntime:
         ):
             messages = [message async for message in runtime.execute_task("ooo help")]
 
+        assert captured_processes[0].stdin.written == b"ooo help"
         dispatcher.assert_not_awaited()
         mock_exec.assert_called_once()
         mock_warning.assert_called_once()
@@ -653,11 +670,14 @@ class TestCodexCliRuntime:
             skills_dir=tmp_path,
         )
 
+        captured_processes: list[_FakeProcess] = []
+
         async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
-            assert command[-1] == "ooo run seed.yaml"
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("Codex fallback", encoding="utf-8")
-            return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            proc = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            captured_processes.append(proc)
+            return proc
 
         with (
             patch.object(runtime, "_get_mcp_tool_handler", return_value=fake_handler),
@@ -669,6 +689,7 @@ class TestCodexCliRuntime:
         ):
             messages = [message async for message in runtime.execute_task("ooo run seed.yaml")]
 
+        assert captured_processes[0].stdin.written == b"ooo run seed.yaml"
         fake_handler.handle.assert_awaited_once_with({"seed_path": "seed.yaml"})
         mock_exec.assert_called_once()
         mock_warning.assert_called_once()
@@ -716,11 +737,14 @@ class TestCodexCliRuntime:
             skill_dispatcher=dispatcher,
         )
 
+        captured_processes: list[_FakeProcess] = []
+
         async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
-            assert command[-1] == "ooo run seed.yaml"
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("Codex fallback after timeout", encoding="utf-8")
-            return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            proc = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            captured_processes.append(proc)
+            return proc
 
         with (
             patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
@@ -731,6 +755,7 @@ class TestCodexCliRuntime:
         ):
             messages = [message async for message in runtime.execute_task("ooo run seed.yaml")]
 
+        assert captured_processes[0].stdin.written == b"ooo run seed.yaml"
         dispatcher.assert_awaited_once()
         mock_exec.assert_called_once()
         mock_warning.assert_called_once()
@@ -948,11 +973,14 @@ class TestCodexCliRuntime:
             skill_dispatcher=dispatcher,
         )
 
+        captured_processes: list[_FakeProcess] = []
+
         async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
-            assert command[-1] == "ooo run seed.yaml"
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("Codex fallback", encoding="utf-8")
-            return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            proc = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            captured_processes.append(proc)
+            return proc
 
         with (
             patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
@@ -963,6 +991,7 @@ class TestCodexCliRuntime:
         ):
             messages = [message async for message in runtime.execute_task("ooo run seed.yaml")]
 
+        assert captured_processes[0].stdin.written == b"ooo run seed.yaml"
         dispatcher.assert_awaited_once()
         mock_exec.assert_called_once()
         mock_warning.assert_called_once()
@@ -1009,11 +1038,14 @@ class TestCodexCliRuntime:
             skill_dispatcher=dispatcher,
         )
 
+        captured_processes: list[_FakeProcess] = []
+
         async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
-            assert command[-1] == 'ooo interview "Build a REST API"'
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("Codex fallback", encoding="utf-8")
-            return _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            proc = _FakeProcess(stdout_lines=[], stderr_lines=[], returncode=0)
+            captured_processes.append(proc)
+            return proc
 
         with (
             patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
@@ -1027,6 +1059,7 @@ class TestCodexCliRuntime:
                 async for message in runtime.execute_task('ooo interview "Build a REST API"')
             ]
 
+        assert captured_processes[0].stdin.written == b'ooo interview "Build a REST API"'
         dispatcher.assert_awaited_once()
         intercept_request = dispatcher.await_args.args[0]
         assert intercept_request.skill_name == "interview"
