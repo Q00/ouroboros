@@ -32,8 +32,23 @@ class _FakeStream:
         return chunk
 
 
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.written = bytearray()
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 class _FakeProcess:
     def __init__(self, returncode: int = 0) -> None:
+        self.stdin = _FakeStdin()
         self.stdout = _FakeStream()
         self.stderr = _FakeStream()
         self._returncode = returncode
@@ -77,15 +92,18 @@ async def test_unhandled_ooo_commands_pass_through_to_codex_unchanged(
     with resolve_packaged_codex_skill_path("help", skills_dir=runtime._skills_dir) as skill_md_path:
         assert skill_md_path.is_file()
 
+    captured_processes: list[_FakeProcess] = []
+
     async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
         assert kwargs["cwd"] == str(tmp_path)
-        assert command[-1] == prompt
         output_index = command.index("--output-last-message") + 1
         Path(command[output_index]).write_text(
             f"Codex pass-through: {prompt}",
             encoding="utf-8",
         )
-        return _FakeProcess(returncode=0)
+        proc = _FakeProcess(returncode=0)
+        captured_processes.append(proc)
+        return proc
 
     with (
         patch("ouroboros.mcp.server.adapter.create_ouroboros_server") as mock_create_server,
@@ -97,6 +115,7 @@ async def test_unhandled_ooo_commands_pass_through_to_codex_unchanged(
     ):
         messages = [message async for message in runtime.execute_task(prompt)]
 
+    assert captured_processes[0].stdin.written == prompt.encode("utf-8")
     mock_exec.assert_called_once()
     mock_create_server.assert_not_called()
     assert messages[-1].content == f"Codex pass-through: {prompt}"

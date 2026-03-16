@@ -32,10 +32,25 @@ class _FakeStream:
         return chunk
 
 
+class _FakeStdin:
+    def __init__(self) -> None:
+        self.written = bytearray()
+
+    def write(self, data: bytes) -> None:
+        self.written.extend(data)
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 class _FakeProcess:
     def __init__(
         self, stdout_lines: list[str], stderr_lines: list[str], returncode: int = 0
     ) -> None:
+        self.stdin = _FakeStdin()
         self.stdout = _FakeStream(stdout_lines)
         self.stderr = _FakeStream(stderr_lines)
         self._returncode = returncode
@@ -62,12 +77,13 @@ async def test_codex_mcp_timeout_falls_back_to_pass_through_cli_flow(tmp_path: P
         )
     )
 
+    captured_processes: list[_FakeProcess] = []
+
     async def fake_create_subprocess_exec(*command: str, **kwargs: object) -> _FakeProcess:
-        assert command[-1] == "ooo run seed.yaml"
         assert kwargs["cwd"] == str(tmp_path)
         output_index = command.index("--output-last-message") + 1
         Path(command[output_index]).write_text("Codex fallback completed", encoding="utf-8")
-        return _FakeProcess(
+        proc = _FakeProcess(
             stdout_lines=[
                 json.dumps({"type": "thread.started", "thread_id": "thread-123"}),
                 json.dumps(
@@ -83,6 +99,8 @@ async def test_codex_mcp_timeout_falls_back_to_pass_through_cli_flow(tmp_path: P
             stderr_lines=[],
             returncode=0,
         )
+        captured_processes.append(proc)
+        return proc
 
     with (
         patch("ouroboros.mcp.server.adapter.create_ouroboros_server", return_value=fake_server),
@@ -94,6 +112,7 @@ async def test_codex_mcp_timeout_falls_back_to_pass_through_cli_flow(tmp_path: P
     ):
         messages = [message async for message in runtime.execute_task("ooo run seed.yaml")]
 
+    assert captured_processes[0].stdin.written == b"ooo run seed.yaml"
     fake_server.call_tool.assert_awaited_once_with(
         "ouroboros_execute_seed",
         {"seed_path": "seed.yaml", "cwd": str(tmp_path)},
