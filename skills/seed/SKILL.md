@@ -62,7 +62,7 @@ If the `ouroboros_generate_seed` MCP tool is available (loaded via ToolSearch ab
 
 If the MCP tool is NOT available, fall back to agent-based generation:
 
-1. Read `agents/seed-architect.md` and adopt that role
+1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role
 2. Extract structured requirements from the interview Q&A in conversation history
 3. Generate a Seed YAML specification
 4. Present the seed to the user

@@ -506,7 +506,7 @@ All LLM calls go through LiteLLM for provider abstraction (100+ models), automat
 ## Extension Points
 
 - **Skills** — Add YAML-defined skills in `skills/` with magic prefix detection and tool declarations
-- **Agents** — Add markdown-defined specialist agents in `agents/` with role, capabilities, and tool access
+- **Agents** — Add bundled specialist prompts in `src/ouroboros/agents/`; use `OUROBOROS_AGENTS_DIR` for explicit local overrides
 - **MCP integration** — Bidirectional: expose Ouroboros tools as an MCP server, or consume external MCP servers during execution
 - **Runtime adapters** — Implement the `AgentRuntime` protocol and register in the runtime factory
 

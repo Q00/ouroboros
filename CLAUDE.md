@@ -34,7 +34,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 
 ## Agents
 
-Custom agents are in `agents/`. When a skill references an agent (e.g., `ouroboros:socratic-interviewer`), read its definition from `agents/{name}.md` and adopt that role.
+Bundled agents live in `src/ouroboros/agents/`. When a skill references an agent (e.g., `ouroboros:socratic-interviewer`), read its definition from `src/ouroboros/agents/{name}.md` and adopt that role. Use `OUROBOROS_AGENTS_DIR` or `.claude-plugin/agents/` only for explicit custom overrides.
 
 <!-- ooo:START -->
 <!-- ooo:VERSION:0.25.1 -->

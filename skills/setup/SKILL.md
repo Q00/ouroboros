@@ -300,7 +300,7 @@ ls skills/ | wc -l  # Should show 12+ skills
 
 Check agents are available:
 ```bash
-ls agents/ | wc -l  # Should show 9+ agents
+ls src/ouroboros/agents/*.md | wc -l  # Should show 20+ bundled agents
 ```
 
 Check MCP registration (if enabled):
