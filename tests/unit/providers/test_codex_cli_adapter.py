@@ -242,6 +242,124 @@ class TestCodexCliLLMAdapter:
         assert result.is_ok
         assert seen_schema["type"] == "object"
         assert seen_schema["required"] == ["approved"]
+        assert seen_schema["additionalProperties"] is False
+
+    @pytest.mark.asyncio
+    async def test_complete_normalizes_optional_object_fields_for_codex_schema(self) -> None:
+        """Codex schemas must require every property and disallow extras."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+        seen_schema: dict[str, object] = {}
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text(
+                '{"approved": true, "confidence": 0.92, "reasoning": "Looks good."}',
+                encoding="utf-8",
+            )
+
+            schema_index = command.index("--output-schema") + 1
+            seen_schema.update(json.loads(Path(command[schema_index]).read_text(encoding="utf-8")))
+            return _FakeProcess(returncode=0)
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return a vote.")],
+                CompletionConfig(
+                    model="default",
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {
+                                "approved": {"type": "boolean"},
+                                "confidence": {"type": "number"},
+                                "reasoning": {"type": "string"},
+                            },
+                            "required": ["approved"],
+                        },
+                    },
+                ),
+            )
+
+        assert result.is_ok
+        assert seen_schema["required"] == ["approved", "confidence", "reasoning"]
+        assert seen_schema["additionalProperties"] is False
+
+    @pytest.mark.asyncio
+    async def test_complete_restores_open_map_objects_after_codex_schema_rewrite(self) -> None:
+        """Open-map object schemas are rewritten for Codex and restored on output."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+        seen_schema: dict[str, object] = {}
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text(
+                json.dumps(
+                    {
+                        "score": 0.9,
+                        "verdict": "pass",
+                        "dimensions": [
+                            {"key": "coverage", "value": 0.88},
+                            {"key": "ux", "value": 0.91},
+                        ],
+                        "differences": [],
+                        "suggestions": [],
+                        "reasoning": "Looks solid.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            schema_index = command.index("--output-schema") + 1
+            seen_schema.update(json.loads(Path(command[schema_index]).read_text(encoding="utf-8")))
+            return _FakeProcess(returncode=0)
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return a QA verdict.")],
+                CompletionConfig(
+                    model="default",
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {
+                                "score": {"type": "number"},
+                                "verdict": {"type": "string"},
+                                "dimensions": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": "number"},
+                                },
+                                "differences": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "suggestions": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "reasoning": {"type": "string"},
+                            },
+                            "required": ["score", "verdict", "dimensions", "differences", "suggestions", "reasoning"],
+                            "additionalProperties": False,
+                        },
+                    },
+                ),
+            )
+
+        assert result.is_ok
+        assert json.loads(result.value.content)["dimensions"] == {
+            "coverage": 0.88,
+            "ux": 0.91,
+        }
+        dimensions_schema = seen_schema["properties"]["dimensions"]  # type: ignore[index]
+        assert dimensions_schema["type"] == "array"  # type: ignore[index]
 
     @pytest.mark.asyncio
     async def test_complete_returns_provider_error_on_nonzero_exit(self) -> None:

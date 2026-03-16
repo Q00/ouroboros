@@ -740,6 +740,79 @@ class TestSessionRepository:
         assert tracker.progress["runtime_status"] == "completed"
 
     @pytest.mark.asyncio
+    async def test_reconstruct_session_keeps_running_when_child_runtime_completes_but_workflow_pending(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Child runtime terminal states must not complete an unfinished workflow."""
+        started_at = datetime.now(UTC)
+
+        start_event = MagicMock()
+        start_event.id = "evt-start"
+        start_event.type = "orchestrator.session.started"
+        start_event.timestamp = started_at
+        start_event.data = {
+            "execution_id": "exec_parallel_123",
+            "seed_id": "seed_456",
+            "start_time": started_at.isoformat(),
+        }
+
+        workflow_progress = MagicMock()
+        workflow_progress.id = "evt-workflow"
+        workflow_progress.type = "workflow.progress.updated"
+        workflow_progress.timestamp = started_at + timedelta(seconds=1)
+        workflow_progress.data = {
+            "completed_count": 8,
+            "total_count": 9,
+            "current_phase": "Deliver",
+            "activity": "Level 2 complete",
+            "activity_detail": "Level 2/3",
+            "messages_count": 5822,
+            "acceptance_criteria": [
+                {"index": 4, "content": "AC 5", "status": "pending"},
+            ],
+        }
+
+        child_terminal_progress = MagicMock()
+        child_terminal_progress.id = "evt-child-terminal"
+        child_terminal_progress.type = "orchestrator.progress.updated"
+        child_terminal_progress.timestamp = started_at + timedelta(seconds=2)
+        child_terminal_progress.data = {
+            "runtime_status": "completed",
+            "progress": {
+                "runtime_status": "completed",
+                "runtime": {
+                    "backend": "opencode",
+                    "kind": "implementation_session",
+                    "native_session_id": "child-native",
+                    "cwd": "/tmp/project",
+                    "approval_mode": "acceptEdits",
+                    "metadata": {
+                        "ac_id": "exec_parallel_123_sub_ac_4_2",
+                        "session_scope_id": "exec_parallel_123_sub_ac_4_2",
+                        "session_role": "implementation",
+                    },
+                },
+                "last_message_type": "result",
+            },
+        }
+
+        mock_event_store.replay.return_value = [start_event]
+        mock_event_store.query_session_related_events = AsyncMock(
+            return_value=[start_event, workflow_progress, child_terminal_progress]
+        )
+
+        result = await repository.reconstruct_session("sess_123")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.status == SessionStatus.RUNNING
+        assert tracker.progress["completed_count"] == 8
+        assert tracker.progress["total_count"] == 9
+        assert tracker.progress["runtime_status"] == "completed"
+
+    @pytest.mark.asyncio
     async def test_reconstruct_completed_session(
         self,
         repository: SessionRepository,

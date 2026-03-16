@@ -308,6 +308,18 @@ class SessionRepository:
         return cls._coerce_runtime_status(event_data.get("runtime_status"))
 
     @staticmethod
+    def _workflow_is_incomplete(progress: dict[str, Any]) -> bool:
+        """Return True when workflow progress shows unfinished acceptance criteria."""
+        completed_count = progress.get("completed_count")
+        total_count = progress.get("total_count")
+        return (
+            isinstance(completed_count, int)
+            and isinstance(total_count, int)
+            and total_count > 0
+            and completed_count < total_count
+        )
+
+    @staticmethod
     def _workflow_progress_from_event(event_data: object) -> dict[str, Any]:
         """Normalize execution-scoped workflow progress into session progress fields."""
         if not isinstance(event_data, dict):
@@ -714,6 +726,7 @@ class SessionRepository:
             # Replay subsequent events
             messages_processed = 0
             last_progress: dict[str, Any] = {}
+            explicit_terminal_status: SessionStatus | None = None
 
             for event in all_events:
                 if event.type == "orchestrator.progress.updated":
@@ -744,6 +757,12 @@ class SessionRepository:
                 status_update = self._status_from_event(event.type, event.data)
                 if status_update is not None:
                     tracker = tracker.with_status(status_update)
+                    if event.type in {
+                        "orchestrator.session.completed",
+                        "orchestrator.session.failed",
+                        "orchestrator.session.cancelled",
+                    }:
+                        explicit_terminal_status = status_update
 
             # Apply accumulated progress
             tracker = replace(
@@ -751,6 +770,20 @@ class SessionRepository:
                 progress=last_progress,
                 messages_processed=messages_processed,
             )
+
+            # Child AC runtime streams emit terminal runtime_status values into the
+            # shared session audit log. Those should not flip the parent session to
+            # completed/failed while workflow progress still shows unfinished ACs.
+            if (
+                explicit_terminal_status is None
+                and tracker.status in {
+                    SessionStatus.COMPLETED,
+                    SessionStatus.FAILED,
+                    SessionStatus.CANCELLED,
+                }
+                and self._workflow_is_incomplete(last_progress)
+            ):
+                tracker = tracker.with_status(SessionStatus.RUNNING)
 
             log.info(
                 "orchestrator.session.reconstructed",
