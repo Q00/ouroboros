@@ -38,6 +38,7 @@ class SessionStatusHandler:
 
     def __post_init__(self) -> None:
         """Initialize the session repository after dataclass creation."""
+        self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._session_repo = SessionRepository(self._event_store)
         self._initialized = False
@@ -47,6 +48,11 @@ class SessionStatusHandler:
         if not self._initialized:
             await self._event_store.initialize()
             self._initialized = True
+
+    async def close(self) -> None:
+        """Close the event store if this handler owns it."""
+        if self._owns_event_store:
+            await self._event_store.close()
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -345,6 +351,7 @@ class ACDashboardHandler:
 
     def __post_init__(self) -> None:
         """Initialize event store."""
+        self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._initialized = False
 
@@ -353,6 +360,11 @@ class ACDashboardHandler:
         if not self._initialized:
             await self._event_store.initialize()
             self._initialized = True
+
+    async def close(self) -> None:
+        """Close the event store if this handler owns it."""
+        if self._owns_event_store:
+            await self._event_store.close()
 
     @property
     def definition(self) -> MCPToolDefinition:
