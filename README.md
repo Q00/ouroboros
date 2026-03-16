@@ -319,35 +319,6 @@ Nine agents, each a different mode of thinking. Loaded on-demand, never preloade
 
 ---
 
-## Real-Time Monitoring (TUI)
-
-Ouroboros includes a **terminal dashboard** for real-time workflow monitoring. Launch it in a separate terminal window while a workflow is executing:
-
-```bash
-# Install and launch
-uvx --from ouroboros-ai ouroboros tui monitor
-
-# Or if installed locally
-uv run ouroboros tui monitor
-```
-
-| Key | Screen | What You See |
-|:---:|:-------|:-------------|
-| `1` | **Dashboard** | Phase progress, acceptance criteria tree, live status |
-| `2` | **Execution** | Timeline, phase outputs, detailed events |
-| `3` | **Logs** | Filterable log viewer with level-based coloring |
-| `4` | **Debug** | State inspector, raw events, configuration |
-
-<!-- Screenshot: replace placeholder path with actual TUI capture -->
-<p align="center">
-  <img src="./docs/images/demo-tui-dashboard.png" width="720" alt="Ouroboros TUI dashboard showing phase progress, acceptance criteria tree, and live workflow status"/><br/>
-  <sub>Terminal dashboard: real-time phase progress, acceptance criteria tree, and live event stream.</sub>
-</p>
-
-> See [TUI Usage Guide](./docs/guides/tui-usage.md) for full details.
-
----
-
 ## Under the Hood
 
 <details>

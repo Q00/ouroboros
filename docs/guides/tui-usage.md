@@ -1,40 +1,17 @@
-# TUI Usage Guide
+# TUI Dashboard Reference
 
 Ouroboros includes an interactive terminal user interface (TUI) built with [Textual](https://textual.textualize.io/) for real-time workflow monitoring.
+
+> **New to Ouroboros?** See [Getting Started](../getting-started.md) for install and onboarding.
 
 ## Launching the TUI
 
 ```bash
-# Via uvx (no install needed)
-uvx --from ouroboros-ai ouroboros tui monitor
-
-# Local development
-uv run ouroboros tui monitor
+ouroboros tui monitor
 
 # Monitor with a specific database file
-uv run ouroboros tui monitor --db-path ~/.ouroboros/ouroboros.db
+ouroboros tui monitor --db-path ~/.ouroboros/ouroboros.db
 ```
-
-### Native SLT Backend (optional)
-
-A native Rust TUI backend built with [SuperLightTUI](https://github.com/subinium/SuperLightTUI) is available as an alternative. It provides the same screens and keybindings with faster startup and no Python runtime dependency.
-
-```bash
-# Install the native binary
-cd crates/ouroboros-tui
-cargo install --path .
-
-# Launch via CLI flag
-ouroboros tui monitor --backend slt
-
-# Or run the standalone binary directly
-ouroboros-tui
-ouroboros-tui --mock    # demo mode without DB
-```
-
-See the [ouroboros-tui README](../../crates/ouroboros-tui/README.md) for full details.
-
-## Getting Started
 
 When launched, the TUI opens with a **Session Selector** screen where you pick an existing session to monitor. Once selected, it switches to the Dashboard.
 
@@ -141,7 +118,7 @@ Browse and select from available sessions. Useful when multiple workflows have b
 
 ## Lineage Screen (Key: `e`)
 
-View evolutionary lineage across generations when using `ooo evolve` or `ooo ralph`. Shows how seeds evolved and converged over multiple iterations.
+View evolutionary lineage across generations when using `ouroboros evolve`. Shows how seeds evolved and converged over multiple iterations.
 
 ## Keyboard Shortcuts
 
