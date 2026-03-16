@@ -92,10 +92,9 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
 ### Path B: Plugin-only (no MCP tools available)
 
 If MCP tools are not available, explain the evolutionary loop concept and
-suggest installing the Ouroboros MCP server:
+suggest installing the Ouroboros MCP server. See [Getting Started](docs/getting-started.md) for install options, then run:
 
 ```
-pip install ouroboros-ai
 ouroboros mcp serve
 ```
 
