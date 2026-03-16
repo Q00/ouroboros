@@ -2499,10 +2499,12 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     f"Sibling tasks in progress:\n{other_list}\n"
                 )
 
-        # Scan project files so the agent doesn't hallucinate paths.
+        # Scan the requested runtime workspace so prompts stay aligned with the actual task cwd.
         import os
 
-        cwd = os.getcwd()
+        cwd = self._adapter.working_directory
+        if not isinstance(cwd, str) or not cwd:
+            cwd = os.getcwd()
         try:
             entries = sorted(os.listdir(cwd))
             file_listing = "\n".join(f"- {e}" for e in entries if not e.startswith("."))

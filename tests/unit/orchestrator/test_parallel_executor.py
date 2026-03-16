@@ -1703,6 +1703,98 @@ class TestParallelACExecutor:
         assert result.session_id == "opencode-session-retry"
 
     @pytest.mark.asyncio
+    async def test_atomic_ac_prompt_uses_adapter_working_directory(self) -> None:
+        """Prompt workspace context should come from the runtime adapter, not the server cwd."""
+
+        class _StubPromptRuntime:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/requested-workspace"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "tools": tools,
+                        "system_prompt": system_prompt,
+                        "resume_handle": resume_handle,
+                        "resume_session_id": resume_session_id,
+                    }
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=RuntimeHandle(
+                        backend="opencode",
+                        kind="implementation_session",
+                        native_session_id="opencode-session-prompt",
+                        cwd=self._cwd,
+                        approval_mode="acceptEdits",
+                        metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+                    ),
+                )
+
+        runtime = _StubPromptRuntime()
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+        listed_paths: list[str] = []
+
+        def _listdir(path: str) -> list[str]:
+            listed_paths.append(path)
+            return [".git", "README.md", "src"]
+
+        with patch("os.getcwd", return_value="/tmp/server-cwd"), patch(
+            "os.listdir", side_effect=_listdir
+        ):
+            result = await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Implement the requested feature",
+                session_id="orch_prompt",
+                tools=["Read"],
+                system_prompt="system",
+                seed_goal="Ship the feature",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        assert listed_paths == ["/tmp/requested-workspace"]
+        prompt = runtime.calls[0]["prompt"]
+        assert isinstance(prompt, str)
+        assert "## Working Directory" in prompt
+        assert "`/tmp/requested-workspace`" in prompt
+        assert "- README.md" in prompt
+        assert "- src" in prompt
+        assert "/tmp/server-cwd" not in prompt
+        assert result.success is True
+        assert result.session_id == "opencode-session-prompt"
+
+    @pytest.mark.asyncio
     async def test_aggregates_mixed_stage_outcomes(self) -> None:
         """A later stage may be partially executable while blocked dependents are withheld."""
         seed = _make_seed(
