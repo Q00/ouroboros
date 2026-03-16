@@ -1,0 +1,651 @@
+# Ouroboros — Full Model Context Reference
+
+> Specification-first workflow engine for AI coding agents.
+> Package: ouroboros-ai | CLI: ouroboros | Claude Code skills: ooo
+> Python >= 3.12 | License: MIT
+
+---
+
+## What Ouroboros Does
+
+Ouroboros sits between a human and an AI coding runtime (Claude Code, Codex CLI).
+It replaces ad-hoc prompting with a structured loop:
+
+  Interview -> Seed -> Execute -> Evaluate -> Evolve (repeat)
+
+The core insight: most AI coding fails at the INPUT, not the output.
+Ouroboros forces clarity before code through Socratic questioning and
+ontological analysis.
+
+---
+
+## Command Surfaces
+
+Two command surfaces exist. They are NOT a 1:1 mapping.
+
+### ooo (Claude Code skills — run inside a Claude Code session)
+
+  ooo setup          Register MCP server, configure project (one-time)
+  ooo interview      Socratic questioning — expose hidden assumptions
+  ooo seed           Crystallize interview into immutable spec (auto-invoked by interview; advanced/manual use only)
+  ooo run            Execute via Double Diamond decomposition
+  ooo evaluate       3-stage verification gate
+  ooo evolve         Evolutionary loop until ontology converges
+  ooo cancel         Cancel a running or orphaned session
+  ooo unstuck        5 lateral thinking personas when stuck
+  ooo status         Drift detection + session tracking
+  ooo ralph          Persistent loop until verified
+  ooo update         Update to latest version
+  ooo tutorial       Interactive hands-on learning
+  ooo welcome        Onboarding guide
+  ooo help           Full reference
+
+### ouroboros (Typer CLI — any terminal)
+
+  ouroboros setup       Detect runtimes, configure Ouroboros
+  ouroboros interview   Start interactive interview
+  ouroboros run         Execute workflows from a seed file
+  ouroboros cancel      Cancel stuck or orphaned executions
+  ouroboros status      Check system status and execution history
+  ouroboros config      Manage configuration settings
+  ouroboros tui         Interactive TUI monitor
+  ouroboros monitor     Shorthand for ouroboros tui monitor
+  ouroboros mcp         MCP server commands
+
+NOTE: Both `ooo interview` and `ouroboros interview` start the Socratic interview flow.
+
+---
+
+## Architecture Overview
+
+### Source Layout
+
+  src/ouroboros/
+    bigbang/        Interview, ambiguity scoring, brownfield explorer
+    routing/        PAL Router — 3-tier cost optimization (1x / 10x / 30x)
+    execution/      Double Diamond, hierarchical AC decomposition
+    evaluation/     Mechanical -> Semantic -> Multi-Model Consensus
+    evolution/      Wonder / Reflect cycle, convergence detection
+    resilience/     4-pattern stagnation detection, 5 lateral personas
+    observability/  3-component drift measurement, auto-retrospective
+    persistence/    Event sourcing (SQLAlchemy + aiosqlite), checkpoints
+    orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI)
+    core/           Types, errors, seed, ontology, security
+    providers/      LiteLLM adapter (100+ models)
+    mcp/            MCP client/server integration
+    plugin/         Plugin system (skill/agent auto-discovery)
+    tui/            Terminal UI dashboard (Textual)
+    cli/            Typer-based CLI
+
+### Layers
+
+  Plugin Layer      Skills (14) + Agents (9), hot-reload, magic prefix detection
+  Core Layer        Immutable Seed, AC tree, ontology schema, version tracking
+  Execution Layer   Double Diamond, dependency-aware parallel execution
+  State Layer       SQLite event store, append-only, full replay, checkpoints
+  Orchestration     6-phase pipeline, PAL Router cost optimization
+  Presentation      TUI dashboard (Textual), CLI (Typer)
+
+---
+
+## The Six Phases
+
+  Phase 0: BIG BANG         Crystallize requirements into a Seed
+  Phase 1: PAL ROUTER       Select appropriate model tier
+  Phase 2: DOUBLE DIAMOND   Decompose and execute tasks
+  Phase 3: RESILIENCE       Handle stagnation with lateral thinking
+  Phase 4: EVALUATION       Verify outputs at three stages
+  Phase 5: SECONDARY LOOP   Process deferred TODOs
+           (cycle back as needed)
+
+### Phase 0: Big Bang
+
+Components:
+  bigbang/interview.py      InterviewEngine for Socratic interviews
+  bigbang/ambiguity.py      Ambiguity score calculation
+  bigbang/seed_generator.py Seed generation from interview results
+
+Process:
+  1. User provides initial context/idea
+  2. Engine asks clarifying questions (up to MAX_INTERVIEW_ROUNDS)
+  3. Ambiguity score calculated after each response
+  4. Interview completes when ambiguity <= 0.2
+  5. Immutable Seed generated
+
+Ambiguity = 1 - Sum(clarity_i * weight_i)
+
+Greenfield weights:
+  Goal Clarity       40%
+  Constraint Clarity 30%
+  Success Criteria   30%
+
+Brownfield weights:
+  Goal Clarity       35%
+  Constraint Clarity 25%
+  Success Criteria   25%
+  Context Clarity    15%
+
+Gate: Ambiguity <= 0.2
+
+### Phase 1: PAL Router (Progressive Adaptive LLM)
+
+Components:
+  routing/router.py      Main routing logic
+  routing/complexity.py  Task complexity estimation
+  routing/tiers.py       Model tier definitions
+  routing/escalation.py  Escalation logic on failure
+  routing/downgrade.py   Downgrade logic on success
+
+Tiers:
+  FRUGAL    1x cost   complexity < 0.4
+  STANDARD  10x cost  complexity < 0.7
+  FRONTIER  30x cost  complexity >= 0.7 or critical
+
+Complexity scoring:
+  complexity = 0.30 * norm_tokens + 0.30 * norm_tools + 0.40 * norm_depth
+  where:
+    norm_tokens = min(tokens / 4000, 1.0)
+    norm_tools  = min(tools / 5, 1.0)
+    norm_depth  = min(depth / 5, 1.0)
+
+Escalation: 2 consecutive failures at current tier triggers escalation
+  Frugal -> Standard -> Frontier -> Stagnation Event
+
+Downgrade: 5 consecutive successes triggers downgrade
+  Frontier -> Standard -> Frugal
+
+Similar task patterns (Jaccard similarity >= 0.80) inherit tier preferences.
+
+### Phase 2: Double Diamond
+
+Components:
+  execution/double_diamond.py  Four-phase execution cycle
+  execution/decomposition.py   Hierarchical task decomposition
+  execution/atomicity.py       Atomicity detection
+  execution/subagent.py        Isolated subagent execution
+
+Four phases:
+  1. Discover (divergent) — Explore problem space
+  2. Define (convergent) — Converge on core problem
+  3. Design (divergent) — Explore solution approaches
+  4. Deliver (convergent) — Converge on implementation
+
+Recursive decomposition:
+  Each AC -> Discover + Define -> atomicity check
+  Atomic (single-focused, 1-2 files) -> Design + Deliver
+  Non-atomic -> decompose into 2-5 child ACs, recurse
+
+Constraints:
+  MAX_DEPTH = 5           hard recursion limit
+  COMPRESSION_DEPTH = 3   context truncated to 500 chars at depth 3+
+
+### Phase 3: Resilience
+
+Components:
+  resilience/stagnation.py  Stagnation detection (4 patterns)
+  resilience/lateral.py     Persona rotation and lateral thinking
+
+Stagnation patterns:
+  SPINNING           Same output hash repeated (SHA-256), threshold: 3
+  OSCILLATION        A->B->A->B alternating pattern, threshold: 2 cycles
+  NO_DRIFT           Drift score unchanging (epsilon < 0.01), threshold: 3
+  DIMINISHING_RETURNS  Progress rate < 0.01, threshold: 3
+
+Lateral thinking personas:
+  HACKER       Unconventional workarounds     best for: SPINNING
+  RESEARCHER   Seek more information          best for: NO_DRIFT, DIMINISHING_RETURNS
+  SIMPLIFIER   Reduce complexity              best for: DIMINISHING_RETURNS, OSCILLATION
+  ARCHITECT    Restructure fundamentally      best for: OSCILLATION, NO_DRIFT
+  CONTRARIAN   Challenge all assumptions      best for: all patterns
+
+### Phase 4: Evaluation
+
+Components:
+  evaluation/pipeline.py    Pipeline orchestration
+  evaluation/mechanical.py  Stage 1: Mechanical checks
+  evaluation/semantic.py    Stage 2: Semantic verification
+  evaluation/consensus.py   Stage 3: Multi-model consensus
+  evaluation/trigger.py     Consensus trigger matrix
+
+Stage 1: Mechanical ($0)
+  Lint, build, test, static analysis, coverage (threshold: 70%)
+  Any check fails -> pipeline stops
+
+Stage 2: Semantic ($$)
+  AC compliance, goal alignment, drift, uncertainty scoring
+  Score >= 0.8 and no trigger -> approved without consensus
+  Uses Standard tier model (temperature: 0.2)
+
+Stage 3: Consensus ($$$)
+  Triggered by 1 of 6 conditions (checked in priority order):
+    1. Seed modification (seeds are immutable)
+    2. Ontology evolution (schema changes)
+    3. Goal reinterpretation
+    4. Seed drift > 0.3
+    5. Stage 2 uncertainty > 0.3
+    6. Lateral thinking adoption
+
+  Simple mode: 3 models vote (GPT-4o, Claude Sonnet 4, Gemini 2.5 Pro)
+    2/3 majority required
+  Deliberative mode: Advocate / Devil's Advocate / Judge roles
+
+### Phase 5: Secondary Loop
+
+Components:
+  secondary/todo_registry.py   Non-blocking TODO capture during execution
+  secondary/scheduler.py       Batch processing after primary goal
+
+TODO Registration:
+  During execution, discovered improvements are registered asynchronously
+  via TodoRegistry without disrupting the primary flow.
+  Each TODO has: description, context (execution ID), priority, status
+
+Priority levels:
+  HIGH     Critical improvements, addressed first
+  MEDIUM   Standard improvements, moderate impact
+  LOW      Nice-to-have, minimal urgency
+
+Batch Processing:
+  Activates only after primary goal completion (all ACs passed)
+  Processes TODOs in priority order (HIGH -> MEDIUM -> LOW)
+  Non-blocking failures: one failed TODO does not stop others
+  User can skip via --skip-secondary flag
+
+BatchStatus:
+  COMPLETED   All TODOs processed (some may have failed)
+  PARTIAL     Processing stopped early (timeout)
+  SKIPPED     User chose to skip
+  NO_TODOS    No pending TODOs to process
+
+Returns BatchSummary: total, success_count, failure_count, skipped_count
+
+---
+
+## Core Data Models
+
+### Seed (Immutable Specification)
+
+In the happy path, seeds are auto-generated by the interview (Phase 0).
+Most users never create or edit seeds manually. Manual seed authoring is an
+advanced workflow for power users — see docs/guides/seed-authoring.md.
+
+  class Seed(BaseModel, frozen=True):
+      goal: str                                    # Primary objective
+      constraints: tuple[str, ...]                 # Hard requirements
+      acceptance_criteria: tuple[str, ...]         # Success criteria
+      ontology_schema: OntologySchema              # Output structure
+      evaluation_principles: tuple[EvaluationPrinciple, ...]
+      exit_conditions: tuple[ExitCondition, ...]
+      metadata: SeedMetadata
+
+  class SeedMetadata(BaseModel, frozen=True):
+      seed_id: str              # auto-generated UUID
+      version: str              # default "1.0.0"
+      created_at: datetime
+      ambiguity_score: float    # 0.0 to 1.0
+      interview_id: str | None
+
+  class OntologySchema(BaseModel, frozen=True):
+      name: str
+      description: str
+      fields: tuple[OntologyField, ...]
+
+  class OntologyField(BaseModel, frozen=True):
+      name: str
+      field_type: str       # "string" | "number" | "boolean" | "array" | "object"
+      description: str
+      required: bool = True
+
+  class EvaluationPrinciple(BaseModel, frozen=True):
+      name: str
+      description: str
+      weight: float           # 0.0 to 1.0, default 1.0
+
+  class ExitCondition(BaseModel, frozen=True):
+      name: str
+      description: str
+      evaluation_criteria: str
+
+Once generated, a Seed cannot be modified. Any change triggers consensus.
+
+### Result Type
+
+  Result[T, E] — generic frozen dataclass for expected failures
+  Methods: ok(value), err(error), unwrap(), unwrap_or(default),
+           map(fn), map_err(fn), and_then(fn)
+  Properties: is_ok, is_err, value, error
+
+### Error Hierarchy
+
+  OuroborosError (base)
+    ProviderError       LLM provider failures (provider, status_code)
+    ConfigError         Configuration issues (config_key, config_file)
+    PersistenceError    Database/storage issues (operation, table)
+    ValidationError     Data validation failures (field, value, safe_value)
+
+---
+
+## Event Sourcing
+
+All state changes are immutable events in a single SQLite table (events):
+  Columns: id (UUID), aggregate_type, aggregate_id, event_type,
+           payload (JSON), timestamp, consensus_id
+
+Event types use dot-notation past tense:
+  orchestrator.session.started
+  execution.ac.completed
+
+Indexes (5): aggregate_type, aggregate_id, composite, event_type, timestamp
+
+Features:
+  Append-only writes
+  Unit of Work pattern (events + checkpoint atomic commits)
+  Full replay capability
+  3-level rollback depth
+  5-minute periodic checkpointing
+
+---
+
+## Runtime Abstraction
+
+### AgentRuntime Protocol
+
+  class AgentRuntime(Protocol):
+      def execute_task(prompt, tools, system_prompt, resume_handle)
+          -> AsyncIterator[AgentMessage]
+      async def execute_task_to_result(prompt, tools, system_prompt, resume_handle)
+          -> Result[TaskResult, ProviderError]
+
+Key types:
+  AgentMessage    Normalized streaming message (backend-neutral)
+  RuntimeHandle   Frozen dataclass with session/resume state
+  TaskResult      Collected outcome of completed task
+
+### RuntimeHandle
+
+  @dataclass(frozen=True, slots=True)
+  class RuntimeHandle:
+      backend: str                    # "claude" | "codex" | custom
+      kind: str = "agent_runtime"
+      native_session_id: str | None
+      conversation_id: str | None
+      previous_response_id: str | None
+      transcript_path: str | None
+      cwd: str | None
+      approval_mode: str | None
+      updated_at: str | None
+      metadata: dict[str, Any]
+
+  Computed properties: lifecycle_state, is_terminal, can_resume,
+                       can_observe, can_terminate
+  Methods: observe(), terminate(), snapshot(), to_dict(), from_dict()
+
+### Shipped Adapters
+
+  ClaudeAgentAdapter (backend="claude")
+    Module: src/ouroboros/orchestrator/adapter.py
+    Wraps Claude Agent SDK / Claude Code CLI
+    Streaming via claude_agent_sdk.query()
+    Auto transient-error retry, session resumption
+
+  CodexCliRuntime (backend="codex")
+    Module: src/ouroboros/orchestrator/codex_cli_runtime.py
+    Drives OpenAI Codex CLI as session-oriented runtime
+    Parses newline-delimited JSON from stdout
+    Skill-command interception for deterministic MCP dispatch
+
+### Runtime Factory
+
+  create_agent_runtime(backend, permission_mode, model, cwd)
+
+  Backend resolution order:
+    1. OUROBOROS_AGENT_RUNTIME env var
+    2. orchestrator.runtime_backend in ~/.ouroboros/config.yaml
+    3. Explicit backend= parameter
+
+  Aliases: claude/claude_code, codex/codex_cli
+
+---
+
+## MCP Integration
+
+Ouroboros is an MCP Hub (both client and server).
+
+### MCP Server Mode
+
+  ouroboros mcp serve
+
+  Exposed tools:
+    ouroboros_execute_seed   Execute a seed specification
+    ouroboros_session_status Session status query
+    ouroboros_query_events   Event store query
+
+### MCP Client Mode
+
+  ouroboros run --mcp-config mcp.yaml seed.yaml
+
+  Tool precedence:
+    1. Built-in tools always win
+    2. First MCP server in config wins for duplicates
+    3. Use --mcp-tool-prefix to namespace
+
+### MCP Types
+
+  TransportType: stdio | sse | streamable-http
+  ContentType: text | image | resource
+
+  MCPServerConfig: name, transport, command, args, url, env, timeout, headers
+  MCPToolDefinition: name, description, parameters, server_name
+  MCPToolResult: content, is_error, meta
+  MCPCapabilities: tools, resources, prompts, logging
+
+### MCP Error Hierarchy
+
+  MCPError (base, extends OuroborosError)
+    MCPClientError
+      MCPConnectionError    (transport)
+      MCPTimeoutError       (timeout_seconds, operation)
+      MCPProtocolError
+    MCPServerError
+      MCPAuthError
+      MCPResourceNotFoundError
+      MCPToolError          (tool_name, error_code)
+
+---
+
+## Drift Control
+
+3-component weighted measurement:
+  Goal drift       50% weight
+  Constraint drift 30% weight
+  Ontology drift   20% weight
+
+Drift score: 0.0 to 1.0
+Threshold: <= 0.3 (high drift triggers re-examination)
+Automatic retrospective every N cycles
+
+---
+
+## Ontology Convergence
+
+Similarity = 0.5 * name_overlap + 0.3 * type_match + 0.2 * exact_match
+
+Convergence threshold: similarity >= 0.95
+Hard cap: 30 generations
+
+Pathological pattern detection:
+  Stagnation:    similarity >= 0.95 for 3 consecutive generations
+  Oscillation:   Gen N ~ Gen N-2 (period-2 cycle)
+  Repetitive:    >= 70% question overlap across 3 generations
+
+---
+
+## The Nine Agents
+
+Loaded on-demand, never preloaded:
+
+  Socratic Interviewer   Questions-only, never builds
+  Ontologist             Finds essence, not symptoms
+  Seed Architect         Crystallizes specs from dialogue
+  Evaluator              3-stage verification
+  Contrarian             Challenges every assumption
+  Hacker                 Finds unconventional paths
+  Simplifier             Removes complexity
+  Researcher             Stops coding, starts investigating
+  Architect              Identifies structural causes
+
+---
+
+## Configuration
+
+### File Layout
+
+  ~/.ouroboros/
+    config.yaml          Main configuration
+    credentials.yaml     API keys (chmod 600)
+    ouroboros.db          SQLite event store
+    seeds/               Generated seed YAML files
+    data/                Reserved for future use
+    logs/ouroboros.log   Log output
+    .env                 Optional, auto-loaded
+
+### Config Sections
+
+  orchestrator     Runtime backend selection, agent permissions
+  llm              Model selection, permission mode
+  economics        PAL Router tier definitions, escalation thresholds
+  clarification    Phase 0 interview settings
+  execution        Phase 2 Double Diamond settings
+  resilience       Phase 3 stagnation/lateral thinking
+  evaluation       Phase 4 evaluation pipeline settings
+  consensus        Multi-model consensus settings
+  persistence      SQLite event store settings
+  drift            Drift monitoring thresholds
+  logging          Log level, path, verbosity
+
+### Key Environment Variables
+
+  ANTHROPIC_API_KEY          Claude API key
+  OPENAI_API_KEY             OpenAI API key
+  OUROBOROS_AGENT_RUNTIME    Runtime backend override (claude | codex)
+  TERM=xterm-256color        TUI terminal compatibility
+
+### Minimal config.yaml
+
+  orchestrator:
+    runtime_backend: claude     # claude | codex
+
+  logging:
+    level: info                 # debug | info | warning | error
+
+  persistence:
+    database_path: data/ouroboros.db
+
+---
+
+## Security Limits
+
+Input validation constants (core/security.py):
+
+  MAX_INITIAL_CONTEXT_LENGTH   50,000 chars    Interview input limit
+  MAX_USER_RESPONSE_LENGTH     10,000 chars    Interview response limit
+  MAX_SEED_FILE_SIZE           1,000,000 bytes Seed YAML file size cap
+  MAX_LLM_RESPONSE_LENGTH     100,000 chars   LLM response truncation
+
+---
+
+## Performance Characteristics
+
+Event Store:
+  Append latency:  < 10ms p99
+  Query latency:   < 50ms for 1000 events
+  Storage:         ~1KB per event
+  Compression:     80% reduction at checkpoints
+
+TUI:
+  Refresh rate:    500ms polling
+  Event processing: < 100ms per update
+
+Memory:
+  Base: 50MB
+  Per session: 10-100MB depending on complexity
+
+Concurrency:
+  Agent pool: 2-10 parallel agents
+  Task queue: priority-based async processing
+
+---
+
+## TUI Dashboard
+
+Terminal-based real-time workflow monitor (Textual framework).
+
+Launch: ouroboros tui monitor (or ouroboros monitor)
+
+Screens:
+  1  Dashboard    Phase progress, AC tree, live status
+  2  Execution    Timeline, phase outputs, events
+  3  Logs         Filterable log viewer with level coloring
+  4  Debug        State inspector, raw events, config
+  s  Session      Browse and switch sessions
+  e  Lineage      Evolutionary lineage across generations
+
+State: TUIState dataclass in events.py, owned by app.py as SSOT
+Event flow: EventStore -> app._subscribe_to_events() (poll 0.5s)
+            -> create_message_from_event() -> post_message()
+
+---
+
+## Extension Points
+
+### Adding a New Runtime Adapter
+
+  1. Create module in src/ouroboros/orchestrator/
+  2. Implement AgentRuntime protocol (execute_task, execute_task_to_result)
+  3. Register in runtime_factory.py (add backend name set, extend resolve)
+  4. Emit RuntimeHandle with your backend tag
+  5. Update runtime_backend Literal in config/models.py
+  6. Write tests verifying AgentRuntime structural subtyping
+
+### Custom Skills
+
+  Place in skills/ directory with SKILL.md defining:
+    name, version, description, magic_prefixes, triggers, mode, agents, tools
+
+### Custom Agents
+
+  Place in agents/ directory as markdown files defining:
+    role, capabilities, tools
+
+### MCP Server Integration
+
+  Register custom tool/resource handlers via MCPServerAdapter
+  or use ToolRegistry for the global registry
+
+---
+
+## Design Principles
+
+  1. Frugal First      Start cheap, escalate only on failure
+  2. Immutable Seed    Direction cannot change; only path adapts
+  3. Progressive Verification  Cheap checks first, consensus at gates
+  4. Lateral Over Vertical     When stuck, change perspective
+  5. Event-Sourced    Every state change is an event; nothing lost
+
+---
+
+## Key File Locations
+
+  CLAUDE.md                     Dev environment setup, ooo command routing
+  docs/getting-started.md       Onboarding guide (single source of truth)
+  docs/architecture.md          Full architecture document
+  docs/config-reference.md      Complete config reference
+  docs/api/core.md              Core module API reference
+  docs/api/mcp.md               MCP module API reference
+  docs/runtime-capability-matrix.md  Runtime feature comparison
+  docs/runtime-guides/claude-code.md Claude Code backend guide
+  docs/runtime-guides/codex.md      Codex CLI backend guide
+  docs/guides/seed-authoring.md     Advanced seed authoring
+  docs/guides/evaluation-pipeline.md Evaluation pipeline details
+  docs/guides/tui-usage.md          TUI dashboard reference
+  docs/contributing/                 Contributor guides
