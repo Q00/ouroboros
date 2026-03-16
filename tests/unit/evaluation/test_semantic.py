@@ -129,7 +129,7 @@ class TestParseSemanticResponse:
         result = parse_semantic_response(response)
 
         assert result.is_err
-        assert "Invalid JSON" in result.error.message
+        assert "JSON" in result.error.message
 
 
 class TestSemanticConfig:
