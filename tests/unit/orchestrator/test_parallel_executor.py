@@ -1769,8 +1769,9 @@ class TestParallelACExecutor:
             listed_paths.append(path)
             return [".git", "README.md", "src"]
 
-        with patch("os.getcwd", return_value="/tmp/server-cwd"), patch(
-            "os.listdir", side_effect=_listdir
+        with (
+            patch("os.getcwd", return_value="/tmp/server-cwd"),
+            patch("os.listdir", side_effect=_listdir),
         ):
             result = await executor._execute_atomic_ac(
                 ac_index=0,

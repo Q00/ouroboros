@@ -21,8 +21,8 @@ class TestExtractJsonPayload:
     def test_prose_before_json(self):
         """The classic Anthropic prefill failure: prose with braces before JSON."""
         text = (
-            '{I will analyze this artifact carefully.\n\n'
-            'The {complexity} is moderate.\n\n'
+            "{I will analyze this artifact carefully.\n\n"
+            "The {complexity} is moderate.\n\n"
             '{"score": 0.90, "verdict": "pass"}'
         )
         result = extract_json_payload(text)
@@ -32,8 +32,8 @@ class TestExtractJsonPayload:
     def test_prose_with_curly_braces_before_json(self):
         """Stray braces in prose should be skipped."""
         text = (
-            'Let me evaluate the {artifact} quality.\n'
-            'Based on {criteria} analysis:\n\n'
+            "Let me evaluate the {artifact} quality.\n"
+            "Based on {criteria} analysis:\n\n"
             '{"score": 0.75, "verdict": "revise", "reasoning": "needs work"}'
         )
         result = extract_json_payload(text)
@@ -47,7 +47,7 @@ class TestExtractJsonPayload:
         assert '"inner": 42' in result
 
     def test_escaped_braces_in_strings(self):
-        text = '{"msg": "use \\"{key}\\\" syntax", "ok": true}'
+        text = '{"msg": "use \\"{key}\\" syntax", "ok": true}'
         result = extract_json_payload(text)
         assert result is not None
 

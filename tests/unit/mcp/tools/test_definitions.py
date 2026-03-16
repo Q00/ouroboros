@@ -1417,7 +1417,9 @@ class TestInterviewHandlerCwd:
             "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
             return_value=mock_scorer,
         ):
-            result = await handler.handle({"initial_context": "Add a feature", "cwd": str(tmp_path)})
+            result = await handler.handle(
+                {"initial_context": "Add a feature", "cwd": str(tmp_path)}
+            )
 
         mock_engine.start_interview.assert_awaited_once()
         call_kwargs = mock_engine.start_interview.call_args
@@ -1484,7 +1486,9 @@ class TestInterviewHandlerCwd:
             ],
         )
 
-        async def complete_state(current_state: InterviewState) -> Result[InterviewState, Exception]:
+        async def complete_state(
+            current_state: InterviewState,
+        ) -> Result[InterviewState, Exception]:
             current_state.status = InterviewStatus.COMPLETED
             return Result.ok(current_state)
 
@@ -1521,7 +1525,9 @@ class TestInterviewHandlerCwd:
             ],
         )
 
-        async def complete_state(current_state: InterviewState) -> Result[InterviewState, Exception]:
+        async def complete_state(
+            current_state: InterviewState,
+        ) -> Result[InterviewState, Exception]:
             current_state.status = InterviewStatus.COMPLETED
             return Result.ok(current_state)
 

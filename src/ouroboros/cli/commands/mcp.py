@@ -296,9 +296,7 @@ def serve(
     # ouroboros server, the nested instance exits cleanly instead of creating a
     # process tree explosion.
     if os.environ.get("_OUROBOROS_NESTED"):
-        _stderr_console.print(
-            "[dim]Nested ouroboros MCP server detected — exiting cleanly[/dim]"
-        )
+        _stderr_console.print("[dim]Nested ouroboros MCP server detected — exiting cleanly[/dim]")
         raise typer.Exit(0)
     os.environ["_OUROBOROS_NESTED"] = "1"
 
