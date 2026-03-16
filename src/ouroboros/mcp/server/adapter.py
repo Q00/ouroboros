@@ -202,6 +202,7 @@ class MCPServerAdapter:
         self._resource_handlers: dict[str, ResourceHandler] = {}
         self._prompt_handlers: dict[str, PromptHandler] = {}
         self._mcp_server: Any = None
+        self._owned_resources: list[Any] = []  # objects with async close()
 
         # Initialize security layer
         self._security = SecurityLayer(
@@ -537,10 +538,25 @@ class MCPServerAdapter:
         else:
             await self._mcp_server.run_stdio_async()
 
+    def register_owned_resource(self, resource: Any) -> None:
+        """Register a resource whose ``close()`` will be called on shutdown."""
+        self._owned_resources.append(resource)
+
     async def shutdown(self) -> None:
-        """Shutdown the server gracefully."""
+        """Shutdown the server gracefully, closing owned resources."""
         log.info("mcp.server.shutdown", name=self._name)
-        # FastMCP handles its own shutdown when run_async completes
+        for resource in self._owned_resources:
+            close_fn = getattr(resource, "close", None)
+            if callable(close_fn):
+                try:
+                    await close_fn()
+                except Exception as exc:
+                    log.warning(
+                        "mcp.server.resource_close_failed",
+                        resource=type(resource).__name__,
+                        error=str(exc),
+                    )
+        self._owned_resources.clear()
 
 
 def create_ouroboros_server(
@@ -1197,6 +1213,9 @@ def create_ouroboros_server(
         auth_config=auth_config,
         rate_limit_config=rate_limit_config,
     )
+
+    # The server owns the shared event store lifecycle
+    server.register_owned_resource(event_store)
 
     # Register all tools with the server
     for handler in tool_handlers:

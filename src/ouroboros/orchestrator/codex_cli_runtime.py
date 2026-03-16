@@ -627,11 +627,10 @@ class CodexCliRuntime:
     def _build_command(
         self,
         output_last_message_path: str,
-        prompt: str,
         *,
         resume_session_id: str | None = None,
     ) -> list[str]:
-        """Build the Codex CLI command for a new or resumed session."""
+        """Build the CLI command args.  Prompt is fed via stdin separately."""
         command = [self._cli_path, "exec"]
         if resume_session_id:
             if not _SAFE_SESSION_ID_PATTERN.match(resume_session_id):
@@ -657,8 +656,6 @@ class CodexCliRuntime:
             command.extend(["--model", normalized_model])
 
         command.extend(self._build_permission_args())
-
-        command.append(prompt)
         return command
 
     def _resolve_resume_session_id(
@@ -672,7 +669,7 @@ class CodexCliRuntime:
 
     def _requires_process_stdin(self) -> bool:
         """Return True when the runtime needs a writable stdin pipe."""
-        return False
+        return True
 
     async def _handle_runtime_event(
         self,
@@ -1016,8 +1013,10 @@ class CodexCliRuntime:
             if dict_parts:
                 return "\n".join(dict_parts)
 
-            fallback_parts = [self._extract_text(item) for item in value.values()]
-            return "\n".join(part for part in fallback_parts if part)
+            # Shallow fallback: collect only top-level string values to avoid
+            # recursive data leakage (credentials, PII, tool outputs).
+            shallow_parts = [v.strip() for v in value.values() if isinstance(v, str) and v.strip()]
+            return "\n".join(shallow_parts)
 
         return ""
 
@@ -1346,7 +1345,6 @@ class CodexCliRuntime:
         attempted_resume_session_id = self._resolve_resume_session_id(current_handle)
         command = self._build_command(
             output_last_message_path=str(output_path),
-            prompt=composed_prompt,
             resume_session_id=attempted_resume_session_id,
         )
 
@@ -1392,6 +1390,13 @@ class CodexCliRuntime:
             )
             output_path.unlink(missing_ok=True)
             return
+
+        # Feed prompt via stdin to avoid OS ARG_MAX limits (~262KB on macOS).
+        process_stdin = getattr(process, "stdin", None)
+        if composed_prompt and process_stdin is not None:
+            process_stdin.write(composed_prompt.encode("utf-8"))
+            await process_stdin.drain()
+            process_stdin.close()
 
         control_state = {
             "handle": current_handle,
