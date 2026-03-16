@@ -1,7 +1,5 @@
 """Tests for extract_json_payload — the shared JSON extractor."""
 
-import pytest
-
 from ouroboros.evaluation.json_utils import extract_json_payload
 
 
