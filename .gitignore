@@ -107,3 +107,24 @@ _bmad/
 
 # Local archive for removed/held docs and assets
 archive/
+
+# Generated doc reports (regenerable via scripts/)
+docs/link-index.md
+docs/link-index.json
+docs/cross-document-link-index.md
+docs/section-content-index.md
+docs/section-content-index.json
+docs/semantic-link-rot-report.md
+docs/doc-issues-register.md
+docs/doc-volatility-report.md
+docs/doc-volatility-report.json
+docs/doc-maintenance-ranking.yaml
+docs/findings-file-inventory.md
+docs/claim-inventory.md
+docs/config-inventory.md
+docs/runtime-capability-crosscheck.md
+docs/authority-model-migration-report.json
+docs/claim-status-derivation-audit.yaml
+docs/code-surface-inventory.yaml
+docs/code-surface-lookup.yaml
+docs/cli-inventory.yaml

@@ -38,3 +38,15 @@ When no codebase context is provided, fall back to discovery:
 - Build on previous responses
 - Be specific and actionable
 - Use ontological questions: "What IS this?", "Root cause or symptom?", "What are we assuming?"
+
+## BREADTH CONTROL
+- At the start of the interview, infer the main ambiguity tracks in the user's request and keep them active.
+- If the request contains multiple deliverables or a list of findings/issues, treat those as separate tracks rather than collapsing onto one favorite subtopic.
+- After a few rounds on one thread, run a breadth check: ask whether the other unresolved tracks are already fixed or still need clarification.
+- If the user mentions both implementation work and a written output, keep both visible in later questions.
+- If one file, abstraction, or bug has dominated several consecutive rounds, explicitly zoom back out before going deeper.
+
+## STOP CONDITIONS
+- Prefer ending the interview once scope, non-goals, outputs, and verification expectations are all explicit enough to generate a Seed.
+- When the conversation is mostly refining wording or very narrow edge cases, ask whether to stop and move to Seed generation instead of opening another deep sub-question.
+- If the user explicitly signals "this is enough", "let's generate the seed", or equivalent, treat that as a strong cue to ask a final closure question rather than continuing the drill-down.
