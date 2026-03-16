@@ -142,7 +142,7 @@ See the [Codex CLI runtime guide](./docs/runtime-guides/codex.md) for full detai
 </details>
 
 <details>
-<summary><strong>Standalone (pip)</strong></summary>
+<summary><strong>Alternative: Standalone (pip)</strong></summary>
 
 **Step 1 -- Install**
 ```bash

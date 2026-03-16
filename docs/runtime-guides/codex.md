@@ -1,30 +1,6 @@
 <!--
 doc_metadata:
   runtime_scope: [codex]
-
-canonical_source:
-  # [v1.2] Upgraded from claim_ownership schema v1.0 (2026-03-15).
-  # defers_to now uses canonical_doc + claim_patterns[] with claim_pattern_ids from claim_patterns: registry.
-  # Note: "codex-runtime-setup" is not a shared claim pattern (unique to this doc); canonical_for is empty.
-  schema_version: "1.2"
-  generated: "2026-03-15"
-  # This document covers Codex CLI-specific runtime setup.
-  # Shared claim patterns (capabilities, install-paths, CLI options) defer to their canonical owners.
-  canonical_for: []   # no shared claim pattern owned; Codex-specific setup content is unique to this doc
-  defers_to:
-    - canonical_doc: docs/config-reference.md
-      claim_patterns: [install-paths, config-keys]
-      # install-paths: seed file path (~/.ouroboros/seeds/seed_<id>.yaml)
-      #   is canonical in config-reference.md. claim_registry_refs: [CR-001]; claim_inventory_refs: [A-006]
-      # config-keys: orchestrator.runtime_backend: codex, OPENAI_API_KEY env var
-    - canonical_doc: docs/runtime-capability-matrix.md
-      claim_patterns: [runtime-capabilities]
-      # Full Codex vs Claude feature comparison (session model, supported features, limitations)
-      # lives in runtime-capability-matrix.md; this guide provides Codex-specific operational details only.
-    - canonical_doc: docs/cli-reference.md
-      claim_patterns: [cli-options, pkg-install]
-      # cli-options: ouroboros CLI options in skill-to-CLI mapping (e.g., --runtime codex, --orchestrator)
-      #   claim_registry_refs: [CR-005, CR-006, CR-007]
 -->
 
 # Running Ouroboros with Codex CLI

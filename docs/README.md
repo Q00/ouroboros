@@ -32,10 +32,9 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 ### Guides
 
 - [Seed Authoring Guide](./guides/seed-authoring.md) - YAML structure, field reference, examples
-- [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
-- [CLI Usage Guide](./guides/cli-usage.md) - Command-line interface reference
+- [Evolutionary Loop & Ralph](./guides/evolution-loop.md) - Wonder/Reflect cycle, convergence detection, persistent evolution
 - [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md) - Three-stage evaluation, failure modes, and configuration
-- [Execution Failure Modes](./guides/execution-failure-modes.md) - Error handling, recovery, and failure diagnosis
+- [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
 
 ### Contributing
 
@@ -43,17 +42,7 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 - [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
-- [Documentation Issues Register](./doc-issues-register.md) - Severity-classified open and resolved doc issues
-- [Findings Registry](./findings-registry.md) - Canonical consolidated registry of all documentation audit findings (44 findings, all categories)
-
-### Documentation Governance
-
-- [Authority-Chain Rule](./authority-chain.md) - Normative precedence rule: source code > canonical document > deferred documents
-- [Concept Glossary](./concept-glossary.yaml) - Stable concept identifier registry mapping concept IDs to their defining documents; used for `concept_prereqs` validation in the doc topology
-
-### Security
-
-- [Security Policy](../SECURITY.md) - Vulnerability reporting and security model
+- [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
 
 ## Key Concepts
 

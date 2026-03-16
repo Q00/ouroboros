@@ -1,58 +1,11 @@
 <!--
-doc_maintenance:
-  score: 45
-  rank: 3
-  scored_on: "2026-03-15"
-  scoring_formula: "findings_count*2 + code_deps_count + downstream_dependents + open_findings*5"
-  findings_total: 13
-  findings_open: 0
-  open_finding_ids: []
-  # code_deps_count: DERIVED — computed from docs/claim-registry.yaml (schema v1.3, Sub-AC 2a)
-  # Derivation: count unique code_deps entries across all CR-NNN claims whose locations[] include this doc.
-  # Legacy value was 10; authoritative claim-level code_deps now live in claim-registry.yaml.
-  downstream_dependents: 9
-  review_trigger: "Any change to src/ouroboros/cli/commands/*.py or src/ouroboros/cli/main.py"
-  registry_ref: "docs/contributing/findings-registry.md"
-  ranking_ref: "docs/doc-maintenance-ranking.yaml"
+doc_metadata:
   runtime_scope: [local, claude, codex]
-
-canonical_source:
-  # [v1.2] Upgraded from claim_ownership schema v1.0 (2026-03-15).
-  # canonical_for now uses flat claim_pattern_ids from docs/doc-topology.yaml claim_patterns:.
-  # Detailed claim references preserved as inline comments for cross-tracing.
-  # Note: v1.0 "cli-commands" → v1.2 "cli-options"; "tui-shortcuts" merged into "cli-options".
-  schema_version: "1.2"
-  generated: "2026-03-15"
-  # This document is the CANONICAL SOURCE for CLI command specifications.
-  # Other docs that re-state these facts MUST cross-reference here, not independently assert.
-  canonical_for:
-    - cli-options     # all CLI command syntax, flags, defaults, short forms, TUI shortcuts
-                      # claim_registry_refs: [CR-005–CR-015, CR-010 (TUI shortcuts), CR-014]
-                      # claim_inventory_refs: [B-001 through B-012]
-    - pkg-install     # pip install commands, extras (ouroboros-ai[claude] etc.), npm install
-                      # claim_inventory_refs: [C-001, C-002, C-003, C-004]
-  defers_to:
-    - canonical_doc: docs/config-reference.md
-      claim_patterns: [install-paths, config-keys]
-      # install-paths: path values (e.g., ~/.ouroboros/ouroboros.db, ~/.claude/mcp.json)
-      #   are canonical in config-reference.md; update there first if paths change.
-      #   claim_registry_refs: [CR-001, CR-002]; claim_inventory_refs: [A-001–A-004]
-      # config-keys: option descriptions that reference config keys (e.g., orchestrator.runtime_backend)
-      #   are canonical in config-reference.md.
 -->
 
 # CLI Reference
 
 Complete command reference for the Ouroboros CLI.
-
-> **Maintenance Warning — Score 45/100 (Rank #3 of 42, scored 2026-03-15)**
-> This document tracks **10 source files** and has accumulated **13 audit
-> findings** (all resolved). It is depended on by **8 other documents**.
-> Any change to `src/ouroboros/cli/commands/*.py` or `src/ouroboros/cli/main.py`
-> **must** trigger a review of this file. The companion guide
-> [`docs/guides/cli-usage.md`](guides/cli-usage.md) must be updated in tandem.
-> See [`docs/doc-maintenance-ranking.yaml`](doc-maintenance-ranking.yaml) for
-> the full scoring breakdown.
 
 ## Installation
 
