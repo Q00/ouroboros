@@ -79,7 +79,7 @@ ouroboros/
     observability/    # Drift detection, retrospective
     resilience/       # Retry and recovery
     config/           # Configuration models
-    agents/           # Agent loader
+    agents/           # Agent prompt package (src/ouroboros/agents)
     plugin/           # Plugin system (skills, agents, orchestration)
     providers/        # Runtime backend providers
     evolution/        # Regression detection, projector

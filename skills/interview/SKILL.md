@@ -166,7 +166,7 @@ If the `ouroboros_interview` MCP tool is available (loaded via ToolSearch above)
 
 If the MCP tool is NOT available, fall back to agent-based interview:
 
-1. Read `agents/socratic-interviewer.md` and adopt that role
+1. Read `src/ouroboros/agents/socratic-interviewer.md` and adopt that role
 2. **Pre-scan the codebase**: Use Glob to check for config files (`pyproject.toml`, `package.json`, `go.mod`, etc.). If found, use Read/Grep to scan key files and incorporate findings into your questions as confirmation-style ("I see X. Should I assume Y?") rather than open-ended discovery ("Do you have X?")
 3. Ask clarifying questions based on the user's topic and codebase context
 4. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)

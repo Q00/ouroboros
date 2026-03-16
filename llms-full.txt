@@ -614,7 +614,8 @@ Event flow: EventStore -> app._subscribe_to_events() (poll 0.5s)
 
 ### Custom Agents
 
-  Place in agents/ directory as markdown files defining:
+  Place in src/ouroboros/agents/ as bundled markdown files, or in an explicit
+  override directory via OUROBOROS_AGENTS_DIR / .claude-plugin/agents/:
     role, capabilities, tools
 
 ### MCP Server Integration
