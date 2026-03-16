@@ -248,7 +248,7 @@ class AgentRegistry:
         )
     """
 
-    AGENT_DIR = Path("agents")
+    AGENT_DIR = Path(".claude-plugin/agents")
 
     def __init__(self) -> None:
         """Initialize the agent registry."""
