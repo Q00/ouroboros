@@ -776,7 +776,8 @@ class SessionRepository:
             # completed/failed while workflow progress still shows unfinished ACs.
             if (
                 explicit_terminal_status is None
-                and tracker.status in {
+                and tracker.status
+                in {
                     SessionStatus.COMPLETED,
                     SessionStatus.FAILED,
                     SessionStatus.CANCELLED,
