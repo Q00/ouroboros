@@ -169,18 +169,168 @@ class CodexCliLLMAdapter:
     def _build_output_schema(
         self,
         response_format: dict[str, object] | None,
-    ) -> dict[str, object] | None:
-        """Build a JSON Schema payload for `codex exec --output-schema`."""
+    ) -> tuple[dict[str, object] | None, tuple[tuple[str, ...], ...]]:
+        """Build a Codex-compatible JSON Schema payload and response transforms."""
         if not response_format:
-            return None
+            return None, ()
 
         schema_type = response_format.get("type")
         if schema_type == "json_schema":
             schema = response_format.get("json_schema")
-            return schema if isinstance(schema, dict) else None
+            if not isinstance(schema, dict):
+                return None, ()
+            normalized_schema, map_paths = self._normalize_schema_for_codex(schema)
+            return normalized_schema, tuple(map_paths)
         if schema_type == "json_object":
-            return {"type": "object"}
-        return None
+            log.warning(
+                "codex_cli_adapter.json_object_unstructured_fallback",
+                reason="codex_output_schema_requires_strict_object_shapes",
+            )
+            return None, ()
+        return None, ()
+
+    def _normalize_schema_for_codex(
+        self,
+        schema: dict[str, Any],
+        *,
+        path: tuple[str, ...] = (),
+    ) -> tuple[dict[str, object], list[tuple[str, ...]]]:
+        """Normalize generic JSON Schema into the stricter Codex CLI subset.
+
+        Codex requires object schemas to declare ``required`` for every
+        property and to set ``additionalProperties`` to ``false``. Generic
+        open-map objects are therefore rewritten into arrays of
+        ``{key, value}`` entries and restored after completion.
+        """
+        normalized: dict[str, object] = {
+            key: value
+            for key, value in schema.items()
+            if key not in {"properties", "required", "additionalProperties", "items"}
+        }
+        map_paths: list[tuple[str, ...]] = []
+
+        schema_type = normalized.get("type")
+        if schema_type == "object":
+            properties = schema.get("properties")
+            if isinstance(properties, dict):
+                normalized_properties: dict[str, object] = {}
+                for key, value in properties.items():
+                    if isinstance(value, dict):
+                        child_schema, child_map_paths = self._normalize_schema_for_codex(
+                            value,
+                            path=(*path, key),
+                        )
+                        normalized_properties[key] = child_schema
+                        map_paths.extend(child_map_paths)
+                    else:
+                        normalized_properties[key] = value
+
+                normalized["properties"] = normalized_properties
+                normalized["required"] = list(normalized_properties.keys())
+                normalized["additionalProperties"] = False
+                return normalized, map_paths
+
+            additional_properties = schema.get("additionalProperties")
+            if isinstance(additional_properties, dict):
+                value_schema, _ = self._normalize_schema_for_codex(additional_properties)
+                map_paths.append(path)
+                return (
+                    {
+                        "type": "array",
+                        "description": normalized.get("description"),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "value": value_schema,
+                            },
+                            "required": ["key", "value"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    map_paths,
+                )
+
+            normalized["properties"] = {}
+            normalized["required"] = []
+            normalized["additionalProperties"] = False
+            return normalized, map_paths
+
+        if schema_type == "array":
+            items = schema.get("items")
+            if isinstance(items, dict):
+                normalized_items, child_map_paths = self._normalize_schema_for_codex(
+                    items,
+                    path=(*path, "*"),
+                )
+                normalized["items"] = normalized_items
+                map_paths.extend(child_map_paths)
+            elif items is not None:
+                normalized["items"] = items
+
+        return normalized, map_paths
+
+    def _restore_schema_transforms(
+        self,
+        content: str,
+        map_paths: tuple[tuple[str, ...], ...],
+    ) -> str:
+        """Restore backend-specific schema rewrites back into the original shape."""
+        if not map_paths:
+            return content
+
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return content
+
+        restored = payload
+        for path in sorted(map_paths, key=len, reverse=True):
+            restored = self._restore_map_entries(restored, path)
+
+        try:
+            return json.dumps(restored, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return content
+
+    def _restore_map_entries(
+        self,
+        node: object,
+        path: tuple[str, ...],
+    ) -> object:
+        """Convert entry-array payloads back into ``{key: value}`` maps."""
+        if not path:
+            return self._entries_array_to_object(node)
+
+        head, *tail = path
+        remaining = tuple(tail)
+        if head == "*":
+            if not isinstance(node, list):
+                return node
+            return [self._restore_map_entries(item, remaining) for item in node]
+
+        if not isinstance(node, dict) or head not in node:
+            return node
+
+        restored = dict(node)
+        restored[head] = self._restore_map_entries(restored[head], remaining)
+        return restored
+
+    @staticmethod
+    def _entries_array_to_object(value: object) -> object:
+        """Convert ``[{key, value}, ...]`` into ``{key: value, ...}`` when possible."""
+        if not isinstance(value, list):
+            return value
+
+        result: dict[str, object] = {}
+        for item in value:
+            if not isinstance(item, dict):
+                return value
+            key = item.get("key")
+            if not isinstance(key, str) or "value" not in item:
+                return value
+            result[key] = item["value"]
+        return result
 
     def _build_command(
         self,
@@ -475,7 +625,7 @@ class CodexCliLLMAdapter:
         output_path = Path(output_path_str)
 
         schema_path: Path | None = None
-        schema = self._build_output_schema(config.response_format)
+        schema, map_paths = self._build_output_schema(config.response_format)
         if schema is not None:
             schema_fd, schema_path_str = tempfile.mkstemp(
                 prefix=self._schema_tempfile_prefix,
@@ -707,6 +857,7 @@ class CodexCliLLMAdapter:
                 )
             )
 
+        content = self._restore_schema_transforms(content, map_paths)
         content = self._truncate_if_oversized(content, normalized_model or "default")
 
         return Result.ok(
