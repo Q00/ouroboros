@@ -241,7 +241,11 @@ class JobManager:
                 sub_name = sub_data.get("content") or sub_data.get("sub_task_id") or ""
                 sub_status = sub_data.get("status") or ""
                 if sub_name:
-                    return f"Working | {sub_name} ({sub_status})" if sub_status else f"Working | {sub_name}"
+                    return (
+                        f"Working | {sub_name} ({sub_status})"
+                        if sub_status
+                        else f"Working | {sub_name}"
+                    )
 
         if snapshot.links.session_id:
             repo = SessionRepository(self._event_store)
