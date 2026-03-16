@@ -7,6 +7,7 @@ clear requirements through iterative questioning. Users control when to stop.
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+import functools
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,54 @@ DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 
 # Legacy alias for backward compatibility
 MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS
+
+
+class InterviewPerspective(StrEnum):
+    """Internal perspectives used to keep interviews broad and practical."""
+
+    RESEARCHER = "researcher"
+    SIMPLIFIER = "simplifier"
+    ARCHITECT = "architect"
+    BREADTH_KEEPER = "breadth-keeper"
+    SEED_CLOSER = "seed-closer"
+
+
+@dataclass(frozen=True, slots=True)
+class InterviewPerspectiveStrategy:
+    """Prompt data for one internal interview perspective."""
+
+    perspective: InterviewPerspective
+    system_prompt: str
+    approach_instructions: tuple[str, ...]
+    question_templates: tuple[str, ...]
+
+
+@functools.lru_cache(maxsize=1)
+def _load_interview_perspective_strategies() -> dict[
+    InterviewPerspective,
+    InterviewPerspectiveStrategy,
+]:
+    """Lazy-load perspective prompts from agent markdown files."""
+    from ouroboros.agents.loader import load_persona_prompt_data
+
+    mapping = {
+        InterviewPerspective.RESEARCHER: "researcher",
+        InterviewPerspective.SIMPLIFIER: "simplifier",
+        InterviewPerspective.ARCHITECT: "architect",
+        InterviewPerspective.BREADTH_KEEPER: "breadth-keeper",
+        InterviewPerspective.SEED_CLOSER: "seed-closer",
+    }
+
+    return {
+        perspective: InterviewPerspectiveStrategy(
+            perspective=perspective,
+            system_prompt=data.system_prompt,
+            approach_instructions=data.approach_instructions,
+            question_templates=data.question_templates,
+        )
+        for perspective, filename in mapping.items()
+        for data in [load_persona_prompt_data(filename)]
+    }
 
 
 class InterviewStatus(StrEnum):
@@ -530,7 +579,127 @@ class InterviewEngine:
                 '\n- Frame as: "I found X. Should I assume Y?" not "Do you have X?"'
             )
 
-        return f"{dynamic_header}\n{base_prompt}"
+        ambiguity_snapshot = self._build_ambiguity_snapshot_prompt(state)
+        if ambiguity_snapshot:
+            dynamic_header += f"\n\n{ambiguity_snapshot}"
+
+        perspective_panel = self._build_perspective_panel_prompt(state)
+
+        return f"{dynamic_header}\n{base_prompt}\n\n{perspective_panel}"
+
+    def _build_ambiguity_snapshot_prompt(self, state: InterviewState) -> str:
+        """Build prompt context from the latest ambiguity snapshot."""
+        if state.ambiguity_score is None:
+            return ""
+
+        from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD
+
+        lines = [
+            "## Current Ambiguity Snapshot",
+            f"- Overall ambiguity: {state.ambiguity_score:.2f}",
+            f"- Seed-ready threshold: {AMBIGUITY_THRESHOLD:.2f}",
+            (
+                "- Seed-ready now: yes"
+                if state.ambiguity_score <= AMBIGUITY_THRESHOLD
+                else "- Seed-ready now: no"
+            ),
+        ]
+
+        if isinstance(state.ambiguity_breakdown, dict):
+            weakest_components: list[tuple[float, str, str]] = []
+            for payload in state.ambiguity_breakdown.values():
+                if not isinstance(payload, dict):
+                    continue
+                clarity = payload.get("clarity_score")
+                if clarity is None:
+                    continue
+                weakest_components.append(
+                    (
+                        float(clarity),
+                        str(payload.get("name", "Unknown")),
+                        str(payload.get("justification", "")),
+                    )
+                )
+
+            weakest_components.sort(key=lambda item: item[0])
+            for clarity, name, justification in weakest_components[:2]:
+                lines.append(f"- Weakest area: {name} ({clarity:.2f} clarity)")
+                if justification:
+                    lines.append(f"  Reason: {justification}")
+
+        lines.append(
+            "- Use this snapshot to decide whether the next turn should close the interview or ask one more targeted question."
+        )
+        return "\n".join(lines)
+
+    def _select_perspectives(self, state: InterviewState) -> tuple[InterviewPerspective, ...]:
+        """Choose the active perspective panel for the current round."""
+        perspectives: list[InterviewPerspective] = [InterviewPerspective.BREADTH_KEEPER]
+
+        if state.current_round_number <= 2:
+            perspectives.extend(
+                [
+                    InterviewPerspective.RESEARCHER,
+                    InterviewPerspective.SIMPLIFIER,
+                ]
+            )
+        elif state.current_round_number <= 5:
+            perspectives.extend(
+                [
+                    InterviewPerspective.RESEARCHER,
+                    InterviewPerspective.SIMPLIFIER,
+                    InterviewPerspective.ARCHITECT,
+                ]
+            )
+        else:
+            perspectives.extend(
+                [
+                    InterviewPerspective.SIMPLIFIER,
+                    InterviewPerspective.ARCHITECT,
+                    InterviewPerspective.SEED_CLOSER,
+                ]
+            )
+
+        if state.is_brownfield and InterviewPerspective.ARCHITECT not in perspectives:
+            perspectives.append(InterviewPerspective.ARCHITECT)
+
+        # Preserve declaration order while removing duplicates.
+        return tuple(dict.fromkeys(perspectives))
+
+    def _build_perspective_panel_prompt(self, state: InterviewState) -> str:
+        """Build instructions for the internal perspective panel."""
+        strategies = _load_interview_perspective_strategies()
+        sections = [
+            "## Perspective Panel",
+            "Before asking the next question, silently consult these internal agents.",
+            "They are planning aids only. Emit exactly one final question to the user.",
+            "",
+        ]
+
+        for perspective in self._select_perspectives(state):
+            strategy = strategies[perspective]
+            sections.append(f"### {perspective.value}")
+            sections.append(f"Focus: {strategy.system_prompt}")
+            if strategy.approach_instructions:
+                sections.append("Approach cues:")
+                sections.extend(f"- {item}" for item in strategy.approach_instructions[:3])
+            if strategy.question_templates:
+                sections.append("Question patterns:")
+                sections.extend(f"- {item}" for item in strategy.question_templates[:2])
+            sections.append("")
+
+        sections.extend(
+            [
+                "## Panel Synthesis Rules",
+                "- Keep independent ambiguity tracks visible instead of collapsing onto one favorite subtopic.",
+                "- If one file, abstraction, or bug has dominated several rounds, zoom back out before going deeper.",
+                "- Preserve both implementation and written-output requirements when the user asked for both.",
+                "- Prefer breadth recap questions when multiple unresolved tracks still exist.",
+                "- When the interview is already seed-ready, ask a closure question instead of opening a new deep branch.",
+            ]
+        )
+
+        return "\n".join(sections)
 
     def _build_conversation_history(self, state: InterviewState) -> list[Message]:
         """Build conversation history from completed rounds.

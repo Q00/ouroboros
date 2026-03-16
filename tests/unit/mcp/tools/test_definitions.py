@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
+from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_signal
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
     CancelExecutionHandler,
@@ -43,6 +44,42 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.runner import OrchestratorResult
 from ouroboros.orchestrator.session import SessionTracker
+
+
+def create_mock_live_ambiguity_score(
+    score: float,
+    *,
+    seed_ready: bool,
+) -> MagicMock:
+    """Create a mock ambiguity score object for interview handler tests."""
+    return MagicMock(
+        overall_score=score,
+        is_ready_for_seed=seed_ready,
+        breakdown=MagicMock(
+            model_dump=MagicMock(
+                return_value={
+                    "goal_clarity": {
+                        "name": "Goal Clarity",
+                        "clarity_score": 1.0 - score,
+                        "weight": 0.4,
+                        "justification": "Mock goal clarity",
+                    },
+                    "constraint_clarity": {
+                        "name": "Constraint Clarity",
+                        "clarity_score": 1.0 - score,
+                        "weight": 0.3,
+                        "justification": "Mock constraint clarity",
+                    },
+                    "success_criteria_clarity": {
+                        "name": "Success Criteria Clarity",
+                        "clarity_score": 1.0 - score,
+                        "weight": 0.3,
+                        "justification": "Mock success clarity",
+                    },
+                }
+            )
+        ),
+    )
 
 
 class TestExecuteSeedHandler:
@@ -1328,6 +1365,20 @@ class TestEvaluateHandlerCodeChanges:
 class TestInterviewHandlerCwd:
     """Test InterviewHandler cwd parameter."""
 
+    @pytest.mark.parametrize(
+        ("answer", "expected"),
+        [
+            ("done", True),
+            ("Yes. Close now.", True),
+            ("Correct. No remaining ambiguity. Close the interview.", True),
+            ("Yes. Lock it. Documentation-only outcomes. Done.", True),
+            ("Not done yet.", False),
+        ],
+    )
+    def test_interview_completion_signal_detection(self, answer: str, expected: bool) -> None:
+        """Completion detection should accept natural closure phrases without over-triggering."""
+        assert _is_interview_completion_signal(answer) is expected
+
     def test_interview_definition_has_cwd_param(self) -> None:
         """Interview tool definition includes the cwd parameter."""
         handler = InterviewHandler()
@@ -1357,17 +1408,25 @@ class TestInterviewHandlerCwd:
             return_value=MagicMock(is_ok=True, is_err=False, value="First question?")
         )
         mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_score = create_mock_live_ambiguity_score(0.67, seed_ready=False)
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
 
-        handler = InterviewHandler(interview_engine=mock_engine)
-        await handler.handle({"initial_context": "Add a feature", "cwd": str(tmp_path)})
+        handler = InterviewHandler(interview_engine=mock_engine, llm_adapter=MagicMock())
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
+            return_value=mock_scorer,
+        ):
+            result = await handler.handle({"initial_context": "Add a feature", "cwd": str(tmp_path)})
 
         mock_engine.start_interview.assert_awaited_once()
         call_kwargs = mock_engine.start_interview.call_args
         assert call_kwargs[1]["cwd"] == str(tmp_path)
+        assert "(ambiguity: 0.67) First question?" in result.value.content[0].text
 
     async def test_interview_handle_clears_stored_ambiguity_after_new_answer(self) -> None:
-        """Interview answers should invalidate any persisted ambiguity snapshot."""
-        handler = InterviewHandler()
+        """Interview answers should refresh the ambiguity snapshot after rescoring."""
+        handler = InterviewHandler(llm_adapter=MagicMock())
         state = InterviewState(
             interview_id="sess-123",
             ambiguity_score=0.14,
@@ -1387,16 +1446,127 @@ class TestInterviewHandlerCwd:
             return_value=MagicMock(is_ok=True, is_err=False, value="Next question?"),
         )
         mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_score = create_mock_live_ambiguity_score(0.44, seed_ready=False)
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
+                return_value=mock_scorer,
+            ),
+        ):
+            result = await handler.handle({"session_id": "sess-123", "answer": "Manage tasks"})
+
+        assert result.is_ok
+        assert state.ambiguity_score == 0.44
+        assert state.ambiguity_breakdown is not None
+        assert "(ambiguity: 0.44) Next question?" in result.value.content[0].text
+
+    async def test_interview_handle_done_completes_without_new_question(self) -> None:
+        """Explicit completion signals should stop the interview instead of asking again."""
+        handler = InterviewHandler()
+        handler._emit_event = AsyncMock()
+        state = InterviewState(
+            interview_id="sess-123",
+            ambiguity_score=0.14,
+            ambiguity_breakdown={"goal_clarity": {"name": "goal_clarity"}},
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What should it do?",
+                    user_response=None,
+                )
+            ],
+        )
+
+        async def complete_state(current_state: InterviewState) -> Result[InterviewState, Exception]:
+            current_state.status = InterviewStatus.COMPLETED
+            return Result.ok(current_state)
+
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.complete_interview = AsyncMock(side_effect=complete_state)
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_engine.ask_next_question = AsyncMock()
 
         with patch(
             "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
             return_value=mock_engine,
         ):
-            result = await handler.handle({"session_id": "sess-123", "answer": "Manage tasks"})
+            result = await handler.handle({"session_id": "sess-123", "answer": "done"})
 
         assert result.is_ok
+        assert state.status == InterviewStatus.COMPLETED
+        assert state.rounds == []
         assert state.ambiguity_score is None
         assert state.ambiguity_breakdown is None
+        mock_engine.ask_next_question.assert_not_called()
+        assert result.value.meta["completed"] is True
+
+    async def test_interview_handle_auto_completes_when_live_ambiguity_is_low(self) -> None:
+        """Low live ambiguity should end the interview without another question."""
+        handler = InterviewHandler(llm_adapter=MagicMock())
+        handler._emit_event = AsyncMock()
+        state = InterviewState(
+            interview_id="sess-123",
+            rounds=[
+                InterviewRound(round_number=1, question="Q1", user_response="A1"),
+                InterviewRound(round_number=2, question="Q2", user_response="A2"),
+                InterviewRound(round_number=3, question="Q3", user_response=None),
+            ],
+        )
+
+        async def complete_state(current_state: InterviewState) -> Result[InterviewState, Exception]:
+            current_state.status = InterviewStatus.COMPLETED
+            return Result.ok(current_state)
+
+        async def record_answer(
+            current_state: InterviewState,
+            answer: str,
+            question: str,
+        ) -> Result[InterviewState, Exception]:
+            current_state.rounds.append(
+                InterviewRound(
+                    round_number=3,
+                    question=question,
+                    user_response=answer,
+                )
+            )
+            return Result.ok(current_state)
+
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.record_response = AsyncMock(side_effect=record_answer)
+        mock_engine.complete_interview = AsyncMock(side_effect=complete_state)
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_engine.ask_next_question = AsyncMock()
+        mock_score = create_mock_live_ambiguity_score(0.18, seed_ready=True)
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
+                return_value=mock_scorer,
+            ),
+        ):
+            result = await handler.handle({"session_id": "sess-123", "answer": "A3"})
+
+        assert result.is_ok
+        assert state.status == InterviewStatus.COMPLETED
+        assert result.value.meta["completed"] is True
+        assert result.value.meta["ambiguity_score"] == 0.18
+        assert "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
+        mock_engine.ask_next_question.assert_not_called()
 
 
 class TestGenerateSeedHandlerAmbiguity:
