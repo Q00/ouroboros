@@ -1,6 +1,37 @@
+<!--
+doc_metadata:
+  runtime_scope: [codex]
+
+canonical_source:
+  # [v1.2] Upgraded from claim_ownership schema v1.0 (2026-03-15).
+  # defers_to now uses canonical_doc + claim_patterns[] with claim_pattern_ids from claim_patterns: registry.
+  # Note: "codex-runtime-setup" is not a shared claim pattern (unique to this doc); canonical_for is empty.
+  schema_version: "1.2"
+  generated: "2026-03-15"
+  # This document covers Codex CLI-specific runtime setup.
+  # Shared claim patterns (capabilities, install-paths, CLI options) defer to their canonical owners.
+  canonical_for: []   # no shared claim pattern owned; Codex-specific setup content is unique to this doc
+  defers_to:
+    - canonical_doc: docs/config-reference.md
+      claim_patterns: [install-paths, config-keys]
+      # install-paths: seed file path (~/.ouroboros/seeds/seed_<id>.yaml)
+      #   is canonical in config-reference.md. claim_registry_refs: [CR-001]; claim_inventory_refs: [A-006]
+      # config-keys: orchestrator.runtime_backend: codex, OPENAI_API_KEY env var
+    - canonical_doc: docs/runtime-capability-matrix.md
+      claim_patterns: [runtime-capabilities]
+      # Full Codex vs Claude feature comparison (session model, supported features, limitations)
+      # lives in runtime-capability-matrix.md; this guide provides Codex-specific operational details only.
+    - canonical_doc: docs/cli-reference.md
+      claim_patterns: [cli-options, pkg-install]
+      # cli-options: ouroboros CLI options in skill-to-CLI mapping (e.g., --runtime codex, --orchestrator)
+      #   claim_registry_refs: [CR-005, CR-006, CR-007]
+-->
+
 # Running Ouroboros with Codex CLI
 
-Ouroboros can use **OpenAI Codex CLI** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is OpenAI's open-source terminal-based coding agent -- it reads your codebase, proposes changes, and executes commands directly in your terminal. Ouroboros drives Codex CLI as a subprocess, wrapping it with the specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions).
+> For installation and first-run onboarding, see [Getting Started](../getting-started.md).
+
+Ouroboros can use **OpenAI Codex CLI** as a runtime backend. [Codex CLI](https://github.com/openai/codex) is the local Codex execution surface that the adapter talks to. In Ouroboros, that backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions), even though the adapter itself communicates with the local `codex` executable.
 
 No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
@@ -30,21 +61,8 @@ For alternative install methods and shell completions, see the [Codex CLI README
 
 ## Installing Ouroboros
 
-```bash
-pip install ouroboros-ai
-# or
-uv pip install ouroboros-ai
-```
-
-The base package includes the Codex CLI runtime adapter. No extras are required.
-
-### From Source (Development)
-
-```bash
-git clone https://github.com/Q00/ouroboros
-cd ouroboros
-uv sync
-```
+> For all installation options (pip, one-liner, from source) and first-run onboarding, see **[Getting Started](../getting-started.md)**.
+> The base `ouroboros-ai` package includes the Codex CLI runtime adapter — no extras are required.
 
 ## Platform Notes
 
@@ -69,115 +87,69 @@ orchestrator:
 Or pass the backend on the command line:
 
 ```bash
-uv run ouroboros run workflow --runtime codex seed.yaml
+uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
 ```
 
-## Skill Shortcuts (`ooo` commands)
+## Command Surface
 
-Codex CLI supports `ooo` skill commands just like Claude Code. When you run `ouroboros setup` with the Codex runtime, Ouroboros installs rules and skill files into `~/.codex/`:
+From the user's perspective, the Codex integration behaves like a **session-oriented Ouroboros runtime** — the same specification-first workflow harness that drives the Claude runtime.
 
-- **Rules** (`~/.codex/rules/ouroboros.md`) -- teaches Codex to route `ooo` commands to the corresponding MCP tools
-- **Skills** (`~/.codex/skills/ouroboros-*`) -- provides each skill's instructions (interview, seed, run, evaluate, etc.)
+Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, but it preserves native session IDs and resume handles, and the Codex command dispatcher can route `ooo`-style skill commands through the in-process Ouroboros MCP server.
 
-After setup, you can use `ooo` commands inside a Codex session:
+Today, the most reliable documented entrypoint is still the `ouroboros` CLI while Codex artifact installation is being finalized.
 
-```
-ooo interview "Build a REST API for task management"
-ooo seed
-ooo run seed.yaml
-ooo evaluate
-```
+`ouroboros setup --runtime codex` currently:
 
-These map to the same MCP tools as the Claude Code `ooo` commands. Codex reads the installed rules and routes each command to the appropriate Ouroboros MCP tool automatically.
+- Detects the `codex` binary on your `PATH`
+- Writes `orchestrator.runtime_backend: codex` to `~/.ouroboros/config.yaml`
+- Records `orchestrator.codex_cli_path` when available
+
+Packaged Codex rule and skill assets exist in the repository, but automatic installation into `~/.codex/` is not currently part of `ouroboros setup`. Once those artifacts are installed, Codex can present an `ooo`-driven session surface similar to Claude Code. Until that setup path is fully wired, prefer the documented `ouroboros` CLI flow.
+
+### `ooo` Skill Availability on Codex
+
+> **Current status:** `ooo` skill shortcuts (`ooo interview`, `ooo run`, etc.) are **Claude Code-specific** — they rely on Claude Code's skill/plugin system. Automatic installation of Codex rule and skill artifacts into `~/.codex/` is **not currently part of `ouroboros setup`**. Codex users should use the equivalent `ouroboros` CLI commands from the terminal instead.
+
+The table below maps all 14 `ooo` skills from the registry to their CLI equivalents for Codex users.
+
+| `ooo` Skill | Available in Codex session | CLI equivalent (Terminal) |
+|-------------|---------------------------|--------------------------|
+| `ooo interview` | **Not yet** — Codex skill artifacts not installed | `uv run ouroboros init start --llm-backend codex "your idea"` |
+| `ooo seed` | **Not yet** | *(no standalone CLI equivalent — `ooo seed` takes a `session_id` from a prior `ooo interview` run; from the terminal, both steps are bundled: `ouroboros init start` automatically offers seed generation at the end of the interview)* |
+| `ooo run` | **Not yet** | `uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_{id}.yaml` |
+| `ooo status` | **Not yet** | `uv run ouroboros status execution <session_id>` — or `uv run ouroboros status executions` to list all sessions *(note: neither CLI subcommand currently implements the drift-measurement that `ooo status` provides via MCP)* |
+| `ooo evaluate` | **Not yet** | *(not exposed as an `ouroboros` CLI command)* |
+| `ooo evolve` | **Not yet** | *(not exposed as an `ouroboros` CLI command)* |
+| `ooo ralph` | **Not yet** | *(not exposed as an `ouroboros` CLI command — drives a persistent execute-verify loop via background MCP job tools: `ouroboros_start_evolve_step`, `ouroboros_job_wait`, `ouroboros_job_result`)* |
+| `ooo cancel` | **Not yet** | `uv run ouroboros cancel execution <session_id>` |
+| `ooo unstuck` | **Not yet** | *(not exposed as an `ouroboros` CLI command)* |
+| `ooo tutorial` | **Not yet** | *(not exposed as an `ouroboros` CLI command)* |
+| `ooo welcome` | **Not yet** | *(not exposed as an `ouroboros` CLI command)* |
+| `ooo update` | **Not yet** | `pip install --upgrade ouroboros-ai` *(upgrades directly; the skill also checks current vs. latest version before upgrading — the CLI skips that check)* |
+| `ooo help` | **Not yet** | `uv run ouroboros --help` |
+| `ooo setup` | **No** — Claude Code only | `uv run ouroboros setup --runtime codex` |
+
+> **Why are `ooo` skills not available in Codex sessions?** The `ooo` skill commands use Claude Code's skill/plugin dispatch mechanism and require skill files installed in the Claude Code environment. The equivalent Codex skill artifacts (Codex rules/commands) are present in the repository but automatic installation into `~/.codex/` is not currently wired into `ouroboros setup`. Until that path is completed, use the `ouroboros` CLI commands listed above.
+>
+> **Note on `ooo seed` vs `ooo interview`:** These are two distinct skills with separate roles. `ooo interview` runs a Socratic Q&A session and returns a `session_id`. `ooo seed` accepts that `session_id` and generates a structured Seed YAML (with ambiguity scoring). From the terminal, both steps are performed in a single `ouroboros init start` invocation — there is no separate seed-generation subcommand.
 
 ## Quick Start
 
-### Check System Health
+> For the full first-run onboarding flow (interview → seed → execute), see **[Getting Started](../getting-started.md)**.
+
+### Verify Installation
 
 ```bash
-uv run ouroboros status health
+codex --version
+ouroboros --help
 ```
-
-Expected output:
-
-```
-+---------------+---------+
-| Database      |   ok    |
-| Configuration |   ok    |
-| Providers     | warning |  # OK when using Codex as the runtime backend
-+---------------+---------+
-```
-
-### Option A: Create Seed via Interview (Recommended)
-
-Don't know how to write a Seed file? Use the interactive interview:
-
-```bash
-uv run ouroboros init start --orchestrator "Build a REST API for task management"
-```
-
-This will:
-
-1. Ask clarifying questions (Socratic method)
-2. Reduce ambiguity through dialogue
-3. Generate a Seed file automatically
-
-### Option B: Write Seed Manually
-
-Create a YAML file describing your task. Example `my-task.yaml`:
-
-```yaml
-goal: "Implement a user authentication module"
-constraints:
-  - "Python >= 3.12"
-  - "Use bcrypt for password hashing"
-  - "Follow existing project patterns"
-acceptance_criteria:
-  - "Create auth/models.py with User model"
-  - "Create auth/service.py with login/register functions"
-  - "Add unit tests with pytest"
-ontology_schema:
-  name: "AuthModule"
-  description: "User authentication system"
-  fields:
-    - name: "users"
-      field_type: "object"
-      description: "User data structure"
-      required: true
-evaluation_principles:
-  - name: "security"
-    description: "Code follows security best practices"
-    weight: 1.0
-  - name: "testability"
-    description: "Code is well-tested"
-    weight: 0.8
-exit_conditions:
-  - name: "all_tests_pass"
-    description: "All acceptance criteria met and tests pass"
-    evaluation_criteria: "pytest returns 0"
-metadata:
-  ambiguity_score: 0.15
-```
-
-### Run with Orchestrator Mode
-
-```bash
-uv run ouroboros run workflow --runtime codex my-task.yaml
-```
-
-This will:
-
-1. Parse your seed file
-2. Launch Codex CLI as a subprocess
-3. Execute the task autonomously using GPT-5.4
-4. Report progress and results
 
 ## How It Works
 
 ```
 +-----------------+     +------------------+     +-----------------+
 |   Seed YAML     | --> |   Orchestrator   | --> |   Codex CLI     |
-|  (your task)    |     | (runtime_factory)|     |   (subprocess)  |
+|  (your task)    |     | (runtime_factory)|     |   (runtime)     |
 +-----------------+     +------------------+     +-----------------+
                                 |
                                 v
@@ -189,13 +161,13 @@ This will:
                         +------------------+
 ```
 
-The `CodexCliRuntime` adapter launches `codex` (or `codex-cli`) as a subprocess, streams output, and maps results back into the Ouroboros event model.
+The `CodexCliRuntime` adapter launches `codex` (or `codex-cli`) as its transport layer, but wraps it with session handles, resume support, and deterministic skill/MCP dispatch so the runtime behaves like a persistent Ouroboros session.
 
 > For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 
 ## Codex CLI Strengths
 
-- **Terminal-native agent** -- Codex CLI runs directly in your terminal, reading and editing files, executing shell commands, and iterating on code autonomously
+- **Session-aware Codex runtime** -- Ouroboros preserves Codex session handles and resume state across workflow steps
 - **Strong coding and reasoning** -- GPT-5.4 provides robust code generation and multi-file editing across languages
 - **Agentic task execution** -- effective at decomposing complex tasks into sequential steps and iterating autonomously
 - **Open-source** -- Codex CLI is open-source (Apache 2.0), allowing inspection and contribution
@@ -207,11 +179,12 @@ Codex CLI and Claude Code are independent runtime backends with different tool s
 
 | Aspect | Codex CLI | Claude Code |
 |--------|-----------|-------------|
-| What it is | Open-source terminal coding agent | Anthropic's agentic coding tool |
+| What it is | Ouroboros session runtime backed by Codex CLI transport | Anthropic's agentic coding tool |
 | Authentication | OpenAI API key | Max Plan subscription |
 | Model | GPT-5.4 (recommended) | Claude (via claude-agent-sdk) |
 | Sandbox | Codex CLI's own sandbox model | Claude Code's permission system |
 | Tool surface | Codex-native tools (file I/O, shell) | Read, Write, Edit, Bash, Glob, Grep |
+| Session model | Session-aware via runtime handles, resume IDs, and skill dispatch | Native Claude session context |
 | Cost model | OpenAI API usage charges | Included in Max Plan subscription |
 | Windows (native) | Not supported | Experimental |
 
@@ -223,16 +196,17 @@ Codex CLI and Claude Code are independent runtime backends with different tool s
 
 ```bash
 # Execute workflow (Codex runtime)
-uv run ouroboros run workflow --runtime codex seed.yaml
+# Seeds generated by ouroboros init are saved to ~/.ouroboros/seeds/seed_{id}.yaml
+uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
 
 # Dry run (validate seed without executing)
-uv run ouroboros run workflow --dry-run seed.yaml
+uv run ouroboros run workflow --dry-run ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
 
 # Debug output (show logs and agent output)
-uv run ouroboros run workflow --runtime codex --debug seed.yaml
+uv run ouroboros run workflow --runtime codex --debug ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
 
 # Resume a previous session
-uv run ouroboros run workflow --runtime codex --resume <session_id> seed.yaml
+uv run ouroboros run workflow --runtime codex --resume <session_id> ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
 ```
 
 ## Seed File Reference
@@ -240,6 +214,7 @@ uv run ouroboros run workflow --runtime codex --resume <session_id> seed.yaml
 | Field | Required | Description |
 |-------|----------|-------------|
 | `goal` | Yes | Primary objective |
+| `task_type` | No | Execution strategy: `code` (default), `research`, or `analysis` |
 | `constraints` | No | Hard constraints to satisfy |
 | `acceptance_criteria` | No | Specific success criteria |
 | `ontology_schema` | Yes | Output structure definition |

@@ -8,19 +8,20 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 
 ### Getting Started
 
-- [Getting Started Guide](./getting-started.md) - Installation, configuration, and quick start tutorial
+- **[Getting Started Guide](./getting-started.md)** - **Single source of truth for onboarding**: installation, configuration, first-run flow, and troubleshooting
 - [Platform Support](./platform-support.md) - Python versions, OS compatibility, and supported runtime backends
 
 ### Runtime Guides
 
-- [Claude Code](./runtime-guides/claude-code.md) - Setup, configuration, and usage with the Claude Code runtime backend
-- [Codex CLI](./runtime-guides/codex.md) - Setup, configuration, and usage with the OpenAI Codex CLI runtime backend
+- [Claude Code](./runtime-guides/claude-code.md) - Backend-specific configuration and CLI options (see [Getting Started](./getting-started.md) for install/onboarding)
+- [Codex CLI](./runtime-guides/codex.md) - Backend-specific configuration and CLI options (see [Getting Started](./getting-started.md) for install/onboarding)
 - [Runtime Capability Matrix](./runtime-capability-matrix.md) - Feature comparison across runtime backends
 
 ### Architecture
 
 - [System Architecture](./architecture.md) - Six-phase architecture, runtime abstraction layer, and core concepts
 - [CLI Reference](./cli-reference.md) - Command-line interface flags and options
+- [Configuration Reference](./config-reference.md) - All `config.yaml` options and environment variables
 
 ### API Reference
 
@@ -30,11 +31,11 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 
 ### Guides
 
-- [Quick Start](./guides/quick-start.md) - Get running in under 10 minutes
 - [Seed Authoring Guide](./guides/seed-authoring.md) - YAML structure, field reference, examples
 - [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
 - [CLI Usage Guide](./guides/cli-usage.md) - Command-line interface reference
-- [Common Workflows](./guides/common-workflows.md) - Recipes for typical scenarios
+- [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md) - Three-stage evaluation, failure modes, and configuration
+- [Execution Failure Modes](./guides/execution-failure-modes.md) - Error handling, recovery, and failure diagnosis
 
 ### Contributing
 
@@ -42,6 +43,13 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 - [Architecture for Contributors](./contributing/architecture-overview.md) - How modules connect
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
+- [Documentation Issues Register](./doc-issues-register.md) - Severity-classified open and resolved doc issues
+- [Findings Registry](./findings-registry.md) - Canonical consolidated registry of all documentation audit findings (44 findings, all categories)
+
+### Documentation Governance
+
+- [Authority-Chain Rule](./authority-chain.md) - Normative precedence rule: source code > canonical document > deferred documents
+- [Concept Glossary](./concept-glossary.yaml) - Stable concept identifier registry mapping concept IDs to their defining documents; used for `concept_prereqs` validation in the doc topology
 
 ### Security
 
@@ -75,7 +83,7 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 ## Quick Links
 
 - [GitHub Repository](https://github.com/Q00/ouroboros)
-- [PyPI Package](https://pypi.org/project/ouroboros/)
+- [PyPI Package](https://pypi.org/project/ouroboros-ai/)
 
 ## License
 
