@@ -290,6 +290,18 @@ def serve(
         # Use OpenCode for orchestrator and LLM-backed tools
         ouroboros mcp serve --runtime opencode --llm-backend opencode
     """
+    # Guard: prevent recursive MCP server spawning.
+    # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
+    # inherits this env var. If that runtime's MCP config tries to spawn another
+    # ouroboros server, the nested instance exits cleanly instead of creating a
+    # process tree explosion.
+    if os.environ.get("_OUROBOROS_NESTED"):
+        _stderr_console.print(
+            "[dim]Nested ouroboros MCP server detected — exiting cleanly[/dim]"
+        )
+        raise typer.Exit(0)
+    os.environ["_OUROBOROS_NESTED"] = "1"
+
     try:
         db_path = db if db else None
         asyncio.run(
