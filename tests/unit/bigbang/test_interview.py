@@ -775,6 +775,83 @@ class TestInterviewEngineSystemPrompt:
 
         assert "Build a task manager" in prompt
 
+    def test_system_prompt_includes_live_ambiguity_snapshot(self) -> None:
+        """_build_system_prompt includes the latest ambiguity snapshot when available."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Build a task manager",
+            ambiguity_score=0.24,
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "Goal Clarity",
+                    "clarity_score": 0.82,
+                    "weight": 0.4,
+                    "justification": "Goal is mostly clear.",
+                },
+                "constraint_clarity": {
+                    "name": "Constraint Clarity",
+                    "clarity_score": 0.61,
+                    "weight": 0.3,
+                    "justification": "Constraints need work.",
+                },
+                "success_criteria_clarity": {
+                    "name": "Success Criteria Clarity",
+                    "clarity_score": 0.73,
+                    "weight": 0.3,
+                    "justification": "Criteria are somewhat measurable.",
+                },
+            },
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Current Ambiguity Snapshot" in prompt
+        assert "Overall ambiguity: 0.24" in prompt
+        assert "Weakest area: Constraint Clarity" in prompt
+        assert "Constraints need work." in prompt
+
+    def test_system_prompt_includes_perspective_panel(self) -> None:
+        """_build_system_prompt includes the internal perspective panel."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Review a PR and decide what to implement",
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "## Perspective Panel" in prompt
+        assert "### breadth-keeper" in prompt
+        assert "### researcher" in prompt
+        assert "### simplifier" in prompt
+
+    def test_system_prompt_uses_seed_closer_in_late_rounds(self) -> None:
+        """Late rounds should activate the closure perspective."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Refine requirements",
+            rounds=[
+                InterviewRound(round_number=1, question="Q1", user_response="A1"),
+                InterviewRound(round_number=2, question="Q2", user_response="A2"),
+                InterviewRound(round_number=3, question="Q3", user_response="A3"),
+                InterviewRound(round_number=4, question="Q4", user_response="A4"),
+                InterviewRound(round_number=5, question="Q5", user_response="A5"),
+            ],
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "### seed-closer" in prompt
+        assert "closure question" in prompt
+
 
 class TestInterviewEngineConversationHistory:
     """Test InterviewEngine conversation history building."""
@@ -926,3 +1003,4 @@ class TestSystemPromptBrownfield:
         assert "CONFIRMATION questions" in prompt
         assert "I found X. Should I assume Y?" in prompt
         assert "flask" in prompt
+        assert "### architect" in prompt

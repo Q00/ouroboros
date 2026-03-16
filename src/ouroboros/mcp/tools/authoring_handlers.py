@@ -8,6 +8,7 @@ Contains handlers for interview and seed generation tools:
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -15,12 +16,17 @@ import structlog
 import yaml
 
 from ouroboros.bigbang.ambiguity import (
+    AMBIGUITY_THRESHOLD,
     AmbiguityScore,
     AmbiguityScorer,
     ComponentScore,
     ScoreBreakdown,
 )
-from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+from ouroboros.bigbang.interview import (
+    MIN_ROUNDS_BEFORE_EARLY_EXIT,
+    InterviewEngine,
+    InterviewState,
+)
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ValidationError
@@ -39,6 +45,134 @@ from ouroboros.providers import create_llm_adapter
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
+
+_LIVE_AMBIGUITY_MAX_RETRIES = 3
+
+_INTERVIEW_COMPLETION_SIGNALS = {
+    "done",
+    "complete",
+    "stop",
+    "enough",
+    "generate seed",
+    "create seed",
+    "seed",
+}
+
+_INTERVIEW_COMPLETION_PHRASES = (
+    "close the interview",
+    "close interview",
+    "close now",
+    "mark the interview complete",
+    "mark interview complete",
+    "generate the seed",
+    "create the seed",
+    "seed generation",
+    "ready for seed generation",
+    "hand off for seed generation",
+    "no remaining ambiguity",
+    "no ambiguity remains",
+    "no ambiguity left",
+)
+
+_INTERVIEW_COMPLETION_NEGATIONS = (
+    "not done",
+    "not complete",
+    "not enough",
+    "not ready",
+    "do not close",
+    "dont close",
+    "don't close",
+)
+
+
+def _normalize_interview_answer(answer: str) -> str:
+    """Normalize interview answers for lightweight intent matching."""
+    return " ".join(re.findall(r"[a-z0-9']+", answer.lower()))
+
+
+def _is_interview_completion_signal(answer: str | None) -> bool:
+    """Return True when the answer explicitly asks to end the interview."""
+    if answer is None:
+        return False
+
+    normalized = _normalize_interview_answer(answer)
+    if not normalized:
+        return False
+
+    if normalized in _INTERVIEW_COMPLETION_SIGNALS:
+        return True
+
+    if any(phrase in normalized for phrase in _INTERVIEW_COMPLETION_NEGATIONS):
+        return False
+
+    if any(phrase in normalized for phrase in _INTERVIEW_COMPLETION_PHRASES):
+        return True
+
+    tokens = set(normalized.split())
+    if {"close", "interview"} <= tokens:
+        return True
+    if "seed" in tokens and tokens.intersection({"generate", "create", "ready"}):
+        return True
+    if "ambiguity" in tokens and "no" in tokens and tokens.intersection({"remaining", "left"}):
+        return True
+    return normalized.endswith(" done") or normalized == "done"
+
+
+def _count_answered_rounds(state: InterviewState) -> int:
+    """Return the number of completed interview rounds."""
+    return sum(1 for round_data in state.rounds if round_data.user_response is not None)
+
+
+def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
+    """Attach the current ambiguity score to a question for display."""
+    if score is None:
+        return question
+    return f"(ambiguity: {score.overall_score:.2f}) {question}"
+
+
+def _load_state_ambiguity_score(state: InterviewState) -> AmbiguityScore | None:
+    """Rebuild a stored ambiguity snapshot from interview state."""
+    if state.ambiguity_score is None:
+        return None
+
+    if isinstance(state.ambiguity_breakdown, dict):
+        try:
+            breakdown = ScoreBreakdown.model_validate(state.ambiguity_breakdown)
+        except PydanticValidationError:
+            log.warning(
+                "mcp.tool.interview.invalid_stored_ambiguity_breakdown",
+                session_id=state.interview_id,
+            )
+        else:
+            return AmbiguityScore(
+                overall_score=state.ambiguity_score,
+                breakdown=breakdown,
+            )
+
+    breakdown = ScoreBreakdown(
+        goal_clarity=ComponentScore(
+            name="goal_clarity",
+            clarity_score=1.0 - state.ambiguity_score,
+            weight=0.40,
+            justification="Loaded from stored interview ambiguity score",
+        ),
+        constraint_clarity=ComponentScore(
+            name="constraint_clarity",
+            clarity_score=1.0 - state.ambiguity_score,
+            weight=0.30,
+            justification="Loaded from stored interview ambiguity score",
+        ),
+        success_criteria_clarity=ComponentScore(
+            name="success_criteria_clarity",
+            clarity_score=1.0 - state.ambiguity_score,
+            weight=0.30,
+            justification="Loaded from stored interview ambiguity score",
+        ),
+    )
+    return AmbiguityScore(
+        overall_score=state.ambiguity_score,
+        breakdown=breakdown,
+    )
 
 
 @dataclass
@@ -317,6 +451,94 @@ class InterviewHandler:
         except Exception as e:
             log.warning("mcp.tool.interview.event_emission_failed", error=str(e))
 
+    async def _score_interview_state(
+        self,
+        llm_adapter: LLMAdapter,
+        state: InterviewState,
+    ) -> AmbiguityScore | None:
+        """Calculate and cache the latest ambiguity snapshot for interview routing."""
+        scorer = AmbiguityScorer(
+            llm_adapter=llm_adapter,
+            model=get_clarification_model(self.llm_backend),
+            max_retries=_LIVE_AMBIGUITY_MAX_RETRIES,
+        )
+        score_result = await scorer.score(state)
+        if score_result.is_err:
+            state.clear_stored_ambiguity()
+            log.warning(
+                "mcp.tool.interview.live_ambiguity_failed",
+                interview_id=state.interview_id,
+                error=str(score_result.error),
+            )
+            return None
+
+        score = score_result.value
+        state.store_ambiguity(
+            score=score.overall_score,
+            breakdown=score.breakdown.model_dump(mode="json"),
+        )
+        return score
+
+    async def _complete_interview_response(
+        self,
+        engine: InterviewEngine,
+        state: InterviewState,
+        session_id: str,
+        score: AmbiguityScore | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Complete the interview and return a Seed-ready MCP response."""
+        complete_result = await engine.complete_interview(state)
+        if complete_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    str(complete_result.error),
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        state = complete_result.value
+        save_result = await engine.save_state(state)
+        if save_result.is_err:
+            log.warning(
+                "mcp.tool.interview.save_failed_on_complete",
+                error=str(save_result.error),
+            )
+
+        from ouroboros.events.interview import interview_completed
+
+        await self._emit_event(
+            interview_completed(
+                interview_id=session_id,
+                total_rounds=len(state.rounds),
+            )
+        )
+
+        score_line = ""
+        if score is not None:
+            score_line = f"(ambiguity: {score.overall_score:.2f}) Ready for Seed generation.\n"
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            f"Interview completed. Session ID: {session_id}\n\n"
+                            f"{score_line}"
+                            f'Generate a Seed with: session_id="{session_id}"'
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "session_id": session_id,
+                    "completed": True,
+                    "ambiguity_score": score.overall_score if score is not None else None,
+                    "seed_ready": score.is_ready_for_seed if score is not None else None,
+                },
+            )
+        )
+
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition."""
@@ -404,6 +626,7 @@ class InterviewHandler:
 
                 state = result.value
                 _interview_id = state.interview_id
+                live_score = await self._score_interview_state(llm_adapter, state)
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
@@ -437,6 +660,7 @@ class InterviewHandler:
                     return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
 
                 question = question_result.value
+                display_question = _format_question_with_ambiguity(question, live_score)
 
                 # Record the question as an unanswered round so resume can find it
                 from ouroboros.bigbang.interview import InterviewRound
@@ -478,11 +702,22 @@ class InterviewHandler:
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=f"Interview started. Session ID: {state.interview_id}\n\n{question}",
+                                text=(
+                                    f"Interview started. Session ID: {state.interview_id}\n\n"
+                                    f"{display_question}"
+                                ),
                             ),
                         ),
                         is_error=False,
-                        meta={"session_id": state.interview_id},
+                        meta={
+                            "session_id": state.interview_id,
+                            "ambiguity_score": (
+                                live_score.overall_score if live_score is not None else None
+                            ),
+                            "seed_ready": (
+                                live_score.is_ready_for_seed if live_score is not None else None
+                            ),
+                        },
                     )
                 )
 
@@ -500,8 +735,43 @@ class InterviewHandler:
                 state = load_result.value
                 _interview_id = session_id
 
+                if not answer and state.rounds and state.rounds[-1].user_response is None:
+                    display_question = _format_question_with_ambiguity(
+                        state.rounds[-1].question,
+                        _load_state_ambiguity_score(state),
+                    )
+                    return Result.ok(
+                        MCPToolResult(
+                            content=(
+                                MCPContentItem(
+                                    type=ContentType.TEXT,
+                                    text=f"Session {session_id}\n\n{display_question}",
+                                ),
+                            ),
+                            is_error=False,
+                            meta={
+                                "session_id": session_id,
+                                "ambiguity_score": state.ambiguity_score,
+                                "seed_ready": (
+                                    state.ambiguity_score is not None
+                                    and state.ambiguity_score <= AMBIGUITY_THRESHOLD
+                                ),
+                            },
+                        )
+                    )
+
                 # If answer provided, record it first
                 if answer:
+                    if _is_interview_completion_signal(answer):
+                        if state.rounds and state.rounds[-1].user_response is None:
+                            state.rounds.pop()
+                        state.clear_stored_ambiguity()
+                        return await self._complete_interview_response(
+                            engine,
+                            state,
+                            session_id,
+                        )
+
                     if not state.rounds:
                         return Result.err(
                             MCPToolError(
@@ -545,6 +815,21 @@ class InterviewHandler:
                         session_id=session_id,
                     )
 
+                    live_score = await self._score_interview_state(llm_adapter, state)
+                    if (
+                        live_score is not None
+                        and live_score.is_ready_for_seed
+                        and _count_answered_rounds(state) >= MIN_ROUNDS_BEFORE_EARLY_EXIT
+                    ):
+                        return await self._complete_interview_response(
+                            engine,
+                            state,
+                            session_id,
+                            live_score,
+                        )
+                else:
+                    live_score = _load_state_ambiguity_score(state)
+
                 # Generate next question (whether resuming or after recording answer)
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
@@ -578,6 +863,7 @@ class InterviewHandler:
                     return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
 
                 question = question_result.value
+                display_question = _format_question_with_ambiguity(question, live_score)
 
                 # Save pending question as unanswered round for next resume
                 from ouroboros.bigbang.interview import InterviewRound
@@ -608,11 +894,19 @@ class InterviewHandler:
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=f"Session {session_id}\n\n{question}",
+                                text=f"Session {session_id}\n\n{display_question}",
                             ),
                         ),
                         is_error=False,
-                        meta={"session_id": session_id},
+                        meta={
+                            "session_id": session_id,
+                            "ambiguity_score": (
+                                live_score.overall_score if live_score is not None else None
+                            ),
+                            "seed_ready": (
+                                live_score.is_ready_for_seed if live_score is not None else None
+                            ),
+                        },
                     )
                 )
 

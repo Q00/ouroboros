@@ -254,8 +254,10 @@ class CodexCliLLMAdapter:
             if dict_parts:
                 return "\n".join(dict_parts)
 
-            # Do not recurse into arbitrary dict values to prevent data leakage
-            return ""
+            # Shallow fallback: collect only top-level string values to avoid
+            # recursive data leakage while still capturing non-standard keys.
+            shallow_parts = [v.strip() for v in value.values() if isinstance(v, str) and v.strip()]
+            return "\n".join(shallow_parts)
 
         return ""
 
