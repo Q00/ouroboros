@@ -10,8 +10,10 @@ from unittest.mock import patch
 
 import pytest
 
+from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+from ouroboros.providers.codex_cli_stream import collect_stream_lines
 
 
 class _FakeStream:
@@ -504,6 +506,48 @@ class TestCodexCliLLMAdapter:
 
         # Last element should be a flag, not user-supplied text
         assert command[-1] in ("--ephemeral", "/tmp/out.txt") or command[-1].startswith("--")
+
+    @pytest.mark.asyncio
+    async def test_collect_stream_lines_rejects_unbounded_capture(self) -> None:
+        """The shared stream collector should fail once cumulative capture exceeds its cap."""
+        stream = _FakeStream("line-1\nline-2\n")
+
+        with pytest.raises(ProviderError, match="stream capture exceeded"):
+            await collect_stream_lines(stream, max_total_bytes=8)
+
+    @pytest.mark.asyncio
+    async def test_complete_returns_provider_error_when_stderr_capture_overflows(self) -> None:
+        """Adapter converts stream-capture guard trips into ProviderError results."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("", encoding="utf-8")
+            return _FakeProcess(stderr="overflow\n", returncode=0)
+
+        with (
+            patch(
+                "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+                side_effect=fake_create_subprocess_exec,
+            ),
+            patch(
+                "ouroboros.providers.codex_cli_adapter.collect_stream_lines",
+                side_effect=ProviderError(
+                    message="Codex CLI stream capture exceeded 8 bytes",
+                    provider="codex_cli",
+                    details={"capture_limit_bytes": 8, "overflow_stage": "stream_capture"},
+                ),
+            ),
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Do the thing.")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert result.error.provider == "codex_cli"
+        assert result.error.details["overflow_stage"] == "stream_capture"
+        assert result.error.details["capture_limit_bytes"] == 8
 
 
 class TestLazyImport:

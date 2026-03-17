@@ -773,6 +773,30 @@ class CodexCliLLMAdapter:
                     await process.wait()
             await stdout_task
             stderr_lines = await stderr_task
+        except ProviderError as exc:
+            await self._terminate_process(process)
+            if not stdout_task.done():
+                stdout_task.cancel()
+            if not stderr_task.done():
+                stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stdout_task
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await stderr_task
+            output_path.unlink(missing_ok=True)
+            if schema_path:
+                schema_path.unlink(missing_ok=True)
+            return Result.err(
+                ProviderError(
+                    message=exc.message,
+                    provider=self._provider_name,
+                    details={
+                        **exc.details,
+                        "session_id": session_id,
+                        "returncode": getattr(process, "returncode", None),
+                    },
+                )
+            )
         except TimeoutError:
             await self._terminate_process(process)
             if not stdout_task.done():
