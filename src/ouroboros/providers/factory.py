@@ -56,9 +56,11 @@ def resolve_llm_permission_mode(
         raise ValueError(msg)
 
     resolved = resolve_llm_backend(backend)
-    # Interview flows should not silently escalate beyond the backend's
-    # configured default. Callers can still opt into a broader policy by
-    # passing ``permission_mode`` explicitly.
+    if use_case == "interview" and resolved in ("claude_code", "codex", "opencode"):
+        # Interview uses LLM to generate questions — no file writes, but
+        # codex read-only sandbox blocks LLM output entirely. Must bypass.
+        return "bypassPermissions"
+
     return get_llm_permission_mode(backend=resolved)
 
 
