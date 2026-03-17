@@ -93,14 +93,14 @@ def _get_available_memory_gb() -> float | None:
                     pages_free = int(line.split(":")[1].strip().rstrip("."))
                 elif line.startswith("Pages inactive:"):
                     pages_inactive = int(line.split(":")[1].strip().rstrip("."))
-            return (pages_free + pages_inactive) * page_size / (1024 ** 3)
+            return (pages_free + pages_inactive) * page_size / (1024**3)
 
         elif system == "Linux":
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemAvailable:"):
                         kb = int(line.split()[1])
-                        return kb / (1024 ** 2)
+                        return kb / (1024**2)
             return None
 
         else:
