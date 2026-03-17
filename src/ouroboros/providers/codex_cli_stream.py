@@ -49,10 +49,7 @@ async def iter_stream_lines(
         buffer_byte_estimate += len(decoded) * 4
         if buffer_byte_estimate > max_buffer_bytes:
             raise ProviderError(
-                message=(
-                    "Codex CLI stream line buffer exceeded "
-                    f"{max_buffer_bytes} bytes"
-                ),
+                message=(f"Codex CLI stream line buffer exceeded {max_buffer_bytes} bytes"),
                 provider="codex_cli",
                 details={
                     "buffer_limit_bytes": max_buffer_bytes,
@@ -97,10 +94,7 @@ async def collect_stream_lines(
         total_bytes += len(line.encode("utf-8", errors="replace")) + 1
         if total_bytes > max_total_bytes:
             raise ProviderError(
-                message=(
-                    "Codex CLI stream capture exceeded "
-                    f"{max_total_bytes} bytes"
-                ),
+                message=(f"Codex CLI stream capture exceeded {max_total_bytes} bytes"),
                 provider="codex_cli",
                 details={
                     "capture_limit_bytes": max_total_bytes,
