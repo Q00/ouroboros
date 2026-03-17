@@ -176,38 +176,23 @@ class TestCreateLLMAdapter:
 class TestResolveLLMPermissionMode:
     """Tests for use-case-aware permission defaults."""
 
-    def test_interview_mode_uses_backend_default_for_claude(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Interview flows should honor the configured Claude default."""
-        monkeypatch.setattr(
-            "ouroboros.providers.factory.get_llm_permission_mode",
-            lambda backend=None: "default" if backend == "claude_code" else "acceptEdits",
+    def test_interview_mode_escalates_to_bypass_for_claude(self) -> None:
+        """Interview needs bypassPermissions for Claude — read-only sandbox blocks LLM output."""
+        assert (
+            resolve_llm_permission_mode(backend="claude_code", use_case="interview")
+            == "bypassPermissions"
         )
 
-        assert resolve_llm_permission_mode(backend="claude_code", use_case="interview") == "default"
-
-    def test_interview_mode_uses_backend_default_for_codex(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Codex interview flows should not silently escalate to bypass mode."""
-        monkeypatch.setattr(
-            "ouroboros.providers.factory.get_llm_permission_mode",
-            lambda backend=None: "default" if backend == "codex" else "acceptEdits",
+    def test_interview_mode_escalates_to_bypass_for_codex(self) -> None:
+        """Interview needs bypassPermissions for Codex — read-only sandbox blocks LLM output."""
+        assert (
+            resolve_llm_permission_mode(backend="codex", use_case="interview")
+            == "bypassPermissions"
         )
 
-        assert resolve_llm_permission_mode(backend="codex", use_case="interview") == "default"
-
-    def test_interview_mode_uses_backend_default_for_opencode(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """OpenCode interview flows should reuse their configured backend default."""
-        monkeypatch.setattr(
-            "ouroboros.providers.factory.get_llm_permission_mode",
-            lambda backend=None: "acceptEdits" if backend == "opencode" else "default",
-        )
-
+    def test_interview_mode_escalates_to_bypass_for_opencode(self) -> None:
+        """Interview needs bypassPermissions for OpenCode — read-only sandbox blocks LLM output."""
         assert (
             resolve_llm_permission_mode(backend="opencode", use_case="interview")
-            == "acceptEdits"
+            == "bypassPermissions"
         )
