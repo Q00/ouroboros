@@ -14,11 +14,17 @@ from collections.abc import AsyncIterator
 import contextlib
 from typing import Any
 
+from ouroboros.core.errors import ProviderError
+
+_MAX_STREAM_LINE_BUFFER_BYTES = 50 * 1024 * 1024
+_MAX_STREAM_CAPTURE_BYTES = 50 * 1024 * 1024
+
 
 async def iter_stream_lines(
     stream: asyncio.StreamReader | None,
     *,
     chunk_size: int = 16384,
+    max_buffer_bytes: int = _MAX_STREAM_LINE_BUFFER_BYTES,
 ) -> AsyncIterator[str]:
     """Yield decoded lines from an asyncio stream without readline().
 
@@ -31,13 +37,29 @@ async def iter_stream_lines(
 
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     buffer = ""
+    buffer_byte_estimate = 0
 
     while True:
         chunk = await stream.read(chunk_size)
         if not chunk:
             break
 
-        buffer += decoder.decode(chunk)
+        decoded = decoder.decode(chunk)
+        buffer += decoded
+        buffer_byte_estimate += len(decoded) * 4
+        if buffer_byte_estimate > max_buffer_bytes:
+            raise ProviderError(
+                message=(
+                    "Codex CLI stream line buffer exceeded "
+                    f"{max_buffer_bytes} bytes"
+                ),
+                provider="codex_cli",
+                details={
+                    "buffer_limit_bytes": max_buffer_bytes,
+                    "overflow_stage": "line_buffer",
+                },
+            )
+
         while True:
             newline_index = buffer.find("\n")
             if newline_index < 0:
@@ -45,6 +67,7 @@ async def iter_stream_lines(
 
             line = buffer[:newline_index]
             buffer = buffer[newline_index + 1 :]
+            buffer_byte_estimate = len(buffer) * 4
             yield line.rstrip("\r")
 
     buffer += decoder.decode(b"", final=True)
@@ -54,15 +77,37 @@ async def iter_stream_lines(
 
 async def collect_stream_lines(
     stream: asyncio.StreamReader | None,
+    *,
+    max_total_bytes: int = _MAX_STREAM_CAPTURE_BYTES,
 ) -> list[str]:
-    """Drain a subprocess stream into a list of non-empty lines."""
+    """Drain a subprocess stream into a list of non-empty lines.
+
+    The collector enforces a cumulative byte cap so stderr/stdout capture cannot
+    grow without bound under noisy or malicious subprocess output.
+    """
     if stream is None:
         return []
 
     lines: list[str] = []
+    total_bytes = 0
     async for line in iter_stream_lines(stream):
-        if line:
-            lines.append(line)
+        if not line:
+            continue
+
+        total_bytes += len(line.encode("utf-8", errors="replace")) + 1
+        if total_bytes > max_total_bytes:
+            raise ProviderError(
+                message=(
+                    "Codex CLI stream capture exceeded "
+                    f"{max_total_bytes} bytes"
+                ),
+                provider="codex_cli",
+                details={
+                    "capture_limit_bytes": max_total_bytes,
+                    "overflow_stage": "stream_capture",
+                },
+            )
+        lines.append(line)
     return lines
 
 
