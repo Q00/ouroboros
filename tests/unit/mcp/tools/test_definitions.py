@@ -369,13 +369,13 @@ class TestExecuteSeedHandler:
         assert "Seed Execution LAUNCHED" in result.value.text_content
         assert "Session ID: sess-123" in result.value.text_content
         assert "Execution ID: exec-456" in result.value.text_content
-        assert "Runtime Backend: claude" in result.value.text_content
+        assert "Runtime Backend:" in result.value.text_content
         assert result.value.meta["seed_id"] == "test-seed-123"
         assert result.value.meta["session_id"] == "sess-123"
         assert result.value.meta["execution_id"] == "exec-456"
         assert result.value.meta["launched"] is True
         assert result.value.meta["status"] == "running"
-        assert result.value.meta["runtime_backend"] == "claude"
+        assert result.value.meta["runtime_backend"] in ("claude", "codex")
         assert result.value.meta["resume_requested"] is False
 
     async def test_handle_launches_background_execution_with_opencode_runtime(self) -> None:

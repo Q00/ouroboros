@@ -2348,7 +2348,6 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             elapsed += _MEMORY_CHECK_INTERVAL_SECONDS
         log.warning("memory_pressure.timeout", label=label)
 
-
     @staticmethod
     def _runtime_event_metadata(message: AgentMessage) -> dict[str, Any]:
         """Serialize shared runtime/tool metadata for execution-scoped events."""

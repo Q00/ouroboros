@@ -19,6 +19,7 @@ from ouroboros.bigbang.seed_generator import (
     load_seed,
     save_seed_sync,
 )
+from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
     EvaluationPrinciple,
@@ -164,7 +165,7 @@ class TestSeedGeneratorConstruction:
                 output_dir=Path(tmp_dir) / "seeds",
             )
 
-            assert generator.model == "claude-opus-4-6"
+            assert generator.model == get_clarification_model()
             assert generator.temperature == 0.2
             assert generator.max_tokens == 4096
 
