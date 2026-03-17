@@ -19,6 +19,7 @@ from ouroboros.bigbang.ambiguity import (
     is_ready_for_seed,
 )
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionResponse, UsageInfo
@@ -305,7 +306,7 @@ class TestAmbiguityScorerInit:
         scorer = AmbiguityScorer(llm_adapter=mock_adapter)
 
         assert scorer.llm_adapter == mock_adapter
-        assert scorer.model == "claude-opus-4-6"
+        assert scorer.model == get_clarification_model()
         assert scorer.temperature == SCORING_TEMPERATURE
         assert scorer.initial_max_tokens == 2048
         assert scorer.max_retries == 10  # Default to 10 retries
