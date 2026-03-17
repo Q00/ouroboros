@@ -401,6 +401,83 @@ def create_workflow_progress_event(
     )
 
 
+def create_heartbeat_event(
+    session_id: str,
+    ac_index: int,
+    ac_id: str,
+    elapsed_seconds: float,
+    message_count: int,
+) -> BaseEvent:
+    """Create heartbeat event for AC liveness tracking.
+
+    Emitted periodically during AC execution to prove liveness.
+    Consumers (TUI, monitors) can detect stalls by the absence of heartbeats.
+
+    Args:
+        session_id: Parent session ID.
+        ac_index: AC being executed.
+        ac_id: AC identifier string (e.g., "ac_0" or "sub_ac_1_0").
+        elapsed_seconds: Seconds since AC execution started.
+        message_count: Messages received so far.
+
+    Returns:
+        BaseEvent for heartbeat.
+    """
+    return BaseEvent(
+        type="execution.ac.heartbeat",
+        aggregate_type="execution",
+        aggregate_id=ac_id,
+        data={
+            "session_id": session_id,
+            "ac_index": ac_index,
+            "elapsed_seconds": elapsed_seconds,
+            "message_count": message_count,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_ac_stall_detected_event(
+    session_id: str,
+    ac_index: int,
+    ac_id: str,
+    silent_seconds: float,
+    attempt: int,
+    max_attempts: int,
+    action: str,
+) -> BaseEvent:
+    """Create stall detected event.
+
+    Emitted when an AC has produced no messages for longer than the stall timeout.
+
+    Args:
+        session_id: Parent session ID.
+        ac_index: Stalled AC index.
+        ac_id: AC identifier string.
+        silent_seconds: Seconds of silence before detection.
+        attempt: Current attempt number (1-based).
+        max_attempts: Maximum attempts before abandoning.
+        action: "restart" or "abandon".
+
+    Returns:
+        BaseEvent for stall detection.
+    """
+    return BaseEvent(
+        type="execution.ac.stall_detected",
+        aggregate_type="execution",
+        aggregate_id=ac_id,
+        data={
+            "session_id": session_id,
+            "ac_index": ac_index,
+            "silent_seconds": silent_seconds,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "action": action,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 def create_drift_measured_event(
     execution_id: str,
     goal_drift: float,
@@ -440,7 +517,9 @@ def create_drift_measured_event(
 
 
 __all__ = [
+    "create_ac_stall_detected_event",
     "create_drift_measured_event",
+    "create_heartbeat_event",
     "create_mcp_tools_loaded_event",
     "create_progress_event",
     "create_session_cancelled_event",

@@ -28,6 +28,7 @@ Example:
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
@@ -42,6 +43,10 @@ from rich.console import Console
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.coordinator import LevelCoordinator
+from ouroboros.orchestrator.events import (
+    create_ac_stall_detected_event,
+    create_heartbeat_event,
+)
 from ouroboros.orchestrator.level_context import (
     LevelContext,
     build_context_prompt,
@@ -60,6 +65,12 @@ log = get_logger(__name__)
 MAX_DECOMPOSITION_DEPTH = 2
 MIN_SUB_ACS = 2
 MAX_SUB_ACS = 5
+
+# Stall detection constants
+STALL_TIMEOUT_SECONDS: float = 300.0  # 5 minutes of silence → stall
+HEARTBEAT_INTERVAL_SECONDS: float = 30.0  # Heartbeat emission interval
+MAX_STALL_RETRIES: int = 2  # Max retries after stall (3 total attempts)
+_STALL_SENTINEL = "__STALL_DETECTED__"  # Sentinel error for stall results
 
 # Memory-pressure gate constants
 _MIN_FREE_MEMORY_GB = 2.0
@@ -191,6 +202,7 @@ class ParallelACExecutor:
         console: Console | None = None,
         enable_decomposition: bool = True,
         max_concurrent: int = 3,
+        checkpoint_store: Any | None = None,
     ):
         """Initialize executor.
 
@@ -200,6 +212,7 @@ class ParallelACExecutor:
             console: Rich console for output.
             enable_decomposition: Enable Claude to decompose complex ACs.
             max_concurrent: Maximum number of concurrent AC executions.
+            checkpoint_store: Optional CheckpointStore for state recovery (RC3).
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -207,6 +220,7 @@ class ParallelACExecutor:
         self._enable_decomposition = enable_decomposition
         self._coordinator = LevelCoordinator(adapter)
         self._semaphore = anyio.Semaphore(max_concurrent)
+        self._checkpoint_store = checkpoint_store
 
     def _flush_console(self) -> None:
         """Flush console output to ensure progress is visible immediately."""
@@ -215,6 +229,41 @@ class ParallelACExecutor:
                 self._console.file.flush()
             except (OSError, ValueError):
                 pass
+
+    async def _safe_emit_event(self, event: Any, max_retries: int = 3) -> bool:
+        """Emit event with retry on failure (RC5).
+
+        Retries with exponential backoff to handle transient DB lock errors.
+
+        Args:
+            event: BaseEvent to persist.
+            max_retries: Maximum number of attempts.
+
+        Returns:
+            True if event was written, False if all retries failed.
+        """
+        for attempt in range(max_retries):
+            try:
+                await self._event_store.append(event)
+                return True
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = min(1.0 * (2 ** attempt), 5.0)
+                    log.warning(
+                        "parallel_executor.event_write.retry",
+                        event_type=event.type,
+                        attempt=attempt + 1,
+                        error=str(e),
+                    )
+                    await anyio.sleep(wait)
+                else:
+                    log.error(
+                        "parallel_executor.event_write.failed",
+                        event_type=event.type,
+                        attempts=max_retries,
+                        error=str(e),
+                    )
+        return False
 
     async def execute_parallel(
         self,
@@ -249,6 +298,36 @@ class ParallelACExecutor:
         # Track AC statuses for TUI updates
         ac_statuses: dict[int, str] = dict.fromkeys(range(total_acs), "pending")
         completed_count = 0
+
+        # RC3: Attempt to recover from checkpoint
+        resume_from_level = 0
+        if self._checkpoint_store:
+            try:
+                seed_id = getattr(seed, "id", session_id)
+                load_result = self._checkpoint_store.load(seed_id)
+                if hasattr(load_result, "is_ok") and load_result.is_ok and load_result.value:
+                    cp = load_result.value
+                    if cp.phase == "parallel_execution":
+                        resume_from_level = cp.state.get("completed_levels", 0)
+                        for idx, status in cp.state.get("ac_statuses", {}).items():
+                            ac_statuses[int(idx)] = status
+                        for idx in cp.state.get("failed_indices", []):
+                            failed_indices.add(int(idx))
+                        completed_count = cp.state.get("completed_count", 0)
+                        log.info(
+                            "parallel_executor.recovery.resuming",
+                            from_level=resume_from_level,
+                            seed_id=seed_id,
+                        )
+                        self._console.print(
+                            f"[cyan]Resuming from level {resume_from_level + 1} "
+                            f"(checkpoint recovered)[/cyan]"
+                        )
+            except Exception as e:
+                log.warning(
+                    "parallel_executor.recovery.failed",
+                    error=str(e),
+                )
 
         # Validation: check all AC indices are present in dependency graph
         expected_indices = set(range(total_acs))
@@ -306,6 +385,14 @@ class ParallelACExecutor:
         # Execute groups sequentially, but ACs within each group in parallel
         for level_idx, level in enumerate(dependency_graph.execution_levels):
             level_num = level_idx + 1
+
+            # RC3: Skip already-completed levels on recovery
+            if level_idx < resume_from_level:
+                log.info(
+                    "parallel_executor.recovery.skipping_level",
+                    level=level_num,
+                )
+                continue
 
             # Check for skipped ACs (dependencies failed)
             executable: list[int] = []
@@ -374,11 +461,16 @@ class ParallelACExecutor:
                 activity="Executing",
             )
 
-            # Execute level in parallel using anyio task group
-            # (anyio manages cancel scopes correctly across concurrent tasks,
+            # Execute level in parallel using anyio task group with
+            # Supervisor retry loop for stall recovery (RC6).
+            #
+            # anyio manages cancel scopes correctly across concurrent tasks,
             # unlike asyncio.gather which creates separate asyncio Tasks
-            # that break the SDK's internal cancel scope tracking)
-            level_results: list[ACExecutionResult | BaseException] = [None] * len(executable)
+            # that break the SDK's internal cancel scope tracking.
+            #
+            # Stall detection uses CancelScope.deadline reset inside
+            # _execute_atomic_ac. Stalled ACs return error=_STALL_SENTINEL.
+            # The supervisor retries stalled ACs up to MAX_STALL_RETRIES times.
 
             # Capture current contexts for this level's closure
             current_contexts = list(level_contexts)
@@ -388,67 +480,140 @@ class ParallelACExecutor:
                 [seed.acceptance_criteria[i] for i in executable] if len(executable) > 1 else []
             )
 
-            async def _run_ac(idx: int, ac_idx: int) -> None:
-                async with self._semaphore:
-                    try:
-                        level_results[idx] = await self._execute_single_ac(
+            # Supervisor: track which ACs still need execution
+            pending_in_level = list(executable)
+            level_result_map: dict[int, ACExecutionResult] = {}
+
+            for stall_attempt in range(MAX_STALL_RETRIES + 1):
+                if not pending_in_level:
+                    break
+
+                attempt_results: list[ACExecutionResult | BaseException | None] = [None] * len(
+                    pending_in_level
+                )
+
+                async def _run_ac(idx: int, ac_idx: int) -> None:
+                    async with self._semaphore:
+                        try:
+                            attempt_results[idx] = await self._execute_single_ac(
+                                ac_index=ac_idx,
+                                ac_content=seed.acceptance_criteria[ac_idx],
+                                session_id=session_id,
+                                tools=tools,
+                                system_prompt=system_prompt,
+                                seed_goal=seed.goal,
+                                depth=0,
+                                execution_id=execution_id,
+                                level_contexts=current_contexts,
+                                sibling_acs=sibling_acs,
+                            )
+                        except BaseException as e:
+                            # Never suppress anyio Cancelled — doing so breaks
+                            # the task group's cancel-scope propagation and can
+                            # cause the entire group to hang indefinitely.
+                            if isinstance(e, anyio.get_cancelled_exc_class()):
+                                raise
+                            attempt_results[idx] = e
+
+                async with anyio.create_task_group() as tg:
+                    for i, ac_idx in enumerate(pending_in_level):
+                        tg.start_soon(_run_ac, i, ac_idx)
+
+                # Classify results: completed, failed, or stalled
+                still_pending: list[int] = []
+
+                for ac_idx, result in zip(pending_in_level, attempt_results, strict=True):
+                    if isinstance(result, BaseException):
+                        # Exception → permanent failure
+                        level_result_map[ac_idx] = ACExecutionResult(
                             ac_index=ac_idx,
                             ac_content=seed.acceptance_criteria[ac_idx],
-                            session_id=session_id,
-                            tools=tools,
-                            system_prompt=system_prompt,
-                            seed_goal=seed.goal,
-                            depth=0,
-                            execution_id=execution_id,
-                            level_contexts=current_contexts,
-                            sibling_acs=sibling_acs,
+                            success=False,
+                            error=str(result),
                         )
-                    except BaseException as e:
-                        # Never suppress anyio Cancelled — doing so breaks
-                        # the task group's cancel-scope propagation and can
-                        # cause the entire group to hang indefinitely.
-                        if isinstance(e, anyio.get_cancelled_exc_class()):
-                            raise
-                        level_results[idx] = e
+                    elif (
+                        isinstance(result, ACExecutionResult)
+                        and result.error == _STALL_SENTINEL
+                    ):
+                        # Stalled → retry if attempts remain
+                        if stall_attempt < MAX_STALL_RETRIES:
+                            still_pending.append(ac_idx)
+                            log.warning(
+                                "parallel_executor.supervisor.stall_retry",
+                                session_id=session_id,
+                                ac_index=ac_idx,
+                                attempt=stall_attempt + 1,
+                                max_retries=MAX_STALL_RETRIES,
+                            )
+                            self._console.print(
+                                f"  [yellow]AC {ac_idx + 1}: Stall detected "
+                                f"(attempt {stall_attempt + 1}/{MAX_STALL_RETRIES + 1}), "
+                                f"retrying...[/yellow]"
+                            )
+                            self._flush_console()
+                        else:
+                            # Exhausted retries → permanent failure
+                            ac_id = f"ac_{ac_idx}"
+                            await self._safe_emit_event(create_ac_stall_detected_event(
+                                session_id=session_id,
+                                ac_index=ac_idx,
+                                ac_id=ac_id,
+                                silent_seconds=STALL_TIMEOUT_SECONDS,
+                                attempt=stall_attempt + 1,
+                                max_attempts=MAX_STALL_RETRIES + 1,
+                                action="abandon",
+                            ))
+                            level_result_map[ac_idx] = ACExecutionResult(
+                                ac_index=ac_idx,
+                                ac_content=seed.acceptance_criteria[ac_idx],
+                                success=False,
+                                error=(
+                                    f"Stalled after {MAX_STALL_RETRIES + 1} attempts "
+                                    f"(no activity for {STALL_TIMEOUT_SECONDS:.0f}s)"
+                                ),
+                            )
+                            log.error(
+                                "parallel_executor.supervisor.stall_abandoned",
+                                session_id=session_id,
+                                ac_index=ac_idx,
+                                total_attempts=MAX_STALL_RETRIES + 1,
+                            )
+                    else:
+                        # Normal completion (success or non-stall failure)
+                        level_result_map[ac_idx] = result
 
-            async with anyio.create_task_group() as tg:
-                for i, ac_idx in enumerate(executable):
-                    tg.start_soon(_run_ac, i, ac_idx)
+                pending_in_level = still_pending
 
-            # Process results
+            # Process aggregated level results
             level_success = 0
             level_failed = 0
 
-            for ac_idx, result in zip(executable, level_results, strict=False):
-                if isinstance(result, BaseException):
-                    # Exception during execution
-                    error_msg = str(result)
+            for ac_idx in executable:
+                ac_result = level_result_map.get(ac_idx)
+                if ac_result is None:
                     ac_result = ACExecutionResult(
                         ac_index=ac_idx,
                         ac_content=seed.acceptance_criteria[ac_idx],
                         success=False,
-                        error=error_msg,
+                        error="No result produced",
                     )
+
+                if ac_result.success:
+                    level_success += 1
+                    ac_statuses[ac_idx] = "completed"
+                    completed_count += 1
+                else:
                     failed_indices.add(ac_idx)
                     level_failed += 1
                     ac_statuses[ac_idx] = "failed"
 
-                    log.error(
-                        "parallel_executor.ac.exception",
-                        session_id=session_id,
-                        ac_index=ac_idx,
-                        error=error_msg,
-                    )
-                else:
-                    ac_result = result
-                    if ac_result.success:
-                        level_success += 1
-                        ac_statuses[ac_idx] = "completed"
-                        completed_count += 1
-                    else:
-                        failed_indices.add(ac_idx)
-                        level_failed += 1
-                        ac_statuses[ac_idx] = "failed"
+                    if ac_result.error and ac_result.error != _STALL_SENTINEL:
+                        log.error(
+                            "parallel_executor.ac.exception",
+                            session_id=session_id,
+                            ac_index=ac_idx,
+                            error=ac_result.error,
+                        )
 
                 all_results.append(ac_result)
 
@@ -519,6 +684,37 @@ class ParallelACExecutor:
                     )
 
                 level_contexts.append(level_ctx)
+
+            # RC3: Save checkpoint after each level completion
+            if self._checkpoint_store:
+                try:
+                    from ouroboros.persistence.checkpoint import CheckpointData
+
+                    seed_id = getattr(seed, "id", session_id)
+                    checkpoint = CheckpointData.create(
+                        seed_id=seed_id,
+                        phase="parallel_execution",
+                        state={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "completed_levels": level_idx + 1,
+                            "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
+                            "failed_indices": sorted(failed_indices),
+                            "completed_count": completed_count,
+                        },
+                    )
+                    self._checkpoint_store.save(checkpoint)
+                    log.info(
+                        "parallel_executor.checkpoint.saved",
+                        level=level_num,
+                        seed_id=seed_id,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "parallel_executor.checkpoint.save_failed",
+                        level=level_num,
+                        error=str(e),
+                    )
 
         # Aggregate results - sort by AC index for consistent ordering
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
@@ -965,74 +1161,123 @@ When complete, explicitly state: [TASK_COMPLETE]
         final_message = ""
         success = False
 
+        # AC identifier for events
+        ac_id = (
+            f"ac_{ac_index}"
+            if not is_sub_ac
+            else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
+        )
+
+        # Stall detection: CancelScope with resettable deadline (RC6)
+        message_count = 0
+        last_heartbeat = time.monotonic()
+        exec_start = time.monotonic()
+
         await self._wait_for_memory(label)
 
         try:
-            async for message in self._adapter.execute_task(
-                prompt=prompt,
-                tools=tools,
-                system_prompt=system_prompt,
-            ):
-                messages.append(message)
-
-                if (
-                    ac_session_id is None
-                    and message.resume_handle is not None
-                    and message.resume_handle.native_session_id
+            with anyio.CancelScope(
+                deadline=anyio.current_time() + STALL_TIMEOUT_SECONDS,
+            ) as stall_scope:
+                async for message in self._adapter.execute_task(
+                    prompt=prompt,
+                    tools=tools,
+                    system_prompt=system_prompt,
                 ):
-                    ac_session_id = message.resume_handle.native_session_id
-                elif ac_session_id is None and message.data.get("session_id"):
-                    ac_session_id = message.data["session_id"]
+                    # Reset stall deadline on every message (RC6 core)
+                    stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
+                    messages.append(message)
+                    message_count += 1
 
-                if message.tool_name:
-                    tool_input = message.data.get("tool_input", {})
-                    tool_detail = self._format_tool_detail(message.tool_name, tool_input)
-                    self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")
-                    self._flush_console()
+                    if (
+                        ac_session_id is None
+                        and message.resume_handle is not None
+                        and message.resume_handle.native_session_id
+                    ):
+                        ac_session_id = message.resume_handle.native_session_id
+                    elif ac_session_id is None and message.data.get("session_id"):
+                        ac_session_id = message.data["session_id"]
 
-                    # Emit tool started event for TUI
-                    ac_id = (
-                        f"ac_{ac_index}"
-                        if not is_sub_ac
-                        else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
-                    )
-                    from ouroboros.events.base import BaseEvent as _BaseEvent
+                    # RC1: Emit heartbeat piggybacking on message flow
+                    now = time.monotonic()
+                    if now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
+                        await self._safe_emit_event(create_heartbeat_event(
+                            session_id=session_id,
+                            ac_index=ac_index,
+                            ac_id=ac_id,
+                            elapsed_seconds=now - exec_start,
+                            message_count=message_count,
+                        ))
+                        last_heartbeat = now
 
-                    tool_event = _BaseEvent(
-                        type="execution.tool.started",
-                        aggregate_type="execution",
-                        aggregate_id=ac_id,
-                        data={
-                            "ac_id": ac_id,
-                            "tool_name": message.tool_name,
-                            "tool_detail": tool_detail,
-                            "tool_input": tool_input,
-                        },
-                    )
-                    await self._event_store.append(tool_event)
+                    if message.tool_name:
+                        tool_input = message.data.get("tool_input", {})
+                        tool_detail = self._format_tool_detail(message.tool_name, tool_input)
+                        self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")
+                        self._flush_console()
 
-                if message.data.get("thinking"):
-                    ac_id = (
-                        f"ac_{ac_index}"
-                        if not is_sub_ac
-                        else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
-                    )
-                    from ouroboros.events.base import BaseEvent as _BaseEvent
+                        from ouroboros.events.base import BaseEvent as _BaseEvent
 
-                    thinking_event = _BaseEvent(
-                        type="execution.agent.thinking",
-                        aggregate_type="execution",
-                        aggregate_id=ac_id,
-                        data={
-                            "ac_id": ac_id,
-                            "thinking_text": message.data["thinking"],
-                        },
-                    )
-                    await self._event_store.append(thinking_event)
+                        tool_event = _BaseEvent(
+                            type="execution.tool.started",
+                            aggregate_type="execution",
+                            aggregate_id=ac_id,
+                            data={
+                                "ac_id": ac_id,
+                                "tool_name": message.tool_name,
+                                "tool_detail": tool_detail,
+                                "tool_input": tool_input,
+                            },
+                        )
+                        await self._safe_emit_event(tool_event)
 
-                if message.is_final:
-                    final_message = message.content
-                    success = not message.is_error
+                    if message.data.get("thinking"):
+                        from ouroboros.events.base import BaseEvent as _BaseEvent
+
+                        thinking_event = _BaseEvent(
+                            type="execution.agent.thinking",
+                            aggregate_type="execution",
+                            aggregate_id=ac_id,
+                            data={
+                                "ac_id": ac_id,
+                                "thinking_text": message.data["thinking"],
+                            },
+                        )
+                        await self._safe_emit_event(thinking_event)
+
+                    if message.is_final:
+                        final_message = message.content
+                        success = not message.is_error
+
+            # Check if stall was detected (CancelScope ate the Cancelled)
+            if stall_scope.cancelled_caught:
+                duration = (datetime.now(UTC) - start_time).total_seconds()
+                log.warning(
+                    "parallel_executor.ac.stall_detected",
+                    ac_index=ac_index,
+                    depth=depth,
+                    silent_seconds=STALL_TIMEOUT_SECONDS,
+                    message_count=message_count,
+                )
+                await self._safe_emit_event(create_ac_stall_detected_event(
+                    session_id=session_id,
+                    ac_index=ac_index,
+                    ac_id=ac_id,
+                    silent_seconds=STALL_TIMEOUT_SECONDS,
+                    attempt=0,
+                    max_attempts=MAX_STALL_RETRIES + 1,
+                    action="restart",
+                ))
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=ac_content,
+                    success=False,
+                    messages=tuple(messages),
+                    error=_STALL_SENTINEL,
+                    duration_seconds=duration,
+                    session_id=ac_session_id,
+                    depth=depth,
+                )
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
@@ -1100,7 +1345,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 "status": status,
             },
         )
-        await self._event_store.append(event)
+        await self._safe_emit_event(event)
 
     async def _emit_level_started(
         self,
@@ -1123,7 +1368,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 "ac_count": len(ac_indices),
             },
         )
-        await self._event_store.append(event)
+        await self._safe_emit_event(event)
 
     async def _emit_level_completed(
         self,
@@ -1145,7 +1390,74 @@ When complete, explicitly state: [TASK_COMPLETE]
                 "total": success_count + failure_count,
             },
         )
-        await self._event_store.append(event)
+        await self._safe_emit_event(event)
+
+    async def _resilient_progress_emitter(
+        self,
+        session_id: str,
+        execution_id: str,
+        seed: Seed,
+        ac_statuses: dict[int, str],
+        interval: float = 15.0,
+        max_consecutive_errors: int = 5,
+    ) -> None:
+        """Periodically emit workflow progress with error resilience (RC2 + RC4).
+
+        Runs as a background task inside a task group. Terminates when:
+        - All ACs are in terminal state (RC4: no stale monitoring)
+        - Consecutive errors exceed threshold (RC2: graceful degradation)
+
+        Args:
+            session_id: Session ID.
+            execution_id: Execution ID.
+            seed: Seed specification.
+            ac_statuses: Shared dict of AC statuses (mutated externally).
+            interval: Seconds between emissions.
+            max_consecutive_errors: Stop after this many consecutive failures.
+        """
+        consecutive_errors = 0
+        terminal_states = {"completed", "failed", "skipped"}
+
+        while True:
+            await anyio.sleep(interval)
+
+            # RC4: Stop when all ACs are done
+            if all(s in terminal_states for s in ac_statuses.values()):
+                log.info("parallel_executor.progress_emitter.all_done")
+                return
+
+            try:
+                await self._emit_workflow_progress(
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    seed=seed,
+                    ac_statuses=ac_statuses,
+                    executing_indices=[
+                        i for i, s in ac_statuses.items() if s == "executing"
+                    ],
+                    completed_count=sum(
+                        1 for s in ac_statuses.values() if s == "completed"
+                    ),
+                    current_level=0,
+                    total_levels=0,
+                    activity="Monitoring",
+                )
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                wait = min(2.0 ** consecutive_errors, 30.0)
+                log.warning(
+                    "parallel_executor.progress_emitter.error",
+                    error=str(e),
+                    consecutive_errors=consecutive_errors,
+                )
+                if consecutive_errors >= max_consecutive_errors:
+                    log.error(
+                        "parallel_executor.progress_emitter.giving_up",
+                        consecutive_errors=consecutive_errors,
+                    )
+                    return
+                await anyio.sleep(wait)
 
     async def _emit_workflow_progress(
         self,
@@ -1209,7 +1521,7 @@ When complete, explicitly state: [TASK_COMPLETE]
             activity=activity,
             activity_detail=activity_detail,
         )
-        await self._event_store.append(event)
+        await self._safe_emit_event(event)
 
 
 __all__ = [
