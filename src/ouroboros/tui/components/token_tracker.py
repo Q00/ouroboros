@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import ProgressBar, Static
@@ -294,7 +295,7 @@ class TokenTracker(Widget):
             self.query_one("#summary-output", Static).update(
                 f"[value]{self._format_tokens(summary.total_output_tokens)}[/] [label]Output[/]"
             )
-        except Exception:
+        except NoMatches:
             pass
 
         # Update tier breakdown
@@ -308,7 +309,7 @@ class TokenTracker(Widget):
             self.query_one("#tier-opus", Static).update(
                 f"[tier-value]{self._format_tokens(summary.opus_tokens)}[/] [tier-label]Opus[/]"
             )
-        except Exception:
+        except NoMatches:
             pass
 
         # Update budget bar
@@ -349,7 +350,7 @@ class TokenTracker(Widget):
                 else:
                     status_widget.update(f"{progress:.0f}% of ${self.budget_usd:.2f} budget used")
 
-            except Exception:
+            except NoMatches:
                 pass
 
     def _format_tokens(self, tokens: int) -> str:

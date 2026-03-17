@@ -9,6 +9,7 @@ Displays current subAgent activity including:
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Static
@@ -135,7 +136,7 @@ class AgentActivityWidget(Widget):
             self.query_one("#tool-line", Static).update(self._format_tool_line())
             self.query_one("#file-line", Static).update(self._format_file_line())
             self.query_one("#thinking-line", Static).update(self._format_thinking_line())
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_current_tool(self, _new_value: str) -> None:

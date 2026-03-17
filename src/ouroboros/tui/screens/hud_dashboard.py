@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Tree
@@ -224,7 +225,7 @@ class HUDDashboardScreen(Screen[None]):
                 hud_row.remove_class("hidden")
             else:
                 hud_row.add_class("hidden")
-        except Exception:
+        except NoMatches:
             pass
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -452,7 +453,7 @@ class HUDDashboardScreen(Screen[None]):
             try:
                 tree_widget = self._tree.query_one("#ac-tree", Tree)
                 tree_widget.focus()
-            except Exception:
+            except NoMatches:
                 pass
 
     def action_toggle_hud(self) -> None:

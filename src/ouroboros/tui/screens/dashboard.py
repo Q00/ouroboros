@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, Static
@@ -226,7 +227,7 @@ class StatusPanel(Static):
                 # Update CSS class for color
                 elem.remove_class(old_status)
                 elem.add_class(status)
-            except Exception:
+            except NoMatches:
                 pass
 
         if current_ac is not None and current_ac != self.current_ac:
@@ -234,7 +235,7 @@ class StatusPanel(Static):
             try:
                 elem = self.query_one("#ac-value", Static)
                 elem.update(self._truncate_ac(current_ac) or "[dim]None[/dim]")
-            except Exception:
+            except NoMatches:
                 pass
 
         if activity is not None and activity != self.activity:
@@ -242,7 +243,7 @@ class StatusPanel(Static):
             try:
                 elem = self.query_one("#activity-value", Static)
                 elem.update(activity or "[dim]Idle[/dim]")
-            except Exception:
+            except NoMatches:
                 pass
 
 

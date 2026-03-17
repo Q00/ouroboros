@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Input, RichLog, Static
@@ -213,7 +214,7 @@ class EventLog(Widget):
         """Update log display based on filter and search."""
         try:
             log = self.query_one("#log-display", RichLog)
-        except Exception:
+        except NoMatches:
             return
 
         # Clear and repopulate
@@ -276,7 +277,7 @@ class EventLog(Widget):
             stats = self.query_one("#stats-row", Static)
             total = len(self.entries)
             stats.update(f"Showing {count} of {total} entries")
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_entries(self, _: list[LogEntry]) -> None:
@@ -311,7 +312,7 @@ class EventLog(Widget):
                     btn.add_class("active")
                 else:
                     btn.remove_class("active")
-            except Exception:
+            except NoMatches:
                 pass
 
     def update_from_state(self, state: TUIState) -> None:
@@ -346,7 +347,7 @@ class EventLog(Widget):
                 timestamp = datetime.fromisoformat(
                     log_entry.get("timestamp", datetime.now().isoformat())
                 )
-            except Exception:
+            except ValueError:
                 timestamp = datetime.now()
 
             new_entries.append(

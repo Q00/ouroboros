@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import DataTable, Static
@@ -260,7 +261,7 @@ class AgentsPanel(Widget):
                     "---",
                     f"[bold]{metrics.utilization_percent:.0f}%[/]",
                 )
-        except Exception:
+        except NoMatches:
             pass
 
     def _format_tokens(self, tokens: int) -> str:

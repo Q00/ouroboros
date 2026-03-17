@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import Screen
@@ -416,7 +417,7 @@ class SelectableACTree(Static):
     def _rebuild_tree(self) -> None:
         try:
             tree = self.query_one("#ac-tree", Tree)
-        except Exception:
+        except NoMatches:
             return
 
         tree.clear()
@@ -791,7 +792,7 @@ class DashboardScreenV3(Screen[None]):
             try:
                 tree_widget = self._tree.query_one("#ac-tree", Tree)
                 tree_widget.focus()
-            except Exception:
+            except NoMatches:
                 pass
 
     def action_logs(self) -> None:

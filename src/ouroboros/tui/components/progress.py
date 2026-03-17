@@ -14,6 +14,7 @@ from datetime import datetime
 from enum import Enum
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import ProgressBar, Static
@@ -301,7 +302,7 @@ class ProgressTracker(Widget):
         try:
             bar = self.query_one("#overall-bar", ProgressBar)
             bar.progress = overall.total_percent
-        except Exception:
+        except NoMatches:
             pass
 
         # Update overall stats
@@ -315,7 +316,7 @@ class ProgressTracker(Widget):
             if overall.eta_display:
                 parts.append(f"[dim]{overall.eta_display} remaining[/]")
             stats.update(" | ".join(parts))
-        except Exception:
+        except NoMatches:
             pass
 
         # Update phase bars
@@ -330,7 +331,7 @@ class ProgressTracker(Widget):
 
                 percent = self.query_one(f"#phase-percent-{phase.value}", Static)
                 percent.update(f"{phase_progress.percent_complete:.0f}%")
-            except Exception:
+            except NoMatches:
                 pass
 
         # Update current activity
@@ -344,7 +345,7 @@ class ProgressTracker(Widget):
             else:
                 activity_text.update("Idle")
                 activity_label.update("Status:")
-        except Exception:
+        except NoMatches:
             pass
 
         # Update milestones
@@ -381,7 +382,7 @@ class ProgressTracker(Widget):
             else:
                 container.update("[dim]No milestones yet[/]")
 
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_overall(self, _: OverallProgress) -> None:

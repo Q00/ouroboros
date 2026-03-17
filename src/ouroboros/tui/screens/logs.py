@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, VerticalScroll
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Input, Label, Static
@@ -335,7 +336,7 @@ class LogsScreen(Screen[None]):
         """Refresh log display after filter change or new log."""
         try:
             container = self.query_one("#log-container", VerticalScroll)
-        except Exception:
+        except NoMatches:
             return
 
         # Remove all children and re-add filtered logs

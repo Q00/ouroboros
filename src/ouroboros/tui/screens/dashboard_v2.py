@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Label, Static
@@ -282,7 +283,7 @@ class ActivityBar(Static):
             if self.elapsed:
                 stats_parts.append(f"[dim]Time: {self.elapsed}[/]")
             stats_elem.update(" │ ".join(stats_parts) if stats_parts else "")
-        except Exception:
+        except NoMatches:
             pass
 
 
@@ -487,7 +488,7 @@ class DashboardScreenV2(Screen[None]):
             try:
                 status_widget = self._command_bar.query_one("#mini-status", MiniStatusIndicator)
                 status_widget.status = message.status
-            except Exception:
+            except NoMatches:
                 pass
 
     def on_phase_changed(self, message: PhaseChanged) -> None:
@@ -496,7 +497,7 @@ class DashboardScreenV2(Screen[None]):
             try:
                 phase_widget = self._command_bar.query_one("#mini-phase", MiniPhaseIndicator)
                 phase_widget.phase = message.current_phase
-            except Exception:
+            except NoMatches:
                 pass
 
     def on_drift_updated(self, message: DriftUpdated) -> None:
@@ -505,7 +506,7 @@ class DashboardScreenV2(Screen[None]):
             try:
                 drift_widget = self._command_bar.query_one("#mini-drift", MiniDriftIndicator)
                 drift_widget.drift = message.combined_drift
-            except Exception:
+            except NoMatches:
                 pass
 
     def on_cost_updated(self, message: CostUpdated) -> None:
@@ -515,7 +516,7 @@ class DashboardScreenV2(Screen[None]):
                 cost_widget = self._command_bar.query_one("#mini-cost", MiniCostIndicator)
                 cost_widget.tokens = message.total_tokens
                 cost_widget.cost_usd = message.total_cost_usd
-            except Exception:
+            except NoMatches:
                 pass
 
     def on_ac_updated(self, message: ACUpdated) -> None:
@@ -559,7 +560,7 @@ class DashboardScreenV2(Screen[None]):
                 cost_widget = self._command_bar.query_one("#mini-cost", MiniCostIndicator)
                 cost_widget.tokens = message.estimated_tokens
                 cost_widget.cost_usd = message.estimated_cost_usd
-            except Exception:
+            except NoMatches:
                 pass
 
         # Update activity bar
@@ -673,7 +674,7 @@ class DashboardScreenV2(Screen[None]):
                 cost_widget = self._command_bar.query_one("#mini-cost", MiniCostIndicator)
                 cost_widget.tokens = state.total_tokens
                 cost_widget.cost_usd = state.total_cost_usd
-            except Exception:
+            except NoMatches:
                 pass
 
         if self._enhanced_tree:

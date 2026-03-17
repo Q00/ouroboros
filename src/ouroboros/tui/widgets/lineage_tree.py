@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from textual.app import ComposeResult
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -134,7 +135,7 @@ class LineageTreeWidget(Widget):
 
         try:
             tree = self.query_one("#lineage-tree", Tree)
-        except Exception:
+        except NoMatches:
             return
 
         tree.clear()
