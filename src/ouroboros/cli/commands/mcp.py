@@ -143,6 +143,8 @@ async def _run_mcp_server(
     # Auto-cancel orphaned sessions on startup.
     # Sessions left in RUNNING/PAUSED state for >1 hour are considered orphaned
     # (e.g., from a previous crash). Cancel them before accepting new requests.
+    # NOTE: find_orphaned_sessions now checks for active runtime processes first,
+    # so sessions with live claude/codex agents won't be cancelled even if stale.
     try:
         await event_store.initialize()
         repo = SessionRepository(event_store)
