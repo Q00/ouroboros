@@ -298,7 +298,7 @@ class TestPendingReframeInResponseMeta:
 
         handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
 
-        result = await handler.handle({"initial_context": "Build a chat app", "cwd": "/tmp"})
+        result = await handler.handle({"initial_context": "Build a chat app", "selected_repos": [], "cwd": "/tmp"})
 
         assert result.is_ok
         meta = result.value.meta
@@ -319,7 +319,7 @@ class TestPendingReframeInResponseMeta:
 
         handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
 
-        result = await handler.handle({"initial_context": "Build a chat app", "cwd": "/tmp"})
+        result = await handler.handle({"initial_context": "Build a chat app", "selected_repos": [], "cwd": "/tmp"})
 
         assert result.is_ok
         assert result.value.meta["pending_reframe"] is None
@@ -479,6 +479,7 @@ class TestPendingReframeCycle:
 
         start_result = await handler.handle({
             "initial_context": "Build an admin panel",
+            "selected_repos": [],
             "cwd": "/tmp",
         })
 

@@ -461,16 +461,24 @@ class PMInterviewHandler:
 
             # ── Resume with answer ─────────────────────────────────
             if action == "resume" and session_id:
-                # ── AC 10: restart recovery ───────────────────────
-                # After MCP server restart, in-memory state is lost.
-                # Check pm_meta to see if this session was waiting for
-                # repo selection — if so, re-send the repo list instead
-                # of trying to load a non-existent InterviewState.
-                recovered = await self._maybe_recover_awaiting_session(
-                    session_id, cwd,
-                )
-                if recovered is not None:
-                    return recovered
+                # Check pm_meta for pending states (project type or repo selection)
+                meta_data = _load_pm_meta(session_id, data_dir=self.data_dir)
+                if meta_data:
+                    status = meta_data.get("status", "")
+
+                    # User answered brownfield/greenfield question
+                    if status == "awaiting_project_type" and answer:
+                        return await self._handle_project_type_answer(
+                            engine, session_id, answer, cwd, meta_data,
+                        )
+
+                    # User answered repo selection (recovery case)
+                    if status == "awaiting_repo_selection":
+                        recovered = await self._maybe_recover_awaiting_session(
+                            session_id, cwd,
+                        )
+                        if recovered is not None:
+                            return recovered
 
                 return await self._handle_answer(engine, session_id, answer, cwd)
 
@@ -520,18 +528,9 @@ class PMInterviewHandler:
         Backward compat: ``selected_repos`` with ``initial_context`` in
         a single call behaves identically to the old 1-step flow.
         """
-        # ── Step-1: repo selection needed? ────────────────────────
+        # ── Step-1: ask brownfield vs greenfield ────────────────
         if selected_repos is None:
-            all_repos = await self._query_all_repos()
-
-            if all_repos:
-                # Repos exist → return list, save awaiting status
-                return self._step1_awaiting_repo_selection(
-                    initial_context, cwd, all_repos,
-                )
-
-            # No repos in DB → auto-greenfield, fall through to full start
-            log.info("pm_handler.start.auto_greenfield")
+            return self._step1_ask_project_type(initial_context, cwd)
 
         # ── Full interview start (step-2 or greenfield) ───────────
         brownfield_repos = None
@@ -650,7 +649,182 @@ class PMInterviewHandler:
         )
 
     # ──────────────────────────────────────────────────────────────
-    # Step-1 helpers (2-step start)
+    # Step-1: brownfield vs greenfield choice
+    # ──────────────────────────────────────────────────────────────
+
+    async def _handle_project_type_answer(
+        self,
+        engine: PMInterviewEngine,
+        session_id: str,
+        answer: str,
+        cwd: str,
+        meta_data: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle the brownfield/greenfield answer from step 1."""
+        initial_context = meta_data.get("initial_context", "")
+
+        if "brownfield" in answer.lower() or "기존" in answer:
+            # Brownfield → show repo selection
+            all_repos = await self._query_all_repos()
+            if all_repos:
+                return self._step1_awaiting_repo_selection(
+                    initial_context, cwd, all_repos, session_id=session_id,
+                )
+            # No repos in DB → tell user to run ooo setup
+            _save_pm_meta(
+                session_id, engine=None, cwd=cwd,
+                data_dir=self.data_dir, status="interview_started",
+                extra={"initial_context": initial_context},
+            )
+            log.info("pm_handler.brownfield_no_repos")
+            # Fall through to greenfield start with a note
+            return await self._start_greenfield_interview(
+                engine, initial_context, cwd,
+                note="등록된 레포가 없습니다. `ooo setup`을 실행하여 레포를 등록하세요.\nGreenfield 모드로 진행합니다.",
+            )
+
+        # Greenfield → start interview directly
+        return await self._start_greenfield_interview(
+            engine, initial_context, cwd,
+        )
+
+    async def _start_greenfield_interview(
+        self,
+        engine: PMInterviewEngine,
+        initial_context: str,
+        cwd: str,
+        *,
+        note: str = "",
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Start interview without brownfield context (greenfield)."""
+        log.info("pm_handler.start.greenfield")
+        result = await engine.ask_opening_and_start(
+            user_response=initial_context,
+            brownfield_repos=None,
+        )
+        if result.is_err:
+            return Result.err(
+                MCPToolError(str(result.error), tool_name="ouroboros_pm_interview")
+            )
+
+        state = result.value
+        deferred_before = len(engine.deferred_items)
+        decide_later_before = len(engine.decide_later_items)
+
+        question_result = await engine.ask_next_question(state)
+        if question_result.is_err:
+            return Result.err(
+                MCPToolError(str(question_result.error), tool_name="ouroboros_pm_interview")
+            )
+
+        question = question_result.value
+        diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
+
+        state.rounds.append(
+            InterviewRound(round_number=1, question=question, user_response=None)
+        )
+        state.mark_updated()
+        await engine.save_state(state)
+        _save_pm_meta(
+            state.interview_id, engine, cwd=cwd, data_dir=self.data_dir,
+            status="interview_started",
+        )
+
+        pending_reframe = None
+        if engine._reframe_map:
+            reframed = next(reversed(engine._reframe_map))
+            pending_reframe = {"reframed": reframed, "original": engine._reframe_map[reframed]}
+
+        prefix = f"{note}\n\n" if note else ""
+        meta = {
+            "session_id": state.interview_id,
+            "status": "interview_started",
+            "input_type": "freeText",
+            "response_param": "answer",
+            "question": question,
+            "is_brownfield": False,
+            "pending_reframe": pending_reframe,
+            **diff,
+        }
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=f"{prefix}PM interview started. Session ID: {state.interview_id}\n\n{question}",
+                    ),
+                ),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # Step-1: brownfield vs greenfield choice
+    # ──────────────────────────────────────────────────────────────
+
+    def _step1_ask_project_type(
+        self,
+        initial_context: str,
+        cwd: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Step 1: Ask the user whether this is brownfield or greenfield."""
+        from datetime import UTC, datetime
+
+        session_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+
+        _save_pm_meta(
+            session_id,
+            engine=None,
+            cwd=cwd,
+            data_dir=self.data_dir,
+            status="awaiting_project_type",
+            extra={"initial_context": initial_context},
+        )
+
+        options = [
+            {
+                "value": "brownfield",
+                "label": "기존 프로젝트에 기능 추가",
+                "selected": False,
+            },
+            {
+                "value": "greenfield",
+                "label": "새 프로젝트 시작",
+                "selected": False,
+            },
+        ]
+
+        meta = {
+            "session_id": session_id,
+            "status": "awaiting_project_type",
+            "input_type": "singleSelect",
+            "options": options,
+            "response_param": "answer",
+        }
+
+        log.info("pm_handler.step1_ask_project_type", session_id=session_id)
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            f"PM interview session created: {session_id}\n\n"
+                            "이 프로젝트는 기존 코드베이스에 기능을 추가하는 건가요, "
+                            "아니면 새로 시작하는 프로젝트인가요?"
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # Step-2 helpers (repo selection or greenfield start)
     # ──────────────────────────────────────────────────────────────
 
     async def _query_all_repos(self) -> list[BrownfieldRepo]:
