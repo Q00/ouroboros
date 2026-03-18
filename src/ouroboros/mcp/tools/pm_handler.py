@@ -680,7 +680,7 @@ class PMInterviewHandler:
             # Fall through to greenfield start with a note
             return await self._start_greenfield_interview(
                 engine, initial_context, cwd,
-                note="등록된 레포가 없습니다. `ooo setup`을 실행하여 레포를 등록하세요.\nGreenfield 모드로 진행합니다.",
+                note="No repos registered. Run `ooo setup` to scan and register repos.\nProceeding in greenfield mode.",
             )
 
         # Greenfield → start interview directly
@@ -786,12 +786,12 @@ class PMInterviewHandler:
         options = [
             {
                 "value": "brownfield",
-                "label": "기존 프로젝트에 기능 추가",
+                "label": "Add to existing project",
                 "selected": False,
             },
             {
                 "value": "greenfield",
-                "label": "새 프로젝트 시작",
+                "label": "Start a new project",
                 "selected": False,
             },
         ]
@@ -813,8 +813,8 @@ class PMInterviewHandler:
                         type=ContentType.TEXT,
                         text=(
                             f"PM interview session created: {session_id}\n\n"
-                            "이 프로젝트는 기존 코드베이스에 기능을 추가하는 건가요, "
-                            "아니면 새로 시작하는 프로젝트인가요?"
+                            "Is this an addition to an existing codebase, "
+                            "or a brand-new project?"
                         ),
                     ),
                 ),
