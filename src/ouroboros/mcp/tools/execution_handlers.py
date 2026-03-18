@@ -571,8 +571,14 @@ class StartExecuteSeedHandler:
         if session_id:
             repo = SessionRepository(self._event_store)
             session_result = await repo.reconstruct_session(session_id)
-            if session_result.is_ok:
-                execution_id = session_result.value.execution_id
+            if session_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Session resume failed: {session_result.error.message}",
+                        tool_name="ouroboros_start_execute_seed",
+                    )
+                )
+            execution_id = session_result.value.execution_id
         else:
             execution_id = f"exec_{uuid4().hex[:12]}"
             new_session_id = f"orch_{uuid4().hex[:12]}"
