@@ -472,8 +472,14 @@ class PMInterviewHandler:
                             engine, session_id, answer, cwd, meta_data,
                         )
 
-                    # User answered repo selection (recovery case)
-                    if status == "awaiting_repo_selection":
+                    # User answered repo selection
+                    if status == "awaiting_repo_selection" and answer:
+                        selected = self._parse_repo_selection(answer, meta_data)
+                        if selected:
+                            return await self._handle_select_repos(
+                                engine, selected, session_id, None, cwd,
+                            )
+                        # Could not parse → re-send repo list
                         recovered = await self._maybe_recover_awaiting_session(
                             session_id, cwd,
                         )
@@ -827,6 +833,42 @@ class PMInterviewHandler:
     # Step-2 helpers (repo selection or greenfield start)
     # ──────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _parse_repo_selection(answer: str, meta_data: dict[str, Any]) -> list[str]:
+        """Parse user's free-text repo selection into a list of paths.
+
+        Supports:
+        - Numbers: "1,3,5" or "1, 3, 5"
+        - Names: "podo-backend, podo-app"
+        - Mixed: "1, podo-app, 5"
+
+        Returns list of resolved paths, or empty list if nothing matched.
+        """
+        repo_map: dict[str, str] = meta_data.get("repo_map", {})
+        name_map: dict[str, str] = meta_data.get("name_map", {})
+
+        parts = [p.strip() for p in answer.replace("\n", ",").split(",") if p.strip()]
+        paths: list[str] = []
+        seen: set[str] = set()
+
+        for part in parts:
+            path = None
+            # Try as number
+            if part in repo_map:
+                path = repo_map[part]
+            # Try as name (case-insensitive)
+            elif part.lower() in name_map:
+                path = name_map[part.lower()]
+            # Try as full path
+            elif part.startswith("/"):
+                path = part
+
+            if path and path not in seen:
+                paths.append(path)
+                seen.add(path)
+
+        return paths
+
     async def _auto_scan_repos(self) -> list[BrownfieldRepo]:
         """Scan home directory for GitHub repos and register them in DB."""
         try:
@@ -921,24 +963,22 @@ class PMInterviewHandler:
             for r in repos
         ]
 
-        # Build multiSelect options for the caller UI
-        options = [
-            {
-                "value": r.path,
-                "label": f"{r.name}" + (f" — {r.desc}" if r.desc else ""),
-                "selected": r.is_default,
-            }
-            for r in repos
-        ]
-
         # Persist minimal pm_meta so step 2 can pick up
+        # Include repo_map for resolving user input (numbers/names → paths)
+        repo_map = {str(i + 1): r.path for i, r in enumerate(repos)}
+        name_map = {r.name.lower(): r.path for r in repos}
+
         _save_pm_meta(
             session_id,
             engine=None,
             cwd=cwd,
             data_dir=self.data_dir,
             status="awaiting_repo_selection",
-            extra={"initial_context": initial_context},
+            extra={
+                "initial_context": initial_context,
+                "repo_map": repo_map,
+                "name_map": name_map,
+            },
         )
 
         log.info(
@@ -950,31 +990,28 @@ class PMInterviewHandler:
         meta: dict[str, Any] = {
             "session_id": session_id,
             "status": "awaiting_repo_selection",
-            "input_type": "multiSelect",
-            "options": options,
-            "response_param": "selected_repos",
+            "input_type": "freeText",
+            "response_param": "answer",
             "repos": repo_list,
             "repo_count": len(repo_list),
         }
 
-        # Build human-readable repo list text
+        # Build numbered repo list text
         repo_lines = []
-        for r in repo_list:
+        for i, r in enumerate(repo_list, 1):
             label = r["name"]
             if r.get("desc"):
                 label += f" — {r['desc']}"
             if r.get("is_default"):
-                label += " (default)"
-            repo_lines.append(f"  • {r['path']}  [{label}]")
+                label += " ★"
+            repo_lines.append(f"  {i}. {label}")
         repo_list_text = "\n".join(repo_lines)
 
         content_text = (
-            f"Session created: {session_id}\n\n"
-            f"Found {len(repo_list)} registered repository(ies). "
-            f"Please select which repos to include as brownfield context:\n\n"
-            f"{repo_list_text}\n\n"
-            f"Reply with selected_repos (list of paths) + initial_context "
-            f"to start the interview."
+            f"Found {len(repo_list)} repositories. "
+            f"Select repos by number, name, or comma-separated list "
+            f"(e.g. '1,3,5' or 'podo-backend, podo-app'):\n\n"
+            f"{repo_list_text}"
         )
 
         return Result.ok(

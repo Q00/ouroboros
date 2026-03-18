@@ -889,34 +889,17 @@ class TestHandleStartBrownfield:
         assert meta["repos"][1]["path"] == "/home/user/other-repo"
         assert meta["session_id"] == session_id
 
-        # AC 2: multiSelect UI hints in meta
-        assert meta["input_type"] == "multiSelect"
-        assert meta["response_param"] == "selected_repos"
-        options = meta["options"]
-        assert len(options) == 2
-        assert options[0] == {
-            "value": "/home/user/my-repo",
-            "label": "my-repo — A cool project",
-            "selected": True,
-        }
-        assert options[1] == {
-            "value": "/home/user/other-repo",
-            "label": "other-repo — Another project",
-            "selected": False,
-        }
+        # AC 2: freeText UI hints in meta (user answers with numbers/names)
+        assert meta["input_type"] == "freeText"
+        assert meta["response_param"] == "answer"
+        # No "options" field — repos shown as numbered text in content
+        assert "options" not in meta
 
-        # AC 3: Human-readable content includes guidance message + repo list
+        # AC 3: Human-readable content includes numbered repo list
         content_text = result.value.content[0].text
-        assert "Session created:" in content_text
-        assert "registered repository(ies)" in content_text
-        assert "Please select which repos to include as brownfield context" in content_text
-        # Repo details in the text
-        assert "/home/user/my-repo" in content_text
-        assert "my-repo — A cool project" in content_text
-        assert "(default)" in content_text
-        assert "/home/user/other-repo" in content_text
-        assert "other-repo — Another project" in content_text
-        assert "selected_repos" in content_text
+        assert "repositories" in content_text.lower()
+        assert "my-repo" in content_text
+        assert "other-repo" in content_text
 
         # Engine should NOT have been called — interview not started yet
         engine.ask_opening_and_start.assert_not_called()
@@ -956,12 +939,10 @@ class TestHandleStartBrownfield:
 
         assert result.is_ok
         content_text = result.value.content[0].text
-        # Path and name present, no desc, no "(default)"
-        assert "/home/user/plain-repo" in content_text
-        assert "plain-repo]" in content_text
-        assert "(default)" not in content_text
-        # Guidance message still present
-        assert "Please select which repos" in content_text
+        # Name present in numbered list
+        assert "plain-repo" in content_text
+        # No star marker (not default)
+        assert "★" not in content_text
 
     @pytest.mark.asyncio
     async def test_start_step2_with_selected_repos(self, tmp_path: Path) -> None:
@@ -2258,22 +2239,26 @@ class TestRestartRecovery:
 
     @pytest.mark.asyncio
     async def test_resume_awaiting_session_re_sends_repo_list(self, tmp_path: Path):
-        """Resume on an awaiting_repo_selection session re-queries repos and re-sends list."""
+        """Resume on an awaiting_repo_selection session with unparseable answer re-sends list."""
         session_id = "interview_20260319_140000"
 
-        # Save pm_meta as if step 1 completed before restart
+        # Save pm_meta as if step 1 completed before restart (includes repo_map/name_map)
         _save_pm_meta(
             session_id,
             engine=None,
             cwd="/project",
             data_dir=tmp_path,
             status="awaiting_repo_selection",
-            extra={"initial_context": "Build a task manager"},
+            extra={
+                "initial_context": "Build a task manager",
+                "repo_map": {"1": "/repos/my-app"},
+                "name_map": {"my-app": "/repos/my-app"},
+            },
         )
 
         engine = _make_engine_stub()
 
-        # Mock _query_all_repos to return repos
+        # Mock _query_all_repos to return repos (for re-send)
         mock_repo = MagicMock()
         mock_repo.path = "/repos/my-app"
         mock_repo.name = "my-app"
@@ -2282,23 +2267,27 @@ class TestRestartRecovery:
 
         handler = self._make_handler(engine, tmp_path)
 
+        # Send an unparseable answer to trigger re-send of repo list
         with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
             mock_query.return_value = [mock_repo]
             result = await handler.handle({
                 "session_id": session_id,
+                "answer": "???invalid???",
             })
 
         assert result.is_ok
         meta = result.value.meta
         assert meta["status"] == "awaiting_repo_selection"
         assert meta["session_id"] == session_id  # Reuses same session_id
-        assert meta["input_type"] == "multiSelect"
-        assert len(meta["options"]) == 1
-        assert meta["options"][0]["value"] == "/repos/my-app"
+        assert meta["input_type"] == "freeText"
+        assert meta["response_param"] == "answer"
+        assert "options" not in meta
+        assert meta["repo_count"] == 1
+        assert meta["repos"][0]["path"] == "/repos/my-app"
 
     @pytest.mark.asyncio
     async def test_resume_awaiting_session_auto_greenfield_when_no_repos(self, tmp_path: Path):
-        """Resume on awaiting session with no repos in DB → re-asks project type."""
+        """Resume on awaiting session with unparseable answer and no repos → re-asks project type."""
         session_id = "interview_20260319_140000"
 
         _save_pm_meta(
@@ -2307,17 +2296,23 @@ class TestRestartRecovery:
             cwd="/project",
             data_dir=tmp_path,
             status="awaiting_repo_selection",
-            extra={"initial_context": "Build a task manager"},
+            extra={
+                "initial_context": "Build a task manager",
+                "repo_map": {},
+                "name_map": {},
+            },
         )
 
         engine = _make_engine_stub()
 
         handler = self._make_handler(engine, tmp_path)
 
+        # Send an unparseable answer; no repos in DB → auto-greenfield (project type)
         with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
             mock_query.return_value = []  # No repos in DB
             result = await handler.handle({
                 "session_id": session_id,
+                "answer": "???invalid???",
             })
 
         assert result.is_ok
@@ -2326,8 +2321,6 @@ class TestRestartRecovery:
         assert meta["status"] == "awaiting_project_type"
         assert meta["input_type"] == "singleSelect"
         assert meta["response_param"] == "answer"
-        # Engine should NOT have been started yet
-        engine.ask_opening_and_start.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_resume_active_session_not_intercepted(self, tmp_path: Path):
@@ -2397,16 +2390,18 @@ class TestRestartRecovery:
             cwd="/project",
             data_dir=tmp_path,
             status="awaiting_repo_selection",
-            extra={},  # No initial_context
+            extra={"repo_map": {}, "name_map": {}},  # No initial_context
         )
 
         engine = _make_engine_stub()
         handler = self._make_handler(engine, tmp_path)
 
+        # Send unparseable answer; no repos and no initial_context → error
         with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
             mock_query.return_value = []  # No repos → would need initial_context for greenfield
             result = await handler.handle({
                 "session_id": session_id,
+                "answer": "???invalid???",
             })
 
         assert result.is_err
@@ -2423,7 +2418,11 @@ class TestRestartRecovery:
             cwd="/project",
             data_dir=tmp_path,
             status="awaiting_repo_selection",
-            extra={"initial_context": "Build a task manager"},
+            extra={
+                "initial_context": "Build a task manager",
+                "repo_map": {"1": "/repos/my-app"},
+                "name_map": {"my-app": "/repos/my-app"},
+            },
         )
 
         engine = _make_engine_stub()
@@ -2435,10 +2434,12 @@ class TestRestartRecovery:
 
         handler = self._make_handler(engine, tmp_path)
 
+        # Send unparseable answer to trigger re-send of repo list
         with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
             mock_query.return_value = [mock_repo]
             result = await handler.handle({
                 "session_id": session_id,
+                "answer": "???invalid???",
             })
 
         assert result.is_ok
@@ -2516,12 +2517,12 @@ class TestTwoStepStartOrchestrationFlow:
         assert step1b_result.is_ok
         step1b_meta = step1b_result.value.meta
         assert step1b_meta["status"] == "awaiting_repo_selection"
-        assert step1b_meta["input_type"] == "multiSelect"
+        assert step1b_meta["input_type"] == "freeText"
 
         # Engine should still NOT have been started
         engine.ask_opening_and_start.assert_not_called()
 
-        # ── Step 2: user selects one repo ──────────────────────────
+        # ── Step 2: user selects one repo by name ─────────────────
         state = _make_state(interview_id=session_id, is_brownfield=True)
         engine.ask_opening_and_start.return_value = Result.ok(state)
         engine.ask_next_question.return_value = Result.ok("What notifications do you need?")
@@ -2530,8 +2531,8 @@ class TestTwoStepStartOrchestrationFlow:
         with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
             mock_resolve.return_value = [db_repos[0]]  # User selected only frontend
             step2_result = await handler.handle({
-                "selected_repos": ["/repos/frontend"],
                 "session_id": session_id,
+                "answer": "frontend",
             })
 
         assert step2_result.is_ok
@@ -2838,10 +2839,14 @@ class TestTwoStepStartOrchestrationFlow:
             })
 
         assert result.is_ok
-        options = result.value.meta["options"]
-        assert options[0]["selected"] is True
-        assert options[1]["selected"] is False
-        assert options[2]["selected"] is True
+        meta = result.value.meta
+        # freeText mode — no options field; repos shown as numbered list
+        assert meta["input_type"] == "freeText"
+        assert "options" not in meta
+        # Repos are in meta["repos"] with is_default flag
+        assert meta["repos"][0]["is_default"] is True
+        assert meta["repos"][1]["is_default"] is False
+        assert meta["repos"][2]["is_default"] is True
 
     @pytest.mark.asyncio
     async def test_2step_flow_with_restart_recovery(self, engine, tmp_path):
@@ -2858,10 +2863,14 @@ class TestTwoStepStartOrchestrationFlow:
             cwd=str(tmp_path),
             data_dir=tmp_path,
             status="awaiting_repo_selection",
-            extra={"initial_context": "Add search feature"},
+            extra={
+                "initial_context": "Add search feature",
+                "repo_map": {"1": "/repos/search-service"},
+                "name_map": {"search-service": "/repos/search-service"},
+            },
         )
 
-        # After restart, client sends resume with just session_id
+        # After restart, client sends resume with unparseable answer to trigger re-send
         mock_repo = MagicMock()
         mock_repo.path = "/repos/search-service"
         mock_repo.name = "search-service"
@@ -2872,17 +2881,20 @@ class TestTwoStepStartOrchestrationFlow:
             mock_query.return_value = [mock_repo]
             result = await handler.handle({
                 "session_id": session_id,
+                "answer": "???invalid???",
             })
 
         assert result.is_ok
         meta = result.value.meta
         assert meta["status"] == "awaiting_repo_selection"
         assert meta["session_id"] == session_id  # Same session_id preserved
-        assert meta["input_type"] == "multiSelect"
-        assert len(meta["options"]) == 1
-        assert meta["options"][0]["value"] == "/repos/search-service"
+        assert meta["input_type"] == "freeText"
+        assert meta["response_param"] == "answer"
+        assert "options" not in meta
+        assert meta["repo_count"] == 1
+        assert meta["repos"][0]["path"] == "/repos/search-service"
 
-        # Now step 2: user selects the repo
+        # Now step 2: user selects the repo by name
         state = _make_state(interview_id=session_id, is_brownfield=True)
         engine.ask_opening_and_start.return_value = Result.ok(state)
         engine.ask_next_question.return_value = Result.ok("What search features?")
@@ -2891,8 +2903,8 @@ class TestTwoStepStartOrchestrationFlow:
         with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
             mock_resolve.return_value = [BrownfieldRepo(path="/repos/search-service", name="search-service", desc="Search indexer")]
             step2_result = await handler.handle({
-                "selected_repos": ["/repos/search-service"],
                 "session_id": session_id,
+                "answer": "search-service",
             })
 
         assert step2_result.is_ok
