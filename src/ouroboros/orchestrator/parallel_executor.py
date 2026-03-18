@@ -236,6 +236,8 @@ class ParallelACExecutor:
         """Emit event with retry on failure (RC5).
 
         Retries with exponential backoff to handle transient DB lock errors.
+        On permanent failure, logs error AND prints a console warning so the
+        operator is aware of event persistence degradation.
 
         Args:
             event: BaseEvent to persist.
@@ -264,6 +266,10 @@ class ParallelACExecutor:
                         event_type=event.type,
                         attempts=max_retries,
                         error=str(e),
+                    )
+                    self._console.print(
+                        f"  [yellow]Event persistence degraded: "
+                        f"{event.type} dropped after {max_retries} retries[/yellow]"
                     )
         return False
 
@@ -327,22 +333,31 @@ class ParallelACExecutor:
                             seed_id=seed_id,
                             restored_contexts=len(level_contexts),
                         )
-                        # Reconstruct all_results for completed/failed/skipped ACs
+                        # Reconstruct all_results for completed/failed/skipped ACs.
+                        # These are placeholder results — they preserve counts and
+                        # status but lack messages/session_id/duration from the
+                        # original run. final_message is set to indicate recovery
+                        # so downstream consumers can distinguish them.
                         for prev_level in dependency_graph.execution_levels[:resume_from_level]:
                             for ac_idx in prev_level:
                                 if ac_idx >= total_acs:
                                     continue
                                 status = ac_statuses.get(ac_idx, "pending")
+                                is_completed = status == "completed"
+                                is_skipped = status == "skipped"
                                 all_results.append(
                                     ACExecutionResult(
                                         ac_index=ac_idx,
                                         ac_content=seed.acceptance_criteria[ac_idx],
-                                        success=(status == "completed"),
+                                        success=is_completed,
+                                        final_message=(
+                                            "[Restored from checkpoint]" if is_completed else ""
+                                        ),
                                         error=(
                                             "Skipped: dependency failed"
-                                            if status == "skipped"
+                                            if is_skipped
                                             else None
-                                            if status == "completed"
+                                            if is_completed
                                             else "Failed (restored from checkpoint)"
                                         ),
                                     )
@@ -1110,6 +1125,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     status="executing",
                 )
 
+                sub_ac_id = f"sub_ac_{parent_ac_index}_{idx}"
                 result = None
                 for attempt in range(MAX_STALL_RETRIES + 1):
                     result = await self._execute_atomic_ac(
@@ -1126,24 +1142,62 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                         sub_ac_index=idx,
                         level_contexts=level_contexts,
                     )
-                    if (
-                        isinstance(result, ACExecutionResult)
-                        and result.error == _STALL_SENTINEL
-                        and attempt < MAX_STALL_RETRIES
-                    ):
-                        log.warning(
-                            "parallel_executor.sub_ac.stall_retry",
-                            parent_ac=parent_ac_index,
-                            sub_ac=idx,
-                            attempt=attempt + 1,
-                            max_retries=MAX_STALL_RETRIES,
-                        )
-                        self._console.print(
-                            f"    [yellow]Sub-AC {idx + 1}: Stall detected "
-                            f"(attempt {attempt + 1}/{MAX_STALL_RETRIES + 1}), "
-                            f"retrying...[/yellow]"
-                        )
-                        continue
+                    if isinstance(result, ACExecutionResult) and result.error == _STALL_SENTINEL:
+                        if attempt < MAX_STALL_RETRIES:
+                            await self._safe_emit_event(
+                                create_ac_stall_detected_event(
+                                    session_id=session_id,
+                                    ac_index=parent_ac_index,
+                                    ac_id=sub_ac_id,
+                                    silent_seconds=STALL_TIMEOUT_SECONDS,
+                                    attempt=attempt + 1,
+                                    max_attempts=MAX_STALL_RETRIES + 1,
+                                    action="restart",
+                                )
+                            )
+                            log.warning(
+                                "parallel_executor.sub_ac.stall_retry",
+                                parent_ac=parent_ac_index,
+                                sub_ac=idx,
+                                attempt=attempt + 1,
+                                max_retries=MAX_STALL_RETRIES,
+                            )
+                            self._console.print(
+                                f"    [yellow]Sub-AC {idx + 1}: Stall detected "
+                                f"(attempt {attempt + 1}/{MAX_STALL_RETRIES + 1}), "
+                                f"retrying...[/yellow]"
+                            )
+                            continue
+                        else:
+                            # Exhausted retries → normalize to descriptive failure
+                            await self._safe_emit_event(
+                                create_ac_stall_detected_event(
+                                    session_id=session_id,
+                                    ac_index=parent_ac_index,
+                                    ac_id=sub_ac_id,
+                                    silent_seconds=STALL_TIMEOUT_SECONDS,
+                                    attempt=attempt + 1,
+                                    max_attempts=MAX_STALL_RETRIES + 1,
+                                    action="abandon",
+                                )
+                            )
+                            result = ACExecutionResult(
+                                ac_index=parent_ac_index * 100 + idx,
+                                ac_content=sub_ac,
+                                success=False,
+                                error=(
+                                    f"Sub-AC stalled after {MAX_STALL_RETRIES + 1} "
+                                    f"attempts (no activity for "
+                                    f"{STALL_TIMEOUT_SECONDS:.0f}s)"
+                                ),
+                                depth=depth,
+                            )
+                            log.error(
+                                "parallel_executor.sub_ac.stall_abandoned",
+                                parent_ac=parent_ac_index,
+                                sub_ac=idx,
+                                total_attempts=MAX_STALL_RETRIES + 1,
+                            )
                     break
                 sub_results[idx] = result
             except BaseException as e:
@@ -1340,6 +1394,10 @@ When complete, explicitly state: [TASK_COMPLETE]
                         last_heartbeat = now
 
                     if message.tool_name:
+                        # RC6: Tool invocations prove liveness — reset stall
+                        # deadline so long-running tools (Bash, external APIs)
+                        # are not falsely detected as stalls.
+                        stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS
                         tool_input = message.data.get("tool_input", {})
                         tool_detail = self._format_tool_detail(message.tool_name, tool_input)
                         self._console.print(f"{indent}[yellow]{label} → {tool_detail}[/yellow]")

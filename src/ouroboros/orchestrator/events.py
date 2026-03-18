@@ -469,6 +469,7 @@ def create_ac_stall_detected_event(
         data={
             "session_id": session_id,
             "ac_index": ac_index,
+            "ac_id": ac_id,
             "silent_seconds": silent_seconds,
             "attempt": attempt,
             "max_attempts": max_attempts,

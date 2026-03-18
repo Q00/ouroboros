@@ -226,7 +226,9 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
     """Deserialize level contexts from checkpoint data.
 
     Reconstructs the typed dataclass tree, converting lists back to tuples
-    where the frozen dataclasses expect them.
+    where the frozen dataclasses expect them. Tolerates missing/extra fields
+    from older/newer checkpoint schemas by using explicit field extraction
+    with defaults rather than dict-splatting.
     """
     from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 
@@ -235,31 +237,55 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
         review = None
         if d.get("coordinator_review"):
             rd = d["coordinator_review"]
-            review = CoordinatorReview(
-                **{
-                    **rd,
-                    "conflicts_detected": tuple(
-                        FileConflict(**{**fc, "ac_indices": tuple(fc["ac_indices"])})
-                        for fc in rd.get("conflicts_detected", ())
-                    ),
-                    "fixes_applied": tuple(rd.get("fixes_applied", ())),
-                    "warnings_for_next_level": tuple(rd.get("warnings_for_next_level", ())),
-                }
-            )
+            try:
+                conflicts = tuple(
+                    FileConflict(
+                        file_path=fc.get("file_path", ""),
+                        ac_indices=tuple(fc.get("ac_indices", ())),
+                        resolved=fc.get("resolved", False),
+                        resolution_description=fc.get("resolution_description", ""),
+                    )
+                    for fc in rd.get("conflicts_detected", ())
+                )
+                review = CoordinatorReview(
+                    level_number=rd.get("level_number", 0),
+                    conflicts_detected=conflicts,
+                    review_summary=rd.get("review_summary", ""),
+                    fixes_applied=tuple(rd.get("fixes_applied", ())),
+                    warnings_for_next_level=tuple(rd.get("warnings_for_next_level", ())),
+                    duration_seconds=rd.get("duration_seconds", 0.0),
+                    session_id=rd.get("session_id"),
+                )
+            except Exception as e:
+                log.warning(
+                    "level_context.deserialize.review_skipped",
+                    error=str(e),
+                )
+                review = None
+
+        completed_acs: list[ACContextSummary] = []
+        for ac in d.get("completed_acs", ()):
+            try:
+                completed_acs.append(
+                    ACContextSummary(
+                        ac_index=ac.get("ac_index", 0),
+                        ac_content=ac.get("ac_content", ""),
+                        success=ac.get("success", False),
+                        tools_used=tuple(ac.get("tools_used", ())),
+                        files_modified=tuple(ac.get("files_modified", ())),
+                        key_output=ac.get("key_output", ""),
+                    )
+                )
+            except Exception as e:
+                log.warning(
+                    "level_context.deserialize.ac_skipped",
+                    error=str(e),
+                )
 
         result.append(
             LevelContext(
-                level_number=d["level_number"],
-                completed_acs=tuple(
-                    ACContextSummary(
-                        **{
-                            **ac,
-                            "tools_used": tuple(ac.get("tools_used", ())),
-                            "files_modified": tuple(ac.get("files_modified", ())),
-                        }
-                    )
-                    for ac in d.get("completed_acs", ())
-                ),
+                level_number=d.get("level_number", 0),
+                completed_acs=tuple(completed_acs),
                 coordinator_review=review,
             )
         )
