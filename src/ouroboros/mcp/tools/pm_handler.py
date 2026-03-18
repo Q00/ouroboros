@@ -1111,6 +1111,21 @@ class PMInterviewHandler:
             f"{repo_list_text}"
         )
 
+        # Build recommended option from current defaults
+        default_numbers = [
+            str(i + 1) for i, r in enumerate(repo_list) if r.get("is_default")
+        ]
+        default_names = [
+            r["name"] for r in repo_list if r.get("is_default")
+        ]
+
+        if default_numbers:
+            recommended_label = ", ".join(default_numbers) + " (Recommended)"
+            recommended_desc = ", ".join(default_names)
+        else:
+            recommended_label = "none (Recommended)"
+            recommended_desc = "No defaults — proceed as greenfield"
+
         meta: dict[str, Any] = {
             "session_id": session_id,
             "status": "awaiting_repo_select",
@@ -1118,10 +1133,11 @@ class PMInterviewHandler:
             "repos": repo_list,
             "repo_count": len(repo_list),
             "ask_user_question": {
-                "question": "Which repos to use as brownfield context? Enter numbers or names (comma-separated), or 'none' for greenfield.",
+                "question": "Which repos to use? Enter numbers (see list above) or type custom selection.",
                 "header": "Select repos",
                 "options": [
-                    {"label": "none", "description": "Skip — proceed as greenfield (no existing codebase)"},
+                    {"label": recommended_label, "description": recommended_desc},
+                    {"label": "none", "description": "Proceed as greenfield (no existing codebase)"},
                 ],
                 "multiSelect": False,
             },

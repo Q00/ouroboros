@@ -92,19 +92,12 @@ Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business
 
    **If `meta.ask_user_question` exists** (selection steps like project type, repo selection):
 
-   **IMPORTANT — For repo selection steps** (status contains `"repo"`):
-   Do NOT use AskUserQuestion. Instead:
-   1. Output the MCP content text verbatim (it contains the numbered repo list)
-   2. Output the question from `meta.ask_user_question.question` as plain text
-   3. The user will type their answer directly (e.g. "1,3,5" or "podo-backend, grape")
-   4. Relay the user's text response back to the MCP tool
-
-   **For other selection steps** (project type etc.):
-   - First, output the MCP content text verbatim as a regular text message
-   - Then pass `meta.ask_user_question` DIRECTLY to the `AskUserQuestion` tool as-is. Do NOT modify the question, header, or options. Example:
+   - First, output the MCP content text verbatim as a regular text message (important for repo lists — show the full numbered list)
+   - Then pass `meta.ask_user_question` DIRECTLY to the `AskUserQuestion` tool as-is. Do NOT modify the question, header, or options. Do NOT add extra options. Do NOT create your own question. Example:
      ```
      AskUserQuestion(questions=[meta.ask_user_question])
      ```
+     The MCP server has already formatted everything including recommended defaults. Just relay it.
 
    **If `meta.ask_user_question` does NOT exist** (interview questions):
    - Use `meta.question` as the question text

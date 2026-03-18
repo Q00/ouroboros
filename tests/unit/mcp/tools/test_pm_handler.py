@@ -893,7 +893,7 @@ class TestHandleStartBrownfield:
         # ask_user_question UI hints in meta (user answers with numbers/names)
         assert meta["response_param"] == "answer"
         auq = meta["ask_user_question"]
-        assert "brownfield context" in auq["question"]
+        assert "repos to use" in auq["question"].lower()
 
         # Human-readable content includes numbered repo list with ★ for defaults
         content_text = result.value.content[0].text
