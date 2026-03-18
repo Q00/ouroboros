@@ -183,7 +183,7 @@ class TestCodexCommandDispatcher:
             },
         )
         mock_exec.assert_not_called()
-        assert messages[-1].data["subtype"] == "success"
+        assert messages[-1].data["subtype"] == "error"
         assert messages[-1].data["tool_error"] is True
         assert messages[-1].resume_handle is not None
         assert messages[-1].resume_handle.native_session_id == "thread-123"

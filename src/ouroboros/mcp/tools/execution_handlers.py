@@ -143,21 +143,21 @@ class ExecuteSeedHandler:
             if not seed_candidate.is_absolute():
                 seed_candidate = resolved_cwd / seed_candidate
 
-            # Allow seeds from both cwd and the global ~/.ouroboros/ directory
-            ouroboros_home = Path.home() / ".ouroboros"
+            # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
+            ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
             valid_cwd, _ = InputValidator.validate_path_containment(
                 seed_candidate,
                 resolved_cwd,
             )
             valid_home, _ = InputValidator.validate_path_containment(
                 seed_candidate,
-                ouroboros_home,
+                ouroboros_seeds,
             )
             if not valid_cwd and not valid_home:
                 return Result.err(
                     MCPToolError(
                         f"Seed path escapes allowed directories: "
-                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_home}",
+                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
                         tool_name="ouroboros_execute_seed",
                     )
                 )
@@ -404,7 +404,7 @@ class ExecuteSeedHandler:
                         "launched": True,
                         "status": "running",
                         "runtime_backend": runtime_backend,
-                        "llm_backend": self.llm_backend,
+                        "llm_backend": resolved_llm_backend,
                         "resume_requested": bool(session_id),
                     },
                 )
@@ -518,21 +518,21 @@ class StartExecuteSeedHandler:
             if not seed_candidate.is_absolute():
                 seed_candidate = resolved_cwd / seed_candidate
 
-            # Allow seeds from both cwd and the global ~/.ouroboros/ directory
-            ouroboros_home = Path.home() / ".ouroboros"
+            # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
+            ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
             valid_cwd, _ = InputValidator.validate_path_containment(
                 seed_candidate,
                 resolved_cwd,
             )
             valid_home, _ = InputValidator.validate_path_containment(
                 seed_candidate,
-                ouroboros_home,
+                ouroboros_seeds,
             )
             if not valid_cwd and not valid_home:
                 return Result.err(
                     MCPToolError(
                         f"Seed path escapes allowed directories: "
-                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_home}",
+                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
                         tool_name="ouroboros_start_execute_seed",
                     )
                 )
@@ -634,6 +634,8 @@ class StartExecuteSeedHandler:
                     "execution_id": snapshot.links.execution_id,
                     "status": snapshot.status.value,
                     "cursor": snapshot.cursor,
+                    "runtime_backend": runtime_backend,
+                    "llm_backend": llm_backend,
                 },
             )
         )

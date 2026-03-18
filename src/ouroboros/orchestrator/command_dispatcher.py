@@ -192,8 +192,6 @@ class CodexCommandDispatcher:
         resume_handle = self._build_resume_handle(current_handle, intercept, tool_result)
         content = tool_result.text_content.strip() or f"{intercept.command_prefix} completed."
         result_subtype = "error" if tool_result.is_error else "success"
-        if intercept.mcp_tool == "ouroboros_interview":
-            result_subtype = "success"
         result_data: dict[str, Any] = {
             "subtype": result_subtype,
             "skill_name": intercept.skill_name,
