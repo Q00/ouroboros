@@ -1,8 +1,8 @@
-"""PRD Interview Handler for MCP server.
+"""PM Interview Handler for MCP server.
 
 Mirrors the existing InterviewHandler pattern from definitions.py but wraps
-PRDInterviewEngine instead of InterviewEngine.  The handler adds a thin MCP
-layer on top of the engine: flat optional parameters, prd_meta persistence,
+PMInterviewEngine instead of InterviewEngine.  The handler adds a thin MCP
+layer on top of the engine: flat optional parameters, pm_meta persistence,
 and deferred/decide-later diff computation.
 
 The diff computation is the core value-add of this handler: before calling
@@ -27,12 +27,13 @@ from typing import Any
 import structlog
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
+from ouroboros.bigbang.brownfield import get_default_brownfield_context
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewRound,
     InterviewState,
 )
-from ouroboros.bigbang.prd_interview import PRDInterviewEngine
+from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
@@ -44,29 +45,30 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
+from ouroboros.persistence.brownfield import BrownfieldStore
 
 log = structlog.get_logger()
 
 # Hard cap on interview rounds in MCP mode.  The engine's ambiguity scorer
 # should trigger completion well before this, but this prevents runaway loops.
-MAX_PRD_INTERVIEW_ROUNDS = 20
+MAX_PM_INTERVIEW_ROUNDS = 20
 
 _DATA_DIR = Path.home() / ".ouroboros" / "data"
 
 
 def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
-    """Return the path to the prd_meta JSON file for a session."""
+    """Return the path to the pm_meta JSON file for a session."""
     base = data_dir or _DATA_DIR
-    return base / f"prd_meta_{session_id}.json"
+    return base / f"pm_meta_{session_id}.json"
 
 
-def _save_prd_meta(
+def _save_pm_meta(
     session_id: str,
-    engine: PRDInterviewEngine,
+    engine: PMInterviewEngine,
     cwd: str = "",
     data_dir: Path | None = None,
 ) -> None:
-    """Persist PRD-specific metadata that isn't in InterviewState.
+    """Persist PM-specific metadata that isn't in InterviewState.
 
     Fields (limited to 5):
         deferred_items: list[str]
@@ -97,26 +99,26 @@ def _save_prd_meta(
     path = _meta_path(session_id, data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    log.debug("prd_handler.meta_saved", session_id=session_id, path=str(path))
+    log.debug("pm_handler.meta_saved", session_id=session_id, path=str(path))
 
 
-def _load_prd_meta(
+def _load_pm_meta(
     session_id: str,
     data_dir: Path | None = None,
 ) -> dict[str, Any] | None:
-    """Load PRD-specific metadata from disk.  Returns None if not found."""
+    """Load PM-specific metadata from disk.  Returns None if not found."""
     path = _meta_path(session_id, data_dir)
     if not path.exists():
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        log.warning("prd_handler.meta_load_failed", error=str(exc))
+        log.warning("pm_handler.meta_load_failed", error=str(exc))
         return None
 
 
-def _restore_engine_meta(engine: PRDInterviewEngine, meta: dict[str, Any]) -> None:
-    """Restore PRD-specific state into an engine from loaded meta."""
+def _restore_engine_meta(engine: PMInterviewEngine, meta: dict[str, Any]) -> None:
+    """Restore PM-specific state into an engine from loaded meta."""
     engine.deferred_items = list(meta.get("deferred_items", []))
     engine.decide_later_items = list(meta.get("decide_later_items", []))
     engine.codebase_context = meta.get("codebase_context", "")
@@ -126,7 +128,7 @@ def _restore_engine_meta(engine: PRDInterviewEngine, meta: dict[str, Any]) -> No
         engine._reframe_map[pending["reframed"]] = pending["original"]
 
 
-def _last_classification(engine: PRDInterviewEngine) -> str | None:
+def _last_classification(engine: PMInterviewEngine) -> str | None:
     """Return the output_type string of the engine's last classification, or None."""
     if engine.classifications:
         return engine.classifications[-1].output_type.value
@@ -156,7 +158,7 @@ def _detect_action(arguments: dict[str, Any]) -> str:
 
 
 def _compute_deferred_diff(
-    engine: PRDInterviewEngine,
+    engine: PMInterviewEngine,
     deferred_len_before: int,
     decide_later_len_before: int,
 ) -> dict[str, Any]:
@@ -184,7 +186,7 @@ def _compute_deferred_diff(
 
 async def _check_completion(
     state: InterviewState,
-    engine: PRDInterviewEngine,
+    engine: PMInterviewEngine,
 ) -> dict[str, Any] | None:
     """Check whether the interview should complete based on ambiguity or rounds.
 
@@ -192,10 +194,10 @@ async def _check_completion(
 
     1. **Ambiguity score** — after at least ``MIN_ROUNDS_BEFORE_EARLY_EXIT``
        answered rounds, the scorer evaluates requirement clarity.  If the score
-       is ≤ ``AMBIGUITY_THRESHOLD`` (0.2) the interview is ready for PRD
+       is ≤ ``AMBIGUITY_THRESHOLD`` (0.2) the interview is ready for PM
        generation.
 
-    2. **Max-rounds safety cap** — after ``MAX_PRD_INTERVIEW_ROUNDS`` rounds
+    2. **Max-rounds safety cap** — after ``MAX_PM_INTERVIEW_ROUNDS`` rounds
        the interview is force-completed to prevent runaway loops.
 
     Returns a dict with completion metadata if the interview should end,
@@ -205,9 +207,9 @@ async def _check_completion(
     answered_rounds = sum(1 for r in state.rounds if r.user_response is not None)
 
     # ── Max-rounds hard cap ────────────────────────────────────────
-    if answered_rounds >= MAX_PRD_INTERVIEW_ROUNDS:
+    if answered_rounds >= MAX_PM_INTERVIEW_ROUNDS:
         log.info(
-            "prd_handler.completion.max_rounds",
+            "pm_handler.completion.max_rounds",
             session_id=state.interview_id,
             rounds=answered_rounds,
         )
@@ -244,7 +246,7 @@ async def _check_completion(
 
         if score_result.is_err:
             log.warning(
-                "prd_handler.completion.scoring_failed",
+                "pm_handler.completion.scoring_failed",
                 session_id=state.interview_id,
                 error=str(score_result.error),
             )
@@ -261,7 +263,7 @@ async def _check_completion(
 
         if ambiguity.is_ready_for_seed:
             log.info(
-                "prd_handler.completion.ambiguity_resolved",
+                "pm_handler.completion.ambiguity_resolved",
                 session_id=state.interview_id,
                 ambiguity_score=ambiguity.overall_score,
                 rounds=answered_rounds,
@@ -274,7 +276,7 @@ async def _check_completion(
             }
 
         log.debug(
-            "prd_handler.completion.continuing",
+            "pm_handler.completion.continuing",
             session_id=state.interview_id,
             ambiguity_score=ambiguity.overall_score,
             rounds=answered_rounds,
@@ -282,7 +284,7 @@ async def _check_completion(
 
     except Exception as e:
         log.warning(
-            "prd_handler.completion.check_error",
+            "pm_handler.completion.check_error",
             session_id=state.interview_id,
             error=str(e),
         )
@@ -291,47 +293,47 @@ async def _check_completion(
 
 
 @dataclass
-class PRDInterviewHandler:
-    """Handler for the ouroboros_prd_interview MCP tool.
+class PMInterviewHandler:
+    """Handler for the ouroboros_pm_interview MCP tool.
 
-    Manages PRD-focused interviews with question classification,
+    Manages PM-focused interviews with question classification,
     deferred item tracking, and per-call diff computation.
 
     Interview completion is determined solely by the engine's ambiguity
     scorer (score ≤ 0.2) or max-rounds cap — there is no user "done"
     signal.
 
-    The handler wraps PRDInterviewEngine and adds:
+    The handler wraps PMInterviewEngine and adds:
     - Flat MCP parameter interface (session_id, action, answer, cwd, initial_context)
-    - prd_meta_{session_id}.json persistence for PRD-specific state
+    - pm_meta_{session_id}.json persistence for PM-specific state
     - Deferred/decide-later diff computation per ask_next_question call
     - Automatic completion detection via ambiguity scoring and max-rounds
     """
 
-    prd_engine: PRDInterviewEngine | None = field(default=None, repr=False)
+    pm_engine: PMInterviewEngine | None = field(default=None, repr=False)
     data_dir: Path | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition with flat optional parameters."""
         return MCPToolDefinition(
-            name="ouroboros_prd_interview",
+            name="ouroboros_pm_interview",
             description=(
-                "PRD interview for product requirements gathering. "
+                "PM interview for product requirements gathering. "
                 "Start with initial_context, continue with session_id + answer, "
-                "or generate PRD seed with action='generate'."
+                "or generate PM seed with action='generate'."
             ),
             parameters=(
                 MCPToolParameter(
                     name="initial_context",
                     type=ToolInputType.STRING,
-                    description="Initial product description to start a new PRD interview",
+                    description="Initial product description to start a new PM interview",
                     required=False,
                 ),
                 MCPToolParameter(
                     name="session_id",
                     type=ToolInputType.STRING,
-                    description="Session ID to resume an existing PRD interview",
+                    description="Session ID to resume an existing PM interview",
                     required=False,
                 ),
                 MCPToolParameter(
@@ -346,7 +348,7 @@ class PRDInterviewHandler:
                     description=(
                         "Action to perform. Auto-detected from parameter presence when omitted: "
                         "initial_context → 'start', session_id + answer → 'resume'. "
-                        "Use 'generate' explicitly to produce PRD seed from completed interview."
+                        "Use 'generate' explicitly to produce PM seed from completed interview."
                     ),
                     required=False,
                 ),
@@ -354,20 +356,21 @@ class PRDInterviewHandler:
                     name="cwd",
                     type=ToolInputType.STRING,
                     description=(
-                        "Working directory for brownfield auto-detection. "
-                        "Defaults to current working directory."
+                        "Working directory for PM document output. "
+                        "Defaults to current working directory. "
+                        "Brownfield context is loaded from DB (is_default=true)."
                     ),
                     required=False,
                 ),
             ),
         )
 
-    def _get_engine(self) -> PRDInterviewEngine:
+    def _get_engine(self) -> PMInterviewEngine:
         """Return the injected engine or create a new one with default adapter."""
-        if self.prd_engine is not None:
-            return self.prd_engine
+        if self.pm_engine is not None:
+            return self.pm_engine
         adapter = ClaudeAgentAdapter(permission_mode="bypassPermissions")
-        return PRDInterviewEngine.create(
+        return PMInterviewEngine.create(
             llm_adapter=adapter,
             state_dir=self.data_dir or _DATA_DIR,
         )
@@ -376,7 +379,7 @@ class PRDInterviewHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Handle a PRD interview request.
+        """Handle a PM interview request.
 
         Action is auto-detected from parameter presence when ``action`` is
         omitted:
@@ -396,7 +399,7 @@ class PRDInterviewHandler:
         engine = self._get_engine()
 
         try:
-            # ── Generate PRD seed ──────────────────────────────────
+            # ── Generate PM seed ──────────────────────────────────
             if action == "generate" and session_id:
                 return await self._handle_generate(engine, session_id, cwd)
 
@@ -411,16 +414,16 @@ class PRDInterviewHandler:
             return Result.err(
                 MCPToolError(
                     "Must provide initial_context to start, or session_id to resume/generate",
-                    tool_name="ouroboros_prd_interview",
+                    tool_name="ouroboros_pm_interview",
                 )
             )
 
         except Exception as e:
-            log.error("prd_handler.unexpected_error", error=str(e))
+            log.error("pm_handler.unexpected_error", error=str(e))
             return Result.err(
                 MCPToolError(
-                    f"PRD interview failed: {e}",
-                    tool_name="ouroboros_prd_interview",
+                    f"PM interview failed: {e}",
+                    tool_name="ouroboros_pm_interview",
                 )
             )
 
@@ -430,18 +433,35 @@ class PRDInterviewHandler:
 
     async def _handle_start(
         self,
-        engine: PRDInterviewEngine,
+        engine: PMInterviewEngine,
         initial_context: str,
         cwd: str,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Start a new PRD interview session."""
-        # Auto-detect brownfield from cwd
-        cwd_path = Path(cwd)
+        """Start a new PM interview session."""
+        # Auto-detect brownfield from DB default repo (not cwd)
         brownfield_repos = None
-        if (cwd_path / ".git").exists():
-            brownfield_repos = [
-                {"path": str(cwd_path), "name": cwd_path.name, "role": "primary"}
-            ]
+        try:
+            store = BrownfieldStore()
+            await store.initialize()
+            try:
+                default_repo = await get_default_brownfield_context(store)
+                if default_repo is not None:
+                    brownfield_repos = [
+                        {
+                            "path": default_repo.path,
+                            "name": default_repo.name,
+                            "role": "primary",
+                        }
+                    ]
+                    log.info(
+                        "pm_handler.brownfield_from_db",
+                        path=default_repo.path,
+                        name=default_repo.name,
+                    )
+            finally:
+                await store.close()
+        except Exception as exc:
+            log.warning("pm_handler.brownfield_db_failed", error=str(exc))
 
         result = await engine.ask_opening_and_start(
             user_response=initial_context,
@@ -449,7 +469,7 @@ class PRDInterviewHandler:
         )
         if result.is_err:
             return Result.err(
-                MCPToolError(str(result.error), tool_name="ouroboros_prd_interview")
+                MCPToolError(str(result.error), tool_name="ouroboros_pm_interview")
             )
 
         state = result.value
@@ -463,7 +483,7 @@ class PRDInterviewHandler:
             return Result.err(
                 MCPToolError(
                     str(question_result.error),
-                    tool_name="ouroboros_prd_interview",
+                    tool_name="ouroboros_pm_interview",
                 )
             )
 
@@ -484,7 +504,7 @@ class PRDInterviewHandler:
 
         # Persist
         await engine.save_state(state)
-        _save_prd_meta(state.interview_id, engine, cwd=cwd, data_dir=self.data_dir)
+        _save_pm_meta(state.interview_id, engine, cwd=cwd, data_dir=self.data_dir)
 
         # Include pending_reframe in response meta if a reframe occurred
         pending_reframe = None
@@ -504,7 +524,7 @@ class PRDInterviewHandler:
         }
 
         log.info(
-            "prd_handler.started",
+            "pm_handler.started",
             session_id=state.interview_id,
             is_brownfield=state.is_brownfield,
             has_pending_reframe=pending_reframe is not None,
@@ -517,7 +537,7 @@ class PRDInterviewHandler:
                     MCPContentItem(
                         type=ContentType.TEXT,
                         text=(
-                            f"PRD interview started. Session ID: {state.interview_id}\n\n"
+                            f"PM interview started. Session ID: {state.interview_id}\n\n"
                             f"{question}"
                         ),
                     ),
@@ -533,7 +553,7 @@ class PRDInterviewHandler:
 
     async def _handle_answer(
         self,
-        engine: PRDInterviewEngine,
+        engine: PMInterviewEngine,
         session_id: str,
         answer: str | None,
         cwd: str,
@@ -548,12 +568,12 @@ class PRDInterviewHandler:
         load_result = await engine.load_state(session_id)
         if load_result.is_err:
             return Result.err(
-                MCPToolError(str(load_result.error), tool_name="ouroboros_prd_interview")
+                MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
             )
         state = load_result.value
 
-        # Restore PRD meta into engine
-        meta = _load_prd_meta(session_id, self.data_dir)
+        # Restore PM meta into engine
+        meta = _load_pm_meta(session_id, self.data_dir)
         if meta:
             _restore_engine_meta(engine, meta)
 
@@ -568,7 +588,7 @@ class PRDInterviewHandler:
                 return Result.err(
                     MCPToolError(
                         str(record_result.error),
-                        tool_name="ouroboros_prd_interview",
+                        tool_name="ouroboros_pm_interview",
                     )
                 )
             state = record_result.value
@@ -582,7 +602,7 @@ class PRDInterviewHandler:
             # Mark interview as complete
             await engine.complete_interview(state)
             await engine.save_state(state)
-            _save_prd_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
+            _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
             decide_later_summary = engine.format_decide_later_summary()
             summary_text = (
@@ -599,7 +619,7 @@ class PRDInterviewHandler:
             if decide_later_summary:
                 summary_text += f"\n{decide_later_summary}\n"
             summary_text += (
-                f'\nGenerate PRD with: action="generate", session_id="{session_id}"'
+                f'\nGenerate PM with: action="generate", session_id="{session_id}"'
             )
 
             response_meta = {
@@ -615,7 +635,7 @@ class PRDInterviewHandler:
             }
 
             log.info(
-                "prd_handler.interview_complete",
+                "pm_handler.interview_complete",
                 session_id=session_id,
                 **completion,
             )
@@ -659,7 +679,7 @@ class PRDInterviewHandler:
                     )
                 )
             return Result.err(
-                MCPToolError(error_msg, tool_name="ouroboros_prd_interview")
+                MCPToolError(error_msg, tool_name="ouroboros_pm_interview")
             )
 
         question = question_result.value
@@ -679,7 +699,7 @@ class PRDInterviewHandler:
         state.mark_updated()
 
         await engine.save_state(state)
-        _save_prd_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
+        _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
         # Include pending_reframe in response meta if a new reframe occurred
         pending_reframe = None
@@ -707,7 +727,7 @@ class PRDInterviewHandler:
         }
 
         log.info(
-            "prd_handler.question_asked",
+            "pm_handler.question_asked",
             session_id=session_id,
             classification=classification,
             has_pending_reframe=pending_reframe is not None,
@@ -728,51 +748,51 @@ class PRDInterviewHandler:
         )
 
     # ──────────────────────────────────────────────────────────────
-    # Generate PRD seed
+    # Generate PM seed
     # ──────────────────────────────────────────────────────────────
 
     async def _handle_generate(
         self,
-        engine: PRDInterviewEngine,
+        engine: PMInterviewEngine,
         session_id: str,
         cwd: str,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Generate PRD seed from completed interview (idempotent).
+        """Generate PM seed from completed interview (idempotent).
 
-        Loads InterviewState and prd_meta, restores engine via restore_meta(),
-        runs generate_prd_seed, saves PRD seed to ~/.ouroboros/seeds/ and
-        prd.md to {cwd}/.ouroboros/.  Idempotent — overwrites on retry with
+        Loads InterviewState and pm_meta, restores engine via restore_meta(),
+        runs generate_pm_seed, saves PM seed to ~/.ouroboros/seeds/ and
+        pm.md to {cwd}/.ouroboros/.  Idempotent — overwrites on retry with
         the same session_id.
         """
         load_result = await engine.load_state(session_id)
         if load_result.is_err:
             return Result.err(
-                MCPToolError(str(load_result.error), tool_name="ouroboros_prd_interview")
+                MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
             )
         state = load_result.value
 
-        # Restore PRD meta into engine via engine.restore_meta()
-        meta = _load_prd_meta(session_id, self.data_dir)
+        # Restore PM meta into engine via engine.restore_meta()
+        meta = _load_pm_meta(session_id, self.data_dir)
         if meta:
             engine.restore_meta(meta)
 
-        seed_result = await engine.generate_prd_seed(state)
+        seed_result = await engine.generate_pm_seed(state)
         if seed_result.is_err:
             return Result.err(
                 MCPToolError(
                     str(seed_result.error),
-                    tool_name="ouroboros_prd_interview",
+                    tool_name="ouroboros_pm_interview",
                 )
             )
 
         seed = seed_result.value
 
         # Save seed to ~/.ouroboros/seeds/ (idempotent — overwrites on retry)
-        seed_path = engine.save_prd_seed(seed)
+        seed_path = engine.save_pm_seed(seed)
 
-        # Save prd.md to {cwd}/.ouroboros/
-        prd_output_dir = Path(cwd) / ".ouroboros"
-        prd_path = engine.save_prd_document(seed, output_dir=prd_output_dir)
+        # Save pm.md to {cwd}/.ouroboros/
+        pm_output_dir = Path(cwd) / ".ouroboros"
+        pm_path = engine.save_pm_document(seed, output_dir=pm_output_dir)
 
         return Result.ok(
             MCPToolResult(
@@ -780,9 +800,9 @@ class PRDInterviewHandler:
                     MCPContentItem(
                         type=ContentType.TEXT,
                         text=(
-                            f"PRD seed generated: {seed.product_name}\n"
+                            f"PM seed generated: {seed.product_name}\n"
                             f"Seed: {seed_path}\n"
-                            f"Document: {prd_path}\n\n"
+                            f"Document: {pm_path}\n\n"
                             f"Deferred items: {len(seed.deferred_items)}\n"
                             f"Decide-later items: {len(seed.decide_later_items)}"
                         ),
@@ -791,7 +811,7 @@ class PRDInterviewHandler:
                 is_error=False,
                 meta={
                     "session_id": session_id,
-                    "prd_path": str(prd_path),
+                    "pm_path": str(pm_path),
                     "seed_path": str(seed_path),
                 },
             )

@@ -344,6 +344,104 @@ Join the community:
 
 ---
 
+### Step 5.5: Brownfield Repository Scan
+
+Scan the user's home directory for existing git repositories and register them in the Ouroboros DB. This enables PM interviews to use brownfield context for existing projects.
+
+**Show scanning indicator:**
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Scanning for Existing Projects...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Looking for git repositories in your home directory.
+Only GitHub-hosted repos will be registered.
+This may take a moment...
+```
+
+**Implementation:**
+
+1. Call the brownfield scan logic (`scan_home_repos()`) which:
+   - Walks `~/` looking for `.git` directories
+   - Prunes `.git` subtrees (no descending into nested repos)
+   - Skips excluded directories (node_modules, .venv, __pycache__, .cache, Library, .Trash, vendor, .gradle, build, dist, target, .tox, .mypy_cache, .pytest_cache, .cargo, Pods, etc.)
+   - Filters to only repos whose `origin` remote URL contains `github.com`
+
+2. Bulk-register discovered repos via `BrownfieldStore.bulk_register()` (is_default=false, desc="")
+
+**Display discovered repos:**
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Found 12 GitHub Repositories
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  1. ouroboros          ~/ouroboros
+  2. my-webapp          ~/projects/my-webapp
+  3. dotfiles           ~/dotfiles
+  4. awesome-tool       ~/work/awesome-tool
+  ...
+
+These repos are now registered in Ouroboros.
+When you start a PM interview, Ouroboros can use
+your existing codebase as brownfield context.
+```
+
+**If no repos found:**
+```
+No GitHub repositories found in your home directory.
+That's fine — you can register repos later with:
+  ooo brownfield scan
+```
+Skip the default selection prompt and proceed to Step 6.
+
+**Default repo selection prompt (via AskUserQuestion):**
+
+```json
+{
+  "questions": [{
+    "question": "Which repository would you like as your default brownfield context? The default repo is used automatically in PM interviews.",
+    "header": "Default Brownfield Repository",
+    "options": [
+      {
+        "label": "ouroboros",
+        "description": "~/ouroboros"
+      },
+      {
+        "label": "my-webapp",
+        "description": "~/projects/my-webapp"
+      },
+      {
+        "label": "Skip — choose later",
+        "description": "You can set a default anytime with: ooo brownfield set_default"
+      }
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+- Options are dynamically generated from the discovered repos list
+- Always include a **"Skip — choose later"** option as the last choice
+- If the user selects a repo, call `set_default(path)` which sets `is_default=true` and generates a one-line description from README/CLAUDE.md using the Frugal (Haiku) model
+- If the user selects **Skip**, proceed without setting a default
+
+**Celebration Checkpoint 5.5:**
+```
+Brownfield registry updated!
+Default: ouroboros (~/ouroboros)
+
+Your existing code will inform future PM interviews
+for smarter, context-aware project planning.
+```
+
+Or if skipped:
+```
+Brownfield repos registered! You can set a default later:
+  ooo brownfield set_default
+```
+
+---
+
 ### Step 6: First Project Nudge
 
 Encourage immediate action:
@@ -460,6 +558,8 @@ Track these checkpoints for conversion optimization:
 - [ ] MCP server registration accepted
 - [ ] CLAUDE.md integration accepted
 - [ ] Verification passed
+- [ ] Brownfield repos scanned and registered
+- [ ] Default brownfield repo selected
 - [ ] First project started (ooo interview)
 - [ ] First seed generated (ooo seed)
 - [ ] First execution completed (ooo run)

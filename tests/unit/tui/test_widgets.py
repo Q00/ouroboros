@@ -150,7 +150,7 @@ class TestDriftMeterWidget:
         assert widget.ontology_drift == 0.05
 
     def test_combined_drift_calculation(self) -> None:
-        """Test combined drift calculation matches PRD formula."""
+        """Test combined drift calculation matches PM formula."""
         widget = DriftMeterWidget(
             goal_drift=0.2,
             constraint_drift=0.1,

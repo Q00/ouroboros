@@ -1,20 +1,20 @@
 ---
-name: prd
-description: "Generate a PRD through guided PM-focused interview with automatic question classification"
+name: pm
+description: "Generate a PM through guided PM-focused interview with automatic question classification"
 ---
 
-# /ouroboros:prd
+# /ouroboros:pm
 
 Generate a Product Requirements Document through a PM-focused Socratic interview.
 
 ## Usage
 
 ```
-ooo prd [topic]
-/ouroboros:prd [topic]
+ooo pm [topic]
+/ouroboros:pm [topic]
 ```
 
-**Trigger keywords:** "prd", "product requirements", "write prd"
+**Trigger keywords:** "pm", "product requirements", "write pm"
 
 ## Instructions
 
@@ -24,13 +24,13 @@ When the user invokes this skill:
 
 The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step first.**
 
-1. Use the `ToolSearch` tool to find and load the PRD interview MCP tool:
+1. Use the `ToolSearch` tool to find and load the PM interview MCP tool:
    ```
-   ToolSearch query: "+ouroboros prd_interview"
+   ToolSearch query: "+ouroboros pm_interview"
    ```
-   This searches for tools with "ouroboros" in the name related to "prd_interview".
+   This searches for tools with "ouroboros" in the name related to "pm_interview".
 
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_prd_interview` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
+2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_pm_interview` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
 
 3. If ToolSearch finds the tool → proceed to **Path A**.
    If ToolSearch returns no matching tools → proceed to **Path B**.
@@ -39,13 +39,13 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
 
 ### Path A: MCP Mode (Required)
 
-Use the `ouroboros_prd_interview` MCP tool for the entire interview. All business logic (question classification, reframing, decide-later deferrals, ambiguity scoring) is handled by the tool.
+Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business logic (question classification, reframing, decide-later deferrals, ambiguity scoring) is handled by the tool.
 
 #### Starting a New Interview
 
 1. **Start the interview**:
    ```
-   Tool: ouroboros_prd_interview
+   Tool: ouroboros_pm_interview
    Arguments:
      initial_context: <user's topic or idea>
      cwd: <current working directory>
@@ -98,7 +98,7 @@ Use the `ouroboros_prd_interview` MCP tool for the entire interview. All busines
 
 4. **Relay the answer back**:
    ```
-   Tool: ouroboros_prd_interview
+   Tool: ouroboros_pm_interview
    Arguments:
      session_id: <session ID from start>
      answer: <user's selected option or custom text>
@@ -107,7 +107,7 @@ Use the `ouroboros_prd_interview` MCP tool for the entire interview. All busines
 
 5. **Repeat steps 2-4** until the MCP tool response contains `meta.is_complete == true`.
 
-   **Auto-transition to generate**: When the MCP tool returns `meta.is_complete == true`, do NOT ask the user another question. Instead, immediately proceed to **Step 6** (Generate the PRD) by calling the tool with `action: "generate"` and the same `session_id`. This transition is automatic — no user confirmation needed.
+   **Auto-transition to generate**: When the MCP tool returns `meta.is_complete == true`, do NOT ask the user another question. Instead, immediately proceed to **Step 6** (Generate the PM) by calling the tool with `action: "generate"` and the same `session_id`. This transition is automatic — no user confirmation needed.
 
    The tool determines completion via ambiguity scoring — there is no user "done" signal needed.
 
@@ -115,46 +115,46 @@ Use the `ouroboros_prd_interview` MCP tool for the entire interview. All busines
 
 If the user has a previous session:
 ```
-Tool: ouroboros_prd_interview
+Tool: ouroboros_pm_interview
 Arguments:
   session_id: <existing session ID>
 ```
 The tool restores full state (Q&A history, deferred items, decide-later items, brownfield context) and returns the next question.
 
-#### Generating the PRD (auto-triggered on completion)
+#### Generating the PM (auto-triggered on completion)
 
-6. When `meta.is_complete` is `true`, **immediately generate the PRD artifacts** (no user prompt needed):
+6. When `meta.is_complete` is `true`, **immediately generate the PM artifacts** (no user prompt needed):
    ```
-   Tool: ouroboros_prd_interview
+   Tool: ouroboros_pm_interview
    Arguments:
      session_id: <session ID>
      action: "generate"
    ```
    The tool generates:
-   - **PRD Document**: `.ouroboros/prd.md` — natural language PRD with sections for Goal, Target Users, User Stories, Success Criteria, Constraints, and Deferred Decisions
-   - **PRD Seed**: `~/.ouroboros/seeds/prd_seed_{id}.yaml` — structured YAML for downstream tooling
+   - **PM Document**: `.ouroboros/pm.md` — natural language PM with sections for Goal, Target Users, User Stories, Success Criteria, Constraints, and Deferred Decisions
+   - **PM Seed**: `~/.ouroboros/seeds/pm_seed_{id}.yaml` — structured YAML for downstream tooling
 
    The generate action is **idempotent** — calling it again with the same session_id produces the same result.
 
 7. **Display the completion summary**:
    ```
-   Your PRD has been generated!
+   Your PM has been generated!
 
    Artifacts:
-   - PRD Document: .ouroboros/prd.md
-   - PRD Seed: ~/.ouroboros/seeds/prd_seed_{id}.yaml
+   - PM Document: .ouroboros/pm.md
+   - PM Seed: ~/.ouroboros/seeds/pm_seed_{id}.yaml
 
    Deferred decisions: {N} items (to be resolved in development interview)
 
-   📍 Next: `ooo interview` to start the development interview based on this PRD
+   📍 Next: `ooo interview` to start the development interview based on this PM
    ```
 
 ### Path B: MCP Server Not Available (Setup Required)
 
-If the MCP tool is not found, the PRD interview requires the Ouroboros MCP server. Guide the user to set it up:
+If the MCP tool is not found, the PM interview requires the Ouroboros MCP server. Guide the user to set it up:
 
 ```
-The PRD interview requires the Ouroboros MCP server, which is not currently available.
+The PM interview requires the Ouroboros MCP server, which is not currently available.
 
 To set up:
 
@@ -167,14 +167,14 @@ To set up:
 
 3. Restart Claude Code to load the MCP server.
 
-4. Run `ooo prd` again.
+4. Run `ooo pm` again.
 ```
 
 Do NOT attempt to run the interview without the MCP tool. The question classification, reframing, and decide-later logic requires the server.
 
 ## Interviewer Behavior
 
-The MCP tool's interviewer in PRD mode:
+The MCP tool's interviewer in PM mode:
 - Focuses on BUSINESS and PRODUCT questions, not technical ones
 - Targets PM-level ambiguity (goals, users, success criteria, scope)
 - Automatically defers technical questions without bothering the PM
@@ -185,7 +185,7 @@ The MCP tool's interviewer in PRD mode:
 ## Example Session
 
 ```
-User: ooo prd
+User: ooo pm
 
 [MCP tool auto-detects brownfield: Python/FastAPI backend]
 
@@ -213,17 +213,17 @@ Q5 (reframed): When a user has many unread notifications, should we group them o
 [MCP tool returns meta.is_complete = true, completion_reason = "ambiguity_resolved"]
 [Auto-transitioning to generate — no user prompt]
 
-Your PRD has been generated!
+Your PM has been generated!
 
 Artifacts:
-- PRD Document: .ouroboros/prd.md
-- PRD Seed: ~/.ouroboros/seeds/prd_seed_abc123.yaml
+- PM Document: .ouroboros/pm.md
+- PM Seed: ~/.ouroboros/seeds/pm_seed_abc123.yaml
 
 Deferred decisions: 3 items (to be resolved in development interview)
 
-📍 Next: `ooo interview` to start the development interview based on this PRD
+📍 Next: `ooo interview` to start the development interview based on this PM
 ```
 
 ## Next Steps
 
-After PRD completion, `ooo interview` will auto-detect the PRD seed and offer to use it as initial context for a development-focused interview.
+After PM completion, `ooo interview` will auto-detect the PM seed and offer to use it as initial context for a development-focused interview.

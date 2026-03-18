@@ -1,4 +1,4 @@
-"""Tests for PRDInterviewHandler — start/brownfield (AC 2), diff computation (AC 8), completion (AC 12)."""
+"""Tests for PMInterviewHandler — start/brownfield (AC 2), diff computation (AC 8), completion (AC 12)."""
 
 from __future__ import annotations
 
@@ -9,19 +9,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
-from ouroboros.bigbang.prd_interview import PRDInterviewEngine
+from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.core.types import Result
-from ouroboros.mcp.tools.prd_handler import (
+from ouroboros.mcp.tools.pm_handler import (
     _DATA_DIR,
-    MAX_PRD_INTERVIEW_ROUNDS,
-    PRDInterviewHandler,
+    MAX_PM_INTERVIEW_ROUNDS,
+    PMInterviewHandler,
     _check_completion,
     _compute_deferred_diff,
     _detect_action,
-    _load_prd_meta,
+    _load_pm_meta,
     _meta_path,
     _restore_engine_meta,
-    _save_prd_meta,
+    _save_pm_meta,
 )
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -30,9 +30,9 @@ from ouroboros.mcp.tools.prd_handler import (
 def _make_engine_stub(
     deferred: list[str] | None = None,
     decide_later: list[str] | None = None,
-) -> PRDInterviewEngine:
-    """Create a PRDInterviewEngine stub with controllable lists."""
-    engine = MagicMock(spec=PRDInterviewEngine)
+) -> PMInterviewEngine:
+    """Create a PMInterviewEngine stub with controllable lists."""
+    engine = MagicMock(spec=PMInterviewEngine)
     engine.deferred_items = list(deferred or [])
     engine.decide_later_items = list(decide_later or [])
     engine.codebase_context = ""
@@ -136,7 +136,7 @@ class TestComputeDeferredDiff:
 
 
 class TestPrdMetaPersistence:
-    """Test save/load/restore of prd_meta JSON files."""
+    """Test save/load/restore of pm_meta JSON files."""
 
     def test_save_and_load_roundtrip(self, tmp_path: Path) -> None:
         """Meta data survives save/load roundtrip."""
@@ -146,8 +146,8 @@ class TestPrdMetaPersistence:
         )
         engine.codebase_context = "some context"
 
-        _save_prd_meta("sess-1", engine, cwd="/tmp/proj", data_dir=tmp_path)
-        meta = _load_prd_meta("sess-1", data_dir=tmp_path)
+        _save_pm_meta("sess-1", engine, cwd="/tmp/proj", data_dir=tmp_path)
+        meta = _load_pm_meta("sess-1", data_dir=tmp_path)
 
         assert meta is not None
         assert meta["deferred_items"] == ["q1", "q2"]
@@ -157,7 +157,7 @@ class TestPrdMetaPersistence:
 
     def test_load_missing_returns_none(self, tmp_path: Path) -> None:
         """Loading nonexistent meta returns None."""
-        assert _load_prd_meta("nonexistent", data_dir=tmp_path) is None
+        assert _load_pm_meta("nonexistent", data_dir=tmp_path) is None
 
     def test_restore_engine_meta(self) -> None:
         """Engine state is restored from meta dict."""
@@ -195,8 +195,8 @@ class TestPrdMetaPersistence:
         engine = _make_engine_stub()
         engine._reframe_map = {"pm question": "tech question"}
 
-        _save_prd_meta("sess-2", engine, data_dir=tmp_path)
-        meta = _load_prd_meta("sess-2", data_dir=tmp_path)
+        _save_pm_meta("sess-2", engine, data_dir=tmp_path)
+        meta = _load_pm_meta("sess-2", data_dir=tmp_path)
 
         assert meta is not None
         assert meta["pending_reframe"] == {
@@ -205,11 +205,11 @@ class TestPrdMetaPersistence:
         }
 
 
-# ── AC 6: prd_meta alongside interview state in ~/.ouroboros/data/ ─
+# ── AC 6: pm_meta alongside interview state in ~/.ouroboros/data/ ─
 
 
 class TestPrdMetaFileLocation:
-    """Verify prd_meta_{session_id}.json is persisted in ~/.ouroboros/data/
+    """Verify pm_meta_{session_id}.json is persisted in ~/.ouroboros/data/
     alongside interview state files (AC 6)."""
 
     def test_default_data_dir_is_ouroboros_data(self) -> None:
@@ -218,9 +218,9 @@ class TestPrdMetaFileLocation:
         assert expected == _DATA_DIR
 
     def test_meta_path_uses_session_id_in_filename(self) -> None:
-        """_meta_path produces prd_meta_{session_id}.json naming."""
+        """_meta_path produces pm_meta_{session_id}.json naming."""
         path = _meta_path("my-session-42")
-        assert path.name == "prd_meta_my-session-42.json"
+        assert path.name == "pm_meta_my-session-42.json"
 
     def test_meta_path_default_dir_matches_data_dir(self) -> None:
         """Default _meta_path parent is _DATA_DIR (same as interview state)."""
@@ -231,10 +231,10 @@ class TestPrdMetaFileLocation:
         """_meta_path respects custom data_dir override."""
         path = _meta_path("sess-x", data_dir=tmp_path)
         assert path.parent == tmp_path
-        assert path.name == "prd_meta_sess-x.json"
+        assert path.name == "pm_meta_sess-x.json"
 
     def test_meta_file_alongside_interview_state(self, tmp_path: Path) -> None:
-        """prd_meta and interview state live in the same directory.
+        """pm_meta and interview state live in the same directory.
 
         This is the core AC 6 requirement: both files share the data_dir
         so they can be discovered together.
@@ -243,10 +243,10 @@ class TestPrdMetaFileLocation:
         interview_state_path = tmp_path / "interview_sess-co.json"
         interview_state_path.write_text('{"interview_id": "sess-co"}')
 
-        # Save prd_meta in the same directory
+        # Save pm_meta in the same directory
         engine = _make_engine_stub(deferred=["q1"], decide_later=["dl1"])
         engine.codebase_context = "brownfield context"
-        _save_prd_meta("sess-co", engine, cwd="/proj", data_dir=tmp_path)
+        _save_pm_meta("sess-co", engine, cwd="/proj", data_dir=tmp_path)
 
         # Both files exist in the same directory
         meta_path = _meta_path("sess-co", tmp_path)
@@ -254,25 +254,25 @@ class TestPrdMetaFileLocation:
         assert meta_path.parent == interview_state_path.parent
 
     def test_save_creates_directory_if_missing(self, tmp_path: Path) -> None:
-        """_save_prd_meta creates parent directories as needed."""
+        """_save_pm_meta creates parent directories as needed."""
         nested_dir = tmp_path / "nested" / "deep"
         assert not nested_dir.exists()
 
         engine = _make_engine_stub()
-        _save_prd_meta("sess-nested", engine, data_dir=nested_dir)
+        _save_pm_meta("sess-nested", engine, data_dir=nested_dir)
 
         assert nested_dir.exists()
-        meta = _load_prd_meta("sess-nested", data_dir=nested_dir)
+        meta = _load_pm_meta("sess-nested", data_dir=nested_dir)
         assert meta is not None
 
     def test_meta_file_has_exactly_five_fields(self, tmp_path: Path) -> None:
-        """prd_meta JSON contains exactly the 5 required fields."""
+        """pm_meta JSON contains exactly the 5 required fields."""
         engine = _make_engine_stub(deferred=["d1"], decide_later=["dl1"])
         engine.codebase_context = "ctx"
         engine._reframe_map = {"simple": "complex"}
 
-        _save_prd_meta("sess-fields", engine, cwd="/w", data_dir=tmp_path)
-        meta = _load_prd_meta("sess-fields", data_dir=tmp_path)
+        _save_pm_meta("sess-fields", engine, cwd="/w", data_dir=tmp_path)
+        meta = _load_pm_meta("sess-fields", data_dir=tmp_path)
 
         assert meta is not None
         expected_keys = {"deferred_items", "decide_later_items", "codebase_context", "pending_reframe", "cwd"}
@@ -281,14 +281,14 @@ class TestPrdMetaFileLocation:
     def test_meta_persists_across_multiple_saves(self, tmp_path: Path) -> None:
         """Subsequent saves overwrite the same file correctly."""
         engine = _make_engine_stub(deferred=["q1"])
-        _save_prd_meta("sess-over", engine, cwd="/v1", data_dir=tmp_path)
+        _save_pm_meta("sess-over", engine, cwd="/v1", data_dir=tmp_path)
 
         # Update engine state and re-save
         engine.deferred_items = ["q1", "q2", "q3"]
         engine.codebase_context = "updated context"
-        _save_prd_meta("sess-over", engine, cwd="/v2", data_dir=tmp_path)
+        _save_pm_meta("sess-over", engine, cwd="/v2", data_dir=tmp_path)
 
-        meta = _load_prd_meta("sess-over", data_dir=tmp_path)
+        meta = _load_pm_meta("sess-over", data_dir=tmp_path)
         assert meta is not None
         assert meta["deferred_items"] == ["q1", "q2", "q3"]
         assert meta["codebase_context"] == "updated context"
@@ -300,23 +300,23 @@ class TestPrdMetaFileLocation:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("not valid json{{{", encoding="utf-8")
 
-        assert _load_prd_meta("sess-bad", data_dir=tmp_path) is None
+        assert _load_pm_meta("sess-bad", data_dir=tmp_path) is None
 
 
 # ── Integration test: diff in handler.handle ─────────────────────
 
 
-class TestPRDHandlerDiffIntegration:
+class TestPMHandlerDiffIntegration:
     """Test that handle() includes correct diff in response meta."""
 
     def test_definition_name(self) -> None:
         """Handler has correct tool name."""
-        handler = PRDInterviewHandler()
-        assert handler.definition.name == "ouroboros_prd_interview"
+        handler = PMInterviewHandler()
+        assert handler.definition.name == "ouroboros_pm_interview"
 
     def test_definition_has_flat_optional_params(self) -> None:
         """All parameters are optional (flat params pattern)."""
-        handler = PRDInterviewHandler()
+        handler = PMInterviewHandler()
         defn = handler.definition
         for param in defn.parameters:
             assert param.required is False, f"{param.name} should be optional"
@@ -325,7 +325,7 @@ class TestPRDHandlerDiffIntegration:
     async def test_handle_answer_includes_diff_in_meta(self, tmp_path: Path) -> None:
         """When answering, the response meta includes new_deferred/new_decide_later."""
         # Set up engine mock that simulates classification adding items
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = ["existing_deferred"]
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -354,7 +354,7 @@ class TestPRDHandlerDiffIntegration:
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
         # Save initial meta so restore works
-        _save_prd_meta(
+        _save_pm_meta(
             "sess-1",
             engine,
             cwd="/tmp/proj",
@@ -364,7 +364,7 @@ class TestPRDHandlerDiffIntegration:
         engine.deferred_items = ["existing_deferred"]
         engine.decide_later_items = []
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "session_id": "sess-1",
@@ -382,7 +382,7 @@ class TestPRDHandlerDiffIntegration:
     @pytest.mark.asyncio
     async def test_handle_answer_no_new_items(self, tmp_path: Path) -> None:
         """When no items are deferred/decide-later, diff lists are empty."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = ["d1"]
         engine.decide_later_items = ["dl1"]
         engine.codebase_context = ""
@@ -402,9 +402,9 @@ class TestPRDHandlerDiffIntegration:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        _save_prd_meta("sess-2", engine, cwd="/tmp/proj", data_dir=tmp_path)
+        _save_pm_meta("sess-2", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "session_id": "sess-2",
@@ -421,7 +421,7 @@ class TestPRDHandlerDiffIntegration:
     @pytest.mark.asyncio
     async def test_handle_answer_includes_interview_complete_false(self, tmp_path: Path) -> None:
         """Non-complete response meta includes interview_complete=False."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -439,9 +439,9 @@ class TestPRDHandlerDiffIntegration:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        _save_prd_meta("sess-3", engine, cwd="/tmp/proj", data_dir=tmp_path)
+        _save_pm_meta("sess-3", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "session_id": "sess-3",
@@ -481,8 +481,8 @@ class TestCheckCompletion:
 
     @pytest.mark.asyncio
     async def test_max_rounds_triggers_completion(self) -> None:
-        """Hitting MAX_PRD_INTERVIEW_ROUNDS triggers forced completion."""
-        state = _make_state(rounds=_make_answered_rounds(MAX_PRD_INTERVIEW_ROUNDS))
+        """Hitting MAX_PM_INTERVIEW_ROUNDS triggers forced completion."""
+        state = _make_state(rounds=_make_answered_rounds(MAX_PM_INTERVIEW_ROUNDS))
         engine = _make_engine_stub()
 
         result = await _check_completion(state, engine)
@@ -490,7 +490,7 @@ class TestCheckCompletion:
         assert result is not None
         assert result["interview_complete"] is True
         assert result["completion_reason"] == "max_rounds"
-        assert result["rounds_completed"] == MAX_PRD_INTERVIEW_ROUNDS
+        assert result["rounds_completed"] == MAX_PM_INTERVIEW_ROUNDS
 
     @pytest.mark.asyncio
     async def test_ambiguity_resolved_triggers_completion(self) -> None:
@@ -520,7 +520,7 @@ class TestCheckCompletion:
         )
 
         with patch(
-            "ouroboros.mcp.tools.prd_handler.AmbiguityScorer"
+            "ouroboros.mcp.tools.pm_handler.AmbiguityScorer"
         ) as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
@@ -561,7 +561,7 @@ class TestCheckCompletion:
         )
 
         with patch(
-            "ouroboros.mcp.tools.prd_handler.AmbiguityScorer"
+            "ouroboros.mcp.tools.pm_handler.AmbiguityScorer"
         ) as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
@@ -583,7 +583,7 @@ class TestCheckCompletion:
         engine.model = "test-model"
 
         with patch(
-            "ouroboros.mcp.tools.prd_handler.AmbiguityScorer"
+            "ouroboros.mcp.tools.pm_handler.AmbiguityScorer"
         ) as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(
@@ -637,7 +637,7 @@ class TestCheckCompletion:
         )
 
         with patch(
-            "ouroboros.mcp.tools.prd_handler.AmbiguityScorer"
+            "ouroboros.mcp.tools.pm_handler.AmbiguityScorer"
         ) as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
@@ -658,7 +658,7 @@ class TestHandlerCompletionIntegration:
     @pytest.mark.asyncio
     async def test_handle_answer_completion_via_ambiguity(self, tmp_path: Path) -> None:
         """When ambiguity is resolved, handle() returns completion response."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = ["d1"]
         engine.decide_later_items = ["dl1"]
         engine.codebase_context = ""
@@ -681,9 +681,9 @@ class TestHandlerCompletionIntegration:
         engine.complete_interview = AsyncMock(return_value=Result.ok(state))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        _save_prd_meta("sess-complete", engine, cwd="/tmp/proj", data_dir=tmp_path)
+        _save_pm_meta("sess-complete", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         # Mock _check_completion to return completion
         completion_meta = {
@@ -694,7 +694,7 @@ class TestHandlerCompletionIntegration:
         }
 
         with patch(
-            "ouroboros.mcp.tools.prd_handler._check_completion",
+            "ouroboros.mcp.tools.pm_handler._check_completion",
             new_callable=AsyncMock,
             return_value=completion_meta,
         ):
@@ -721,7 +721,7 @@ class TestHandlerCompletionIntegration:
     @pytest.mark.asyncio
     async def test_no_done_signal_processing(self, tmp_path: Path) -> None:
         """User typing 'done' is treated as a normal answer, not a completion signal."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -739,9 +739,9 @@ class TestHandlerCompletionIntegration:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        _save_prd_meta("sess-done", engine, cwd="/tmp/proj", data_dir=tmp_path)
+        _save_pm_meta("sess-done", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         # User types "done" — should NOT trigger completion
         result = await handler.handle({
@@ -763,26 +763,26 @@ class TestHandlerCompletionIntegration:
 
 
 class TestGetEngine:
-    """Test PRDInterviewEngine creation via _get_engine."""
+    """Test PMInterviewEngine creation via _get_engine."""
 
     def test_returns_injected_engine(self) -> None:
-        """When prd_engine is injected, _get_engine returns it directly."""
+        """When pm_engine is injected, _get_engine returns it directly."""
         engine = _make_engine_stub()
-        handler = PRDInterviewHandler(prd_engine=engine)
+        handler = PMInterviewHandler(pm_engine=engine)
         assert handler._get_engine() is engine
 
     def test_creates_engine_when_none_injected(self) -> None:
         """When no engine is injected, creates one with ClaudeAgentAdapter."""
         with patch(
-            "ouroboros.mcp.tools.prd_handler.ClaudeAgentAdapter"
+            "ouroboros.mcp.tools.pm_handler.ClaudeAgentAdapter"
         ) as mock_adapter_cls, patch(
-            "ouroboros.mcp.tools.prd_handler.PRDInterviewEngine"
+            "ouroboros.mcp.tools.pm_handler.PMInterviewEngine"
         ) as mock_engine_cls:
             mock_adapter = MagicMock()
             mock_adapter_cls.return_value = mock_adapter
             mock_engine_cls.create.return_value = MagicMock()
 
-            handler = PRDInterviewHandler()
+            handler = PMInterviewHandler()
             handler._get_engine()
 
             mock_adapter_cls.assert_called_once_with(permission_mode="bypassPermissions")
@@ -791,15 +791,15 @@ class TestGetEngine:
             assert call_kwargs.kwargs["llm_adapter"] is mock_adapter
 
     def test_uses_custom_data_dir(self, tmp_path: Path) -> None:
-        """When data_dir is set, passes it to PRDInterviewEngine.create."""
+        """When data_dir is set, passes it to PMInterviewEngine.create."""
         with patch(
-            "ouroboros.mcp.tools.prd_handler.ClaudeAgentAdapter"
+            "ouroboros.mcp.tools.pm_handler.ClaudeAgentAdapter"
         ), patch(
-            "ouroboros.mcp.tools.prd_handler.PRDInterviewEngine"
+            "ouroboros.mcp.tools.pm_handler.PMInterviewEngine"
         ) as mock_engine_cls:
             mock_engine_cls.create.return_value = MagicMock()
 
-            handler = PRDInterviewHandler(data_dir=tmp_path)
+            handler = PMInterviewHandler(data_dir=tmp_path)
             handler._get_engine()
 
             call_kwargs = mock_engine_cls.create.call_args
@@ -807,15 +807,21 @@ class TestGetEngine:
 
 
 class TestHandleStartBrownfield:
-    """Test brownfield detection in _handle_start."""
+    """Test brownfield detection in _handle_start — uses DB default repo."""
 
     @pytest.mark.asyncio
-    async def test_start_detects_brownfield_from_git_dir(self, tmp_path: Path) -> None:
-        """When cwd contains .git, passes brownfield_repos to engine."""
-        # Create .git directory to simulate a git repo
-        (tmp_path / ".git").mkdir()
+    async def test_start_detects_brownfield_from_db_default(self, tmp_path: Path) -> None:
+        """When DB has a default repo, passes brownfield_repos to engine."""
+        from ouroboros.persistence.brownfield import BrownfieldRepo
 
-        engine = MagicMock(spec=PRDInterviewEngine)
+        mock_default = BrownfieldRepo(
+            path="/home/user/my-repo",
+            name="my-repo",
+            desc="A cool project",
+            is_default=True,
+        )
+
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -826,12 +832,22 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("What features?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "initial_context": "Build a task manager",
-            "cwd": str(tmp_path),
-        })
+        with patch(
+            "ouroboros.mcp.tools.pm_handler.BrownfieldStore"
+        ) as mock_store_cls, patch(
+            "ouroboros.mcp.tools.pm_handler.get_default_brownfield_context",
+            new_callable=AsyncMock,
+            return_value=mock_default,
+        ):
+            mock_store = AsyncMock()
+            mock_store_cls.return_value = mock_store
+
+            result = await handler.handle({
+                "initial_context": "Build a task manager",
+                "cwd": str(tmp_path),
+            })
 
         assert result.is_ok
 
@@ -840,14 +856,14 @@ class TestHandleStartBrownfield:
         brownfield_repos = call_kwargs.kwargs.get("brownfield_repos")
         assert brownfield_repos is not None
         assert len(brownfield_repos) == 1
-        assert brownfield_repos[0]["path"] == str(tmp_path)
-        assert brownfield_repos[0]["name"] == tmp_path.name
+        assert brownfield_repos[0]["path"] == "/home/user/my-repo"
+        assert brownfield_repos[0]["name"] == "my-repo"
         assert brownfield_repos[0]["role"] == "primary"
 
     @pytest.mark.asyncio
-    async def test_start_no_brownfield_without_git_dir(self, tmp_path: Path) -> None:
-        """When cwd has no .git, brownfield_repos is None (greenfield)."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+    async def test_start_no_brownfield_when_no_db_default(self, tmp_path: Path) -> None:
+        """When DB has no default repo, brownfield_repos is None (greenfield)."""
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -858,12 +874,22 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("What features?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "initial_context": "Build a new app",
-            "cwd": str(tmp_path),
-        })
+        with patch(
+            "ouroboros.mcp.tools.pm_handler.BrownfieldStore"
+        ) as mock_store_cls, patch(
+            "ouroboros.mcp.tools.pm_handler.get_default_brownfield_context",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            mock_store = AsyncMock()
+            mock_store_cls.return_value = mock_store
+
+            result = await handler.handle({
+                "initial_context": "Build a new app",
+                "cwd": str(tmp_path),
+            })
 
         assert result.is_ok
 
@@ -873,9 +899,44 @@ class TestHandleStartBrownfield:
         assert brownfield_repos is None
 
     @pytest.mark.asyncio
+    async def test_start_brownfield_graceful_on_db_error(self, tmp_path: Path) -> None:
+        """When DB access fails, brownfield_repos falls back to None."""
+        engine = MagicMock(spec=PMInterviewEngine)
+        engine.deferred_items = []
+        engine.decide_later_items = []
+        engine.codebase_context = ""
+        engine._reframe_map = {}
+
+        state = _make_state(interview_id="fallback-sess")
+        engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("What features?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        with patch(
+            "ouroboros.mcp.tools.pm_handler.BrownfieldStore"
+        ) as mock_store_cls:
+            mock_store = AsyncMock()
+            mock_store.initialize.side_effect = RuntimeError("DB unavailable")
+            mock_store_cls.return_value = mock_store
+
+            result = await handler.handle({
+                "initial_context": "Build something",
+                "cwd": str(tmp_path),
+            })
+
+        assert result.is_ok
+
+        # Should gracefully fall back to no brownfield
+        call_kwargs = engine.ask_opening_and_start.call_args
+        brownfield_repos = call_kwargs.kwargs.get("brownfield_repos")
+        assert brownfield_repos is None
+
+    @pytest.mark.asyncio
     async def test_start_returns_session_id_and_question(self, tmp_path: Path) -> None:
         """Start returns the session_id in meta and first question in content."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -888,7 +949,7 @@ class TestHandleStartBrownfield:
         )
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "initial_context": "Build a task manager",
@@ -901,9 +962,9 @@ class TestHandleStartBrownfield:
         assert "new-sess-42" in result.value.content[0].text
 
     @pytest.mark.asyncio
-    async def test_start_saves_prd_meta(self, tmp_path: Path) -> None:
-        """Start persists prd_meta with cwd for later restoration."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+    async def test_start_saves_pm_meta(self, tmp_path: Path) -> None:
+        """Start persists pm_meta with cwd for later restoration."""
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = ["deferred_q"]
         engine.decide_later_items = []
         engine.codebase_context = "some context"
@@ -914,15 +975,15 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         await handler.handle({
             "initial_context": "Build something",
             "cwd": "/my/project",
         })
 
-        # Verify prd_meta was saved
-        meta = _load_prd_meta("meta-sess", data_dir=tmp_path)
+        # Verify pm_meta was saved
+        meta = _load_pm_meta("meta-sess", data_dir=tmp_path)
         assert meta is not None
         assert meta["cwd"] == "/my/project"
         assert meta["deferred_items"] == ["deferred_q"]
@@ -931,7 +992,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_includes_diff_in_meta(self, tmp_path: Path) -> None:
         """Start response meta includes deferred/decide-later diff."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -948,7 +1009,7 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(side_effect=mock_ask)
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "initial_context": "Build an app",
@@ -964,7 +1025,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_engine_error_returns_err(self, tmp_path: Path) -> None:
         """When engine.ask_opening_and_start fails, handle returns error."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -976,7 +1037,7 @@ class TestHandleStartBrownfield:
             )
         )
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "initial_context": "Build something",
@@ -988,7 +1049,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_question_error_returns_err(self, tmp_path: Path) -> None:
         """When engine.ask_next_question fails, handle returns error."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1000,7 +1061,7 @@ class TestHandleStartBrownfield:
             return_value=Result.err(MagicMock(__str__=lambda _s: "LLM error"))
         )
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "initial_context": "Build something",
@@ -1012,7 +1073,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_cwd_defaults_to_getcwd(self, tmp_path: Path) -> None:
         """When cwd is not provided, defaults to os.getcwd()."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1023,20 +1084,20 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Q?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        with patch("ouroboros.mcp.tools.prd_handler.os.getcwd", return_value="/fallback/cwd"):
+        with patch("ouroboros.mcp.tools.pm_handler.os.getcwd", return_value="/fallback/cwd"):
             await handler.handle({"initial_context": "Build it"})
 
         # cwd saved in meta should be the fallback
-        meta = _load_prd_meta("default-cwd-sess", data_dir=tmp_path)
+        meta = _load_pm_meta("default-cwd-sess", data_dir=tmp_path)
         assert meta is not None
         assert meta["cwd"] == "/fallback/cwd"
 
     @pytest.mark.asyncio
     async def test_start_records_unanswered_round(self, tmp_path: Path) -> None:
         """Start appends an unanswered round to state before saving."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1048,7 +1109,7 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("First question?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         await handler.handle({
             "initial_context": "Build something",
@@ -1070,7 +1131,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_includes_pending_reframe_in_meta(self, tmp_path: Path) -> None:
         """Start response includes pending_reframe when engine has reframe."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1081,7 +1142,7 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("PM-friendly Q"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "initial_context": "Build something",
@@ -1097,7 +1158,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_meta_contains_question_field(self, tmp_path: Path) -> None:
         """Response meta includes the generated question as a separate field."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1111,7 +1172,7 @@ class TestHandleStartBrownfield:
         )
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         result = await handler.handle({
             "initial_context": "Build an app",
             "cwd": str(tmp_path),
@@ -1125,7 +1186,7 @@ class TestHandleStartBrownfield:
         """Response meta includes is_brownfield=True for brownfield projects."""
         (tmp_path / ".git").mkdir()
 
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1137,7 +1198,7 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Q?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         result = await handler.handle({
             "initial_context": "Add auth",
             "cwd": str(tmp_path),
@@ -1149,7 +1210,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_meta_contains_is_brownfield_false(self, tmp_path: Path) -> None:
         """Response meta includes is_brownfield=False for greenfield projects."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1161,7 +1222,7 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Q?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         result = await handler.handle({
             "initial_context": "Build something new",
             "cwd": str(tmp_path),
@@ -1173,7 +1234,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_meta_has_all_required_fields(self, tmp_path: Path) -> None:
         """Response meta contains session_id, question, is_brownfield, and diff fields."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1185,7 +1246,7 @@ class TestHandleStartBrownfield:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("First question?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         result = await handler.handle({
             "initial_context": "Build an API",
             "cwd": str(tmp_path),
@@ -1223,7 +1284,7 @@ class TestResumeMetaFields:
             QuestionCategory,
         )
 
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1249,9 +1310,9 @@ class TestResumeMetaFields:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Who is the target user?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        _save_prd_meta("resume-ac3", engine, cwd="/tmp/proj", data_dir=tmp_path)
+        _save_pm_meta("resume-ac3", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "session_id": "resume-ac3",
@@ -1277,7 +1338,7 @@ class TestResumeMetaFields:
             QuestionCategory,
         )
 
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = ["old_deferred"]
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1310,12 +1371,12 @@ class TestResumeMetaFields:
         engine.ask_next_question = AsyncMock(side_effect=mock_ask)
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        _save_prd_meta("resume-deferred", engine, cwd="/tmp/proj", data_dir=tmp_path)
+        _save_pm_meta("resume-deferred", engine, cwd="/tmp/proj", data_dir=tmp_path)
         # Reset to simulate fresh restore
         engine.deferred_items = ["old_deferred"]
         engine.decide_later_items = []
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "session_id": "resume-deferred",
@@ -1332,7 +1393,7 @@ class TestResumeMetaFields:
     @pytest.mark.asyncio
     async def test_resume_meta_classification_none_when_no_classifications(self, tmp_path: Path) -> None:
         """When engine has no classifications, classification is None."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = ""
@@ -1351,9 +1412,9 @@ class TestResumeMetaFields:
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        _save_prd_meta("resume-noclassify", engine, cwd="/tmp", data_dir=tmp_path)
+        _save_pm_meta("resume-noclassify", engine, cwd="/tmp", data_dir=tmp_path)
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "session_id": "resume-noclassify",
@@ -1371,7 +1432,7 @@ class TestResumeMetaFields:
             QuestionCategory,
         )
 
-        engine = MagicMock(spec=PRDInterviewEngine)
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = ["d1"]
         engine.decide_later_items = ["dl1"]
         engine.codebase_context = ""
@@ -1388,7 +1449,7 @@ class TestResumeMetaFields:
 
         state = _make_state(
             interview_id="resume-complete",
-            rounds=_make_answered_rounds(MAX_PRD_INTERVIEW_ROUNDS),
+            rounds=_make_answered_rounds(MAX_PM_INTERVIEW_ROUNDS),
         )
 
         engine.load_state = AsyncMock(return_value=Result.ok(state))
@@ -1396,9 +1457,9 @@ class TestResumeMetaFields:
         engine.complete_interview = AsyncMock(return_value=Result.ok(state))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
-        _save_prd_meta("resume-complete", engine, cwd="/tmp", data_dir=tmp_path)
+        _save_pm_meta("resume-complete", engine, cwd="/tmp", data_dir=tmp_path)
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "session_id": "resume-complete",
@@ -1420,8 +1481,8 @@ class TestResumeMetaFields:
 
     @pytest.mark.asyncio
     async def test_resume_loads_state_and_meta(self, tmp_path: Path) -> None:
-        """Resume loads InterviewState via engine and restores prd_meta."""
-        engine = MagicMock(spec=PRDInterviewEngine)
+        """Resume loads InterviewState via engine and restores pm_meta."""
+        engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
         engine.codebase_context = "existing context"
@@ -1441,9 +1502,9 @@ class TestResumeMetaFields:
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
         # Save meta with specific values
-        _save_prd_meta("resume-load", engine, cwd="/project", data_dir=tmp_path)
+        _save_pm_meta("resume-load", engine, cwd="/project", data_dir=tmp_path)
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         result = await handler.handle({
             "session_id": "resume-load",
@@ -1458,7 +1519,7 @@ class TestResumeMetaFields:
         # Verify ask_next_question was called
         engine.ask_next_question.assert_called_once()
         # Verify meta was saved after
-        assert _load_prd_meta("resume-load", data_dir=tmp_path) is not None
+        assert _load_pm_meta("resume-load", data_dir=tmp_path) is not None
 
 
 # ── Action auto-detection tests (AC 13) ───────────────────────
@@ -1550,7 +1611,7 @@ class TestAutoDetectIntegration:
         engine.ask_opening_and_start.return_value = Result.ok(state)
         engine.ask_next_question.return_value = Result.ok("First question?")
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         # No "action" key in arguments at all
         result = await handler.handle({"initial_context": "Build a CRM"})
 
@@ -1569,7 +1630,7 @@ class TestAutoDetectIntegration:
         engine.record_response.return_value = Result.ok(state)
         engine.ask_next_question.return_value = Result.ok("Q2?")
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         # No "action" key — auto-detects "resume" from session_id + answer
         result = await handler.handle({
             "session_id": "auto-resume",
@@ -1590,7 +1651,7 @@ class TestAutoDetectIntegration:
         engine.load_state.return_value = Result.ok(state)
         engine.ask_next_question.return_value = Result.ok("Q1 again?")
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         result = await handler.handle({"session_id": "sid-only"})
 
         assert result.is_ok
@@ -1606,20 +1667,20 @@ class TestAutoDetectIntegration:
         engine.load_state.return_value = Result.ok(state)
         engine.ask_next_question.return_value = Result.ok("Next Q?")
 
-        handler = PRDInterviewHandler(prd_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         # session_id only → auto-detects "resume", not "generate"
         result = await handler.handle({"session_id": "gen-test"})
 
         assert result.is_ok
-        # Should have called load_state (resume path), not generate_prd_seed
+        # Should have called load_state (resume path), not generate_pm_seed
         engine.load_state.assert_called_once()
-        engine.generate_prd_seed = AsyncMock()
-        engine.generate_prd_seed.assert_not_called()
+        engine.generate_pm_seed = AsyncMock()
+        engine.generate_pm_seed.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_params_returns_error(self, tmp_path):
         """Calling with no relevant params returns error."""
-        handler = PRDInterviewHandler(data_dir=tmp_path)
+        handler = PMInterviewHandler(data_dir=tmp_path)
         result = await handler.handle({})
 
         assert result.is_err

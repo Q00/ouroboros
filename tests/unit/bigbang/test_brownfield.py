@@ -1,57 +1,51 @@
-"""Unit tests for brownfield registry schema, validation, and file I/O."""
+"""Unit tests for brownfield registry — DB-backed business logic."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+import subprocess
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from ouroboros.bigbang.brownfield import (
+    _SKIP_DIRS,
     BrownfieldEntry,
-    load_brownfield_repos,
-    load_brownfield_repos_as_dicts,
-    register_brownfield_repo,
-    save_brownfield_repos,
-    validate_entries,
+    _has_github_origin,
+    _read_readme_content,
+    generate_desc,
+    register_repo,
+    scan_and_register,
+    scan_home_for_repos,
+    set_default_repo,
 )
+from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 
-# ── BrownfieldEntry ────────────────────────────────────────────────
+# ── BrownfieldEntry (re-exported BrownfieldRepo) ──────────────────
 
 
 class TestBrownfieldEntry:
-    """Tests for the BrownfieldEntry frozen dataclass."""
+    """Tests for the BrownfieldEntry alias (backward compat)."""
+
+    def test_alias_is_brownfield_repo(self) -> None:
+        assert BrownfieldEntry is BrownfieldRepo
 
     def test_create_with_defaults(self) -> None:
         entry = BrownfieldEntry(path="/repo", name="my-repo")
         assert entry.path == "/repo"
         assert entry.name == "my-repo"
-        assert entry.desc == ""
-
-    def test_create_with_desc(self) -> None:
-        entry = BrownfieldEntry(path="/repo", name="my-repo", desc="A description")
-        assert entry.desc == "A description"
-
-    def test_frozen(self) -> None:
-        entry = BrownfieldEntry(path="/repo", name="my-repo")
-        with pytest.raises(AttributeError):
-            entry.path = "/other"  # type: ignore[misc]
+        assert entry.desc is None
 
     def test_to_dict(self) -> None:
         entry = BrownfieldEntry(path="/repo", name="proj", desc="desc")
-        assert entry.to_dict() == {"path": "/repo", "name": "proj", "desc": "desc"}
+        d = entry.to_dict()
+        assert d == {"path": "/repo", "name": "proj", "desc": "desc"}
 
     def test_from_dict_valid(self) -> None:
         data = {"path": "/repo", "name": "proj", "desc": "hello"}
         entry = BrownfieldEntry.from_dict(data)
         assert entry.path == "/repo"
         assert entry.name == "proj"
-        assert entry.desc == "hello"
-
-    def test_from_dict_missing_desc_defaults_empty(self) -> None:
-        data = {"path": "/repo", "name": "proj"}
-        entry = BrownfieldEntry.from_dict(data)
-        assert entry.desc == ""
 
     def test_from_dict_missing_path_raises(self) -> None:
         with pytest.raises(ValueError, match="path"):
@@ -69,162 +63,1031 @@ class TestBrownfieldEntry:
         with pytest.raises(ValueError, match="name.*empty"):
             BrownfieldEntry.from_dict({"path": "/repo", "name": "  "})
 
-    def test_from_dict_strips_whitespace(self) -> None:
-        entry = BrownfieldEntry.from_dict({"path": "  /repo  ", "name": "  proj  "})
-        assert entry.path == "/repo"
-        assert entry.name == "proj"
 
-    def test_roundtrip(self) -> None:
-        original = BrownfieldEntry(path="/repo", name="proj", desc="desc")
-        restored = BrownfieldEntry.from_dict(original.to_dict())
-        assert restored == original
+# ── _has_github_origin ─────────────────────────────────────────────
 
 
-# ── validate_entries ────────────────────────────────────────────────
+class TestHasGithubOrigin:
+    """Tests for _has_github_origin helper."""
+
+    def test_returns_true_for_github_origin(self, tmp_path: Path) -> None:
+        # Create a real git repo with a GitHub origin
+        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "remote", "add", "origin",
+             "https://github.com/user/repo.git"],
+            capture_output=True,
+        )
+        assert _has_github_origin(tmp_path) is True
+
+    def test_returns_false_for_non_github_origin(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "remote", "add", "origin",
+             "https://gitlab.com/user/repo.git"],
+            capture_output=True,
+        )
+        assert _has_github_origin(tmp_path) is False
+
+    def test_returns_false_for_no_origin(self, tmp_path: Path) -> None:
+        subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        assert _has_github_origin(tmp_path) is False
+
+    def test_returns_false_for_non_git_dir(self, tmp_path: Path) -> None:
+        assert _has_github_origin(tmp_path) is False
 
 
-class TestValidateEntries:
-    """Tests for validate_entries()."""
-
-    def test_valid_list(self) -> None:
-        raw = [
-            {"path": "/a", "name": "A", "desc": "first"},
-            {"path": "/b", "name": "B"},
-        ]
-        entries = validate_entries(raw)
-        assert len(entries) == 2
-        assert entries[0].path == "/a"
-        assert entries[1].desc == ""
-
-    def test_empty_list(self) -> None:
-        assert validate_entries([]) == []
-
-    def test_not_a_list_raises(self) -> None:
-        with pytest.raises(ValueError, match="JSON array"):
-            validate_entries({"path": "/a", "name": "A"})
-
-    def test_skips_non_dict_items(self) -> None:
-        raw = [{"path": "/a", "name": "A"}, "not-a-dict", 42]
-        entries = validate_entries(raw)
-        assert len(entries) == 1
-
-    def test_skips_invalid_entries(self) -> None:
-        raw = [
-            {"path": "/a", "name": "A"},
-            {"path": "", "name": "bad"},  # empty path
-            {"name": "no-path"},  # missing path
-        ]
-        entries = validate_entries(raw)
-        assert len(entries) == 1
-        assert entries[0].path == "/a"
+# ── scan_home_for_repos ────────────────────────────────────────────
 
 
-# ── File I/O ────────────────────────────────────────────────────────
+class TestScanHomeForRepos:
+    """Tests for scan_home_for_repos."""
 
+    def test_finds_github_repos(self, tmp_path: Path) -> None:
+        # Create a repo with GitHub origin
+        repo = tmp_path / "my-project"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin",
+             "git@github.com:user/my-project.git"],
+            capture_output=True,
+        )
 
-class TestLoadBrownfieldRepos:
-    """Tests for load_brownfield_repos()."""
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 1
+        assert result[0]["path"] == str(repo.resolve())
+        assert result[0]["name"] == "my-project"
 
-    def test_returns_empty_when_file_missing(self, tmp_path: Path) -> None:
-        result = load_brownfield_repos(tmp_path / "nonexistent.json")
+    def test_skips_non_github_repos(self, tmp_path: Path) -> None:
+        repo = tmp_path / "gitlab-proj"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin",
+             "https://gitlab.com/user/repo.git"],
+            capture_output=True,
+        )
+
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 0
+
+    def test_prunes_subdirectories_after_git_found(self, tmp_path: Path) -> None:
+        # Parent repo
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        subprocess.run(["git", "init", str(parent)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(parent), "remote", "add", "origin",
+             "https://github.com/user/parent.git"],
+            capture_output=True,
+        )
+
+        # Nested repo inside parent (should NOT be found)
+        nested = parent / "sub" / "nested"
+        nested.mkdir(parents=True)
+        subprocess.run(["git", "init", str(nested)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(nested), "remote", "add", "origin",
+             "https://github.com/user/nested.git"],
+            capture_output=True,
+        )
+
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 1
+        assert result[0]["path"] == str(parent.resolve())
+        assert result[0]["name"] == "parent"
+
+    def test_skips_excluded_directories(self, tmp_path: Path) -> None:
+        # Create a repo inside node_modules (should be skipped)
+        nm = tmp_path / "node_modules" / "some-pkg"
+        nm.mkdir(parents=True)
+        subprocess.run(["git", "init", str(nm)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(nm), "remote", "add", "origin",
+             "https://github.com/user/pkg.git"],
+            capture_output=True,
+        )
+
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 0
+
+    def test_skips_dot_directories(self, tmp_path: Path) -> None:
+        # Create a repo inside a hidden directory
+        hidden = tmp_path / ".hidden-dir" / "repo"
+        hidden.mkdir(parents=True)
+        subprocess.run(["git", "init", str(hidden)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(hidden), "remote", "add", "origin",
+             "https://github.com/user/repo.git"],
+            capture_output=True,
+        )
+
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 0
+
+    def test_empty_directory(self, tmp_path: Path) -> None:
+        result = scan_home_for_repos(tmp_path)
         assert result == []
 
-    def test_loads_valid_file(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        fp.write_text(json.dumps([{"path": "/r", "name": "r"}]))
-        entries = load_brownfield_repos(fp)
-        assert len(entries) == 1
-        assert entries[0].path == "/r"
+    def test_results_are_sorted(self, tmp_path: Path) -> None:
+        for name in ["zeta", "alpha", "mid"]:
+            repo = tmp_path / name
+            repo.mkdir()
+            subprocess.run(["git", "init", str(repo)], capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "remote", "add", "origin",
+                 f"https://github.com/user/{name}.git"],
+                capture_output=True,
+            )
 
-    def test_returns_empty_on_malformed_json(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        fp.write_text("{not valid json")
-        assert load_brownfield_repos(fp) == []
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 3
+        names = [r["name"] for r in result]
+        assert names == sorted(names)
 
-    def test_returns_empty_on_non_array_json(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        fp.write_text(json.dumps({"path": "/r", "name": "r"}))
-        assert load_brownfield_repos(fp) == []
-
-    def test_skips_invalid_entries_in_file(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        data = [{"path": "/good", "name": "good"}, {"bad": True}]
-        fp.write_text(json.dumps(data))
-        entries = load_brownfield_repos(fp)
-        assert len(entries) == 1
-
-
-class TestSaveBrownfieldRepos:
-    """Tests for save_brownfield_repos()."""
-
-    def test_creates_file_and_dirs(self, tmp_path: Path) -> None:
-        fp = tmp_path / "sub" / "dir" / "brownfield.json"
-        entries = [BrownfieldEntry(path="/r", name="r", desc="d")]
-        save_brownfield_repos(entries, fp)
-
-        assert fp.exists()
-        data = json.loads(fp.read_text())
-        assert len(data) == 1
-        assert data[0] == {"path": "/r", "name": "r", "desc": "d"}
-
-    def test_overwrites_existing(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        fp.write_text(json.dumps([{"path": "/old", "name": "old", "desc": ""}]))
-
-        save_brownfield_repos(
-            [BrownfieldEntry(path="/new", name="new")], fp
+    def test_returns_path_and_name_keys(self, tmp_path: Path) -> None:
+        repo = tmp_path / "my-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin",
+             "https://github.com/user/my-repo.git"],
+            capture_output=True,
         )
-        data = json.loads(fp.read_text())
-        assert len(data) == 1
-        assert data[0]["path"] == "/new"
 
-    def test_saves_empty_list(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        save_brownfield_repos([], fp)
-        assert json.loads(fp.read_text()) == []
-
-
-class TestRegisterBrownfieldRepo:
-    """Tests for register_brownfield_repo()."""
-
-    def test_registers_new_repo(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        result = register_brownfield_repo("/repo", "repo", filepath=fp)
+        result = scan_home_for_repos(tmp_path)
         assert len(result) == 1
-        assert result[0].path == "/repo"
+        entry = result[0]
+        assert set(entry.keys()) == {"path", "name"}
+        assert isinstance(entry["path"], str)
+        assert isinstance(entry["name"], str)
 
-    def test_deduplicates_by_path(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        register_brownfield_repo("/repo", "old-name", filepath=fp)
-        result = register_brownfield_repo("/repo", "new-name", filepath=fp)
+
+# ── _read_readme_content ───────────────────────────────────────────
+
+
+class TestReadReadmeContent:
+    """Tests for README content reading."""
+
+    def test_reads_readme_md(self, tmp_path: Path) -> None:
+        (tmp_path / "README.md").write_text("# Hello\nWorld")
+        content = _read_readme_content(tmp_path)
+        assert content == "# Hello\nWorld"
+
+    def test_prefers_claude_md(self, tmp_path: Path) -> None:
+        (tmp_path / "CLAUDE.md").write_text("Claude doc")
+        (tmp_path / "README.md").write_text("Readme doc")
+        content = _read_readme_content(tmp_path)
+        assert content == "Claude doc"
+
+    def test_returns_none_when_no_readme(self, tmp_path: Path) -> None:
+        assert _read_readme_content(tmp_path) is None
+
+    def test_truncates_long_content(self, tmp_path: Path) -> None:
+        long_text = "x" * 5000
+        (tmp_path / "README.md").write_text(long_text)
+        content = _read_readme_content(tmp_path, max_chars=100)
+        assert len(content) == 100
+
+
+# ── generate_desc ──────────────────────────────────────────────────
+
+
+class TestGenerateDesc:
+    """Tests for LLM-based description generation."""
+
+    @pytest.mark.asyncio
+    async def test_generates_desc_from_readme(self, tmp_path: Path) -> None:
+        (tmp_path / "README.md").write_text("# My Project\nA cool tool")
+
+        mock_adapter = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = "A cool development tool"
+        from ouroboros.core.types import Result
+
+        mock_adapter.complete.return_value = Result.ok(mock_response)
+
+        desc = await generate_desc(tmp_path, mock_adapter)
+        assert desc == "A cool development tool"
+        mock_adapter.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_readme(self, tmp_path: Path) -> None:
+        mock_adapter = AsyncMock()
+        desc = await generate_desc(tmp_path, mock_adapter)
+        assert desc == ""
+        mock_adapter.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_on_llm_failure(self, tmp_path: Path) -> None:
+        (tmp_path / "README.md").write_text("# Project")
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete.side_effect = Exception("LLM down")
+
+        desc = await generate_desc(tmp_path, mock_adapter)
+        assert desc == ""
+
+    @pytest.mark.asyncio
+    async def test_truncates_long_desc(self, tmp_path: Path) -> None:
+        (tmp_path / "README.md").write_text("# Project")
+
+        mock_adapter = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = "x" * 200
+        from ouroboros.core.types import Result
+
+        mock_adapter.complete.return_value = Result.ok(mock_response)
+
+        desc = await generate_desc(tmp_path, mock_adapter)
+        assert len(desc) <= 120
+
+
+# ── scan_and_register ──────────────────────────────────────────────
+
+
+class TestScanAndRegister:
+    """Tests for the high-level scan_and_register orchestration."""
+
+    @pytest.mark.asyncio
+    async def test_bulk_registers_found_repos(self, tmp_path: Path) -> None:
+        # Create a GitHub repo
+        repo = tmp_path / "my-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin",
+             "https://github.com/user/my-repo.git"],
+            capture_output=True,
+        )
+
+        # Set up store mock
+        store = AsyncMock(spec=BrownfieldStore)
+        store.get_default.return_value = None
+        store.bulk_register.return_value = 1
+        store.list.return_value = [
+            BrownfieldRepo(path=str(repo.resolve()), name="my-repo")
+        ]
+        store.set_default.return_value = BrownfieldRepo(
+            path=str(repo.resolve()), name="my-repo", is_default=True
+        )
+
+        result = await scan_and_register(store, root=tmp_path)
+
         assert len(result) == 1
-        assert result[0].name == "new-name"
+        # Should use bulk_register, not individual register
+        store.bulk_register.assert_called_once()
+        call_args = store.bulk_register.call_args[0][0]
+        assert len(call_args) == 1
+        assert call_args[0]["name"] == "my-repo"
+        # Should set default since none existed
+        store.set_default.assert_called_once()
 
-    def test_preserves_other_repos(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        register_brownfield_repo("/a", "A", filepath=fp)
-        result = register_brownfield_repo("/b", "B", filepath=fp)
+    @pytest.mark.asyncio
+    async def test_bulk_register_no_llm_during_scan(self, tmp_path: Path) -> None:
+        """scan_and_register does NOT call LLM — desc is always empty string."""
+        repo = tmp_path / "proj"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin",
+             "https://github.com/user/proj.git"],
+            capture_output=True,
+        )
+        (repo / "README.md").write_text("# Great Project\nDoes great things")
+
+        mock_adapter = AsyncMock()
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.get_default.return_value = BrownfieldRepo(
+            path=str(repo.resolve()), name="proj", is_default=True
+        )
+        store.bulk_register.return_value = 1
+        store.list.return_value = [
+            BrownfieldRepo(path=str(repo.resolve()), name="proj")
+        ]
+
+        await scan_and_register(
+            store, llm_adapter=mock_adapter, root=tmp_path
+        )
+
+        # LLM should NOT be called during scan — desc generation is deferred
+        mock_adapter.complete.assert_not_called()
+        # bulk_register should be called instead of individual register
+        store.bulk_register.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_default_set_when_already_exists(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin",
+             "https://github.com/user/repo.git"],
+            capture_output=True,
+        )
+
+        store = AsyncMock(spec=BrownfieldStore)
+        existing_default = BrownfieldRepo(
+            path="/some/other", name="other", is_default=True
+        )
+        store.get_default.return_value = existing_default
+        store.bulk_register.return_value = 1
+        store.list.return_value = [existing_default]
+
+        await scan_and_register(store, root=tmp_path)
+
+        # Should NOT call set_default since one already exists
+        store.set_default.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_repos_found(self, tmp_path: Path) -> None:
+        store = AsyncMock(spec=BrownfieldStore)
+        store.list.return_value = []
+
+        result = await scan_and_register(store, root=tmp_path)
+
+        assert result == []
+        store.bulk_register.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bulk_register_multiple_repos(self, tmp_path: Path) -> None:
+        """scan_and_register bulk-inserts all scanned repos at once."""
+        for name in ["alpha", "beta"]:
+            repo = tmp_path / name
+            repo.mkdir()
+            subprocess.run(["git", "init", str(repo)], capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "remote", "add", "origin",
+                 f"https://github.com/user/{name}.git"],
+                capture_output=True,
+            )
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.get_default.return_value = None
+        store.bulk_register.return_value = 2
+        store.list.return_value = [
+            BrownfieldRepo(path=str((tmp_path / "alpha").resolve()), name="alpha"),
+            BrownfieldRepo(path=str((tmp_path / "beta").resolve()), name="beta"),
+        ]
+        store.set_default.return_value = BrownfieldRepo(
+            path=str((tmp_path / "alpha").resolve()), name="alpha", is_default=True
+        )
+
+        result = await scan_and_register(store, root=tmp_path)
+
         assert len(result) == 2
+        # Should be a single bulk call, not multiple individual calls
+        store.bulk_register.assert_called_once()
+        call_args = store.bulk_register.call_args[0][0]
+        assert len(call_args) == 2
 
-    def test_roundtrip_via_file(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        register_brownfield_repo("/repo", "proj", desc="my desc", filepath=fp)
 
-        loaded = load_brownfield_repos(fp)
-        assert len(loaded) == 1
-        assert loaded[0] == BrownfieldEntry(
-            path="/repo", name="proj", desc="my desc"
+# ── register_repo ─────────────────────────────────────────────────
+
+
+class TestRegisterRepo:
+    """Tests for the register_repo business-level handler."""
+
+    @pytest.mark.asyncio
+    async def test_registers_with_explicit_name_and_desc(self) -> None:
+        store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(
+            path="/home/user/my-repo", name="my-repo", desc="A cool project"
         )
 
+        repo = await register_repo(
+            store=store,
+            path="/home/user/my-repo",
+            name="my-repo",
+            desc="A cool project",
+        )
 
-class TestLoadBrownfieldReposAsDicts:
-    """Tests for the dict-returning convenience wrapper."""
+        assert repo.path == "/home/user/my-repo"
+        assert repo.name == "my-repo"
+        assert repo.desc == "A cool project"
+        store.register.assert_called_once()
 
-    def test_returns_dicts(self, tmp_path: Path) -> None:
-        fp = tmp_path / "brownfield.json"
-        fp.write_text(json.dumps([{"path": "/r", "name": "r", "desc": "d"}]))
-        result = load_brownfield_repos_as_dicts(fp)
-        assert result == [{"path": "/r", "name": "r", "desc": "d"}]
+    @pytest.mark.asyncio
+    async def test_defaults_name_to_basename(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "my-project"
+        repo_dir.mkdir()
 
-    def test_empty_when_missing(self, tmp_path: Path) -> None:
-        assert load_brownfield_repos_as_dicts(tmp_path / "no.json") == []
+        store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(
+            path=str(repo_dir.resolve()), name="my-project"
+        )
+
+        repo = await register_repo(store=store, path=str(repo_dir))
+
+        assert repo.name == "my-project"
+        call_kwargs = store.register.call_args.kwargs
+        assert call_kwargs["name"] == "my-project"
+
+    @pytest.mark.asyncio
+    async def test_auto_generates_desc_with_llm(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "proj"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Great Project\nDoes things")
+
+        mock_adapter = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = "A great project"
+        from ouroboros.core.types import Result
+
+        mock_adapter.complete.return_value = Result.ok(mock_response)
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(
+            path=str(repo_dir.resolve()), name="proj", desc="A great project"
+        )
+
+        await register_repo(
+            store=store,
+            path=str(repo_dir),
+            llm_adapter=mock_adapter,
+        )
+
+        mock_adapter.complete.assert_called_once()
+        call_kwargs = store.register.call_args.kwargs
+        assert call_kwargs["desc"] == "A great project"
+
+    @pytest.mark.asyncio
+    async def test_skips_llm_when_desc_provided(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "proj"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project")
+
+        mock_adapter = AsyncMock()
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(
+            path=str(repo_dir.resolve()), name="proj", desc="Manual desc"
+        )
+
+        await register_repo(
+            store=store,
+            path=str(repo_dir),
+            desc="Manual desc",
+            llm_adapter=mock_adapter,
+        )
+
+        # LLM should NOT be called since desc was provided
+        mock_adapter.complete.assert_not_called()
+        call_kwargs = store.register.call_args.kwargs
+        assert call_kwargs["desc"] == "Manual desc"
+
+    @pytest.mark.asyncio
+    async def test_handles_llm_failure_gracefully(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "proj"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project")
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete.side_effect = Exception("LLM down")
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(
+            path=str(repo_dir.resolve()), name="proj"
+        )
+
+        # Should not raise
+        await register_repo(
+            store=store,
+            path=str(repo_dir),
+            llm_adapter=mock_adapter,
+        )
+
+        # Should still register (with None desc)
+        store.register.assert_called_once()
+        call_kwargs = store.register.call_args.kwargs
+        assert call_kwargs["desc"] is None
+
+    @pytest.mark.asyncio
+    async def test_resolves_existing_path(self, tmp_path: Path) -> None:
+        repo_dir = tmp_path / "proj"
+        repo_dir.mkdir()
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(
+            path=str(repo_dir.resolve()), name="proj"
+        )
+
+        await register_repo(store=store, path=str(repo_dir))
+
+        call_kwargs = store.register.call_args.kwargs
+        # Path should be resolved (absolute) for existing directories
+        assert Path(call_kwargs["path"]).is_absolute()
+        assert call_kwargs["path"] == str(repo_dir.resolve())
+
+    @pytest.mark.asyncio
+    async def test_preserves_nonexistent_path(self) -> None:
+        store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(
+            path="/nonexistent/repo", name="repo"
+        )
+
+        await register_repo(store=store, path="/nonexistent/repo")
+
+        call_kwargs = store.register.call_args.kwargs
+        # Non-existent path should be preserved as-is
+        assert call_kwargs["path"] == "/nonexistent/repo"
+
+
+# ── set_default_repo ──────────────────────────────────────────────
+
+
+class TestSetDefaultRepo:
+    """Tests for the set_default_repo business-level handler."""
+
+    @pytest.mark.asyncio
+    async def test_sets_default_successfully(self) -> None:
+        store = AsyncMock(spec=BrownfieldStore)
+        store.set_default.return_value = BrownfieldRepo(
+            path="/home/user/repo-a", name="repo-a", is_default=True
+        )
+
+        repo = await set_default_repo(store=store, path="/home/user/repo-a")
+
+        assert repo is not None
+        assert repo.path == "/home/user/repo-a"
+        assert repo.is_default is True
+        store.set_default.assert_called_once_with("/home/user/repo-a")
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_unregistered_path(self) -> None:
+        store = AsyncMock(spec=BrownfieldStore)
+        store.set_default.return_value = None
+
+        repo = await set_default_repo(store=store, path="/nonexistent")
+
+        assert repo is None
+        store.set_default.assert_called_once_with("/nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_store(self) -> None:
+        store = AsyncMock(spec=BrownfieldStore)
+        expected = BrownfieldRepo(
+            path="/repo", name="repo", desc="Desc", is_default=True
+        )
+        store.set_default.return_value = expected
+
+        result = await set_default_repo(store=store, path="/repo")
+
+        assert result is expected
+        store.set_default.assert_called_once_with("/repo")
+
+    @pytest.mark.asyncio
+    async def test_generates_desc_when_empty(self, tmp_path: Path) -> None:
+        """set_default generates desc via Frugal model when desc is empty."""
+        repo_dir = tmp_path / "my-repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# My Repo\nA great tool for devs")
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.set_default.return_value = BrownfieldRepo(
+            path=str(repo_dir), name="my-repo", desc=None, is_default=True
+        )
+        updated_repo = BrownfieldRepo(
+            path=str(repo_dir), name="my-repo", desc="A great tool for developers", is_default=True
+        )
+        store.update_desc.return_value = updated_repo
+
+        mock_adapter = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = "A great tool for developers"
+        from ouroboros.core.types import Result
+
+        mock_adapter.complete.return_value = Result.ok(mock_response)
+
+        result = await set_default_repo(
+            store=store,
+            path=str(repo_dir),
+            llm_adapter=mock_adapter,
+        )
+
+        assert result is not None
+        assert result.desc == "A great tool for developers"
+        mock_adapter.complete.assert_called_once()
+        store.update_desc.assert_called_once_with(str(repo_dir), "A great tool for developers")
+
+    @pytest.mark.asyncio
+    async def test_skips_desc_generation_when_desc_exists(self) -> None:
+        """set_default does NOT call LLM if desc already exists."""
+        store = AsyncMock(spec=BrownfieldStore)
+        store.set_default.return_value = BrownfieldRepo(
+            path="/repo", name="repo", desc="Already has desc", is_default=True
+        )
+
+        mock_adapter = AsyncMock()
+
+        result = await set_default_repo(
+            store=store,
+            path="/repo",
+            llm_adapter=mock_adapter,
+        )
+
+        assert result is not None
+        assert result.desc == "Already has desc"
+        mock_adapter.complete.assert_not_called()
+        store.update_desc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_desc_generation_when_no_llm(self) -> None:
+        """set_default does NOT generate desc without LLM adapter."""
+        store = AsyncMock(spec=BrownfieldStore)
+        store.set_default.return_value = BrownfieldRepo(
+            path="/repo", name="repo", desc=None, is_default=True
+        )
+
+        result = await set_default_repo(store=store, path="/repo")
+
+        assert result is not None
+        store.update_desc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unset_default_preserves_existing_desc(self) -> None:
+        """When switching default, the previously-default repo keeps its desc."""
+        store = AsyncMock(spec=BrownfieldStore)
+        # set_default returns the NEW default repo — its desc should be intact
+        store.set_default.return_value = BrownfieldRepo(
+            path="/repo-b", name="repo-b", desc="B description", is_default=True
+        )
+
+        result = await set_default_repo(store=store, path="/repo-b")
+
+        assert result is not None
+        assert result.desc == "B description"
+        assert result.is_default is True
+        # set_default only changes is_default column, not desc
+        store.set_default.assert_called_once_with("/repo-b")
+        # update_desc should NOT be called since desc is already present
+        store.update_desc.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handles_desc_generation_failure_gracefully(self, tmp_path: Path) -> None:
+        """set_default returns repo even if desc generation fails."""
+        repo_dir = tmp_path / "my-repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Project")
+
+        original_repo = BrownfieldRepo(
+            path=str(repo_dir), name="my-repo", desc=None, is_default=True
+        )
+        store = AsyncMock(spec=BrownfieldStore)
+        store.set_default.return_value = original_repo
+
+        mock_adapter = AsyncMock()
+        mock_adapter.complete.side_effect = Exception("LLM down")
+
+        result = await set_default_repo(
+            store=store,
+            path=str(repo_dir),
+            llm_adapter=mock_adapter,
+        )
+
+        # Should still return the repo (without desc)
+        assert result is not None
+        assert result is original_repo
+        store.update_desc.assert_not_called()
+
+
+# ── Skip directory verification ───────────────────────────────────
+
+
+class TestSkipDirsVerification:
+    """Verify that all hardcoded _SKIP_DIRS are correctly skipped during scan."""
+
+    EXPECTED_SKIP_DIRS = frozenset({
+        "node_modules", ".venv", "__pycache__", ".cache", "Library",
+        ".Trash", "vendor", ".gradle", "build", "dist", "target",
+        ".tox", ".mypy_cache", ".pytest_cache", ".cargo", "Pods",
+        ".npm", ".nvm", ".local", ".docker", ".rustup", "go",
+    })
+
+    def test_skip_dirs_constant_matches_expected(self) -> None:
+        """Ensure _SKIP_DIRS hasn't drifted from the expected set."""
+        assert _SKIP_DIRS == self.EXPECTED_SKIP_DIRS
+
+    def test_skip_dirs_is_frozenset(self) -> None:
+        """_SKIP_DIRS must be immutable."""
+        assert isinstance(_SKIP_DIRS, frozenset)
+
+    @pytest.mark.parametrize("skip_dir", sorted(EXPECTED_SKIP_DIRS))
+    def test_each_skip_dir_is_pruned(self, tmp_path: Path, skip_dir: str) -> None:
+        """Each entry in _SKIP_DIRS prevents scan from descending into it."""
+        # Create a repo inside the skip directory
+        nested = tmp_path / skip_dir / "some-project"
+        nested.mkdir(parents=True)
+        subprocess.run(["git", "init", str(nested)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(nested), "remote", "add", "origin",
+             "https://github.com/user/project.git"],
+            capture_output=True,
+        )
+
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 0, (
+            f"Repo inside '{skip_dir}' should be skipped but was found"
+        )
+
+    def test_dot_prefixed_dirs_are_skipped(self, tmp_path: Path) -> None:
+        """Any directory starting with '.' is pruned (not just those in _SKIP_DIRS)."""
+        for hidden in [".hidden", ".config", ".ssh", ".aws"]:
+            repo = tmp_path / hidden / "repo"
+            repo.mkdir(parents=True)
+            subprocess.run(["git", "init", str(repo)], capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(repo), "remote", "add", "origin",
+                 "https://github.com/user/repo.git"],
+                capture_output=True,
+            )
+
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 0
+
+    def test_non_skip_dir_is_scanned(self, tmp_path: Path) -> None:
+        """A directory NOT in _SKIP_DIRS and NOT dot-prefixed IS scanned."""
+        repo = tmp_path / "projects" / "my-app"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "init", str(repo)], capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin",
+             "https://github.com/user/my-app.git"],
+            capture_output=True,
+        )
+
+        result = scan_home_for_repos(tmp_path)
+        assert len(result) == 1
+        assert result[0]["name"] == "my-app"
+
+
+# ── scan_and_register mocking tests ──────────────────────────────
+
+
+class TestScanAndRegisterMocked:
+    """Tests for scan_and_register with fully mocked scan_home_for_repos.
+
+    These tests mock the filesystem scan to verify the orchestration logic
+    (bulk registration, default setting) without creating real git repos.
+    """
+
+    @pytest.mark.asyncio
+    async def test_mocked_scan_calls_bulk_register(self) -> None:
+        """scan_and_register delegates scanned repos to store.bulk_register."""
+        fake_repos = [
+            {"path": "/home/user/alpha", "name": "alpha"},
+            {"path": "/home/user/beta", "name": "beta"},
+        ]
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.get_default.return_value = None
+        store.bulk_register.return_value = 2
+        store.list.return_value = [
+            BrownfieldRepo(path="/home/user/alpha", name="alpha"),
+            BrownfieldRepo(path="/home/user/beta", name="beta"),
+        ]
+        store.set_default.return_value = BrownfieldRepo(
+            path="/home/user/alpha", name="alpha", is_default=True,
+        )
+
+        with patch(
+            "ouroboros.bigbang.brownfield.scan_home_for_repos",
+            return_value=fake_repos,
+        ):
+            result = await scan_and_register(store, root=Path("/fake"))
+
+        assert len(result) == 2
+        store.bulk_register.assert_called_once_with(fake_repos)
+
+    @pytest.mark.asyncio
+    async def test_mocked_scan_sets_first_as_default(self) -> None:
+        """When no default exists, first repo in list becomes default."""
+        fake_repos = [{"path": "/a", "name": "a"}]
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.get_default.return_value = None
+        store.bulk_register.return_value = 1
+        store.list.return_value = [
+            BrownfieldRepo(path="/a", name="a"),
+        ]
+        store.set_default.return_value = BrownfieldRepo(
+            path="/a", name="a", is_default=True,
+        )
+
+        with patch(
+            "ouroboros.bigbang.brownfield.scan_home_for_repos",
+            return_value=fake_repos,
+        ):
+            await scan_and_register(store, root=Path("/fake"))
+
+        store.set_default.assert_called_once_with("/a")
+
+    @pytest.mark.asyncio
+    async def test_mocked_scan_preserves_existing_default(self) -> None:
+        """When default already exists, scan_and_register does NOT override."""
+        fake_repos = [{"path": "/new", "name": "new"}]
+        existing_default = BrownfieldRepo(
+            path="/old", name="old", is_default=True,
+        )
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.get_default.return_value = existing_default
+        store.bulk_register.return_value = 1
+        store.list.return_value = [existing_default]
+
+        with patch(
+            "ouroboros.bigbang.brownfield.scan_home_for_repos",
+            return_value=fake_repos,
+        ):
+            await scan_and_register(store, root=Path("/fake"))
+
+        store.set_default.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mocked_scan_empty_returns_store_list(self) -> None:
+        """When scan finds no repos, returns store.list() (may have pre-registered)."""
+        store = AsyncMock(spec=BrownfieldStore)
+        pre_registered = [BrownfieldRepo(path="/existing", name="existing")]
+        store.list.return_value = pre_registered
+
+        with patch(
+            "ouroboros.bigbang.brownfield.scan_home_for_repos",
+            return_value=[],
+        ):
+            result = await scan_and_register(store, root=Path("/fake"))
+
+        assert len(result) == 1
+        assert result[0].path == "/existing"
+        store.bulk_register.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mocked_scan_llm_adapter_not_called(self) -> None:
+        """LLM adapter is accepted but never invoked during scan phase."""
+        fake_repos = [{"path": "/repo", "name": "repo"}]
+        mock_adapter = AsyncMock()
+
+        store = AsyncMock(spec=BrownfieldStore)
+        store.get_default.return_value = BrownfieldRepo(
+            path="/repo", name="repo", is_default=True,
+        )
+        store.bulk_register.return_value = 1
+        store.list.return_value = [
+            BrownfieldRepo(path="/repo", name="repo"),
+        ]
+
+        with patch(
+            "ouroboros.bigbang.brownfield.scan_home_for_repos",
+            return_value=fake_repos,
+        ):
+            await scan_and_register(
+                store, llm_adapter=mock_adapter, root=Path("/fake"),
+            )
+
+        mock_adapter.complete.assert_not_called()
+
+
+# ── User selection simulation tests ──────────────────────────────
+
+
+class TestUserSelectionSimulation:
+    """Tests simulating user selection flows in the setup command.
+
+    These tests mock the setup command's _prompt_repo_selection and
+    _scan_and_register_repos to verify end-to-end selection behavior.
+    """
+
+    def test_select_first_repo(self) -> None:
+        """User selects first repo → returns index 0."""
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+
+        repos = [
+            {"path": "/a", "name": "alpha"},
+            {"path": "/b", "name": "beta"},
+        ]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="1"):
+            idx = _prompt_repo_selection(repos)
+        assert idx == 0
+
+    def test_select_last_repo(self) -> None:
+        """User selects last repo → returns correct 0-based index."""
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+
+        repos = [
+            {"path": "/a", "name": "a"},
+            {"path": "/b", "name": "b"},
+            {"path": "/c", "name": "c"},
+        ]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="3"):
+            idx = _prompt_repo_selection(repos)
+        assert idx == 2
+
+    def test_skip_with_s_shorthand(self) -> None:
+        """User types 's' → treated as skip → returns None."""
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+
+        repos = [{"path": "/a", "name": "a"}]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="s"):
+            idx = _prompt_repo_selection(repos)
+        assert idx is None
+
+    def test_skip_with_full_word(self) -> None:
+        """User types 'skip' → returns None."""
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+
+        repos = [{"path": "/a", "name": "a"}]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="skip"):
+            idx = _prompt_repo_selection(repos)
+        assert idx is None
+
+    def test_empty_input_returns_none(self) -> None:
+        """Empty input → treated as skip → returns None."""
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+
+        repos = [{"path": "/a", "name": "a"}]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value=""):
+            idx = _prompt_repo_selection(repos)
+        assert idx is None
+
+    def test_negative_number_returns_none(self) -> None:
+        """Negative number → out of range → returns None."""
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+
+        repos = [{"path": "/a", "name": "a"}]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="-1"):
+            idx = _prompt_repo_selection(repos)
+        assert idx is None
+
+    def test_zero_returns_none(self) -> None:
+        """Zero → out of range → returns None."""
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+
+        repos = [{"path": "/a", "name": "a"}]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="0"):
+            idx = _prompt_repo_selection(repos)
+        assert idx is None
+
+    def test_whitespace_padded_skip(self) -> None:
+        """Whitespace around 'skip' is handled correctly."""
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+
+        repos = [{"path": "/a", "name": "a"}]
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="  skip  "):
+            idx = _prompt_repo_selection(repos)
+        assert idx is None
+
+    @pytest.mark.asyncio
+    async def test_full_setup_scan_then_select(self) -> None:
+        """Simulate the full scan → select flow with mocked components."""
+        from ouroboros.cli.commands.setup import (
+            _scan_and_register_repos,
+            _set_default_repo,
+        )
+        from ouroboros.persistence.brownfield import BrownfieldRepo
+
+        mock_repos = [
+            BrownfieldRepo(path="/a", name="alpha", is_default=False),
+            BrownfieldRepo(path="/b", name="beta", is_default=False),
+        ]
+
+        mock_store = AsyncMock()
+        mock_store.initialize = AsyncMock()
+        mock_store.close = AsyncMock()
+
+        # Step 1: Scan returns repos
+        with patch(
+            "ouroboros.cli.commands.setup.BrownfieldStore",
+            return_value=mock_store,
+        ), patch(
+            "ouroboros.cli.commands.setup.scan_and_register",
+            new_callable=AsyncMock,
+            return_value=mock_repos,
+        ):
+            repos = await _scan_and_register_repos()
+
+        assert len(repos) == 2
+        assert repos[0]["name"] == "alpha"
+        assert repos[1]["name"] == "beta"
+
+        # Step 2: Simulate user selecting repo #2
+        from ouroboros.cli.commands.setup import _prompt_repo_selection
+        with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="2"):
+            idx = _prompt_repo_selection(repos)
+        assert idx == 1
+        selected = repos[idx]
+        assert selected["path"] == "/b"
+
+        # Step 3: Set default
+        mock_result = BrownfieldRepo(path="/b", name="beta", is_default=True)
+        with patch(
+            "ouroboros.cli.commands.setup.BrownfieldStore",
+            return_value=mock_store,
+        ), patch(
+            "ouroboros.cli.commands.setup.set_default_repo",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
+            success = await _set_default_repo(selected["path"])
+
+        assert success is True

@@ -1,16 +1,15 @@
-"""PRD command for generating Product Requirements Documents.
+"""PM command for generating Product Requirements Documents.
 
 This command initiates a guided interview process for PMs to define
 product requirements, with automatic classification of planning vs
-development questions, producing a PRDSeed and human-readable PRD document.
+development questions, producing a PMSeed and human-readable PM document.
 
 Usage:
-    ouroboros prd                    Start a new PRD interview
-    ouroboros prd --resume <id>     Resume an existing PRD session
+    ouroboros pm                    Start a new PM interview
+    ouroboros pm --resume <id>     Resume an existing PM session
 """
 
 import asyncio
-import os
 from pathlib import Path
 from typing import Annotated
 
@@ -21,7 +20,7 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 
 app = typer.Typer(
-    name="prd",
+    name="pm",
     help="Generate a Product Requirements Document through guided interview.",
     no_args_is_help=False,
     invoke_without_command=True,
@@ -29,14 +28,14 @@ app = typer.Typer(
 
 
 @app.callback(invoke_without_command=True)
-def prd_command(
+def pm_command(
     ctx: typer.Context,
     resume: Annotated[
         str | None,
         typer.Option(
             "--resume",
             "-r",
-            help="Resume an existing PRD interview session by ID.",
+            help="Resume an existing PM interview session by ID.",
         ),
     ] = None,
     model: Annotated[
@@ -44,7 +43,7 @@ def prd_command(
         typer.Option(
             "--model",
             "-m",
-            help="LLM model to use for the PRD interview.",
+            help="LLM model to use for the PM interview.",
         ),
     ] = "anthropic/claude-sonnet-4-20250514",
     output: Annotated[
@@ -52,7 +51,7 @@ def prd_command(
         typer.Option(
             "--output",
             "-o",
-            help="Output path for the generated PRD document.",
+            help="Output path for the generated PM document.",
         ),
     ] = None,
     debug: Annotated[
@@ -63,44 +62,44 @@ def prd_command(
         ),
     ] = False,
 ) -> None:
-    """Start or resume a PRD interview to generate product requirements.
+    """Start or resume a PM interview to generate product requirements.
 
     This command guides PMs through a structured interview process to
     define product requirements. Questions are automatically classified
     as planning (PM-answerable) or development (deferred to dev interview).
 
-    The output is a PRDSeed YAML file and a human-readable prd.md document.
+    The output is a PMSeed YAML file and a human-readable pm.md document.
 
     [bold]Examples:[/]
 
-        ouroboros prd                        Start new PRD interview
-        ouroboros prd --resume abc123        Resume session
-        ouroboros prd --output ./my-prd.md   Custom output path
+        ouroboros pm                        Start new PM interview
+        ouroboros pm --resume abc123        Resume session
+        ouroboros pm --output ./my-pm.md   Custom output path
     """
     if ctx.invoked_subcommand is not None:
         return
 
-    output_path = output or Path(".ouroboros/prd.md")
+    output_path = output or Path(".ouroboros/pm.md")
 
     console.print(
-        "\n[bold cyan]Ouroboros PRD Generator[/] - Product Requirements Document\n"
+        "\n[bold cyan]Ouroboros PM Generator[/] - Product Requirements Document\n"
     )
 
     if resume:
-        print_info(f"Resuming PRD session: {resume}")
+        print_info(f"Resuming PM session: {resume}")
     else:
-        print_info("Starting new PRD interview session...")
+        print_info("Starting new PM interview session...")
 
     console.print(
         f"  Model: [dim]{model}[/]\n"
         f"  Output: [dim]{output_path}[/]\n"
     )
 
-    # PRDInterviewEngine integration point — the sibling agent is building
-    # PRDInterviewEngine which will be wired in here.
+    # PMInterviewEngine integration point — the sibling agent is building
+    # PMInterviewEngine which will be wired in here.
     try:
         asyncio.run(
-            _run_prd_interview(
+            _run_pm_interview(
                 resume_id=resume,
                 model=model,
                 output_path=output_path,
@@ -108,160 +107,31 @@ def prd_command(
             )
         )
     except KeyboardInterrupt:
-        print_info("\nPRD interview interrupted. Progress has been saved.")
+        print_info("\nPM interview interrupted. Progress has been saved.")
         raise typer.Exit(code=0)
 
 
-def _check_brownfield(cwd: str | Path) -> list[dict[str, str]]:
-    """Detect brownfield project in cwd and prompt user for confirmation.
+def _load_brownfield_from_db() -> list[dict[str, str]]:
+    """Load brownfield repos from DB for PM interview context.
 
-    If `detect_brownfield(cwd)` finds recognised config files, the user
-    is asked whether to register the current directory as a brownfield
-    repository for codebase-aware interview context.
-
-    When the user confirms, they are prompted for a project name and
-    optional description, then the repo is persisted to
-    ``~/.ouroboros/brownfield.json`` using the brownfield schema utilities.
-
-    Args:
-        cwd: Working directory to inspect.
+    Uses the default brownfield repo registered via ``ooo setup``.
+    No cwd-based detection — repos come from the DB only.
 
     Returns:
-        List of brownfield repo dicts (may include previously registered
-        repos plus the newly confirmed one).
+        List of brownfield repo dicts from the database.
     """
-    from ouroboros.bigbang.brownfield import (
-        load_brownfield_repos_as_dicts,
-        register_brownfield_repo,
-    )
-    from ouroboros.bigbang.explore import detect_brownfield
+    from ouroboros.bigbang.brownfield import load_brownfield_repos_as_dicts
 
-    # Load any previously registered repos via schema utilities
-    existing_repos = load_brownfield_repos_as_dicts()
-
-    # Check if cwd is already registered
-    cwd_str = str(Path(cwd).resolve())
-    already_registered = any(r.get("path") == cwd_str for r in existing_repos)
-
-    if already_registered:
-        print_info(f"Brownfield repo already registered: {cwd_str}")
-        return existing_repos
-
-    if not detect_brownfield(cwd):
-        return existing_repos
-
-    # Brownfield detected — inform and ask for confirmation
-    console.print(
-        f"\n[bold yellow]Brownfield project detected[/] in [cyan]{cwd_str}[/]"
-    )
-    console.print(
-        "[dim]Config files found — this looks like an existing codebase.[/]\n"
-    )
-
-    should_register = Confirm.ask(
-        "Register this directory as a brownfield repo for codebase-aware context?",
-        default=True,
-    )
-
-    if not should_register:
-        print_info("Skipping brownfield registration.")
-        return existing_repos
-
-    # Gather metadata from user
-    name = Prompt.ask(
-        "[yellow]Project name[/]",
-        default=Path(cwd_str).name,
-    )
-    desc = Prompt.ask(
-        "[yellow]Short description (optional)[/]",
-        default="",
-    )
-
-    # Persist using brownfield schema utilities (validates + writes to brownfield.json)
-    entries = register_brownfield_repo(
-        path=cwd_str,
-        name=name,
-        desc=desc,
-    )
-    repos = [e.to_dict() for e in entries]
-
-    print_success(f"Registered brownfield repo: {name} ({cwd_str})")
+    repos = load_brownfield_repos_as_dicts()
+    if repos:
+        print_info(f"Loaded {len(repos)} brownfield repo(s) from registry.")
     return repos
 
 
-def _collect_additional_repos(repos: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Prompt the user to register additional brownfield repos inline.
+def _check_existing_pm_seeds() -> bool:
+    """Check for existing PM seeds and prompt for overwrite confirmation.
 
-    After auto-detection of the CWD, this offers the user a loop to
-    manually register extra repos by providing their path, name, and
-    description. Each entry is persisted to ``~/.ouroboros/brownfield.json``
-    immediately via the brownfield schema utilities, so interrupts don't
-    lose data.
-
-    Args:
-        repos: Current list of registered repos (may include the one
-            just auto-detected from cwd).
-
-    Returns:
-        Updated list of registered repos.
-    """
-    from ouroboros.bigbang.brownfield import register_brownfield_repo
-
-    add_more = Confirm.ask(
-        "Would you like to register additional brownfield repos for context?",
-        default=False,
-    )
-
-    while add_more:
-        repo_path_str = Prompt.ask("[yellow]Repo path[/]")
-
-        if not repo_path_str or not repo_path_str.strip():
-            print_warning("Empty path — skipping.")
-            add_more = Confirm.ask("Add another repo?", default=False)
-            continue
-
-        repo_path = Path(repo_path_str.strip()).expanduser().resolve()
-
-        if not repo_path.is_dir():
-            print_warning(f"Path does not exist or is not a directory: {repo_path}")
-            add_more = Confirm.ask("Add another repo?", default=False)
-            continue
-
-        resolved = str(repo_path)
-
-        # Skip duplicates
-        if any(r.get("path") == resolved for r in repos):
-            print_info(f"Already registered: {resolved}")
-            add_more = Confirm.ask("Add another repo?", default=False)
-            continue
-
-        name = Prompt.ask(
-            "[yellow]Project name[/]",
-            default=repo_path.name,
-        )
-        desc = Prompt.ask(
-            "[yellow]Short description (optional)[/]",
-            default="",
-        )
-
-        # Persist via brownfield schema utilities (validates + writes)
-        entries = register_brownfield_repo(
-            path=resolved,
-            name=name,
-            desc=desc,
-        )
-        repos = [e.to_dict() for e in entries]
-
-        print_success(f"Registered brownfield repo: {name} ({resolved})")
-        add_more = Confirm.ask("Add another repo?", default=False)
-
-    return repos
-
-
-def _check_existing_prd_seeds() -> bool:
-    """Check for existing PRD seeds and prompt for overwrite confirmation.
-
-    Scans ``~/.ouroboros/seeds/`` for any ``prd_seed_*.yaml`` files.
+    Scans ``~/.ouroboros/seeds/`` for any ``pm_seed_*.yaml`` files.
     If found, displays the existing seeds and asks the user whether to
     overwrite or abort.
 
@@ -274,24 +144,24 @@ def _check_existing_prd_seeds() -> bool:
     if not seeds_dir.is_dir():
         return True
 
-    existing = sorted(seeds_dir.glob("prd_seed_*.yaml"))
+    existing = sorted(seeds_dir.glob("pm_seed_*.yaml"))
 
     if not existing:
         return True
 
     # Display existing seeds
-    console.print("\n[bold yellow]Existing PRD seed(s) found:[/]\n")
+    console.print("\n[bold yellow]Existing PM seed(s) found:[/]\n")
     for seed_path in existing:
         console.print(f"  • [dim]{seed_path.name}[/]")
 
     console.print()
     should_overwrite = Confirm.ask(
-        "Starting a new PRD interview may overwrite existing seed(s). Continue?",
+        "Starting a new PM interview may overwrite existing seed(s). Continue?",
         default=False,
     )
 
     if not should_overwrite:
-        print_info("Aborted. Existing PRD seed(s) preserved.")
+        print_info("Aborted. Existing PM seed(s) preserved.")
 
     return should_overwrite
 
@@ -300,7 +170,7 @@ def _select_repos(repos: list[dict[str, str]]) -> list[dict[str, str]]:
     """Multi-select UI for choosing which brownfield repos to use as reference.
 
     Displays a numbered list of registered repos and lets the user pick
-    which ones to include in the PRD interview context. Supports
+    which ones to include in the PM interview context. Supports
     comma-separated numbers, ranges (e.g. ``1-3``), and ``all``.
 
     Behaviour:
@@ -399,13 +269,13 @@ def _parse_selection(raw: str, total: int) -> set[int]:
     return indices
 
 
-async def _run_prd_interview(
+async def _run_pm_interview(
     resume_id: str | None,
     model: str,
     output_path: Path,
     debug: bool,  # noqa: ARG001
 ) -> None:
-    """Run the PRD interview loop.
+    """Run the PM interview loop.
 
     Starts by asking the opening question ("What do you want to build?"),
     then enters the guided interview loop with question classification.
@@ -413,25 +283,24 @@ async def _run_prd_interview(
     Args:
         resume_id: Optional session ID to resume.
         model: LLM model identifier.
-        output_path: Path for the generated PRD document.
+        output_path: Path for the generated PM document.
         debug: Enable debug output.
     """
-    from ouroboros.bigbang.prd_interview import PRDInterviewEngine
+    from ouroboros.bigbang.pm_interview import PMInterviewEngine
     from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
     adapter = LiteLLMAdapter()
-    engine = PRDInterviewEngine.create(llm_adapter=adapter, model=model)
+    engine = PMInterviewEngine.create(llm_adapter=adapter, model=model)
 
-    # Check for existing PRD seeds before starting a new session
+    # Check for existing PM seeds before starting a new session
     if not resume_id:
-        if not _check_existing_prd_seeds():
+        if not _check_existing_pm_seeds():
             raise typer.Exit(code=0)
 
-    # Detect brownfield before starting a new session
+    # Load brownfield repos from DB (registered via ooo setup)
     brownfield_repos: list[dict[str, str]] = []
     if not resume_id:
-        brownfield_repos = _check_brownfield(os.getcwd())
-        brownfield_repos = _collect_additional_repos(brownfield_repos)
+        brownfield_repos = _load_brownfield_from_db()
         brownfield_repos = _select_repos(brownfield_repos)
 
     if resume_id:
@@ -489,15 +358,15 @@ async def _run_prd_interview(
     if decide_later_summary:
         console.print(f"\n[bold yellow]{decide_later_summary}[/]\n")
 
-    # Generate PRD seed and document
+    # Generate PM seed and document
     if state.rounds:
-        console.print("\n[bold cyan]Generating PRD...[/]\n")
-        seed_result = await engine.generate_prd_seed(state)
+        console.print("\n[bold cyan]Generating PM...[/]\n")
+        seed_result = await engine.generate_pm_seed(state)
         if seed_result.is_ok:
             seed = seed_result.value
-            seed_path = engine.save_prd_seed(seed)
-            doc_path = engine.save_prd_document(seed, output_path.parent)
-            print_success(f"PRD seed saved: {seed_path}")
-            print_success(f"PRD document saved: {doc_path}")
+            seed_path = engine.save_pm_seed(seed)
+            doc_path = engine.save_pm_document(seed, output_path.parent)
+            print_success(f"PM seed saved: {seed_path}")
+            print_success(f"PM document saved: {doc_path}")
         else:
-            print_error(f"Failed to generate PRD: {seed_result.error}")
+            print_error(f"Failed to generate PM: {seed_result.error}")

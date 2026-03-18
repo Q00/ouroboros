@@ -1,6 +1,6 @@
-"""Tests for PRD Seed YAML persistence (AC 13).
+"""Tests for PM Seed YAML persistence (AC 13).
 
-Verifies that PRDSeed is saved as YAML at ~/.ouroboros/seeds/prd_seed_{id}.yaml
+Verifies that PMSeed is saved as YAML at ~/.ouroboros/seeds/pm_seed_{id}.yaml
 with correct naming, content roundtrip, and directory creation.
 """
 
@@ -12,13 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
-from ouroboros.bigbang.prd_interview import PRDInterviewEngine
-from ouroboros.bigbang.prd_seed import PRDSeed, UserStory
+from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import QuestionClassifier
 
 
-def _make_engine(tmp_path: Path) -> PRDInterviewEngine:
-    """Create a minimal PRDInterviewEngine for testing."""
+def _make_engine(tmp_path: Path) -> PMInterviewEngine:
+    """Create a minimal PMInterviewEngine for testing."""
     mock_adapter = MagicMock()
     mock_adapter.complete = AsyncMock()
 
@@ -28,17 +28,17 @@ def _make_engine(tmp_path: Path) -> PRDInterviewEngine:
 
     classifier = QuestionClassifier(llm_adapter=mock_adapter)
 
-    return PRDInterviewEngine(
+    return PMInterviewEngine(
         inner=inner,
         classifier=classifier,
         llm_adapter=mock_adapter,
     )
 
 
-def _make_seed(prd_id: str = "prd_seed_abc123def456") -> PRDSeed:
-    """Create a sample PRDSeed for testing."""
-    return PRDSeed(
-        prd_id=prd_id,
+def _make_seed(pm_id: str = "pm_seed_abc123def456") -> PMSeed:
+    """Create a sample PMSeed for testing."""
+    return PMSeed(
+        pm_id=pm_id,
         product_name="TaskFlow",
         goal="Task management for distributed teams",
         user_stories=(
@@ -58,17 +58,17 @@ def _make_seed(prd_id: str = "prd_seed_abc123def456") -> PRDSeed:
     )
 
 
-class TestPRDSeedSaveYAML:
-    """PRD Seed saved as YAML at ~/.ouroboros/seeds/prd_seed_{id}.yaml."""
+class TestPMSeedSaveYAML:
+    """PM Seed saved as YAML at ~/.ouroboros/seeds/pm_seed_{id}.yaml."""
 
-    def test_filename_matches_prd_id(self, tmp_path: Path) -> None:
-        """Saved file is named {prd_id}.yaml."""
+    def test_filename_matches_pm_id(self, tmp_path: Path) -> None:
+        """Saved file is named {pm_id}.yaml."""
         engine = _make_engine(tmp_path)
-        seed = _make_seed(prd_id="prd_seed_abc123def456")
+        seed = _make_seed(pm_id="pm_seed_abc123def456")
 
-        filepath = engine.save_prd_seed(seed, output_dir=tmp_path / "seeds")
+        filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
-        assert filepath.name == "prd_seed_abc123def456.yaml"
+        assert filepath.name == "pm_seed_abc123def456.yaml"
 
     def test_file_saved_in_seeds_directory(self, tmp_path: Path) -> None:
         """File is saved inside the specified seeds directory."""
@@ -76,7 +76,7 @@ class TestPRDSeedSaveYAML:
         seed = _make_seed()
         seeds_dir = tmp_path / "seeds"
 
-        filepath = engine.save_prd_seed(seed, output_dir=seeds_dir)
+        filepath = engine.save_pm_seed(seed, output_dir=seeds_dir)
 
         assert filepath.parent == seeds_dir
         assert filepath.exists()
@@ -89,7 +89,7 @@ class TestPRDSeedSaveYAML:
 
         assert not seeds_dir.exists()
 
-        filepath = engine.save_prd_seed(seed, output_dir=seeds_dir)
+        filepath = engine.save_pm_seed(seed, output_dir=seeds_dir)
 
         assert seeds_dir.exists()
         assert filepath.exists()
@@ -101,13 +101,13 @@ class TestPRDSeedSaveYAML:
         monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
         # Re-import to pick up patched home
-        import ouroboros.bigbang.prd_interview as mod
+        import ouroboros.bigbang.pm_interview as mod
         monkeypatch.setattr(mod, "_SEED_DIR", fake_home / ".ouroboros" / "seeds")
 
         engine = _make_engine(tmp_path)
         seed = _make_seed()
 
-        filepath = engine.save_prd_seed(seed)
+        filepath = engine.save_pm_seed(seed)
 
         expected_dir = fake_home / ".ouroboros" / "seeds"
         assert filepath.parent == expected_dir
@@ -118,20 +118,20 @@ class TestPRDSeedSaveYAML:
         engine = _make_engine(tmp_path)
         seed = _make_seed()
 
-        filepath = engine.save_prd_seed(seed, output_dir=tmp_path / "seeds")
+        filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
         loaded = yaml.safe_load(filepath.read_text(encoding="utf-8"))
         assert isinstance(loaded, dict)
 
     def test_yaml_contains_all_fields(self, tmp_path: Path) -> None:
-        """Saved YAML contains all PRDSeed fields."""
+        """Saved YAML contains all PMSeed fields."""
         engine = _make_engine(tmp_path)
         seed = _make_seed()
 
-        filepath = engine.save_prd_seed(seed, output_dir=tmp_path / "seeds")
+        filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
         loaded = yaml.safe_load(filepath.read_text(encoding="utf-8"))
 
-        assert loaded["prd_id"] == "prd_seed_abc123def456"
+        assert loaded["pm_id"] == "pm_seed_abc123def456"
         assert loaded["product_name"] == "TaskFlow"
         assert loaded["goal"] == "Task management for distributed teams"
         assert len(loaded["user_stories"]) == 2
@@ -149,15 +149,15 @@ class TestPRDSeedSaveYAML:
         assert "created_at" in loaded
 
     def test_yaml_roundtrip_produces_equal_seed(self, tmp_path: Path) -> None:
-        """PRDSeed survives YAML save → load roundtrip."""
+        """PMSeed survives YAML save → load roundtrip."""
         engine = _make_engine(tmp_path)
         seed = _make_seed()
 
-        filepath = engine.save_prd_seed(seed, output_dir=tmp_path / "seeds")
+        filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
         loaded_data = yaml.safe_load(filepath.read_text(encoding="utf-8"))
-        restored = PRDSeed.from_dict(loaded_data)
+        restored = PMSeed.from_dict(loaded_data)
 
-        assert restored.prd_id == seed.prd_id
+        assert restored.pm_id == seed.pm_id
         assert restored.product_name == seed.product_name
         assert restored.goal == seed.goal
         assert len(restored.user_stories) == len(seed.user_stories)
@@ -170,57 +170,57 @@ class TestPRDSeedSaveYAML:
         assert restored.deferred_decisions == seed.deferred_decisions
         assert restored.referenced_repos == seed.referenced_repos
 
-    def test_prd_id_default_format(self) -> None:
-        """Default prd_id starts with 'prd_seed_'."""
-        seed = PRDSeed()
-        assert seed.prd_id.startswith("prd_seed_")
+    def test_pm_id_default_format(self) -> None:
+        """Default pm_id starts with 'pm_seed_'."""
+        seed = PMSeed()
+        assert seed.pm_id.startswith("pm_seed_")
         # 12 hex chars after prefix
-        suffix = seed.prd_id[len("prd_seed_"):]
+        suffix = seed.pm_id[len("pm_seed_"):]
         assert len(suffix) == 12
         # Verify it's valid hex
         int(suffix, 16)
 
-    def test_prd_id_unique_across_instances(self) -> None:
-        """Each PRDSeed gets a unique prd_id by default."""
-        seeds = [PRDSeed() for _ in range(10)]
-        ids = {s.prd_id for s in seeds}
+    def test_pm_id_unique_across_instances(self) -> None:
+        """Each PMSeed gets a unique pm_id by default."""
+        seeds = [PMSeed() for _ in range(10)]
+        ids = {s.pm_id for s in seeds}
         assert len(ids) == 10
 
-    def test_saved_filename_uses_prd_id_as_stem(self, tmp_path: Path) -> None:
-        """The YAML filename stem matches prd_id exactly."""
+    def test_saved_filename_uses_pm_id_as_stem(self, tmp_path: Path) -> None:
+        """The YAML filename stem matches pm_id exactly."""
         engine = _make_engine(tmp_path)
-        custom_id = "prd_seed_custom12345"
-        seed = _make_seed(prd_id=custom_id)
+        custom_id = "pm_seed_custom12345"
+        seed = _make_seed(pm_id=custom_id)
 
-        filepath = engine.save_prd_seed(seed, output_dir=tmp_path / "seeds")
+        filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
         assert filepath.stem == custom_id
         assert filepath.suffix == ".yaml"
 
     def test_overwrite_existing_file(self, tmp_path: Path) -> None:
-        """Saving with same prd_id overwrites the existing file."""
+        """Saving with same pm_id overwrites the existing file."""
         engine = _make_engine(tmp_path)
         seeds_dir = tmp_path / "seeds"
 
-        seed_v1 = PRDSeed(prd_id="prd_seed_overwrite", product_name="V1")
-        seed_v2 = PRDSeed(prd_id="prd_seed_overwrite", product_name="V2")
+        seed_v1 = PMSeed(pm_id="pm_seed_overwrite", product_name="V1")
+        seed_v2 = PMSeed(pm_id="pm_seed_overwrite", product_name="V2")
 
-        engine.save_prd_seed(seed_v1, output_dir=seeds_dir)
-        filepath = engine.save_prd_seed(seed_v2, output_dir=seeds_dir)
+        engine.save_pm_seed(seed_v1, output_dir=seeds_dir)
+        filepath = engine.save_pm_seed(seed_v2, output_dir=seeds_dir)
 
         loaded = yaml.safe_load(filepath.read_text(encoding="utf-8"))
         assert loaded["product_name"] == "V2"
 
     def test_multiple_seeds_coexist(self, tmp_path: Path) -> None:
-        """Multiple PRD seeds can be saved in the same directory."""
+        """Multiple PM seeds can be saved in the same directory."""
         engine = _make_engine(tmp_path)
         seeds_dir = tmp_path / "seeds"
 
-        seed_a = _make_seed(prd_id="prd_seed_aaa111")
-        seed_b = _make_seed(prd_id="prd_seed_bbb222")
+        seed_a = _make_seed(pm_id="pm_seed_aaa111")
+        seed_b = _make_seed(pm_id="pm_seed_bbb222")
 
-        path_a = engine.save_prd_seed(seed_a, output_dir=seeds_dir)
-        path_b = engine.save_prd_seed(seed_b, output_dir=seeds_dir)
+        path_a = engine.save_pm_seed(seed_a, output_dir=seeds_dir)
+        path_b = engine.save_pm_seed(seed_b, output_dir=seeds_dir)
 
         assert path_a.exists()
         assert path_b.exists()
@@ -229,28 +229,28 @@ class TestPRDSeedSaveYAML:
         # Both can be loaded independently
         data_a = yaml.safe_load(path_a.read_text())
         data_b = yaml.safe_load(path_b.read_text())
-        assert data_a["prd_id"] == "prd_seed_aaa111"
-        assert data_b["prd_id"] == "prd_seed_bbb222"
+        assert data_a["pm_id"] == "pm_seed_aaa111"
+        assert data_b["pm_id"] == "pm_seed_bbb222"
 
     def test_returns_path_object(self, tmp_path: Path) -> None:
-        """save_prd_seed returns a Path object."""
+        """save_pm_seed returns a Path object."""
         engine = _make_engine(tmp_path)
         seed = _make_seed()
 
-        result = engine.save_prd_seed(seed, output_dir=tmp_path / "seeds")
+        result = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
         assert isinstance(result, Path)
 
     def test_utf8_encoding(self, tmp_path: Path) -> None:
         """YAML file is saved with UTF-8 encoding, supporting unicode."""
         engine = _make_engine(tmp_path)
-        seed = PRDSeed(
-            prd_id="prd_seed_unicode",
+        seed = PMSeed(
+            pm_id="pm_seed_unicode",
             product_name="Ünïcödé Prödüct",
             goal="Support für internationale Märkte",
         )
 
-        filepath = engine.save_prd_seed(seed, output_dir=tmp_path / "seeds")
+        filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
         content = filepath.read_text(encoding="utf-8")
         loaded = yaml.safe_load(content)
 

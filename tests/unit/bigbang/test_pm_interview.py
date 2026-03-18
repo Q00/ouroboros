@@ -1,7 +1,7 @@
-"""Unit tests for ouroboros.bigbang.prd_interview module.
+"""Unit tests for ouroboros.bigbang.pm_interview module.
 
-Tests the PRDInterviewEngine composition pattern, question classification,
-PRDSeed generation, and brownfield repo management.
+Tests the PMInterviewEngine composition pattern, question classification,
+PMSeed generation, and brownfield repo management.
 """
 
 import json
@@ -17,8 +17,8 @@ from ouroboros.bigbang.interview import (
     InterviewState,
     InterviewStatus,
 )
-from ouroboros.bigbang.prd_interview import PRDInterviewEngine
-from ouroboros.bigbang.prd_seed import PRDSeed, UserStory
+from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
     ClassifierOutputType,
@@ -50,35 +50,35 @@ def _make_adapter() -> MagicMock:
     return adapter
 
 
-def _make_engine(adapter: MagicMock | None = None, tmp_path: Path | None = None) -> PRDInterviewEngine:
-    """Create a PRDInterviewEngine with mocked dependencies."""
+def _make_engine(adapter: MagicMock | None = None, tmp_path: Path | None = None) -> PMInterviewEngine:
+    """Create a PMInterviewEngine with mocked dependencies."""
     if adapter is None:
         adapter = _make_adapter()
 
-    state_dir = tmp_path or Path("/tmp/test_prd_interview")
-    return PRDInterviewEngine.create(
+    state_dir = tmp_path or Path("/tmp/test_pm_interview")
+    return PMInterviewEngine.create(
         llm_adapter=adapter,
         state_dir=state_dir,
     )
 
 
-class TestPRDInterviewEngineComposition:
-    """Test that PRDInterviewEngine wraps InterviewEngine via composition."""
+class TestPMInterviewEngineComposition:
+    """Test that PMInterviewEngine wraps InterviewEngine via composition."""
 
     def test_has_inner_engine(self, tmp_path: Path) -> None:
-        """PRDInterviewEngine has an inner InterviewEngine attribute."""
+        """PMInterviewEngine has an inner InterviewEngine attribute."""
         engine = _make_engine(tmp_path=tmp_path)
         assert isinstance(engine.inner, InterviewEngine)
 
     def test_has_classifier(self, tmp_path: Path) -> None:
-        """PRDInterviewEngine has a QuestionClassifier."""
+        """PMInterviewEngine has a QuestionClassifier."""
         engine = _make_engine(tmp_path=tmp_path)
         assert isinstance(engine.classifier, QuestionClassifier)
 
     def test_shares_llm_adapter(self, tmp_path: Path) -> None:
         """Inner engine and classifier share the same LLM adapter."""
         adapter = _make_adapter()
-        engine = PRDInterviewEngine.create(
+        engine = PMInterviewEngine.create(
             llm_adapter=adapter,
             state_dir=tmp_path,
         )
@@ -87,13 +87,13 @@ class TestPRDInterviewEngineComposition:
         assert engine.llm_adapter is adapter
 
     def test_does_not_inherit_from_interview_engine(self) -> None:
-        """PRDInterviewEngine does NOT inherit from InterviewEngine."""
-        assert not issubclass(PRDInterviewEngine, InterviewEngine)
+        """PMInterviewEngine does NOT inherit from InterviewEngine."""
+        assert not issubclass(PMInterviewEngine, InterviewEngine)
 
     def test_create_factory(self, tmp_path: Path) -> None:
         """create() factory method properly wires all components."""
         adapter = _make_adapter()
-        engine = PRDInterviewEngine.create(
+        engine = PMInterviewEngine.create(
             llm_adapter=adapter,
             model="test-model",
             state_dir=tmp_path,
@@ -126,7 +126,7 @@ class TestOpeningQuestion:
 
     def test_get_opening_question_is_static(self) -> None:
         """get_opening_question is a static method — callable without instance."""
-        question = PRDInterviewEngine.get_opening_question()
+        question = PMInterviewEngine.get_opening_question()
         assert isinstance(question, str)
         assert "build" in question.lower()
 
@@ -208,7 +208,7 @@ class TestOpeningQuestion:
 
 
 class TestStartInterview:
-    """Test PRD interview start."""
+    """Test PM interview start."""
 
     @pytest.mark.asyncio
     async def test_start_delegates_to_inner(self, tmp_path: Path) -> None:
@@ -224,15 +224,15 @@ class TestStartInterview:
         assert state.status == InterviewStatus.IN_PROGRESS
 
     @pytest.mark.asyncio
-    async def test_start_prepends_prd_context(self, tmp_path: Path) -> None:
-        """start_interview prepends PRD system prompt to initial context."""
+    async def test_start_prepends_pm_context(self, tmp_path: Path) -> None:
+        """start_interview prepends PM system prompt to initial context."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
         result = await engine.start_interview("Build a task manager")
 
         state = result.value
-        # The inner state's initial_context should contain the PRD prefix
+        # The inner state's initial_context should contain the PM prefix
         assert "Product Requirements" in state.initial_context
         assert "Build a task manager" in state.initial_context
 
@@ -250,13 +250,13 @@ class TestStartInterview:
             "Python project using FastAPI with SQLAlchemy ORM.\n"
         )
 
-        with patch("ouroboros.bigbang.prd_interview.CodebaseExplorer") as MockExplorer:
+        with patch("ouroboros.bigbang.pm_interview.CodebaseExplorer") as MockExplorer:
             mock_explorer = MagicMock()
             mock_explorer.explore = AsyncMock(return_value=[])
             MockExplorer.return_value = mock_explorer
 
             with patch(
-                "ouroboros.bigbang.prd_interview.format_explore_results",
+                "ouroboros.bigbang.pm_interview.format_explore_results",
                 return_value=codebase_summary,
             ):
                 result = await engine.start_interview(
@@ -270,7 +270,7 @@ class TestStartInterview:
 
         # User answer must be present
         assert "Add a notifications feature for users" in ctx
-        # PRD system prompt prefix must be present
+        # PM system prompt prefix must be present
         assert "Product Requirements" in ctx
         # Codebase exploration context must be present
         assert "Existing Codebase Context (BROWNFIELD)" in ctx
@@ -305,13 +305,13 @@ class TestStartInterview:
 
         codebase_summary = "### [PRIMARY] /proj\nTech: Go\nGo monorepo with gRPC services."
 
-        with patch("ouroboros.bigbang.prd_interview.CodebaseExplorer") as MockExplorer:
+        with patch("ouroboros.bigbang.pm_interview.CodebaseExplorer") as MockExplorer:
             mock_explorer = MagicMock()
             mock_explorer.explore = AsyncMock(return_value=[])
             MockExplorer.return_value = mock_explorer
 
             with patch(
-                "ouroboros.bigbang.prd_interview.format_explore_results",
+                "ouroboros.bigbang.pm_interview.format_explore_results",
                 return_value=codebase_summary,
             ):
                 result = await engine.ask_opening_and_start(
@@ -863,12 +863,12 @@ class TestCompleteInterview:
         assert state.status == InterviewStatus.COMPLETED
 
 
-class TestPRDSeedGeneration:
-    """Test PRDSeed generation from completed interview."""
+class TestPMSeedGeneration:
+    """Test PMSeed generation from completed interview."""
 
     @pytest.mark.asyncio
     async def test_generates_seed_from_interview(self, tmp_path: Path) -> None:
-        """generate_prd_seed extracts PRDSeed from interview state."""
+        """generate_pm_seed extracts PMSeed from interview state."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
@@ -904,7 +904,7 @@ class TestPRDSeedGeneration:
             ],
         )
 
-        result = await engine.generate_prd_seed(state)
+        result = await engine.generate_pm_seed(state)
 
         assert result.is_ok
         seed = result.value
@@ -917,7 +917,7 @@ class TestPRDSeedGeneration:
 
     @pytest.mark.asyncio
     async def test_includes_deferred_items(self, tmp_path: Path) -> None:
-        """Deferred items from classifier are included in PRDSeed."""
+        """Deferred items from classifier are included in PMSeed."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
         engine.deferred_items = ["Should we use gRPC or REST?"]
@@ -944,7 +944,7 @@ class TestPRDSeedGeneration:
             ],
         )
 
-        result = await engine.generate_prd_seed(state)
+        result = await engine.generate_pm_seed(state)
 
         assert result.is_ok
         seed = result.value
@@ -961,18 +961,18 @@ class TestPRDSeedGeneration:
             initial_context="Build a task manager",
         )
 
-        result = await engine.generate_prd_seed(state)
+        result = await engine.generate_pm_seed(state)
         assert result.is_err
 
 
-class TestSavePRDSeed:
-    """Test PRDSeed persistence."""
+class TestSavePMSeed:
+    """Test PMSeed persistence."""
 
     def test_saves_yaml_to_seeds_dir(self, tmp_path: Path) -> None:
-        """save_prd_seed writes YAML to output directory."""
+        """save_pm_seed writes YAML to output directory."""
         engine = _make_engine(tmp_path=tmp_path)
 
-        seed = PRDSeed(
+        seed = PMSeed(
             product_name="TaskFlow",
             goal="Task management for small teams",
             user_stories=(
@@ -982,7 +982,7 @@ class TestSavePRDSeed:
             success_criteria=("Create task in 10s",),
         )
 
-        filepath = engine.save_prd_seed(seed, output_dir=tmp_path / "seeds")
+        filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
         assert filepath.exists()
         assert filepath.suffix == ".yaml"
@@ -993,19 +993,19 @@ class TestSavePRDSeed:
         assert len(loaded["user_stories"]) == 1
 
 
-class TestPRDSeed:
-    """Test PRDSeed frozen dataclass."""
+class TestPMSeed:
+    """Test PMSeed frozen dataclass."""
 
     def test_frozen(self) -> None:
-        """PRDSeed is frozen — attributes cannot be changed."""
-        seed = PRDSeed(product_name="Test")
+        """PMSeed is frozen — attributes cannot be changed."""
+        seed = PMSeed(product_name="Test")
 
         with pytest.raises(AttributeError):
             seed.product_name = "Changed"  # type: ignore[misc]
 
     def test_to_dict_and_from_dict_roundtrip(self) -> None:
-        """PRDSeed can roundtrip through dict serialization."""
-        original = PRDSeed(
+        """PMSeed can roundtrip through dict serialization."""
+        original = PMSeed(
             product_name="TaskFlow",
             goal="Manage tasks",
             user_stories=(
@@ -1018,7 +1018,7 @@ class TestPRDSeed:
         )
 
         data = original.to_dict()
-        restored = PRDSeed.from_dict(data)
+        restored = PMSeed.from_dict(data)
 
         assert restored.product_name == original.product_name
         assert restored.goal == original.goal
@@ -1028,7 +1028,7 @@ class TestPRDSeed:
 
     def test_to_initial_context_produces_yaml(self) -> None:
         """to_initial_context produces valid YAML string."""
-        seed = PRDSeed(
+        seed = PMSeed(
             product_name="TaskFlow",
             goal="Manage tasks",
         )
@@ -1042,51 +1042,29 @@ class TestPRDSeed:
 
 
 class TestBrownfieldRepoManagement:
-    """Test brownfield.json management."""
+    """Test DB-based brownfield repo management."""
 
-    def test_register_and_load(self, tmp_path: Path) -> None:
-        """Can register and load brownfield repos."""
-        brownfield_path = tmp_path / "brownfield.json"
+    def test_load_brownfield_repos_delegates_to_db(self, tmp_path: Path) -> None:
+        """load_brownfield_repos delegates to load_brownfield_repos_as_dicts."""
+        expected = [{"path": "/code/my-project", "name": "My Project", "desc": "Main app"}]
 
-        with patch("ouroboros.bigbang.brownfield.BROWNFIELD_PATH", brownfield_path):
-            repos = PRDInterviewEngine.register_brownfield_repo(
-                path="/code/my-project",
-                name="My Project",
-                desc="Main application",
-            )
+        with patch(
+            "ouroboros.bigbang.pm_interview._load_brownfield_dicts",
+            return_value=expected,
+        ):
+            repos = PMInterviewEngine.load_brownfield_repos()
 
-            assert len(repos) == 1
-            assert repos[0]["path"] == "/code/my-project"
-            assert repos[0]["name"] == "My Project"
-
-            # Load back
-            loaded = PRDInterviewEngine.load_brownfield_repos()
-            assert len(loaded) == 1
-            assert loaded[0]["path"] == "/code/my-project"
-
-    def test_no_duplicate_paths(self, tmp_path: Path) -> None:
-        """Registering same path replaces existing entry."""
-        brownfield_path = tmp_path / "brownfield.json"
-
-        with patch("ouroboros.bigbang.brownfield.BROWNFIELD_PATH", brownfield_path):
-            PRDInterviewEngine.register_brownfield_repo(
-                path="/code/my-project",
-                name="Old Name",
-            )
-            repos = PRDInterviewEngine.register_brownfield_repo(
-                path="/code/my-project",
-                name="New Name",
-            )
-
-            assert len(repos) == 1
-            assert repos[0]["name"] == "New Name"
+        assert len(repos) == 1
+        assert repos[0]["path"] == "/code/my-project"
+        assert repos[0]["name"] == "My Project"
 
     def test_load_empty_returns_empty_list(self, tmp_path: Path) -> None:
-        """Loading when no file exists returns empty list."""
-        brownfield_path = tmp_path / "nonexistent" / "brownfield.json"
-
-        with patch("ouroboros.bigbang.brownfield.BROWNFIELD_PATH", brownfield_path):
-            repos = PRDInterviewEngine.load_brownfield_repos()
+        """Loading when DB is empty returns empty list."""
+        with patch(
+            "ouroboros.bigbang.pm_interview._load_brownfield_dicts",
+            return_value=[],
+        ):
+            repos = PMInterviewEngine.load_brownfield_repos()
             assert repos == []
 
 
@@ -1099,7 +1077,7 @@ class TestCodebaseExploration:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        with patch("ouroboros.bigbang.prd_interview.CodebaseExplorer") as MockExplorer:
+        with patch("ouroboros.bigbang.pm_interview.CodebaseExplorer") as MockExplorer:
             mock_explorer = MagicMock()
             mock_explorer.explore = AsyncMock(return_value=[])
             MockExplorer.return_value = mock_explorer
@@ -1120,13 +1098,13 @@ class TestCodebaseExploration:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        with patch("ouroboros.bigbang.prd_interview.CodebaseExplorer") as MockExplorer:
+        with patch("ouroboros.bigbang.pm_interview.CodebaseExplorer") as MockExplorer:
             mock_explorer = MagicMock()
             mock_explorer.explore = AsyncMock(return_value=[])
             MockExplorer.return_value = mock_explorer
 
             with patch(
-                "ouroboros.bigbang.prd_interview.format_explore_results",
+                "ouroboros.bigbang.pm_interview.format_explore_results",
                 return_value="Python project with FastAPI",
             ):
                 await engine.explore_codebases([{"path": "/code/proj", "name": "proj"}])
@@ -1136,17 +1114,17 @@ class TestCodebaseExploration:
 
 
 class TestDevInterviewHandoff:
-    """Test PRDSeed to dev interview handoff."""
+    """Test PMSeed to dev interview handoff."""
 
-    def test_prd_seed_to_dev_context(self) -> None:
-        """prd_seed_to_dev_context produces YAML for initial_context."""
-        seed = PRDSeed(
+    def test_pm_seed_to_dev_context(self) -> None:
+        """pm_seed_to_dev_context produces YAML for initial_context."""
+        seed = PMSeed(
             product_name="TaskFlow",
             goal="Manage tasks for small teams",
             constraints=("offline support",),
         )
 
-        context = PRDInterviewEngine.prd_seed_to_dev_context(seed)
+        context = PMInterviewEngine.pm_seed_to_dev_context(seed)
 
         parsed = yaml.safe_load(context)
         assert parsed["product_name"] == "TaskFlow"
@@ -1197,7 +1175,7 @@ class TestSaveAndLoadState:
 
 
 class TestRestoreMeta:
-    """Tests for PRDInterviewEngine.restore_meta()."""
+    """Tests for PMInterviewEngine.restore_meta()."""
 
     def test_restore_meta_sets_all_fields(self) -> None:
         engine = _make_engine()

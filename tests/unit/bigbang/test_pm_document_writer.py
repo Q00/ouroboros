@@ -1,26 +1,26 @@
-"""Unit tests for prd.md file writing — save_prd_document and generate_prd_markdown.
+"""Unit tests for pm.md file writing — save_pm_document and generate_pm_markdown.
 
-Tests the template-based PRD document generation and file-writing logic
-that takes markdown output and writes it to disk as prd.md.
+Tests the template-based PM document generation and file-writing logic
+that takes markdown output and writes it to disk as pm.md.
 """
 
 from pathlib import Path
 
-from ouroboros.bigbang.prd_document import (
-    generate_prd_markdown,
-    save_prd_document,
+from ouroboros.bigbang.pm_document import (
+    generate_pm_markdown,
+    save_pm_document,
 )
-from ouroboros.bigbang.prd_seed import PRDSeed, UserStory
+from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 
 # ──────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────
 
 
-def _make_seed(**overrides) -> PRDSeed:
-    """Create a PRDSeed with sensible defaults for testing."""
+def _make_seed(**overrides) -> PMSeed:
+    """Create a PMSeed with sensible defaults for testing."""
     defaults = {
-        "prd_id": "prd_seed_test123",
+        "pm_id": "pm_seed_test123",
         "product_name": "Task Manager",
         "goal": "Build a task management tool for small teams.",
         "user_stories": (
@@ -38,34 +38,34 @@ def _make_seed(**overrides) -> PRDSeed:
         "interview_id": "int_abc",
     }
     defaults.update(overrides)
-    return PRDSeed(**defaults)
+    return PMSeed(**defaults)
 
 
 # ──────────────────────────────────────────────────────────────────
-# generate_prd_markdown tests
+# generate_pm_markdown tests
 # ──────────────────────────────────────────────────────────────────
 
 
 class TestGeneratePrdMarkdown:
-    """Tests for template-based PRD markdown generation."""
+    """Tests for template-based PM markdown generation."""
 
     def test_includes_title(self):
         """Generated markdown starts with product name as H1."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert md.startswith("# Task Manager\n")
 
     def test_includes_goal_section(self):
         """Generated markdown includes the Goal section."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Goal" in md
         assert "Build a task management tool" in md
 
     def test_includes_user_stories(self):
         """Generated markdown includes user stories in correct format."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## User Stories" in md
         assert "**As a** team lead" in md
         assert "**I want to** assign tasks" in md
@@ -74,59 +74,59 @@ class TestGeneratePrdMarkdown:
     def test_includes_constraints(self):
         """Generated markdown includes constraints."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Constraints" in md
         assert "- Must launch within 3 months" in md
 
     def test_includes_success_criteria(self):
         """Generated markdown includes numbered success criteria."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Success Criteria" in md
         assert "1. 80% user adoption in first quarter" in md
 
     def test_includes_assumptions(self):
         """Generated markdown includes assumptions."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Assumptions" in md
         assert "- Team has access to cloud infra" in md
 
     def test_includes_deferred_items(self):
         """Generated markdown includes deferred items."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Deferred Items" in md
         assert "- API rate limiting" in md
 
     def test_includes_decide_later_items(self):
         """Generated markdown includes decide-later items."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Decide Later" in md
         assert "- Which database to use?" in md
 
     def test_includes_interview_id_footer(self):
         """Generated markdown has footer with interview ID."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "*Interview ID: int_abc*" in md
 
-    def test_includes_prd_id(self):
-        """Generated markdown includes the PRD ID."""
+    def test_includes_pm_id(self):
+        """Generated markdown includes the PM ID."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
-        assert "*PRD ID: prd_seed_test123*" in md
+        md = generate_pm_markdown(seed)
+        assert "*PM ID: pm_seed_test123*" in md
 
     def test_omits_empty_sections(self):
         """Sections with no data are omitted from the output."""
-        seed = PRDSeed(
-            prd_id="prd_minimal",
+        seed = PMSeed(
+            pm_id="pm_minimal",
             product_name="Minimal",
             goal="Just a goal.",
             interview_id="int_min",
         )
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Goal" in md
         assert "## User Stories" not in md
         assert "## Constraints" not in md
@@ -137,14 +137,14 @@ class TestGeneratePrdMarkdown:
 
     def test_default_title_when_no_product_name(self):
         """Uses fallback title when product_name is empty."""
-        seed = PRDSeed(product_name="", goal="A goal")
-        md = generate_prd_markdown(seed)
+        seed = PMSeed(product_name="", goal="A goal")
+        md = generate_pm_markdown(seed)
         assert "# Product Requirements Document\n" in md
 
     def test_no_goal_placeholder(self):
         """Shows placeholder when goal is empty."""
-        seed = PRDSeed(product_name="Test")
-        md = generate_prd_markdown(seed)
+        seed = PMSeed(product_name="Test")
+        md = generate_pm_markdown(seed)
         assert "*No goal specified.*" in md
 
     def test_brownfield_repos_section(self):
@@ -154,7 +154,7 @@ class TestGeneratePrdMarkdown:
                 {"path": "/code/myapp", "name": "MyApp", "desc": "Main app"},
             ),
         )
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Existing Codebase Context" in md
         assert "**MyApp**" in md
         assert "`/code/myapp`" in md
@@ -163,7 +163,7 @@ class TestGeneratePrdMarkdown:
     def test_codebase_context_subsection(self):
         """Includes codebase analysis when present."""
         seed = _make_seed(codebase_context="Python FastAPI with PostgreSQL.")
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "### Codebase Analysis" in md
         assert "Python FastAPI with PostgreSQL." in md
 
@@ -175,57 +175,57 @@ class TestGeneratePrdMarkdown:
                 UserStory(persona="dev", action="deploy code", benefit="ship faster"),
             ),
         )
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "1. **As a** admin" in md
         assert "2. **As a** dev" in md
 
 
 # ──────────────────────────────────────────────────────────────────
-# save_prd_document tests
+# save_pm_document tests
 # ──────────────────────────────────────────────────────────────────
 
 
 class TestSavePrdDocument:
-    """Tests for the save_prd_document file writing function."""
+    """Tests for the save_pm_document file writing function."""
 
     def test_writes_to_default_ouroboros_dir(self, tmp_path: Path, monkeypatch):
-        """Writes prd.md to .ouroboros/ in cwd when no output_dir specified."""
+        """Writes pm.md to .ouroboros/ in cwd when no output_dir specified."""
         monkeypatch.chdir(tmp_path)
         seed = _make_seed()
 
-        path = save_prd_document(seed)
+        path = save_pm_document(seed)
 
         assert path.exists()
-        assert path.name == "prd.md"
+        assert path.name == "pm.md"
         assert path.parent.name == ".ouroboros"
         assert path.parent.parent == tmp_path
 
     def test_writes_to_custom_output_dir(self, tmp_path: Path):
-        """Writes prd.md to a custom output directory."""
+        """Writes pm.md to a custom output directory."""
         custom_dir = tmp_path / "output"
         seed = _make_seed()
 
-        path = save_prd_document(seed, output_dir=custom_dir)
+        path = save_pm_document(seed, output_dir=custom_dir)
 
         assert path.exists()
-        assert path == custom_dir / "prd.md"
+        assert path == custom_dir / "pm.md"
 
     def test_creates_parent_directories(self, tmp_path: Path):
         """Creates parent directories if they don't exist."""
         nested = tmp_path / "a" / "b" / "c"
         seed = _make_seed()
 
-        path = save_prd_document(seed, output_dir=nested)
+        path = save_pm_document(seed, output_dir=nested)
 
         assert path.exists()
         assert nested.is_dir()
 
     def test_file_content_matches_generated_markdown(self, tmp_path: Path):
-        """Written file content matches generate_prd_markdown output."""
+        """Written file content matches generate_pm_markdown output."""
         seed = _make_seed()
-        expected = generate_prd_markdown(seed)
+        expected = generate_pm_markdown(seed)
 
-        path = save_prd_document(seed, output_dir=tmp_path)
+        path = save_pm_document(seed, output_dir=tmp_path)
 
         content = path.read_text(encoding="utf-8")
         assert content == expected
@@ -234,19 +234,19 @@ class TestSavePrdDocument:
         """File is written with UTF-8 encoding."""
         seed = _make_seed(goal="Support für internationale Nutzer — ñ, ü, é")
 
-        path = save_prd_document(seed, output_dir=tmp_path)
+        path = save_pm_document(seed, output_dir=tmp_path)
 
         content = path.read_text(encoding="utf-8")
         assert "für internationale Nutzer" in content
         assert "ñ, ü, é" in content
 
     def test_overwrites_existing_file(self, tmp_path: Path):
-        """Overwrites an existing prd.md file."""
+        """Overwrites an existing pm.md file."""
         seed1 = _make_seed(product_name="First Version")
         seed2 = _make_seed(product_name="Second Version")
 
-        save_prd_document(seed1, output_dir=tmp_path)
-        path = save_prd_document(seed2, output_dir=tmp_path)
+        save_pm_document(seed1, output_dir=tmp_path)
+        path = save_pm_document(seed2, output_dir=tmp_path)
 
         content = path.read_text()
         assert "Second Version" in content
@@ -256,25 +256,25 @@ class TestSavePrdDocument:
         """Accepts output_dir as a string path."""
         seed = _make_seed()
 
-        path = save_prd_document(seed, output_dir=str(tmp_path))
+        path = save_pm_document(seed, output_dir=str(tmp_path))
 
         assert path.exists()
-        assert path.name == "prd.md"
+        assert path.name == "pm.md"
 
     def test_returns_path_object(self, tmp_path: Path):
         """Returns a Path object pointing to the saved file."""
         seed = _make_seed()
 
-        result = save_prd_document(seed, output_dir=tmp_path)
+        result = save_pm_document(seed, output_dir=tmp_path)
 
         assert isinstance(result, Path)
         assert result.is_file()
 
     def test_contains_all_seed_sections(self, tmp_path: Path):
-        """Saved file contains all expected PRD sections from seed."""
+        """Saved file contains all expected PM sections from seed."""
         seed = _make_seed()
 
-        path = save_prd_document(seed, output_dir=tmp_path)
+        path = save_pm_document(seed, output_dir=tmp_path)
         content = path.read_text()
 
         assert "# Task Manager" in content
@@ -287,10 +287,10 @@ class TestSavePrdDocument:
         assert "## Decide Later" in content
 
     def test_minimal_seed_produces_valid_file(self, tmp_path: Path):
-        """A minimal seed still produces a valid prd.md file."""
-        seed = PRDSeed(prd_id="min", product_name="Min", goal="Minimal goal")
+        """A minimal seed still produces a valid pm.md file."""
+        seed = PMSeed(pm_id="min", product_name="Min", goal="Minimal goal")
 
-        path = save_prd_document(seed, output_dir=tmp_path)
+        path = save_pm_document(seed, output_dir=tmp_path)
 
         content = path.read_text()
         assert "# Min" in content

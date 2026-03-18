@@ -2,7 +2,7 @@
 
 AC 18: Classifier receives full Q&A history plus current question plus brownfield context.
 
-These tests verify that when PRDInterviewEngine.ask_next_question() calls
+These tests verify that when PMInterviewEngine.ask_next_question() calls
 classifier.classify(), it passes:
   1. The current question as the `question` parameter
   2. Full Q&A history (all previous rounds) as `interview_context`
@@ -19,7 +19,7 @@ from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
 )
-from ouroboros.bigbang.prd_interview import PRDInterviewEngine
+from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionResponse,
@@ -44,12 +44,12 @@ def _make_adapter() -> MagicMock:
     return adapter
 
 
-def _make_engine(adapter: MagicMock | None = None, tmp_path: Path | None = None) -> PRDInterviewEngine:
-    """Create a PRDInterviewEngine with mocked dependencies."""
+def _make_engine(adapter: MagicMock | None = None, tmp_path: Path | None = None) -> PMInterviewEngine:
+    """Create a PMInterviewEngine with mocked dependencies."""
     if adapter is None:
         adapter = _make_adapter()
     state_dir = tmp_path or Path("/tmp/test_classifier_context")
-    return PRDInterviewEngine.create(
+    return PMInterviewEngine.create(
         llm_adapter=adapter,
         state_dir=state_dir,
     )

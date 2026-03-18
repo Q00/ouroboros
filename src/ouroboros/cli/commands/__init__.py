@@ -6,5 +6,6 @@ This module contains the command group implementations:
 - config: Manage configuration
 - status: Check system status
 - mcp: MCP server management
-- prd: Generate Product Requirements Documents
+- pm: Generate Product Requirements Documents
+- setup: Brownfield repository scanning and registration
 """

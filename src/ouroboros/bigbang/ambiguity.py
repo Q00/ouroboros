@@ -169,7 +169,7 @@ class AmbiguityScorer:
         doubles on parse failure, up to max_retries attempts.
 
         Items explicitly deferred via ``additional_context`` (e.g. decide-later
-        items from a PRD interview) are treated as **intentional deferrals** and
+        items from a PM interview) are treated as **intentional deferrals** and
         must not reduce the clarity score.  The LLM is instructed to score only
         what is present and answerable, not penalise deliberate gaps.
 

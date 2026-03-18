@@ -1,8 +1,8 @@
-"""Unit tests for PRDDocumentGenerator interface via prd.renderer module.
+"""Unit tests for PMDocumentGenerator interface via pm.renderer module.
 
-Validates that the PRDDocumentGenerator class interface is properly defined
-with a generate method accepting full Q&A history and PRDSeed as inputs,
-returning a PRD markdown string.
+Validates that the PMDocumentGenerator class interface is properly defined
+with a generate method accepting full Q&A history and PMSeed as inputs,
+returning a PM markdown string.
 """
 
 from __future__ import annotations
@@ -12,13 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.bigbang.prd_seed import PRDSeed, UserStory
+from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
-from ouroboros.prd.renderer import (
-    PRDDocumentGenerator,
-    generate_prd_markdown,
-    save_prd_document,
+from ouroboros.pm.renderer import (
+    PMDocumentGenerator,
+    generate_pm_markdown,
+    save_pm_document,
 )
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
@@ -27,10 +27,10 @@ from ouroboros.providers.base import CompletionResponse, UsageInfo
 # ──────────────────────────────────────────────────────────────────
 
 
-def _make_seed(**overrides) -> PRDSeed:
-    """Create a PRDSeed with sensible defaults for testing."""
+def _make_seed(**overrides) -> PMSeed:
+    """Create a PMSeed with sensible defaults for testing."""
     defaults = {
-        "prd_id": "prd_seed_test_renderer",
+        "pm_id": "pm_seed_test_renderer",
         "product_name": "Widget Dashboard",
         "goal": "Build a dashboard for monitoring widgets in real-time.",
         "user_stories": (
@@ -48,7 +48,7 @@ def _make_seed(**overrides) -> PRDSeed:
         "interview_id": "int_renderer_test",
     }
     defaults.update(overrides)
-    return PRDSeed(**defaults)
+    return PMSeed(**defaults)
 
 
 def _make_adapter(content: str = "# Widget Dashboard\n\n## Goal\n\nBuild a dashboard.") -> MagicMock:
@@ -90,45 +90,45 @@ def _sample_qa_pairs() -> list[tuple[str, str]]:
 
 
 # ──────────────────────────────────────────────────────────────────
-# Interface tests — PRDDocumentGenerator class structure
+# Interface tests — PMDocumentGenerator class structure
 # ──────────────────────────────────────────────────────────────────
 
 
-class TestPRDDocumentGeneratorInterface:
-    """Verify the PRDDocumentGenerator class has the expected interface."""
+class TestPMDocumentGeneratorInterface:
+    """Verify the PMDocumentGenerator class has the expected interface."""
 
-    def test_class_importable_from_prd_renderer(self):
-        """PRDDocumentGenerator is importable from ouroboros.prd.renderer."""
-        from ouroboros.prd.renderer import PRDDocumentGenerator as Gen
+    def test_class_importable_from_pm_renderer(self):
+        """PMDocumentGenerator is importable from ouroboros.pm.renderer."""
+        from ouroboros.pm.renderer import PMDocumentGenerator as Gen
 
-        assert Gen is PRDDocumentGenerator
+        assert Gen is PMDocumentGenerator
 
-    def test_class_importable_from_prd_package(self):
-        """PRDDocumentGenerator is importable from ouroboros.prd."""
-        from ouroboros.prd import PRDDocumentGenerator as Gen
+    def test_class_importable_from_pm_package(self):
+        """PMDocumentGenerator is importable from ouroboros.pm."""
+        from ouroboros.pm import PMDocumentGenerator as Gen
 
-        assert Gen is PRDDocumentGenerator
+        assert Gen is PMDocumentGenerator
 
     def test_has_generate_method(self):
-        """PRDDocumentGenerator has an async generate method."""
+        """PMDocumentGenerator has an async generate method."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
 
         assert hasattr(gen, "generate")
         assert callable(gen.generate)
 
     def test_has_save_method(self):
-        """PRDDocumentGenerator has a save method."""
+        """PMDocumentGenerator has a save method."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
 
         assert hasattr(gen, "save")
         assert callable(gen.save)
 
     def test_has_generate_and_save_method(self):
-        """PRDDocumentGenerator has an async generate_and_save method."""
+        """PMDocumentGenerator has an async generate_and_save method."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
 
         assert hasattr(gen, "generate_and_save")
         assert callable(gen.generate_and_save)
@@ -136,7 +136,7 @@ class TestPRDDocumentGeneratorInterface:
     def test_constructor_accepts_llm_adapter_and_model(self):
         """Constructor accepts llm_adapter and optional model."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter, model="test-model")
+        gen = PMDocumentGenerator(llm_adapter=adapter, model="test-model")
 
         assert gen.llm_adapter is adapter
         assert gen.model == "test-model"
@@ -144,24 +144,24 @@ class TestPRDDocumentGeneratorInterface:
     def test_default_model(self):
         """Default model is set when not provided."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
 
         assert gen.model  # Has a default
 
 
 # ──────────────────────────────────────────────────────────────────
-# generate() — accepts Q&A history + PRDSeed, returns markdown
+# generate() — accepts Q&A history + PMSeed, returns markdown
 # ──────────────────────────────────────────────────────────────────
 
 
-class TestPRDDocumentGeneratorGenerate:
-    """Tests for the generate method accepting Q&A history and PRDSeed."""
+class TestPMDocumentGeneratorGenerate:
+    """Tests for the generate method accepting Q&A history and PMSeed."""
 
     @pytest.mark.asyncio
     async def test_generate_accepts_seed_and_qa_pairs(self):
-        """generate() accepts PRDSeed and Q&A pairs, returns markdown."""
+        """generate() accepts PMSeed and Q&A pairs, returns markdown."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed()
 
         result = await gen.generate(seed, qa_pairs=_sample_qa_pairs())
@@ -175,7 +175,7 @@ class TestPRDDocumentGeneratorGenerate:
     async def test_generate_returns_result_type(self):
         """generate() returns a Result[str, ProviderError]."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed()
 
         result = await gen.generate(seed, qa_pairs=_sample_qa_pairs())
@@ -188,7 +188,7 @@ class TestPRDDocumentGeneratorGenerate:
     async def test_generate_with_seed_only(self):
         """generate() works with seed alone (no Q&A history)."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed()
 
         result = await gen.generate(seed)
@@ -200,7 +200,7 @@ class TestPRDDocumentGeneratorGenerate:
     async def test_generate_with_interview_state(self):
         """generate() can extract Q&A from InterviewState."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed()
 
         mock_state = MagicMock()
@@ -217,7 +217,7 @@ class TestPRDDocumentGeneratorGenerate:
     async def test_generate_falls_back_to_template_on_llm_error(self):
         """generate() falls back to template when LLM fails."""
         adapter = _make_failing_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed()
 
         result = await gen.generate(seed, qa_pairs=_sample_qa_pairs())
@@ -232,7 +232,7 @@ class TestPRDDocumentGeneratorGenerate:
     async def test_generate_prompt_includes_qa_history(self):
         """The LLM prompt includes the full Q&A history."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed()
         qa = _sample_qa_pairs()
 
@@ -249,9 +249,9 @@ class TestPRDDocumentGeneratorGenerate:
 
     @pytest.mark.asyncio
     async def test_generate_prompt_includes_seed_data(self):
-        """The LLM prompt includes PRDSeed fields."""
+        """The LLM prompt includes PMSeed fields."""
         adapter = _make_adapter()
-        gen = PRDDocumentGenerator(llm_adapter=adapter)
+        gen = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed()
 
         await gen.generate(seed, qa_pairs=_sample_qa_pairs())
@@ -271,19 +271,19 @@ class TestPRDDocumentGeneratorGenerate:
 # ──────────────────────────────────────────────────────────────────
 
 
-class TestTemplatePRDGeneration:
-    """Tests for the template-based generate_prd_markdown function."""
+class TestTemplatePMGeneration:
+    """Tests for the template-based generate_pm_markdown function."""
 
-    def test_generate_prd_markdown_importable(self):
-        """generate_prd_markdown is importable from prd.renderer."""
-        from ouroboros.prd.renderer import generate_prd_markdown
+    def test_generate_pm_markdown_importable(self):
+        """generate_pm_markdown is importable from pm.renderer."""
+        from ouroboros.pm.renderer import generate_pm_markdown
 
-        assert callable(generate_prd_markdown)
+        assert callable(generate_pm_markdown)
 
     def test_generates_markdown_from_seed(self):
         """Produces valid markdown with all populated sections."""
         seed = _make_seed()
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
 
         assert "# Widget Dashboard" in md
         assert "## Goal" in md
@@ -301,33 +301,33 @@ class TestTemplatePRDGeneration:
 
     def test_generates_markdown_for_minimal_seed(self):
         """Handles a minimal seed with only defaults."""
-        seed = PRDSeed()
-        md = generate_prd_markdown(seed)
+        seed = PMSeed()
+        md = generate_pm_markdown(seed)
 
         assert "## Goal" in md
         assert "Product Requirements Document" in md
 
 
 # ──────────────────────────────────────────────────────────────────
-# save_prd_document
+# save_pm_document
 # ──────────────────────────────────────────────────────────────────
 
 
-class TestSavePRDDocument:
-    """Tests for save_prd_document function."""
+class TestSavePMDocument:
+    """Tests for save_pm_document function."""
 
-    def test_save_prd_document_importable(self):
-        """save_prd_document is importable from prd.renderer."""
-        from ouroboros.prd.renderer import save_prd_document
+    def test_save_pm_document_importable(self):
+        """save_pm_document is importable from pm.renderer."""
+        from ouroboros.pm.renderer import save_pm_document
 
-        assert callable(save_prd_document)
+        assert callable(save_pm_document)
 
     def test_saves_to_output_dir(self, tmp_path: Path):
-        """Saves prd.md to specified output directory."""
+        """Saves pm.md to specified output directory."""
         seed = _make_seed()
-        path = save_prd_document(seed, output_dir=tmp_path)
+        path = save_pm_document(seed, output_dir=tmp_path)
 
         assert path.exists()
-        assert path.name == "prd.md"
+        assert path.name == "pm.md"
         content = path.read_text()
         assert "Widget Dashboard" in content

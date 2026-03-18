@@ -14,13 +14,14 @@ from ouroboros.bigbang.ambiguity import (
     is_ready_for_seed,
 )
 from ouroboros.bigbang.brownfield import (
-    BROWNFIELD_PATH,
     BrownfieldEntry,
-    load_brownfield_repos,
+    generate_desc,
+    get_default_brownfield_context,
     load_brownfield_repos_as_dicts,
-    register_brownfield_repo,
-    save_brownfield_repos,
-    validate_entries,
+    register_repo,
+    scan_and_register,
+    scan_home_for_repos,
+    set_default_repo,
 )
 from ouroboros.bigbang.explore import (
     CodebaseExplorer,
@@ -28,13 +29,13 @@ from ouroboros.bigbang.explore import (
     format_explore_results,
 )
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
-from ouroboros.bigbang.prd_document import (
-    PRDDocumentGenerator,
-    generate_prd_markdown,
-    save_prd_document,
+from ouroboros.bigbang.pm_document import (
+    PMDocumentGenerator,
+    generate_pm_markdown,
+    save_pm_document,
 )
-from ouroboros.bigbang.prd_interview import PRDInterviewEngine
-from ouroboros.bigbang.prd_seed import PRDSeed, UserStory
+from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
     QuestionCategory,
@@ -48,13 +49,14 @@ from ouroboros.bigbang.seed_generator import (
 
 __all__ = [
     # Brownfield
-    "BROWNFIELD_PATH",
     "BrownfieldEntry",
-    "load_brownfield_repos",
+    "generate_desc",
+    "get_default_brownfield_context",
     "load_brownfield_repos_as_dicts",
-    "register_brownfield_repo",
-    "save_brownfield_repos",
-    "validate_entries",
+    "register_repo",
+    "scan_and_register",
+    "scan_home_for_repos",
+    "set_default_repo",
     # Ambiguity
     "AMBIGUITY_THRESHOLD",
     "AmbiguityScore",
@@ -70,16 +72,16 @@ __all__ = [
     # Interview
     "InterviewEngine",
     "InterviewState",
-    # PRD Interview
-    "PRDInterviewEngine",
-    "PRDSeed",
+    # PM Interview
+    "PMInterviewEngine",
+    "PMSeed",
     "UserStory",
     "QuestionClassifier",
     "QuestionCategory",
     "ClassificationResult",
-    "PRDDocumentGenerator",
-    "generate_prd_markdown",
-    "save_prd_document",
+    "PMDocumentGenerator",
+    "generate_pm_markdown",
+    "save_pm_document",
     # Seed Generation
     "SeedGenerator",
     "load_seed",

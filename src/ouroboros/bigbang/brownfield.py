@@ -1,237 +1,461 @@
-"""Brownfield repository registry — schema, validation, and file I/O.
+"""Brownfield repository registry — DB-backed business logic.
 
-Manages the global brownfield registry at ``~/.ouroboros/brownfield.json``.
-Each entry describes an existing codebase that the PRD interview should be
-aware of when generating product requirements.
+Manages the global brownfield registry in ``~/.ouroboros/ouroboros.db``
+via :class:`~ouroboros.persistence.brownfield.BrownfieldStore`.
 
-Schema (JSON array)::
+Business-level operations:
+- Home directory scanning for git repos with GitHub origin
+- README/CLAUDE.md parsing for one-line description generation (Frugal model)
+- Async CRUD delegated to BrownfieldStore
 
-    [
-        {
-            "path": "/absolute/path/to/repo",
-            "name": "human-friendly-name",
-            "desc": "optional short description"
-        }
-    ]
-
-All three fields are strings.  ``path`` and ``name`` are required (non-empty);
-``desc`` defaults to ``""`` when absent.
+All brownfield data is stored in the SQLite database.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import json
+import asyncio
+import os
 from pathlib import Path
-from typing import Any
+import subprocess
 
 import structlog
 
+from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
+from ouroboros.providers.base import (
+    CompletionConfig,
+    LLMAdapter,
+    Message,
+    MessageRole,
+)
+
 log = structlog.get_logger()
 
-BROWNFIELD_PATH = Path.home() / ".ouroboros" / "brownfield.json"
+# Re-export BrownfieldRepo as BrownfieldEntry for backward compat
+BrownfieldEntry = BrownfieldRepo
 
-_REQUIRED_KEYS = {"path", "name"}
+# ── Constants ──────────────────────────────────────────────────────
 
+_FRUGAL_MODEL = "anthropic/claude-3-5-haiku-20241022"
 
-# ── Schema dataclass ────────────────────────────────────────────────
+_SKIP_DIRS: frozenset[str] = frozenset({
+    "node_modules",
+    ".venv",
+    "__pycache__",
+    ".cache",
+    "Library",
+    ".Trash",
+    "vendor",
+    ".gradle",
+    "build",
+    "dist",
+    "target",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".cargo",
+    "Pods",
+    ".npm",
+    ".nvm",
+    ".local",
+    ".docker",
+    ".rustup",
+    "go",
+})
 
-
-@dataclass(frozen=True, slots=True)
-class BrownfieldEntry:
-    """A single brownfield repository entry.
-
-    Attributes:
-        path: Absolute filesystem path to the repository root.
-        name: Human-friendly project name.
-        desc: Optional short description.
-    """
-
-    path: str
-    name: str
-    desc: str = ""
-
-    def to_dict(self) -> dict[str, str]:
-        """Serialize to a plain dict for JSON persistence."""
-        return {"path": self.path, "name": self.name, "desc": self.desc}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> BrownfieldEntry:
-        """Create an entry from a dict, raising on missing required keys.
-
-        Args:
-            data: Dictionary with at least ``path`` and ``name`` keys.
-
-        Returns:
-            Validated BrownfieldEntry.
-
-        Raises:
-            ValueError: If required keys are missing or empty.
-        """
-        missing = _REQUIRED_KEYS - set(data.keys())
-        if missing:
-            raise ValueError(f"Missing required keys: {sorted(missing)}")
-
-        path = str(data["path"]).strip()
-        name = str(data["name"]).strip()
-
-        if not path:
-            raise ValueError("'path' must not be empty")
-        if not name:
-            raise ValueError("'name' must not be empty")
-
-        return cls(path=path, name=name, desc=str(data.get("desc", "")))
+_DESC_SYSTEM_PROMPT = (
+    "You are a concise technical writer. "
+    "Given the content of a project's README or CLAUDE.md, "
+    "produce exactly ONE short sentence (max 15 words) describing the project. "
+    "Reply with only that sentence — no quotes, no bullet points."
+)
 
 
-# ── Validation ──────────────────────────────────────────────────────
+# ── Home directory scanning ────────────────────────────────────────
 
 
-def validate_entries(raw: Any) -> list[BrownfieldEntry]:
-    """Validate raw JSON data against the brownfield schema.
-
-    Accepts any value and returns a list of validated
-    :class:`BrownfieldEntry` instances.  Invalid entries are logged
-    and skipped rather than raising — the registry is best-effort.
+def _has_github_origin(repo_path: Path) -> bool:
+    """Check whether a git repo has a remote origin containing github.com.
 
     Args:
-        raw: Parsed JSON value (should be a list of dicts).
+        repo_path: Path to the repository root (parent of ``.git``).
 
     Returns:
-        List of validated entries.
-
-    Raises:
-        ValueError: If *raw* is not a list.
+        True if any origin URL contains ``github.com``.
     """
-    if not isinstance(raw, list):
-        raise ValueError(
-            f"brownfield.json must be a JSON array, got {type(raw).__name__}"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
+        return "github.com" in result.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
 
-    entries: list[BrownfieldEntry] = []
-    for idx, item in enumerate(raw):
-        if not isinstance(item, dict):
-            log.warning(
-                "brownfield.skip_non_dict",
-                index=idx,
-                type=type(item).__name__,
-            )
+
+def scan_home_for_repos(
+    root: Path | None = None,
+) -> list[dict[str, str]]:
+    """Walk the home directory to find git repositories with GitHub origins.
+
+    Scanning rules:
+    - Prune subdirectories once ``.git`` is found (no nested repos)
+    - Skip hardcoded noise directories (node_modules, .venv, etc.)
+    - Only include repos whose origin remote contains ``github.com``
+
+    Args:
+        root: Directory to start scanning. Defaults to ``~/``.
+
+    Returns:
+        Sorted list of ``{path, name}`` dicts for each discovered repository.
+    """
+    if root is None:
+        root = Path.home()
+
+    repos: list[dict[str, str]] = []
+
+    # os.walk with topdown=True so we can modify dirs in-place to prune
+    for dirpath, dirnames, _filenames in os.walk(root, topdown=True):
+        current = Path(dirpath)
+
+        # Check for .git directory
+        if ".git" in dirnames:
+            if _has_github_origin(current):
+                resolved = current.resolve()
+                repos.append({"path": str(resolved), "name": resolved.name})
+                log.debug("brownfield.scan.found", path=str(current))
+
+            # Prune: don't descend into this repo's subdirectories
+            dirnames.clear()
             continue
-        try:
-            entries.append(BrownfieldEntry.from_dict(item))
-        except ValueError as exc:
-            log.warning(
-                "brownfield.skip_invalid_entry",
-                index=idx,
-                error=str(exc),
-            )
-    return entries
 
+        # Prune skip directories
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in _SKIP_DIRS and not d.startswith(".")
+        ]
 
-# ── File I/O ────────────────────────────────────────────────────────
-
-
-def load_brownfield_repos(
-    filepath: Path | None = None,
-) -> list[BrownfieldEntry]:
-    """Load the brownfield registry from disk.
-
-    Returns an empty list when the file does not exist or cannot be
-    parsed.  Individual entries that fail validation are skipped.
-
-    Args:
-        filepath: Path to the brownfield JSON file.  Defaults to
-            :data:`BROWNFIELD_PATH`.
-
-    Returns:
-        List of validated brownfield entries.
-    """
-    if filepath is None:
-        filepath = BROWNFIELD_PATH
-    if not filepath.exists():
-        return []
-
-    try:
-        text = filepath.read_text(encoding="utf-8")
-        raw = json.loads(text)
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("brownfield.load_failed", path=str(filepath), error=str(exc))
-        return []
-
-    try:
-        return validate_entries(raw)
-    except ValueError as exc:
-        log.warning("brownfield.load_invalid", path=str(filepath), error=str(exc))
-        return []
-
-
-def save_brownfield_repos(
-    entries: list[BrownfieldEntry],
-    filepath: Path | None = None,
-) -> None:
-    """Persist the brownfield registry to disk.
-
-    Creates parent directories as needed.
-
-    Args:
-        entries: List of entries to save.
-        filepath: Path to the brownfield JSON file.  Defaults to
-            :data:`BROWNFIELD_PATH`.
-    """
-    if filepath is None:
-        filepath = BROWNFIELD_PATH
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    data = [e.to_dict() for e in entries]
-    filepath.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    log.info("brownfield.saved", path=str(filepath), count=len(entries))
-
-
-def register_brownfield_repo(
-    path: str,
-    name: str,
-    desc: str = "",
-    filepath: Path | None = None,
-) -> list[BrownfieldEntry]:
-    """Register a new brownfield repository (or update an existing one).
-
-    De-duplicates by ``path``: if a repo with the same path exists it is
-    replaced with the new entry.
-
-    Args:
-        path: Absolute filesystem path to the repo.
-        name: Human-friendly name.
-        desc: Optional description.
-        filepath: Path to the brownfield JSON file.
-
-    Returns:
-        Updated list of entries (including the new/updated one).
-
-    Raises:
-        ValueError: If *path* or *name* are empty.
-    """
-    entry = BrownfieldEntry(path=path, name=name, desc=desc)
-
-    repos = load_brownfield_repos(filepath)
-
-    # De-duplicate by path
-    repos = [r for r in repos if r.path != path]
-    repos.append(entry)
-
-    save_brownfield_repos(repos, filepath)
+    repos.sort(key=lambda r: r["path"])
+    log.info("brownfield.scan.complete", root=str(root), found=len(repos))
     return repos
 
 
-def load_brownfield_repos_as_dicts(
-    filepath: Path | None = None,
-) -> list[dict[str, str]]:
-    """Load brownfield repos and return as plain dicts.
+# ── README / CLAUDE.md description generation ─────────────────────
 
-    Convenience wrapper for callers that expect ``list[dict[str, str]]``
-    (e.g. PRDInterviewEngine static methods for backward compatibility).
+
+def _read_readme_content(repo_path: Path, max_chars: int = 3000) -> str | None:
+    """Read README or CLAUDE.md content from a repo, truncated.
+
+    Checks in order: CLAUDE.md, README.md, README.rst, README.txt, README.
 
     Args:
-        filepath: Path to the brownfield JSON file.
+        repo_path: Path to the repository root.
+        max_chars: Maximum characters to read.
+
+    Returns:
+        File content (truncated) or None if not found.
+    """
+    candidates = [
+        "CLAUDE.md",
+        "README.md",
+        "README.rst",
+        "README.txt",
+        "README",
+    ]
+    for name in candidates:
+        filepath = repo_path / name
+        if filepath.is_file():
+            try:
+                text = filepath.read_text(encoding="utf-8", errors="replace")
+                return text[:max_chars]
+            except OSError:
+                continue
+    return None
+
+
+async def generate_desc(
+    repo_path: Path,
+    llm_adapter: LLMAdapter,
+    model: str = _FRUGAL_MODEL,
+) -> str:
+    """Generate a one-line description for a repo using a Frugal-tier LLM.
+
+    Reads README/CLAUDE.md and asks a Haiku-class model for a short summary.
+    Falls back to the directory name if no README is found or LLM fails.
+
+    Args:
+        repo_path: Path to the repository root.
+        llm_adapter: LLM adapter for the completion call.
+        model: Model identifier (defaults to Frugal/Haiku-class).
+
+    Returns:
+        One-line description string.
+    """
+    content = _read_readme_content(repo_path)
+    if not content:
+        return ""
+
+    messages = [
+        Message(role=MessageRole.SYSTEM, content=_DESC_SYSTEM_PROMPT),
+        Message(
+            role=MessageRole.USER,
+            content=f"Project at: {repo_path.name}\n\n{content}",
+        ),
+    ]
+    config = CompletionConfig(
+        model=model,
+        temperature=0.0,
+        max_tokens=60,
+    )
+
+    try:
+        result = await llm_adapter.complete(messages, config)
+        if result.is_ok:
+            desc = result.value.content.strip().rstrip(".")
+            # Sanity: cap at 120 chars
+            return desc[:120]
+    except Exception as exc:
+        log.warning(
+            "brownfield.desc_generation_failed",
+            path=str(repo_path),
+            error=str(exc),
+        )
+
+    return ""
+
+
+# ── High-level orchestration ───────────────────────────────────────
+
+
+async def scan_and_register(
+    store: BrownfieldStore,
+    llm_adapter: LLMAdapter | None = None,  # noqa: ARG001
+    root: Path | None = None,
+    *,
+    model: str = _FRUGAL_MODEL,  # noqa: ARG001
+) -> list[BrownfieldRepo]:
+    """Scan home directory for repos and bulk-register them in the DB.
+
+    This is the main entry point for ``ooo setup`` brownfield scanning.
+
+    1. Walk ``~/`` to find git repos with GitHub origins.
+    2. Bulk-insert all found repos with ``is_default=False`` and ``desc=""``.
+    3. Set the first repo as default if no default exists.
+
+    Description generation is deferred to ``set_default_repo`` (Frugal model).
+    The ``llm_adapter`` and ``model`` params are accepted for API compatibility
+    but are not used during scanning.
+
+    Args:
+        store: Initialized BrownfieldStore.
+        llm_adapter: Unused — kept for backward API compatibility.
+        root: Directory to scan. Defaults to ``~/``.
+        model: Unused — kept for backward API compatibility.
+
+    Returns:
+        List of all registered BrownfieldRepo instances.
+    """
+    scanned = scan_home_for_repos(root)
+
+    if not scanned:
+        log.info("brownfield.scan_and_register.no_repos")
+        return await store.list()
+
+    # Bulk insert all scanned repos with is_default=False, desc=""
+    inserted = await store.bulk_register(scanned)
+    log.info("brownfield.bulk_registered", count=inserted)
+
+    # Set default if none exists
+    current_default = await store.get_default()
+    if current_default is None:
+        all_repos = await store.list()
+        if all_repos:
+            await store.set_default(all_repos[0].path)
+            log.info("brownfield.default_set", path=all_repos[0].path)
+
+    return await store.list()
+
+
+async def get_default_brownfield_context(
+    store: BrownfieldStore,
+) -> BrownfieldRepo | None:
+    """Get the default brownfield repo for PM interview context.
+
+    Args:
+        store: Initialized BrownfieldStore.
+
+    Returns:
+        The default BrownfieldRepo, or None if no default is set.
+    """
+    return await store.get_default()
+
+
+# ── Register & set_default handlers ───────────────────────────────
+
+
+async def register_repo(
+    store: BrownfieldStore,
+    path: str,
+    name: str | None = None,
+    desc: str | None = None,
+    *,
+    llm_adapter: LLMAdapter | None = None,
+    model: str = _FRUGAL_MODEL,
+) -> BrownfieldRepo:
+    """Register a single repository in the brownfield DB.
+
+    Handles both manual registration and scan-result registration.
+    Generates a one-line description via LLM if an adapter is provided
+    and no description is given.
+
+    If ``name`` is omitted, the directory basename is used.
+
+    Args:
+        store: Initialized BrownfieldStore.
+        path: Absolute filesystem path to the repository.
+        name: Human-readable name. Defaults to ``Path(path).name``.
+        desc: One-line description. If None and an LLM adapter is given,
+              a description is auto-generated from README/CLAUDE.md.
+        llm_adapter: Optional LLM adapter for description generation.
+        model: Model for description generation.
+
+    Returns:
+        The registered BrownfieldRepo.
+    """
+    repo_path = Path(path)
+    resolved_name = name or repo_path.name
+    # Resolve only if the path exists on disk (avoids macOS /System/Volumes
+    # prefix for non-existent paths in tests and cross-machine registrations).
+    canonical_path = str(repo_path.resolve()) if repo_path.exists() else str(repo_path)
+
+    # Auto-generate description if not provided and LLM adapter is available
+    if desc is None and llm_adapter is not None:
+        try:
+            desc = await generate_desc(repo_path, llm_adapter, model)
+        except Exception as exc:
+            log.warning(
+                "brownfield.register_repo.desc_failed",
+                path=canonical_path,
+                error=str(exc),
+            )
+
+    repo = await store.register(
+        path=canonical_path,
+        name=resolved_name,
+        desc=desc or None,
+    )
+
+    log.info(
+        "brownfield.register_repo",
+        path=canonical_path,
+        name=resolved_name,
+        desc=desc[:60] if desc else "",
+    )
+
+    return repo
+
+
+async def set_default_repo(
+    store: BrownfieldStore,
+    path: str,
+    *,
+    llm_adapter: LLMAdapter | None = None,
+    model: str = _FRUGAL_MODEL,
+) -> BrownfieldRepo | None:
+    """Set a registered repository as the default brownfield context.
+
+    Clears the default flag on all other repos and sets it on the
+    specified repo. The repo must already be registered.
+
+    If the repo's ``desc`` is empty and an ``llm_adapter`` is provided,
+    a one-line description is auto-generated from the repo's README/CLAUDE.md
+    using a Frugal (Haiku-class) model and stored in the DB.
+
+    Args:
+        store: Initialized BrownfieldStore.
+        path: Absolute filesystem path of the repo to set as default.
+        llm_adapter: Optional LLM adapter for description generation.
+        model: Model identifier for description generation.
+
+    Returns:
+        The updated BrownfieldRepo, or None if the path is not registered.
+    """
+    repo = await store.set_default(path)
+
+    if repo is None:
+        log.warning("brownfield.set_default_repo.not_found", path=path)
+        return None
+
+    # Auto-generate desc if empty and LLM adapter is available
+    if not repo.desc and llm_adapter is not None:
+        try:
+            desc = await generate_desc(Path(repo.path), llm_adapter, model)
+            if desc:
+                updated = await store.update_desc(repo.path, desc)
+                if updated is not None:
+                    repo = updated
+                    log.info(
+                        "brownfield.set_default_repo.desc_generated",
+                        path=path,
+                        desc=desc[:60],
+                    )
+        except Exception as exc:
+            log.warning(
+                "brownfield.set_default_repo.desc_failed",
+                path=path,
+                error=str(exc),
+            )
+
+    log.info("brownfield.set_default_repo", path=path, name=repo.name)
+    return repo
+
+
+# ── Sync convenience wrappers (for non-async callers) ─────────────
+
+
+def _run_async(coro):
+    """Run an async coroutine from sync context, handling event loops."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # Already in an async context — create a new thread
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    else:
+        return asyncio.run(coro)
+
+
+def load_brownfield_repos_as_dicts(
+    store: BrownfieldStore | None = None,
+) -> list[dict[str, str]]:
+    """Load brownfield repos from DB and return as plain dicts.
+
+    Convenience wrapper for callers that expect ``list[dict[str, str]]``.
+
+    Args:
+        store: Optional BrownfieldStore. Creates a temporary one if None.
 
     Returns:
         List of repo dicts with keys: path, name, desc.
     """
-    return [e.to_dict() for e in load_brownfield_repos(filepath)]
+
+    async def _load() -> list[dict[str, str]]:
+        own_store = store is None
+        s = store or BrownfieldStore()
+        try:
+            if own_store:
+                await s.initialize()
+            repos = await s.list()
+            return [r.to_dict() for r in repos]
+        finally:
+            if own_store:
+                await s.close()
+
+    return _run_async(_load())

@@ -1,8 +1,8 @@
-"""PRD Seed — immutable specification for product requirements.
+"""PM Seed — immutable specification for product requirements.
 
-A PRDSeed captures PM-level product requirements: goals, user stories,
+A PMSeed captures PM-level product requirements: goals, user stories,
 constraints, success criteria, and deferred items. It is produced by the
-PRD interview flow and can be serialized to YAML for handoff to a
+PM interview flow and can be serialized to YAML for handoff to a
 development interview via initial_context.
 """
 
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class UserStory:
-    """A single user story captured during PRD interview.
+    """A single user story captured during PM interview.
 
     Attributes:
         persona: Who benefits (e.g., "PM", "Developer").
@@ -36,14 +36,14 @@ class UserStory:
 
 
 @dataclass(frozen=True, slots=True)
-class PRDSeed:
-    """Immutable product requirements seed produced by PRD interview.
+class PMSeed:
+    """Immutable product requirements seed produced by PM interview.
 
     This is the PM-facing counterpart of Seed. It captures product-level
     requirements before they are translated into development specifications.
 
     Attributes:
-        prd_id: Unique identifier for this PRD seed.
+        pm_id: Unique identifier for this PM seed.
         product_name: Name of the product or feature.
         goal: High-level product goal statement.
         user_stories: Captured user stories.
@@ -51,17 +51,17 @@ class PRDSeed:
         success_criteria: Measurable success criteria.
         deferred_items: Items explicitly deferred to later phases.
         assumptions: Assumptions made during the interview.
-        interview_id: Reference to the source PRD interview.
+        interview_id: Reference to the source PM interview.
         codebase_context: Shared codebase exploration context (brownfield).
         brownfield_repos: Registered brownfield repositories.
         seed: Optional reference to the generated dev Seed.
-        deferred_decisions: Decisions deferred during PRD interview
+        deferred_decisions: Decisions deferred during PM interview
             (architectural, technical, or strategic choices postponed).
-        referenced_repos: Repos referenced during PRD interview for context.
+        referenced_repos: Repos referenced during PM interview for context.
         created_at: When this seed was generated.
     """
 
-    prd_id: str = field(default_factory=lambda: f"prd_seed_{uuid4().hex[:12]}")
+    pm_id: str = field(default_factory=lambda: f"pm_seed_{uuid4().hex[:12]}")
     product_name: str = ""
     goal: str = ""
     user_stories: tuple[UserStory, ...] = ()
@@ -71,7 +71,7 @@ class PRDSeed:
     decide_later_items: tuple[str, ...] = ()
     """Original question text for items classified as decide-later.
 
-    These are questions that were premature or unknowable during the PRD
+    These are questions that were premature or unknowable during the PM
     interview. Stored as the original question text so they can be surfaced
     later when enough context exists to answer them.
     """
@@ -82,22 +82,22 @@ class PRDSeed:
     seed: Seed | None = None
     """Optional reference to the generated dev Seed.
 
-    Populated after the dev interview produces a Seed from the PRD
-    requirements. None while in the PRD-only phase.
+    Populated after the dev interview produces a Seed from the PM
+    requirements. None while in the PM-only phase.
     """
     deferred_decisions: tuple[str, ...] = ()
-    """Decisions deferred during the PRD interview.
+    """Decisions deferred during the PM interview.
 
     These are architectural, technical, or strategic decisions that the PM
     chose to postpone. Distinct from decide_later_items (which are questions
     the classifier auto-deferred) and deferred_items (feature-level deferrals).
     """
     referenced_repos: tuple[dict[str, str], ...] = ()
-    """Repos referenced during the PRD interview for brownfield context.
+    """Repos referenced during the PM interview for brownfield context.
 
     Each entry is a dict with keys: path, name, desc. This captures which
     repositories were consulted during codebase exploration, providing
-    traceability for the PRD requirements.
+    traceability for the PM requirements.
     """
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat(),
@@ -106,7 +106,7 @@ class PRDSeed:
     def to_dict(self) -> dict:
         """Convert to a plain dictionary for YAML serialization."""
         return {
-            "prd_id": self.prd_id,
+            "pm_id": self.pm_id,
             "product_name": self.product_name,
             "goal": self.goal,
             "user_stories": [
@@ -128,8 +128,8 @@ class PRDSeed:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> PRDSeed:
-        """Create a PRDSeed from a dictionary (e.g., loaded from YAML)."""
+    def from_dict(cls, data: dict) -> PMSeed:
+        """Create a PMSeed from a dictionary (e.g., loaded from YAML)."""
         from ouroboros.core.seed import Seed
 
         stories = tuple(
@@ -146,7 +146,7 @@ class PRDSeed:
         seed = Seed.from_dict(seed_data) if seed_data is not None else None
 
         return cls(
-            prd_id=data.get("prd_id", ""),
+            pm_id=data.get("pm_id", ""),
             product_name=data.get("product_name", ""),
             goal=data.get("goal", ""),
             user_stories=stories,
@@ -169,7 +169,7 @@ class PRDSeed:
         )
 
     def to_initial_context(self) -> str:
-        """Serialize PRDSeed to a string for dev interview handoff.
+        """Serialize PMSeed to a string for dev interview handoff.
 
         This produces a YAML-formatted string suitable for passing as
         initial_context to a standard InterviewEngine session.

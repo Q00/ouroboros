@@ -1,7 +1,7 @@
 """Unit tests for decide-later items tracking.
 
 Tests that DECIDE_LATER classified questions store original question text
-in a separate decide_later_items list, flowing through to PRDSeed and PRD document.
+in a separate decide_later_items list, flowing through to PMSeed and PM document.
 """
 
 import json
@@ -16,9 +16,9 @@ from ouroboros.bigbang.interview import (
     InterviewState,
     InterviewStatus,
 )
-from ouroboros.bigbang.prd_document import generate_prd_markdown
-from ouroboros.bigbang.prd_interview import PRDInterviewEngine
-from ouroboros.bigbang.prd_seed import PRDSeed
+from ouroboros.bigbang.pm_document import generate_pm_markdown
+from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
     ClassifierOutputType,
@@ -49,8 +49,8 @@ def _make_adapter() -> MagicMock:
     return adapter
 
 
-def _make_engine(adapter: MagicMock | None = None) -> PRDInterviewEngine:
-    """Create a PRDInterviewEngine with mocked dependencies."""
+def _make_engine(adapter: MagicMock | None = None) -> PMInterviewEngine:
+    """Create a PMInterviewEngine with mocked dependencies."""
     if adapter is None:
         adapter = _make_adapter()
 
@@ -63,7 +63,7 @@ def _make_engine(adapter: MagicMock | None = None) -> PRDInterviewEngine:
     classifier.classify = AsyncMock()
     classifier.codebase_context = ""
 
-    return PRDInterviewEngine(
+    return PMInterviewEngine(
         inner=inner,
         classifier=classifier,
         llm_adapter=adapter,
@@ -259,26 +259,26 @@ class TestDecideLaterItemsList:
         assert isinstance(engine.decide_later_items, list)
 
 
-class TestDecideLaterInPRDSeed:
-    """Tests for decide_later_items field in PRDSeed dataclass."""
+class TestDecideLaterInPMSeed:
+    """Tests for decide_later_items field in PMSeed dataclass."""
 
-    def test_prd_seed_has_decide_later_items_field(self):
-        """PRDSeed has a decide_later_items field (tuple of strings)."""
-        seed = PRDSeed(
+    def test_pm_seed_has_decide_later_items_field(self):
+        """PMSeed has a decide_later_items field (tuple of strings)."""
+        seed = PMSeed(
             product_name="Test",
             goal="Test goal",
             decide_later_items=("Question 1?", "Question 2?"),
         )
         assert seed.decide_later_items == ("Question 1?", "Question 2?")
 
-    def test_prd_seed_decide_later_items_default_empty(self):
-        """PRDSeed decide_later_items defaults to empty tuple."""
-        seed = PRDSeed()
+    def test_pm_seed_decide_later_items_default_empty(self):
+        """PMSeed decide_later_items defaults to empty tuple."""
+        seed = PMSeed()
         assert seed.decide_later_items == ()
 
-    def test_prd_seed_to_dict_includes_decide_later_items(self):
+    def test_pm_seed_to_dict_includes_decide_later_items(self):
         """to_dict() includes decide_later_items as a list."""
-        seed = PRDSeed(
+        seed = PMSeed(
             product_name="Test",
             decide_later_items=("What rate limiting?", "What caching?"),
         )
@@ -286,46 +286,46 @@ class TestDecideLaterInPRDSeed:
         assert "decide_later_items" in d
         assert d["decide_later_items"] == ["What rate limiting?", "What caching?"]
 
-    def test_prd_seed_from_dict_parses_decide_later_items(self):
+    def test_pm_seed_from_dict_parses_decide_later_items(self):
         """from_dict() parses decide_later_items correctly."""
         data = {
             "product_name": "Test",
             "decide_later_items": ["Question A?", "Question B?"],
         }
-        seed = PRDSeed.from_dict(data)
+        seed = PMSeed.from_dict(data)
         assert seed.decide_later_items == ("Question A?", "Question B?")
 
-    def test_prd_seed_from_dict_missing_decide_later_items(self):
+    def test_pm_seed_from_dict_missing_decide_later_items(self):
         """from_dict() handles missing decide_later_items gracefully."""
         data = {"product_name": "Test"}
-        seed = PRDSeed.from_dict(data)
+        seed = PMSeed.from_dict(data)
         assert seed.decide_later_items == ()
 
-    def test_prd_seed_roundtrip_yaml(self, tmp_path):
-        """PRDSeed decide_later_items survive YAML roundtrip."""
+    def test_pm_seed_roundtrip_yaml(self, tmp_path):
+        """PMSeed decide_later_items survive YAML roundtrip."""
         items = ("What caching strategy?", "What deployment model?")
-        seed = PRDSeed(
+        seed = PMSeed(
             product_name="Test",
             decide_later_items=items,
         )
         yaml_str = yaml.dump(seed.to_dict(), default_flow_style=False)
         loaded = yaml.safe_load(yaml_str)
-        restored = PRDSeed.from_dict(loaded)
+        restored = PMSeed.from_dict(loaded)
         assert restored.decide_later_items == items
 
-    def test_prd_seed_frozen(self):
-        """PRDSeed.decide_later_items is immutable (frozen dataclass)."""
-        seed = PRDSeed(decide_later_items=("Q1?",))
+    def test_pm_seed_frozen(self):
+        """PMSeed.decide_later_items is immutable (frozen dataclass)."""
+        seed = PMSeed(decide_later_items=("Q1?",))
         with pytest.raises(AttributeError):
             seed.decide_later_items = ("Q2?",)
 
 
-class TestDecideLaterInPRDDocument:
-    """Tests for decide-later items rendering in PRD document."""
+class TestDecideLaterInPMDocument:
+    """Tests for decide-later items rendering in PM document."""
 
-    def test_prd_document_renders_decide_later_section(self):
-        """PRD document includes a 'Decide Later' section."""
-        seed = PRDSeed(
+    def test_pm_document_renders_decide_later_section(self):
+        """PM document includes a 'Decide Later' section."""
+        seed = PMSeed(
             product_name="Test Product",
             goal="Test goal",
             decide_later_items=(
@@ -333,32 +333,32 @@ class TestDecideLaterInPRDDocument:
                 "How should we handle data migration?",
             ),
         )
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
 
         assert "## Decide Later" in md
         assert "premature or unknowable" in md
         assert "- What caching strategy should we use?" in md
         assert "- How should we handle data migration?" in md
 
-    def test_prd_document_no_decide_later_when_empty(self):
-        """PRD document omits 'Decide Later' section when no items."""
-        seed = PRDSeed(
+    def test_pm_document_no_decide_later_when_empty(self):
+        """PM document omits 'Decide Later' section when no items."""
+        seed = PMSeed(
             product_name="Test Product",
             goal="Test goal",
             decide_later_items=(),
         )
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
         assert "## Decide Later" not in md
 
-    def test_prd_document_has_both_deferred_and_decide_later(self):
-        """PRD document shows both Deferred Items and Decide Later sections."""
-        seed = PRDSeed(
+    def test_pm_document_has_both_deferred_and_decide_later(self):
+        """PM document shows both Deferred Items and Decide Later sections."""
+        seed = PMSeed(
             product_name="Test Product",
             goal="Test goal",
             deferred_items=("Which ORM to use?",),
             decide_later_items=("What rate limiting strategy?",),
         )
-        md = generate_prd_markdown(seed)
+        md = generate_pm_markdown(seed)
 
         assert "## Deferred Items" in md
         assert "- Which ORM to use?" in md
@@ -372,7 +372,7 @@ class TestDecideLaterInPRDDocument:
 
 
 class TestDecideLaterExtractionFlow:
-    """Tests for decide-later items flowing through PRD seed extraction."""
+    """Tests for decide-later items flowing through PM seed extraction."""
 
     @pytest.mark.asyncio
     async def test_extraction_prompt_includes_decide_later_items(self):
@@ -402,8 +402,8 @@ class TestDecideLaterExtractionFlow:
         assert "premature or unknowable" in prompt
 
     @pytest.mark.asyncio
-    async def test_parse_prd_seed_merges_decide_later_items(self):
-        """_parse_prd_seed merges classifier decide-later items with LLM extraction."""
+    async def test_parse_pm_seed_merges_decide_later_items(self):
+        """_parse_pm_seed merges classifier decide-later items with LLM extraction."""
         engine = _make_engine()
         engine.decide_later_items = ["What caching strategy?"]
 
@@ -418,7 +418,7 @@ class TestDecideLaterExtractionFlow:
             "assumptions": [],
         })
 
-        seed = engine._parse_prd_seed(response_json, interview_id="test-1")
+        seed = engine._parse_pm_seed(response_json, interview_id="test-1")
 
         # Both LLM-extracted and classifier items should be present
         assert "What deployment model?" in seed.decide_later_items
@@ -426,8 +426,8 @@ class TestDecideLaterExtractionFlow:
         assert len(seed.decide_later_items) == 2
 
     @pytest.mark.asyncio
-    async def test_parse_prd_seed_deduplicates_decide_later_items(self):
-        """_parse_prd_seed deduplicates decide-later items."""
+    async def test_parse_pm_seed_deduplicates_decide_later_items(self):
+        """_parse_pm_seed deduplicates decide-later items."""
         engine = _make_engine()
         engine.decide_later_items = ["What caching strategy?"]
 
@@ -442,13 +442,13 @@ class TestDecideLaterExtractionFlow:
             "assumptions": [],
         })
 
-        seed = engine._parse_prd_seed(response_json, interview_id="test-1")
+        seed = engine._parse_pm_seed(response_json, interview_id="test-1")
 
         assert seed.decide_later_items == ("What caching strategy?",)
 
     @pytest.mark.asyncio
-    async def test_parse_prd_seed_no_decide_later_items_in_response(self):
-        """_parse_prd_seed handles missing decide_later_items in LLM response."""
+    async def test_parse_pm_seed_no_decide_later_items_in_response(self):
+        """_parse_pm_seed handles missing decide_later_items in LLM response."""
         engine = _make_engine()
         engine.decide_later_items = ["Original question?"]
 
@@ -463,7 +463,7 @@ class TestDecideLaterExtractionFlow:
             # No decide_later_items key
         })
 
-        seed = engine._parse_prd_seed(response_json, interview_id="test-1")
+        seed = engine._parse_pm_seed(response_json, interview_id="test-1")
 
         # Classifier items still included
         assert seed.decide_later_items == ("Original question?",)

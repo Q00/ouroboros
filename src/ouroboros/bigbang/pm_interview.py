@@ -1,18 +1,18 @@
-"""PRD Interview Engine — composition wrapper around InterviewEngine.
+"""PM Interview Engine — composition wrapper around InterviewEngine.
 
-Adds PRD-specific behavior on top of the existing InterviewEngine:
+Adds PM-specific behavior on top of the existing InterviewEngine:
 - Question classification (planning vs development)
 - Reframing technical questions for PM audience
 - Deferred item tracking for dev-only questions
-- PRDSeed generation from completed interview
-- PRD document generation (prd.md)
-- Brownfield repo management via ~/.ouroboros/brownfield.json
+- PMSeed generation from completed interview
+- PM document generation (pm.md)
+- Brownfield repo management via ~/.ouroboros/ouroboros.db
 - CodebaseExplorer scan-once semantics (shared context)
 
-Composition pattern: PRDInterviewEngine *wraps* InterviewEngine without
+Composition pattern: PMInterviewEngine *wraps* InterviewEngine without
 modifying its internals. The inner engine handles question generation,
 state persistence, and round management. The outer engine intercepts
-questions for classification and collects PRD-specific metadata.
+questions for classification and collects PM-specific metadata.
 """
 
 from __future__ import annotations
@@ -26,21 +26,12 @@ import structlog
 import yaml
 
 from ouroboros.bigbang.brownfield import (
-    BrownfieldEntry,
-)
-from ouroboros.bigbang.brownfield import (
     load_brownfield_repos_as_dicts as _load_brownfield_dicts,
-)
-from ouroboros.bigbang.brownfield import (
-    register_brownfield_repo as _register_brownfield,
-)
-from ouroboros.bigbang.brownfield import (
-    save_brownfield_repos as _save_brownfield,
 )
 from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
 from ouroboros.bigbang.interview import InterviewEngine, InterviewState
-from ouroboros.bigbang.prd_document import save_prd_document
-from ouroboros.bigbang.prd_seed import PRDSeed, UserStory
+from ouroboros.bigbang.pm_document import save_pm_document
+from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
     ClassifierOutputType,
@@ -57,9 +48,8 @@ from ouroboros.providers.base import (
 
 log = structlog.get_logger()
 
-_BROWNFIELD_PATH = Path.home() / ".ouroboros" / "brownfield.json"
 _SEED_DIR = Path.home() / ".ouroboros" / "seeds"
-_PRD_SYSTEM_PROMPT_PREFIX = """\
+_PM_SYSTEM_PROMPT_PREFIX = """\
 You are a Product Requirements interviewer helping a PM define their product.
 
 Focus on PRODUCT-LEVEL questions:
@@ -84,7 +74,7 @@ _OPENING_QUESTION = (
 )
 
 _EXTRACTION_SYSTEM_PROMPT = """\
-You are a requirements extraction engine. Given a PRD interview transcript,
+You are a requirements extraction engine. Given a PM interview transcript,
 extract structured product requirements.
 
 Respond ONLY with valid JSON in this exact format:
@@ -107,10 +97,10 @@ _FALLBACK_MODEL = "claude-opus-4-6"
 
 
 @dataclass
-class PRDInterviewEngine:
-    """PRD interview engine — wraps InterviewEngine via composition.
+class PMInterviewEngine:
+    """PM interview engine — wraps InterviewEngine via composition.
 
-    This engine adds a PRD-specific layer on top of the standard
+    This engine adds a PM-specific layer on top of the standard
     InterviewEngine. It intercepts generated questions, classifies them
     as planning vs development, reframes technical questions for PMs,
     and tracks deferred items.
@@ -121,19 +111,19 @@ class PRDInterviewEngine:
     - Round tracking
     - Brownfield codebase exploration (delegated to inner engine)
 
-    The PRDInterviewEngine adds:
+    The PMInterviewEngine adds:
     - Question classification via QuestionClassifier
     - Deferred item tracking (dev-only questions)
-    - PRDSeed extraction from completed interviews
-    - PRD document generation (prd.md)
-    - Brownfield repo registration (~/.ouroboros/brownfield.json)
+    - PMSeed extraction from completed interviews
+    - PM document generation (pm.md)
+    - Brownfield repo registration (~/.ouroboros/ouroboros.db)
     - Scan-once codebase context sharing
 
     Attributes:
         inner: The wrapped InterviewEngine instance.
         classifier: Question classifier for planning/dev distinction.
         llm_adapter: LLM adapter (shared with inner engine).
-        model: Model for PRD-specific LLM calls.
+        model: Model for PM-specific LLM calls.
         deferred_items: Questions deferred to development phase.
         classifications: History of question classifications.
         codebase_context: Shared codebase exploration context.
@@ -141,7 +131,7 @@ class PRDInterviewEngine:
 
     Example:
         adapter = LiteLLMAdapter()
-        engine = PRDInterviewEngine.create(llm_adapter=adapter)
+        engine = PMInterviewEngine.create(llm_adapter=adapter)
 
         state_result = await engine.start_interview("Build a task manager")
         state = state_result.value
@@ -153,9 +143,9 @@ class PRDInterviewEngine:
             response = input(question)
             await engine.record_response(state, response, question)
 
-        prd_seed = await engine.generate_prd_seed(state)
-        engine.save_prd_seed(prd_seed)
-        engine.save_prd_document(prd_seed)
+        pm_seed = await engine.generate_pm_seed(state)
+        engine.save_pm_seed(pm_seed)
+        engine.save_pm_document(pm_seed)
     """
 
     inner: InterviewEngine
@@ -166,9 +156,9 @@ class PRDInterviewEngine:
     decide_later_items: list[str] = field(default_factory=list)
     """Original question text for questions classified as DECIDE_LATER.
 
-    These are questions that are premature or unknowable at the PRD stage.
-    They are auto-answered with a placeholder and stored here so the PRDSeed
-    and PRD document can surface them as explicit "decide later" decisions.
+    These are questions that are premature or unknowable at the PM stage.
+    They are auto-answered with a placeholder and stored here so the PMSeed
+    and PM document can surface them as explicit "decide later" decisions.
     """
     classifications: list[ClassificationResult] = field(default_factory=list)
     codebase_context: str = ""
@@ -187,8 +177,8 @@ class PRDInterviewEngine:
         llm_adapter: LLMAdapter,
         model: str = _FALLBACK_MODEL,
         state_dir: Path | None = None,
-    ) -> PRDInterviewEngine:
-        """Factory method to create a PRDInterviewEngine with proper wiring.
+    ) -> PMInterviewEngine:
+        """Factory method to create a PMInterviewEngine with proper wiring.
 
         Creates the inner InterviewEngine and QuestionClassifier with
         shared LLM adapter.
@@ -199,7 +189,7 @@ class PRDInterviewEngine:
             state_dir: Custom state directory for interview persistence.
 
         Returns:
-            Configured PRDInterviewEngine instance.
+            Configured PMInterviewEngine instance.
         """
         if state_dir is None:
             state_dir = Path.home() / ".ouroboros" / "data"
@@ -227,7 +217,7 @@ class PRDInterviewEngine:
 
     @staticmethod
     def load_brownfield_repos() -> list[dict[str, str]]:
-        """Load registered brownfield repositories from global config.
+        """Load registered brownfield repositories from the DB.
 
         Delegates to :func:`ouroboros.bigbang.brownfield.load_brownfield_repos_as_dicts`.
 
@@ -235,39 +225,6 @@ class PRDInterviewEngine:
             List of repo dicts with keys: path, name, desc.
         """
         return _load_brownfield_dicts()
-
-    @staticmethod
-    def save_brownfield_repos(repos: list[dict[str, str]]) -> None:
-        """Save brownfield repositories to global config.
-
-        Delegates to :func:`ouroboros.bigbang.brownfield.save_brownfield_repos`.
-
-        Args:
-            repos: List of repo dicts to save.
-        """
-        entries = [BrownfieldEntry.from_dict(r) for r in repos]
-        _save_brownfield(entries)
-
-    @staticmethod
-    def register_brownfield_repo(
-        path: str,
-        name: str,
-        desc: str = "",
-    ) -> list[dict[str, str]]:
-        """Register a new brownfield repository.
-
-        Delegates to :func:`ouroboros.bigbang.brownfield.register_brownfield_repo`.
-
-        Args:
-            path: Absolute path to the repository.
-            name: Human-friendly name.
-            desc: Optional description.
-
-        Returns:
-            Updated list of registered repos.
-        """
-        entries = _register_brownfield(path=path, name=name, desc=desc)
-        return [e.to_dict() for e in entries]
 
     # ──────────────────────────────────────────────────────────────
     # Codebase exploration (scan-once)
@@ -316,12 +273,12 @@ class PRDInterviewEngine:
             self.classifier.codebase_context = self.codebase_context
 
             log.info(
-                "prd.explore_completed",
+                "pm.explore_completed",
                 repos_explored=len(results),
                 context_length=len(self.codebase_context),
             )
         except Exception as e:
-            log.warning("prd.explore_failed", error=str(e))
+            log.warning("pm.explore_failed", error=str(e))
 
         self._explored = True
         return self.codebase_context
@@ -371,7 +328,7 @@ class PRDInterviewEngine:
             )
 
         log.info(
-            "prd.opening_response_received",
+            "pm.opening_response_received",
             response_length=len(user_response),
         )
 
@@ -391,7 +348,7 @@ class PRDInterviewEngine:
         interview_id: str | None = None,
         brownfield_repos: list[dict[str, str]] | None = None,
     ) -> Result[InterviewState, ValidationError]:
-        """Start a new PRD interview session.
+        """Start a new PM interview session.
 
         Optionally explores brownfield codebases before starting.
         Delegates interview creation to the inner InterviewEngine.
@@ -408,23 +365,23 @@ class PRDInterviewEngine:
         if brownfield_repos:
             await self.explore_codebases(brownfield_repos)
 
-        # Prepend PRD context to the initial context
-        prd_context = _PRD_SYSTEM_PROMPT_PREFIX + initial_context
+        # Prepend PM context to the initial context
+        pm_context = _PM_SYSTEM_PROMPT_PREFIX + initial_context
 
         if self.codebase_context:
-            prd_context += (
+            pm_context += (
                 f"\n\n## Existing Codebase Context (BROWNFIELD)\n"
                 f"{self.codebase_context}"
             )
 
         result = await self.inner.start_interview(
-            initial_context=prd_context,
+            initial_context=pm_context,
             interview_id=interview_id,
         )
 
         if result.is_ok:
             log.info(
-                "prd.interview_started",
+                "pm.interview_started",
                 interview_id=result.value.interview_id,
                 has_brownfield=bool(self.codebase_context),
             )
@@ -464,7 +421,7 @@ class PRDInterviewEngine:
 
         if classify_result.is_err:
             # Classification failed — return original question (safe fallback)
-            log.warning("prd.classification_failed", question=question[:100])
+            log.warning("pm.classification_failed", question=question[:100])
             return question_result
 
         classification = classify_result.value
@@ -476,7 +433,7 @@ class PRDInterviewEngine:
             # Track as deferred item and generate a new question
             self.deferred_items.append(classification.original_question)
             log.info(
-                "prd.question_deferred",
+                "pm.question_deferred",
                 question=classification.original_question[:100],
                 reasoning=classification.reasoning,
                 output_type=output_type,
@@ -500,7 +457,7 @@ class PRDInterviewEngine:
             placeholder = classification.placeholder_response
             self.decide_later_items.append(classification.original_question)
             log.info(
-                "prd.question_decide_later",
+                "pm.question_decide_later",
                 question=classification.original_question[:100],
                 placeholder=placeholder[:100],
                 reasoning=classification.reasoning,
@@ -520,7 +477,7 @@ class PRDInterviewEngine:
             reframed = classification.question_for_pm
             self._reframe_map[reframed] = classification.original_question
             log.info(
-                "prd.question_reframed",
+                "pm.question_reframed",
                 original=classification.original_question[:100],
                 reframed=reframed[:100],
                 output_type=output_type,
@@ -529,7 +486,7 @@ class PRDInterviewEngine:
 
         # PASSTHROUGH — planning question forwarded unchanged to the PM
         log.debug(
-            "prd.question_passthrough",
+            "pm.question_passthrough",
             question=classification.original_question[:100],
             output_type=output_type,
         )
@@ -575,7 +532,7 @@ class PRDInterviewEngine:
             bundled_response = f"PM answer: {user_response}"
 
             log.info(
-                "prd.response_bundled",
+                "pm.response_bundled",
                 original_question=original_question[:100],
                 reframed_question=question[:100],
             )
@@ -590,7 +547,7 @@ class PRDInterviewEngine:
         self,
         state: InterviewState,
     ) -> Result[InterviewState, ValidationError]:
-        """Mark the PRD interview as completed.
+        """Mark the PM interview as completed.
 
         Delegates to the inner InterviewEngine.
 
@@ -606,7 +563,7 @@ class PRDInterviewEngine:
         """Return the list of decide-later items collected during the interview.
 
         These are the original question texts for questions classified as
-        DECIDE_LATER — premature or unknowable at the PRD stage. Shown to
+        DECIDE_LATER — premature or unknowable at the PM stage. Shown to
         the PM at interview end so they have a clear record of open items.
 
         Returns:
@@ -667,7 +624,7 @@ class PRDInterviewEngine:
         return await self.inner.load_state(interview_id)
 
     def restore_meta(self, meta: dict[str, Any]) -> None:
-        """Restore PRD-specific metadata into this engine from a loaded dict.
+        """Restore PM-specific metadata into this engine from a loaded dict.
 
         Sets ``deferred_items``, ``decide_later_items``, ``codebase_context``,
         ``pending_reframe`` (via ``_reframe_map``), and syncs the classifier's
@@ -675,10 +632,10 @@ class PRDInterviewEngine:
         brownfield context.
 
         This is the inverse of the meta dict produced by
-        :func:`prd_handler._save_prd_meta`.
+        :func:`pm_handler._save_pm_meta`.
 
         Args:
-            meta: Dictionary previously persisted as ``prd_meta_{session_id}.json``.
+            meta: Dictionary previously persisted as ``pm_meta_{session_id}.json``.
                   Expected keys: ``deferred_items``, ``decide_later_items``,
                   ``codebase_context``, ``pending_reframe``.
         """
@@ -693,14 +650,14 @@ class PRDInterviewEngine:
             self._reframe_map[pending["reframed"]] = pending["original"]
 
     # ──────────────────────────────────────────────────────────────
-    # PRDSeed extraction
+    # PMSeed extraction
     # ──────────────────────────────────────────────────────────────
 
-    async def generate_prd_seed(
+    async def generate_pm_seed(
         self,
         state: InterviewState,
-    ) -> Result[PRDSeed, ProviderError | ValidationError]:
-        """Extract PRDSeed from completed interview.
+    ) -> Result[PMSeed, ProviderError | ValidationError]:
+        """Extract PMSeed from completed interview.
 
         Uses LLM to extract structured product requirements from the
         interview transcript, including any deferred items.
@@ -709,12 +666,12 @@ class PRDInterviewEngine:
             state: Completed interview state.
 
         Returns:
-            Result containing PRDSeed or error.
+            Result containing PMSeed or error.
         """
         if not state.rounds:
             return Result.err(
                 ValidationError(
-                    "Cannot generate PRD seed from empty interview",
+                    "Cannot generate PM seed from empty interview",
                     field="rounds",
                 )
             )
@@ -741,13 +698,13 @@ class PRDInterviewEngine:
             return Result.err(result.error)
 
         try:
-            seed = self._parse_prd_seed(
+            seed = self._parse_pm_seed(
                 result.value.content,
                 interview_id=state.interview_id,
             )
             log.info(
-                "prd.seed_generated",
-                prd_id=seed.prd_id,
+                "pm.seed_generated",
+                pm_id=seed.pm_id,
                 product_name=seed.product_name,
                 story_count=len(seed.user_stories),
                 deferred_count=len(seed.deferred_items),
@@ -756,22 +713,22 @@ class PRDInterviewEngine:
         except (ValueError, KeyError, json.JSONDecodeError) as e:
             return Result.err(
                 ProviderError(
-                    f"Failed to parse PRD seed: {e}",
+                    f"Failed to parse PM seed: {e}",
                     details={"response_preview": result.value.content[:200]},
                 )
             )
 
-    def save_prd_seed(
+    def save_pm_seed(
         self,
-        seed: PRDSeed,
+        seed: PMSeed,
         output_dir: Path | None = None,
     ) -> Path:
-        """Save PRDSeed to YAML file.
+        """Save PMSeed to YAML file.
 
-        Saves to ~/.ouroboros/seeds/prd_seed_{id}.yaml.
+        Saves to ~/.ouroboros/seeds/pm_seed_{id}.yaml.
 
         Args:
-            seed: The PRDSeed to save.
+            seed: The PMSeed to save.
             output_dir: Custom output directory (defaults to ~/.ouroboros/seeds/).
 
         Returns:
@@ -781,7 +738,7 @@ class PRDInterviewEngine:
             output_dir = _SEED_DIR
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{seed.prd_id}.yaml"
+        filename = f"{seed.pm_id}.yaml"
         filepath = output_dir / filename
 
         yaml_content = yaml.dump(
@@ -793,42 +750,42 @@ class PRDInterviewEngine:
         filepath.write_text(yaml_content, encoding="utf-8")
 
         log.info(
-            "prd.seed_saved",
+            "pm.seed_saved",
             path=str(filepath),
-            prd_id=seed.prd_id,
+            pm_id=seed.pm_id,
         )
 
         return filepath
 
-    def save_prd_document(
+    def save_pm_document(
         self,
-        seed: PRDSeed,
+        seed: PMSeed,
         output_dir: str | Path | None = None,
     ) -> Path:
-        """Generate and save PRD document (prd.md).
+        """Generate and save PM document (pm.md).
 
         Args:
-            seed: The PRDSeed to generate document from.
+            seed: The PMSeed to generate document from.
             output_dir: Directory to save in. Defaults to .ouroboros/.
 
         Returns:
-            Path to the saved prd.md.
+            Path to the saved pm.md.
         """
-        return save_prd_document(seed, output_dir)
+        return save_pm_document(seed, output_dir)
 
     # ──────────────────────────────────────────────────────────────
     # Dev interview handoff
     # ──────────────────────────────────────────────────────────────
 
     @staticmethod
-    def prd_seed_to_dev_context(seed: PRDSeed) -> str:
-        """Serialize PRDSeed to initial_context string for dev interview.
+    def pm_seed_to_dev_context(seed: PMSeed) -> str:
+        """Serialize PMSeed to initial_context string for dev interview.
 
-        This is the CLI-level handoff: the PRDSeed YAML is passed as the
+        This is the CLI-level handoff: the PMSeed YAML is passed as the
         initial_context string to a standard InterviewEngine session.
 
         Args:
-            seed: The PRDSeed to serialize.
+            seed: The PMSeed to serialize.
 
         Returns:
             YAML string suitable for initial_context.
@@ -864,9 +821,9 @@ class PRDInterviewEngine:
             context: Formatted interview context.
 
         Returns:
-            User prompt for PRD seed extraction.
+            User prompt for PM seed extraction.
         """
-        prompt = f"""Extract structured product requirements from this PRD interview:
+        prompt = f"""Extract structured product requirements from this PM interview:
 
 ---
 {context}
@@ -902,19 +859,19 @@ Brownfield codebase context:
 
         return prompt
 
-    def _parse_prd_seed(
+    def _parse_pm_seed(
         self,
         response: str,
         interview_id: str,
-    ) -> PRDSeed:
-        """Parse LLM response into PRDSeed.
+    ) -> PMSeed:
+        """Parse LLM response into PMSeed.
 
         Args:
             response: Raw LLM response text.
             interview_id: Source interview ID.
 
         Returns:
-            Parsed PRDSeed.
+            Parsed PMSeed.
 
         Raises:
             ValueError: If response cannot be parsed.
@@ -961,7 +918,7 @@ Brownfield codebase context:
             dict(r) for r in self.load_brownfield_repos()
         )
 
-        return PRDSeed(
+        return PMSeed(
             product_name=data.get("product_name", ""),
             goal=data.get("goal", ""),
             user_stories=stories,

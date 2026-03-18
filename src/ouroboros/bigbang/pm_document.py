@@ -1,12 +1,12 @@
-"""PRD document generator — produces human-readable prd.md from PRDSeed.
+"""PM document generator — produces human-readable pm.md from PMSeed.
 
-Generates a Markdown PRD document covering goals, constraints, user stories,
+Generates a Markdown PM document covering goals, constraints, user stories,
 success criteria, and deferred items. Designed for PM readability.
 
 Two generation modes:
-- **Template-based** (``generate_prd_markdown``): deterministic, no LLM call.
-- **LLM-based** (``PRDDocumentGenerator``): uses the full Q&A transcript plus
-  PRDSeed to produce a richer, more readable document via LLM synthesis.
+- **Template-based** (``generate_pm_markdown``): deterministic, no LLM call.
+- **LLM-based** (``PMDocumentGenerator``): uses the full Q&A transcript plus
+  PMSeed to produce a richer, more readable document via LLM synthesis.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from ouroboros.bigbang.prd_seed import PRDSeed
+from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -33,17 +33,17 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-_DEFAULT_PRD_DIR = ".ouroboros"
-_PRD_FILENAME = "prd.md"
+_DEFAULT_PM_DIR = ".ouroboros"
+_PM_FILENAME = "pm.md"
 
 _FALLBACK_MODEL = "claude-opus-4-6"
 
-_PRD_GENERATION_SYSTEM_PROMPT = """\
-You are a Product Requirements Document (PRD) writer. Given a full interview \
+_PM_GENERATION_SYSTEM_PROMPT = """\
+You are a Product Requirements Document (PM) writer. Given a full interview \
 transcript and extracted product requirements, produce a polished, \
-human-readable PRD in Markdown format.
+human-readable PM in Markdown format.
 
-The PRD MUST include the following sections (in order):
+The PM MUST include the following sections (in order):
 1. **Title** — the product/feature name as an H1 heading
 2. **Goal** — a clear, concise product goal statement
 3. **User Stories** — numbered user stories in "As a <persona>, I want to \
@@ -66,17 +66,17 @@ Guidelines:
 - Use the interview conversation to add context and nuance beyond the \
 structured seed data
 - Keep the tone professional but accessible
-- End with a footer showing the PRD ID and interview ID
+- End with a footer showing the PM ID and interview ID
 
 Output ONLY the Markdown document, no preamble or explanation.
 """
 
 
-def generate_prd_markdown(seed: PRDSeed) -> str:
-    """Generate a human-readable PRD Markdown document from a PRDSeed.
+def generate_pm_markdown(seed: PMSeed) -> str:
+    """Generate a human-readable PM Markdown document from a PMSeed.
 
     Args:
-        seed: The PRDSeed containing product requirements.
+        seed: The PMSeed containing product requirements.
 
     Returns:
         Formatted Markdown string.
@@ -88,7 +88,7 @@ def generate_prd_markdown(seed: PRDSeed) -> str:
     lines.append(f"# {title}")
     lines.append("")
     lines.append(f"*Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}*")
-    lines.append(f"*PRD ID: {seed.prd_id}*")
+    lines.append(f"*PM ID: {seed.pm_id}*")
     lines.append("")
 
     # Goal
@@ -176,49 +176,49 @@ def generate_prd_markdown(seed: PRDSeed) -> str:
     return "\n".join(lines)
 
 
-def save_prd_document(
-    seed: PRDSeed,
+def save_pm_document(
+    seed: PMSeed,
     output_dir: str | Path | None = None,
 ) -> Path:
-    """Generate and save a PRD document.
+    """Generate and save a PM document.
 
     Args:
-        seed: The PRDSeed to generate the document from.
-        output_dir: Directory to save prd.md in. Defaults to .ouroboros/.
+        seed: The PMSeed to generate the document from.
+        output_dir: Directory to save pm.md in. Defaults to .ouroboros/.
 
     Returns:
-        Path to the saved prd.md file.
+        Path to the saved pm.md file.
     """
     if output_dir is None:
-        output_dir = Path.cwd() / _DEFAULT_PRD_DIR
+        output_dir = Path.cwd() / _DEFAULT_PM_DIR
     else:
         output_dir = Path(output_dir)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    prd_path = output_dir / _PRD_FILENAME
+    pm_path = output_dir / _PM_FILENAME
 
-    content = generate_prd_markdown(seed)
-    prd_path.write_text(content, encoding="utf-8")
+    content = generate_pm_markdown(seed)
+    pm_path.write_text(content, encoding="utf-8")
 
     log.info(
-        "prd.document_saved",
-        path=str(prd_path),
+        "pm.document_saved",
+        path=str(pm_path),
         product_name=seed.product_name,
     )
 
-    return prd_path
+    return pm_path
 
 
 # ──────────────────────────────────────────────────────────────────
-# LLM-based PRD Document Generator
+# LLM-based PM Document Generator
 # ──────────────────────────────────────────────────────────────────
 
 
 @dataclass
-class PRDDocumentGenerator:
-    """Generates a polished PRD document using LLM from Q&A transcript + PRDSeed.
+class PMDocumentGenerator:
+    """Generates a polished PM document using LLM from Q&A transcript + PMSeed.
 
-    Unlike the template-based ``generate_prd_markdown``, this generator uses
+    Unlike the template-based ``generate_pm_markdown``, this generator uses
     an LLM to synthesize a richer document that incorporates the full interview
     context — adding nuance, rationale, and connections that a template cannot.
 
@@ -229,10 +229,10 @@ class PRDDocumentGenerator:
         model: Model identifier for the LLM call.
 
     Example:
-        generator = PRDDocumentGenerator(llm_adapter=adapter)
+        generator = PMDocumentGenerator(llm_adapter=adapter)
         result = await generator.generate(seed, qa_pairs)
         if result.is_ok:
-            prd_path = generator.save(result.value, seed)
+            pm_path = generator.save(result.value, seed)
     """
 
     llm_adapter: LLMAdapter
@@ -240,13 +240,13 @@ class PRDDocumentGenerator:
 
     async def generate(
         self,
-        seed: PRDSeed,
+        seed: PMSeed,
         qa_pairs: list[tuple[str, str]] | None = None,
         interview_state: InterviewState | None = None,
     ) -> Result[str, ProviderError]:
-        """Generate a PRD Markdown document from PRDSeed and Q&A history.
+        """Generate a PM Markdown document from PMSeed and Q&A history.
 
-        Uses the LLM to produce a polished, readable PRD incorporating both
+        Uses the LLM to produce a polished, readable PM incorporating both
         the structured seed data and the raw interview conversation. Falls
         back to template-based generation on LLM failure.
 
@@ -255,7 +255,7 @@ class PRDDocumentGenerator:
         provided, ``qa_pairs`` takes precedence.
 
         Args:
-            seed: The PRDSeed containing extracted requirements.
+            seed: The PMSeed containing extracted requirements.
             qa_pairs: Optional list of (question, answer) tuples from interview.
             interview_state: Optional InterviewState to extract Q&A from.
 
@@ -272,7 +272,7 @@ class PRDDocumentGenerator:
         user_prompt = self._build_generation_prompt(seed, qa_pairs)
 
         messages = [
-            Message(role=MessageRole.SYSTEM, content=_PRD_GENERATION_SYSTEM_PROMPT),
+            Message(role=MessageRole.SYSTEM, content=_PM_GENERATION_SYSTEM_PROMPT),
             Message(role=MessageRole.USER, content=user_prompt),
         ]
 
@@ -283,7 +283,7 @@ class PRDDocumentGenerator:
         )
 
         log.info(
-            "prd.document_generation_started",
+            "pm.document_generation_started",
             product_name=seed.product_name,
             qa_count=len(qa_pairs) if qa_pairs else 0,
         )
@@ -292,26 +292,26 @@ class PRDDocumentGenerator:
 
         if result.is_err:
             log.warning(
-                "prd.document_llm_failed",
+                "pm.document_llm_failed",
                 error=str(result.error),
                 fallback="template",
             )
             # Fall back to template-based generation
-            return Result.ok(generate_prd_markdown(seed))
+            return Result.ok(generate_pm_markdown(seed))
 
         content = result.value.content.strip()
 
         # Validate that the LLM produced something reasonable
         if not content or len(content) < 50:
             log.warning(
-                "prd.document_llm_too_short",
+                "pm.document_llm_too_short",
                 content_length=len(content),
                 fallback="template",
             )
-            return Result.ok(generate_prd_markdown(seed))
+            return Result.ok(generate_pm_markdown(seed))
 
         log.info(
-            "prd.document_generated",
+            "pm.document_generated",
             product_name=seed.product_name,
             content_length=len(content),
         )
@@ -321,57 +321,57 @@ class PRDDocumentGenerator:
     def save(
         self,
         content: str,
-        seed: PRDSeed,
+        seed: PMSeed,
         output_dir: str | Path | None = None,
     ) -> Path:
-        """Save generated PRD content to prd.md.
+        """Save generated PM content to pm.md.
 
         Args:
-            content: The generated PRD Markdown content.
-            seed: The PRDSeed (used for logging metadata).
-            output_dir: Directory to save prd.md in. Defaults to .ouroboros/.
+            content: The generated PM Markdown content.
+            seed: The PMSeed (used for logging metadata).
+            output_dir: Directory to save pm.md in. Defaults to .ouroboros/.
 
         Returns:
-            Path to the saved prd.md file.
+            Path to the saved pm.md file.
         """
         if output_dir is None:
-            output_dir = Path.cwd() / _DEFAULT_PRD_DIR
+            output_dir = Path.cwd() / _DEFAULT_PM_DIR
         else:
             output_dir = Path(output_dir)
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        prd_path = output_dir / _PRD_FILENAME
+        pm_path = output_dir / _PM_FILENAME
 
-        prd_path.write_text(content, encoding="utf-8")
+        pm_path.write_text(content, encoding="utf-8")
 
         log.info(
-            "prd.document_saved",
-            path=str(prd_path),
+            "pm.document_saved",
+            path=str(pm_path),
             product_name=seed.product_name,
-            prd_id=seed.prd_id,
+            pm_id=seed.pm_id,
         )
 
-        return prd_path
+        return pm_path
 
     async def generate_and_save(
         self,
-        seed: PRDSeed,
+        seed: PMSeed,
         qa_pairs: list[tuple[str, str]] | None = None,
         interview_state: InterviewState | None = None,
         output_dir: str | Path | None = None,
     ) -> Result[Path, ProviderError]:
-        """Generate and save PRD document in one step.
+        """Generate and save PM document in one step.
 
         Convenience method that combines :meth:`generate` and :meth:`save`.
 
         Args:
-            seed: The PRDSeed containing extracted requirements.
+            seed: The PMSeed containing extracted requirements.
             qa_pairs: Optional list of (question, answer) tuples.
             interview_state: Optional InterviewState to extract Q&A from.
-            output_dir: Directory to save prd.md in. Defaults to .ouroboros/.
+            output_dir: Directory to save pm.md in. Defaults to .ouroboros/.
 
         Returns:
-            Result containing path to saved prd.md or ProviderError.
+            Result containing path to saved pm.md or ProviderError.
         """
         result = await self.generate(
             seed,
@@ -391,16 +391,16 @@ class PRDDocumentGenerator:
 
     @staticmethod
     def _build_generation_prompt(
-        seed: PRDSeed,
+        seed: PMSeed,
         qa_pairs: list[tuple[str, str]] | None = None,
     ) -> str:
-        """Build the user prompt for PRD generation.
+        """Build the user prompt for PM generation.
 
-        Combines the structured PRDSeed data with the raw Q&A transcript
+        Combines the structured PMSeed data with the raw Q&A transcript
         to give the LLM full context for producing a rich document.
 
         Args:
-            seed: The PRDSeed with extracted requirements.
+            seed: The PMSeed with extracted requirements.
             qa_pairs: Optional Q&A pairs from the interview.
 
         Returns:
@@ -409,10 +409,10 @@ class PRDDocumentGenerator:
         parts: list[str] = []
 
         # Structured seed data
-        parts.append("## Extracted Requirements (PRDSeed)")
+        parts.append("## Extracted Requirements (PMSeed)")
         parts.append("")
         parts.append(f"**Product Name:** {seed.product_name or 'Unnamed'}")
-        parts.append(f"**PRD ID:** {seed.prd_id}")
+        parts.append(f"**PM ID:** {seed.pm_id}")
         parts.append(f"**Interview ID:** {seed.interview_id}")
         parts.append(f"**Goal:** {seed.goal or 'Not specified'}")
         parts.append("")
@@ -480,7 +480,7 @@ class PRDDocumentGenerator:
                 parts.append("")
 
         parts.append(
-            "Generate a polished PRD document from the above requirements "
+            "Generate a polished PM document from the above requirements "
             "and interview transcript."
         )
 

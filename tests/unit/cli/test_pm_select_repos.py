@@ -1,4 +1,4 @@
-"""Unit tests for multi-select brownfield repo UI in prd CLI.
+"""Unit tests for multi-select brownfield repo UI in pm CLI.
 
 Tests verify that _select_repos() and _parse_selection() correctly
 handle multi-select interaction: auto-select for single repos,
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from ouroboros.cli.commands.prd import _parse_selection, _select_repos
+from ouroboros.cli.commands.pm import _parse_selection, _select_repos
 
 # ── _parse_selection (pure function) ──────────────────────────────
 
@@ -97,7 +97,7 @@ class TestSelectRepos:
     def test_single_repo_no_prompt(self) -> None:
         """Verify no Prompt.ask is called for a single repo."""
         repos = [{"path": "/a", "name": "alpha", "desc": ""}]
-        with patch("ouroboros.cli.commands.prd.Prompt") as mock_prompt:
+        with patch("ouroboros.cli.commands.pm.Prompt") as mock_prompt:
             _select_repos(repos)
         mock_prompt.ask.assert_not_called()
 
@@ -107,7 +107,7 @@ class TestSelectRepos:
             {"path": "/a", "name": "alpha", "desc": ""},
             {"path": "/b", "name": "beta", "desc": "B project"},
         ]
-        with patch("ouroboros.cli.commands.prd.Prompt") as mock_prompt:
+        with patch("ouroboros.cli.commands.pm.Prompt") as mock_prompt:
             mock_prompt.ask.return_value = "all"
             result = _select_repos(repos)
         assert result == repos
@@ -119,7 +119,7 @@ class TestSelectRepos:
             {"path": "/b", "name": "beta", "desc": ""},
             {"path": "/c", "name": "gamma", "desc": ""},
         ]
-        with patch("ouroboros.cli.commands.prd.Prompt") as mock_prompt:
+        with patch("ouroboros.cli.commands.pm.Prompt") as mock_prompt:
             mock_prompt.ask.return_value = "1,3"
             result = _select_repos(repos)
         assert len(result) == 2
@@ -134,7 +134,7 @@ class TestSelectRepos:
             {"path": "/c", "name": "gamma", "desc": ""},
             {"path": "/d", "name": "delta", "desc": ""},
         ]
-        with patch("ouroboros.cli.commands.prd.Prompt") as mock_prompt:
+        with patch("ouroboros.cli.commands.pm.Prompt") as mock_prompt:
             mock_prompt.ask.return_value = "2-3"
             result = _select_repos(repos)
         assert len(result) == 2
@@ -147,7 +147,7 @@ class TestSelectRepos:
             {"path": "/a", "name": "alpha", "desc": ""},
             {"path": "/b", "name": "beta", "desc": ""},
         ]
-        with patch("ouroboros.cli.commands.prd.Prompt") as mock_prompt:
+        with patch("ouroboros.cli.commands.pm.Prompt") as mock_prompt:
             # Simulate user pressing Enter (default="all")
             mock_prompt.ask.return_value = "all"
             result = _select_repos(repos)
@@ -159,7 +159,7 @@ class TestSelectRepos:
             {"path": "/a", "name": "alpha", "desc": ""},
             {"path": "/b", "name": "beta", "desc": ""},
         ]
-        with patch("ouroboros.cli.commands.prd.Prompt") as mock_prompt:
+        with patch("ouroboros.cli.commands.pm.Prompt") as mock_prompt:
             mock_prompt.ask.return_value = "xyz"
             result = _select_repos(repos)
         assert result == repos
@@ -171,7 +171,7 @@ class TestSelectRepos:
             {"path": "/b", "name": "beta", "desc": ""},
             {"path": "/c", "name": "gamma", "desc": ""},
         ]
-        with patch("ouroboros.cli.commands.prd.Prompt") as mock_prompt:
+        with patch("ouroboros.cli.commands.pm.Prompt") as mock_prompt:
             mock_prompt.ask.return_value = "3,1"  # reversed order input
             result = _select_repos(repos)
         # Should be in original order: alpha, gamma
@@ -185,7 +185,7 @@ class TestSelectRepos:
             {"path": "/a", "name": "alpha", "desc": "Main API"},
             {"path": "/b", "name": "beta", "desc": "Frontend"},
         ]
-        with patch("ouroboros.cli.commands.prd.Prompt") as mock_prompt:
+        with patch("ouroboros.cli.commands.pm.Prompt") as mock_prompt:
             mock_prompt.ask.return_value = "1"
             result = _select_repos(repos)
         assert len(result) == 1

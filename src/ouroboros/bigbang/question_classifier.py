@@ -1,4 +1,4 @@
-"""Question classifier for PRD interviews.
+"""Question classifier for PM interviews.
 
 Classifies generated questions as PM-answerable (planning), DEV-only
 (development/technical), or decide-later (premature/unknowable).
@@ -41,7 +41,7 @@ _DEFAULT_PLACEHOLDER = (
 
 
 class QuestionCategory(StrEnum):
-    """Category of a question in the PRD interview context."""
+    """Category of a question in the PM interview context."""
 
     PLANNING = "planning"
     DEVELOPMENT = "development"
@@ -122,7 +122,7 @@ class ClassificationResult:
 
 
 _CLASSIFICATION_SYSTEM_PROMPT = """\
-You are a question classifier for a Product Requirements Document (PRD) interview.
+You are a question classifier for a Product Requirements Document (PM) interview.
 
 Your job is to determine whether a question generated during a requirements interview
 is answerable by a Product Manager (PM), requires deep technical/development expertise,
