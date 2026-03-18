@@ -94,25 +94,32 @@ Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business
 
    | `meta.input_type` | UI Rendering |
    |---|---|
-   | `"freeText"` | Check `meta.status`: if it starts with `"awaiting_repo_"` or is `"awaiting_project_type"`, this is a **selection step** — show the MCP content text verbatim (it contains the numbered list) and use `AskUserQuestion` with a simple prompt asking the user to type numbers/names. Do NOT generate your own options — just let the user type freely (use "Type something" as the only option). For **interview questions** (status = `"interview_started"`), generate 2-3 suggested options as usual. |
+   | `"freeText"` + selection step | **First** output the MCP content text verbatim as a regular text message (it contains the numbered repo list). **Then** use `AskUserQuestion` with ONLY a short input prompt. See below. |
+   | `"freeText"` + interview | `AskUserQuestion` with the question verbatim + 2-3 suggested options. |
    | `"singleSelect"` | `AskUserQuestion` with `multiSelect: false`, using `meta.options` as-is. |
 
-   Example for `freeText` — selection step (repo add/remove):
+   **How to detect selection steps:** `meta.status` starts with `"awaiting_repo_"` or is `"awaiting_project_type"` or `"confirm_repos"`.
+
+   Example for selection step (repo add/remove):
+
+   **Step A — Output the full list as text (NOT inside AskUserQuestion):**
+   Just print the MCP content text verbatim. This ensures the full numbered list is visible.
+
+   **Step B — Ask for input:**
    ```json
    {
      "questions": [{
-       "question": "<content text from MCP — contains numbered list>",
-       "header": "Repo selection",
+       "question": "Enter numbers or names (comma-separated), or 'none' to skip:",
+       "header": "Select",
        "options": [
-         {"label": "Type numbers", "description": "e.g. 1,3,5 or repo-name, or 'none' to skip"}
+         {"label": "none", "description": "Skip this step"}
        ],
        "multiSelect": false
      }]
    }
    ```
-   The user types their answer (numbers, names, or "none") in the custom text input.
 
-   Example for `freeText` — interview question:
+   Example for interview question:
    ```json
    {
      "questions": [{
