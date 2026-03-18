@@ -427,7 +427,10 @@ class CodexCliRuntime:
         if not isinstance(session_id, str) or not session_id.strip():
             return dict(intercept.mcp_args)
 
-        arguments: dict[str, Any] = {"session_id": session_id.strip()}
+        # Preserve original frontmatter args (initial_context, cwd, etc.)
+        # and overlay session_id + answer for the resume turn.
+        arguments: dict[str, Any] = dict(intercept.mcp_args)
+        arguments["session_id"] = session_id.strip()
         if intercept.first_argument is not None:
             arguments["answer"] = intercept.first_argument
         return arguments

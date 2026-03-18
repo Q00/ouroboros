@@ -959,7 +959,12 @@ class TestCodexCliRuntime:
             ]
 
         mock_exec.assert_not_called()
-        assert handler.calls == [{"session_id": "interview-123", "answer": "Use PostgreSQL"}]
+        # Resume must preserve original frontmatter args AND overlay session_id/answer
+        assert len(handler.calls) == 1
+        call_args = handler.calls[0]
+        assert call_args["session_id"] == "interview-123"
+        assert call_args["answer"] == "Use PostgreSQL"
+        assert call_args["initial_context"] == "Use PostgreSQL"
         assert messages[0].resume_handle is not None
         assert messages[0].resume_handle.native_session_id == "thread-123"
         assert messages[-1].resume_handle is not None
