@@ -1064,9 +1064,11 @@ class TestHandleStartBrownfield:
         assert step1_result.is_ok
         session_id = step1_result.value.meta["session_id"]
 
-        # Step 2: answer "brownfield" but DB fails → falls back to greenfield
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
+        # Step 2: answer "brownfield" but DB fails and scan finds nothing → greenfield
+        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query, \
+             patch.object(handler, "_auto_scan_repos", new_callable=AsyncMock) as mock_scan:
             mock_query.return_value = []  # DB error returns empty list
+            mock_scan.return_value = []   # Scan also finds nothing
             result = await handler.handle({
                 "session_id": session_id,
                 "answer": "brownfield",

@@ -663,24 +663,24 @@ class PMInterviewHandler:
         """Handle the brownfield/greenfield answer from step 1."""
         initial_context = meta_data.get("initial_context", "")
 
-        if "brownfield" in answer.lower() or "기존" in answer:
+        if "brownfield" in answer.lower() or "기존" in answer or "existing" in answer.lower():
             # Brownfield → show repo selection
             all_repos = await self._query_all_repos()
+            if not all_repos:
+                # No repos in DB → auto-scan home directory
+                log.info("pm_handler.brownfield_auto_scan")
+                all_repos = await self._auto_scan_repos()
+
             if all_repos:
                 return self._step1_awaiting_repo_selection(
                     initial_context, cwd, all_repos, session_id=session_id,
                 )
-            # No repos in DB → tell user to run ooo setup
-            _save_pm_meta(
-                session_id, engine=None, cwd=cwd,
-                data_dir=self.data_dir, status="interview_started",
-                extra={"initial_context": initial_context},
-            )
-            log.info("pm_handler.brownfield_no_repos")
-            # Fall through to greenfield start with a note
+
+            # Scan found nothing → greenfield with note
+            log.info("pm_handler.brownfield_no_repos_after_scan")
             return await self._start_greenfield_interview(
                 engine, initial_context, cwd,
-                note="No repos registered. Run `ooo setup` to scan and register repos.\nProceeding in greenfield mode.",
+                note="No GitHub repos found on this machine. Proceeding in greenfield mode.",
             )
 
         # Greenfield → start interview directly
@@ -826,6 +826,23 @@ class PMInterviewHandler:
     # ──────────────────────────────────────────────────────────────
     # Step-2 helpers (repo selection or greenfield start)
     # ──────────────────────────────────────────────────────────────
+
+    async def _auto_scan_repos(self) -> list[BrownfieldRepo]:
+        """Scan home directory for GitHub repos and register them in DB."""
+        try:
+            from ouroboros.bigbang.brownfield import scan_and_register
+
+            store = BrownfieldStore()
+            await store.initialize()
+            try:
+                repos = await scan_and_register(store=store)
+                log.info("pm_handler.auto_scan_complete", found=len(repos))
+                return repos
+            finally:
+                await store.close()
+        except Exception as exc:
+            log.warning("pm_handler.auto_scan_failed", error=str(exc))
+            return []
 
     async def _query_all_repos(self) -> list[BrownfieldRepo]:
         """Query DB for all registered brownfield repos."""
