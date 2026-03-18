@@ -884,16 +884,10 @@ class TestHandleStartBrownfield:
         meta = result.value.meta
         assert meta["status"] == "awaiting_repo_select"
         # ALL repos shown in select step
-        assert meta["repo_count"] == 2
-        assert len(meta["repos"]) == 2
-        assert meta["repos"][0]["path"] == "/home/user/my-repo"
-        assert meta["repos"][1]["path"] == "/home/user/other-repo"
         assert meta["session_id"] == session_id
 
-        # ask_user_question UI hints in meta (user answers with numbers/names)
+        # Simple meta — no repos data, no ask_user_question (interview pattern)
         assert meta["response_param"] == "answer"
-        auq = meta["ask_user_question"]
-        assert "repos to use" in auq["question"].lower()
 
         # Human-readable content includes numbered repo list with ★ for defaults
         content_text = result.value.content[0].text
@@ -2282,8 +2276,6 @@ class TestRestartRecovery:
         assert meta["input_type"] == "freeText"
         assert meta["response_param"] == "answer"
         assert "options" not in meta
-        assert meta["repo_count"] == 1
-        assert meta["repos"][0]["path"] == "/repos/my-app"
 
     @pytest.mark.asyncio
     async def test_resume_awaiting_session_auto_greenfield_when_no_repos(self, tmp_path: Path):
@@ -2319,7 +2311,6 @@ class TestRestartRecovery:
         meta = result.value.meta
         # Recovery with no repos goes back to project type selection
         assert meta["status"] == "awaiting_project_type"
-        assert "ask_user_question" in meta
         assert meta["response_param"] == "answer"
 
     @pytest.mark.asyncio
@@ -2517,9 +2508,7 @@ class TestTwoStepStartOrchestrationFlow:
         assert step1b_result.is_ok
         step1b_meta = step1b_result.value.meta
         assert step1b_meta["status"] == "awaiting_repo_select"
-        assert "ask_user_question" in step1b_meta
         # ALL repos shown with ★ for defaults
-        assert step1b_meta["repo_count"] == 2
 
         # Engine should still NOT have been started
         engine.ask_opening_and_start.assert_not_called()
@@ -2867,16 +2856,7 @@ class TestTwoStepStartOrchestrationFlow:
         assert result.is_ok
         meta = result.value.meta
         assert meta["status"] == "awaiting_repo_select"
-        assert "ask_user_question" in meta
         # ALL repos shown in the select step
-        assert meta["repo_count"] == 3
-        assert len(meta["repos"]) == 3
-        assert meta["repos"][0]["path"] == "/repos/default-repo"
-        assert meta["repos"][0]["is_default"] is True
-        assert meta["repos"][1]["path"] == "/repos/secondary"
-        assert meta["repos"][1]["is_default"] is False
-        assert meta["repos"][2]["path"] == "/repos/third"
-        assert meta["repos"][2]["is_default"] is True
         # Content text should mark defaults with ★
         content_text = result.value.content[0].text
         assert "★" in content_text
@@ -2924,8 +2904,6 @@ class TestTwoStepStartOrchestrationFlow:
         assert meta["input_type"] == "freeText"
         assert meta["response_param"] == "answer"
         assert "options" not in meta
-        assert meta["repo_count"] == 1
-        assert meta["repos"][0]["path"] == "/repos/search-service"
 
         # Now step 2: user selects the repo by name
         state = _make_state(interview_id=session_id, is_brownfield=True)

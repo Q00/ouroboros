@@ -1110,41 +1110,31 @@ class PMInterviewHandler:
             repo_lines.append(f"  {i}. {label}")
         repo_list_text = "\n".join(repo_lines)
 
-        content_text = (
-            f"Found {len(repo_list)} repositories (★ = currently selected):\n\n"
-            f"{repo_list_text}"
-        )
-
-        # Build recommended option from current defaults
+        # Build default suggestion
         default_numbers = [
             str(i + 1) for i, r in enumerate(repo_list) if r.get("is_default")
         ]
         default_names = [
             r["name"] for r in repo_list if r.get("is_default")
         ]
+        default_hint = (
+            f"Current defaults: {', '.join(default_numbers)} ({', '.join(default_names)})"
+            if default_numbers
+            else "No defaults set"
+        )
+        example = ', '.join(default_numbers[:3]) if default_numbers else '1,2,3'
 
-        if default_numbers:
-            recommended_label = ", ".join(default_numbers) + " (Recommended)"
-            recommended_desc = ", ".join(default_names)
-        else:
-            recommended_label = "none (Recommended)"
-            recommended_desc = "No defaults — proceed as greenfield"
+        content_text = (
+            f"Found {len(repo_list)} repositories (★ = currently selected):\n\n"
+            f"{repo_list_text}\n\n"
+            f"{default_hint}\n"
+            f"Enter repo numbers to use (e.g. '{example}'), or 'none' for greenfield."
+        )
 
         meta: dict[str, Any] = {
             "session_id": session_id,
             "status": "awaiting_repo_select",
             "response_param": "answer",
-            "repos": repo_list,
-            "repo_count": len(repo_list),
-            "ask_user_question": {
-                "question": "Which repos to use? Enter numbers (see list above) or type custom selection.",
-                "header": "Select repos",
-                "options": [
-                    {"label": recommended_label, "description": recommended_desc},
-                    {"label": "none", "description": "Proceed as greenfield (no existing codebase)"},
-                ],
-                "multiSelect": False,
-            },
         }
 
         return Result.ok(
