@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -897,6 +897,15 @@ class TestSessionRepository:
 class TestFindOrphanedSessions:
     """Tests for orphaned session detection."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_heartbeat(self):
+        """Patch heartbeat so orphan detection doesn't check real lock files."""
+        with patch(
+            "ouroboros.orchestrator.heartbeat.get_alive_sessions",
+            return_value=set(),
+        ):
+            yield
+
     @pytest.fixture
     def mock_event_store(self) -> AsyncMock:
         """Create a mock event store."""
@@ -1250,6 +1259,15 @@ class TestFindOrphanedSessions:
 
 class TestCancelOrphanedSessions:
     """Tests for auto-cancel-on-startup routine."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_heartbeat(self):
+        """Patch heartbeat so orphan detection doesn't check real lock files."""
+        with patch(
+            "ouroboros.orchestrator.heartbeat.get_alive_sessions",
+            return_value=set(),
+        ):
+            yield
 
     @pytest.fixture
     def mock_event_store(self) -> AsyncMock:
