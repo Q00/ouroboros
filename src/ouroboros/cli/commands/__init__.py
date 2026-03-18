@@ -6,4 +6,5 @@ This module contains the command group implementations:
 - config: Manage configuration
 - status: Check system status
 - mcp: MCP server management
+- prd: Generate Product Requirements Documents
 """

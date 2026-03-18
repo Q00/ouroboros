@@ -14,6 +14,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from rich.prompt import Confirm, Prompt
 import typer
+import yaml
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
 from ouroboros.bigbang.interview import (
@@ -515,6 +516,162 @@ async def _start_workflow(
         print_info("Standard workflow execution not yet implemented.")
 
 
+def _find_prd_seeds(seeds_dir: Path | None = None) -> list[Path]:
+    """Find all prd_seed YAML files in the seeds directory.
+
+    Args:
+        seeds_dir: Directory to scan. Defaults to ~/.ouroboros/seeds/.
+
+    Returns:
+        List of paths to prd_seed YAML files, sorted by modification time (newest first).
+    """
+    seeds_dir = seeds_dir or Path.home() / ".ouroboros" / "seeds"
+    if not seeds_dir.is_dir():
+        return []
+    prd_seeds = sorted(
+        seeds_dir.glob("prd_seed_*.yaml"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return prd_seeds
+
+
+def _has_dev_seed(seeds_dir: Path | None = None) -> bool:
+    """Check if any dev seed (non-PRD) exists in the seeds directory.
+
+    Looks for seed.json or any YAML seed file that is NOT a prd_seed.
+
+    Args:
+        seeds_dir: Directory to check. Defaults to ~/.ouroboros/seeds/.
+
+    Returns:
+        True if a dev seed file exists.
+    """
+    seeds_dir = seeds_dir or Path.home() / ".ouroboros" / "seeds"
+    if not seeds_dir.is_dir():
+        return False
+    # Check for seed.json
+    if (seeds_dir / "seed.json").exists():
+        return True
+    # Check for any non-prd seed YAML files
+    return any(not yaml_file.name.startswith("prd_seed_") for yaml_file in seeds_dir.glob("*.yaml"))
+
+
+def _display_prd_seed_info(seed_path: Path) -> dict[str, str]:
+    """Read and display summary info for a PRD seed file.
+
+    Args:
+        seed_path: Path to the prd_seed YAML file.
+
+    Returns:
+        Dict with 'name', 'goal', and 'prd_id' extracted from the file.
+        Falls back to defaults if the file is malformed.
+    """
+    try:
+        with open(seed_path) as f:
+            data = yaml.safe_load(f)
+        name = data.get("product_name", "") or "Unnamed"
+        goal = data.get("goal", "") or "No goal specified"
+        prd_id = data.get("prd_id", seed_path.stem)
+    except Exception:
+        name = seed_path.stem
+        goal = "No goal specified"
+        prd_id = seed_path.stem
+    return {"name": name, "goal": goal, "prd_id": prd_id}
+
+
+def _notify_prd_seed_detected(prd_seeds: list[Path]) -> None:
+    """Display a prominent notification that PRD seed(s) were auto-detected.
+
+    Shows a bordered panel with seed details so the user clearly sees
+    that PRD output is available for use as dev interview context.
+
+    Args:
+        prd_seeds: List of detected PRD seed file paths.
+    """
+    console.print()
+    console.print("[bold cyan]╔══════════════════════════════════════════════╗[/]")
+    console.print("[bold cyan]║[/]  [bold yellow]PRD Seed Auto-Detected[/]                      [bold cyan]║[/]")
+    console.print("[bold cyan]╚══════════════════════════════════════════════╝[/]")
+    console.print()
+
+    for seed_path in prd_seeds:
+        info = _display_prd_seed_info(seed_path)
+        goal_display = info["goal"][:80] + "..." if len(info["goal"]) > 80 else info["goal"]
+        console.print(f"  [bold]{info['name']}[/] [dim]({info['prd_id']})[/]")
+        console.print(f"  [dim]{goal_display}[/]")
+        console.print()
+
+    console.print(
+        "[dim]A PRD seed contains product requirements from a prior PRD interview.\n"
+        "Using it as initial context gives the dev interview a head start.[/]"
+    )
+    console.print()
+
+
+def _prompt_prd_seed_selection(prd_seeds: list[Path]) -> Path | None:
+    """Prompt user to select a PRD seed to use as initial context.
+
+    Shows a notification banner, lists available seeds, and asks the user
+    to pick one or skip. For a single seed, offers a simple yes/no confirmation.
+
+    Args:
+        prd_seeds: List of available PRD seed paths.
+
+    Returns:
+        Selected PRD seed path, or None if user declines.
+    """
+    _notify_prd_seed_detected(prd_seeds)
+
+    if len(prd_seeds) == 1:
+        # Single seed — simple yes/no confirmation
+        use_it = Confirm.ask(
+            "[yellow]Use this PRD seed as initial context for the dev interview?[/]",
+            default=True,
+        )
+        return prd_seeds[0] if use_it else None
+
+    # Multiple seeds — numbered selection
+    console.print("[bold]Available PRD seeds:[/]")
+    console.print()
+    for i, seed_path in enumerate(prd_seeds, 1):
+        info = _display_prd_seed_info(seed_path)
+        goal_display = info["goal"][:80] + "..." if len(info["goal"]) > 80 else info["goal"]
+        console.print(f"  [cyan]{i}[/] - [bold]{info['name']}[/] ({info['prd_id']})")
+        console.print(f"      {goal_display}")
+    console.print("  [cyan]0[/] - Skip (start fresh interview)")
+    console.print()
+
+    choice = Prompt.ask(
+        "[yellow]Select PRD seed[/]",
+        choices=[str(i) for i in range(len(prd_seeds) + 1)],
+        default="1",
+    )
+
+    idx = int(choice)
+    if idx == 0:
+        return None
+    return prd_seeds[idx - 1]
+
+
+def _load_prd_seed_as_context(seed_path: Path) -> str:
+    """Load a PRD seed YAML and convert to initial_context string.
+
+    Args:
+        seed_path: Path to the prd_seed YAML file.
+
+    Returns:
+        YAML-formatted string for use as dev interview initial_context.
+    """
+    from ouroboros.bigbang.prd_seed import PRDSeed
+
+    with open(seed_path) as f:
+        data = yaml.safe_load(f)
+
+    prd_seed = PRDSeed.from_dict(data)
+    return prd_seed.to_initial_context()
+
+
 @app.command()
 def start(
     context: Annotated[
@@ -597,18 +754,43 @@ def start(
         ouroboros init start
     """
     # Get initial context if not provided
-    if not resume and not context:
-        console.print("[bold cyan]Welcome to Ouroboros Interview![/]")
-        console.print()
-        console.print(
-            "This interactive process will help refine your ideas into clear requirements.",
-        )
-        console.print(
-            "You control when to stop - no arbitrary round limit.",
-        )
-        console.print()
+    if not resume:
+        # Auto-detect PRD seeds and offer to use as context
+        seeds_dir = Path.home() / ".ouroboros" / "seeds"
+        if not _has_dev_seed(seeds_dir):
+            prd_seeds = _find_prd_seeds(seeds_dir)
+            if prd_seeds:
+                if context:
+                    # User provided context but PRD seed exists — notify and ask
+                    _notify_prd_seed_detected(prd_seeds)
+                    use_prd = Confirm.ask(
+                        "[yellow]Use PRD seed instead of the provided context?[/]",
+                        default=False,
+                    )
+                    if use_prd:
+                        selected = _prompt_prd_seed_selection(prd_seeds) if len(prd_seeds) > 1 else prd_seeds[0]
+                        if selected:
+                            context = _load_prd_seed_as_context(selected)
+                            print_success(f"Using PRD seed: {selected.name}")
+                else:
+                    # No context provided — offer PRD seed as primary option
+                    selected = _prompt_prd_seed_selection(prd_seeds)
+                    if selected:
+                        context = _load_prd_seed_as_context(selected)
+                        print_success(f"Using PRD seed: {selected.name}")
 
-        context = asyncio.run(_multiline_prompt_async("What would you like to build?"))
+        if not context:
+            console.print("[bold cyan]Welcome to Ouroboros Interview![/]")
+            console.print()
+            console.print(
+                "This interactive process will help refine your ideas into clear requirements.",
+            )
+            console.print(
+                "You control when to stop - no arbitrary round limit.",
+            )
+            console.print()
+
+            context = asyncio.run(_multiline_prompt_async("What would you like to build?"))
 
     if not resume and not context:
         print_error("Initial context is required when not resuming.")

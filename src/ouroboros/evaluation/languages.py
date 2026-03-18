@@ -47,7 +47,7 @@ LANGUAGE_PRESETS: dict[str, LanguagePreset] = {
     "python-uv": LanguagePreset(
         name="python-uv",
         lint_command=("uv", "run", "ruff", "check", "."),
-        build_command=("uv", "run", "python", "-m", "py_compile"),
+        build_command=("uv", "run", "python", "-m", "compileall", "-q", "src/"),
         test_command=("uv", "run", "pytest", "--tb=short", "-q"),
         static_command=(
             "uv",
@@ -68,7 +68,7 @@ LANGUAGE_PRESETS: dict[str, LanguagePreset] = {
     "python": LanguagePreset(
         name="python",
         lint_command=("ruff", "check", "."),
-        build_command=("python", "-m", "py_compile"),
+        build_command=("python", "-m", "compileall", "-q", "src/"),
         test_command=("pytest", "--tb=short", "-q"),
         static_command=("mypy", ".", "--ignore-missing-imports"),
         coverage_command=(
