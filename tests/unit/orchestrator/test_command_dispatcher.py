@@ -175,13 +175,14 @@ class TestCodexCommandDispatcher:
                 )
             ]
 
-        fake_server.call_tool.assert_awaited_once_with(
-            "ouroboros_interview",
-            {
-                "session_id": "interview-123",
-                "answer": "Use PostgreSQL",
-            },
-        )
+        call_args = fake_server.call_tool.call_args
+        assert call_args[0][0] == "ouroboros_interview"
+        actual_args = call_args[0][1]
+        # Resume must preserve original frontmatter args AND overlay session_id/answer
+        assert actual_args["session_id"] == "interview-123"
+        assert actual_args["answer"] == "Use PostgreSQL"
+        assert actual_args["initial_context"] == "Use PostgreSQL"
+        assert "cwd" in actual_args
         mock_exec.assert_not_called()
         assert messages[-1].data["subtype"] == "error"
         assert messages[-1].data["tool_error"] is True
