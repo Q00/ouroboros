@@ -817,9 +817,11 @@ class SessionRepository:
         A session is considered orphaned if:
         1. Its current status is RUNNING (or PAUSED)
         2. Its last activity timestamp (last event) is older than the staleness threshold
+        3. No active heartbeat exists for the session (runtime-agnostic check)
 
-        This is used by auto-cleanup on MCP server startup to detect and cancel
-        executions that were left in a running state (e.g., due to a crash).
+        The heartbeat mechanism is extensible: any runtime (codex, claude_code,
+        or future runtimes) just needs to call write_heartbeat(session_id) during
+        execution. No process-name coupling required.
 
         Args:
             staleness_threshold: How long since last activity before a session
@@ -828,6 +830,9 @@ class SessionRepository:
         Returns:
             List of SessionTracker instances for orphaned sessions.
         """
+        from ouroboros.orchestrator.heartbeat import get_alive_sessions
+
+        alive_sessions = get_alive_sessions()
         now = datetime.now(UTC)
         orphaned: list[SessionTracker] = []
 
@@ -878,6 +883,14 @@ class SessionRepository:
                     last_activity = last_activity.replace(tzinfo=UTC)
 
                 if (now - last_activity) > staleness_threshold:
+                    # Skip if the session has an active heartbeat
+                    if session_id in alive_sessions:
+                        log.info(
+                            "orchestrator.orphan_detection.heartbeat_alive",
+                            session_id=session_id,
+                        )
+                        continue
+
                     # Reconstruct full tracker for the orphaned session
                     result = await self.reconstruct_session(session_id)
                     if result.is_ok:
