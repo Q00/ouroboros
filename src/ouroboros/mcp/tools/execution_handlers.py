@@ -190,7 +190,9 @@ class ExecuteSeedHandler:
                 )
             )
 
-        session_id = arguments.get("session_id") or session_id_override
+        session_id = arguments.get("session_id")
+        is_resume = bool(session_id)
+        session_id = session_id or session_id_override
         model_tier = arguments.get("model_tier", "medium")
         max_iterations = arguments.get("max_iterations", 10)
 
@@ -254,7 +256,7 @@ class ExecuteSeedHandler:
             session_repo = SessionRepository(event_store)
 
             skip_qa = arguments.get("skip_qa", False)
-            if session_id:
+            if is_resume and session_id:
                 tracker_result = await session_repo.reconstruct_session(session_id)
                 if tracker_result.is_err:
                     return Result.err(
@@ -279,7 +281,11 @@ class ExecuteSeedHandler:
                         )
                     )
             else:
-                prepared = await runner.prepare_session(seed)
+                prepared = await runner.prepare_session(
+                    seed,
+                    execution_id=execution_id,
+                    session_id=session_id_override,
+                )
                 if prepared.is_err:
                     return Result.err(
                         MCPToolError(
