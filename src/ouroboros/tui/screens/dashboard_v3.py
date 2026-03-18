@@ -627,6 +627,15 @@ class DashboardScreenV3(Screen[None]):
         yield Footer()
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Lifecycle
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def on_show(self) -> None:
+        """Refresh AC tree when screen becomes active."""
+        if self._tree and self._state and self._state.ac_tree:
+            self._tree.update_tree(self._state.ac_tree)
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Message Handlers
     # ─────────────────────────────────────────────────────────────────────────
 
