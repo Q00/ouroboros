@@ -584,7 +584,22 @@ class StartExecuteSeedHandler:
                         tool_name="ouroboros_start_execute_seed",
                     )
                 )
-            execution_id = session_result.value.execution_id
+            tracker = session_result.value
+            if tracker.status in (
+                SessionStatus.COMPLETED,
+                SessionStatus.CANCELLED,
+                SessionStatus.FAILED,
+            ):
+                return Result.err(
+                    MCPToolError(
+                        (
+                            f"Session {tracker.session_id} is already "
+                            f"{tracker.status.value} and cannot be resumed"
+                        ),
+                        tool_name="ouroboros_start_execute_seed",
+                    )
+                )
+            execution_id = tracker.execution_id
         else:
             execution_id = f"exec_{uuid4().hex[:12]}"
             new_session_id = f"orch_{uuid4().hex[:12]}"
