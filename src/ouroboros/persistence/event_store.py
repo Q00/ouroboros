@@ -4,11 +4,15 @@ Provides async methods for appending and replaying events using SQLAlchemy Core
 with aiosqlite backend.
 """
 
+import asyncio
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import event, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+logger = logging.getLogger(__name__)
 
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
@@ -139,7 +143,17 @@ class EventStore:
             self._engine = create_async_engine(
                 self._database_url,
                 echo=False,
+                connect_args={"timeout": 30},
             )
+
+            # Enable WAL mode and set busy timeout on every new connection
+            @event.listens_for(self._engine.sync_engine, "connect")
+            def _set_sqlite_pragmas(dbapi_conn, connection_record):
+                cursor = dbapi_conn.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+                cursor.close()
 
         # Create all tables defined in metadata
         async with self._engine.begin() as conn:
@@ -165,16 +179,29 @@ class EventStore:
         if not isinstance(event, BaseEvent):
             self._raise_invalid_append_input(event, operation="append")
 
-        try:
-            async with self._engine.begin() as conn:
-                await conn.execute(events_table.insert().values(**event.to_db_dict()))
-        except Exception as e:
-            raise PersistenceError(
-                f"Failed to append event: {e}",
-                operation="insert",
-                table="events",
-                details={"event_id": event.id, "event_type": event.type},
-            ) from e
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                async with self._engine.begin() as conn:
+                    await conn.execute(
+                        events_table.insert().values(**event.to_db_dict())
+                    )
+                return
+            except Exception as e:
+                last_err = e
+                if "database is locked" in str(e) and attempt < 2:
+                    logger.warning(
+                        "event_store.append.retry",
+                        extra={"attempt": attempt + 1, "event_id": event.id},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to append event: {e}",
+                    operation="insert",
+                    table="events",
+                    details={"event_id": event.id, "event_type": event.type},
+                ) from e
 
     async def append_batch(self, events: list[BaseEvent]) -> None:
         """Append multiple events atomically in a single transaction.
@@ -211,23 +238,31 @@ class EventStore:
                 index=invalid_index,
             )
 
-        try:
-            async with self._engine.begin() as conn:
-                # Insert all events in a single statement within one transaction
-                await conn.execute(
-                    events_table.insert(),
-                    [event.to_db_dict() for event in events],
-                )
-        except Exception as e:
-            raise PersistenceError(
-                f"Failed to append event batch: {e}",
-                operation="insert_batch",
-                table="events",
-                details={
-                    "batch_size": len(events),
-                    "event_ids": [e.id for e in events[:5]],  # First 5 for debugging
-                },
-            ) from e
+        for attempt in range(3):
+            try:
+                async with self._engine.begin() as conn:
+                    await conn.execute(
+                        events_table.insert(),
+                        [event.to_db_dict() for event in events],
+                    )
+                return
+            except Exception as e:
+                if "database is locked" in str(e) and attempt < 2:
+                    logger.warning(
+                        "event_store.append_batch.retry",
+                        extra={"attempt": attempt + 1, "batch_size": len(events)},
+                    )
+                    await asyncio.sleep(0.1 * (2**attempt))
+                    continue
+                raise PersistenceError(
+                    f"Failed to append event batch: {e}",
+                    operation="insert_batch",
+                    table="events",
+                    details={
+                        "batch_size": len(events),
+                        "event_ids": [e.id for e in events[:5]],
+                    },
+                ) from e
 
     async def replay(self, aggregate_type: str, aggregate_id: str) -> list[BaseEvent]:
         """Replay all events for a specific aggregate.
