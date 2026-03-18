@@ -1060,9 +1060,67 @@ class PMInterviewHandler:
             repo_count=len(selected_repos),
         )
 
+        # Update is_default in DB for selected repos
+        await self._sync_defaults_to_db(selected_repos)
+
         return await self._handle_start(
             engine, saved_context, cwd, selected_repos=selected_repos,
         )
+
+    async def _sync_defaults_to_db(self, selected_paths: list[str]) -> None:
+        """Update is_default in DB: selected paths → true, others → false.
+
+        Also triggers LLM desc generation for newly-selected repos with empty desc.
+        """
+        from pathlib import Path as _Path
+
+        from sqlalchemy import update
+
+        from ouroboros.bigbang.brownfield import generate_desc
+        from ouroboros.persistence.schema import brownfield_repos_table as t
+
+        try:
+            store = BrownfieldStore()
+            await store.initialize()
+            try:
+                engine = store._ensure_initialized("_sync_defaults_to_db")
+                selected_set = set(selected_paths)
+
+                async with engine.begin() as conn:
+                    # Clear all defaults
+                    await conn.execute(
+                        update(t).where(t.c.is_default.is_(True)).values(is_default=False)
+                    )
+                    # Set selected as default
+                    if selected_set:
+                        await conn.execute(
+                            update(t).where(t.c.path.in_(selected_set)).values(is_default=True)
+                        )
+
+                log.info(
+                    "pm_handler.sync_defaults_done",
+                    selected_count=len(selected_paths),
+                )
+
+                # Generate desc for selected repos that lack one
+                all_repos = await store.list()
+                for repo in all_repos:
+                    if repo.path in selected_set and not repo.desc:
+                        try:
+                            llm_adapter = self._get_engine().inner.llm_adapter
+                            desc = await generate_desc(_Path(repo.path), llm_adapter)
+                            if desc:
+                                await store.update_desc(repo.path, desc)
+                                log.info("pm_handler.desc_generated", path=repo.path)
+                        except Exception as exc:
+                            log.warning(
+                                "pm_handler.desc_generation_failed",
+                                path=repo.path, error=str(exc),
+                            )
+            finally:
+                await store.close()
+        except Exception as exc:
+            log.warning("pm_handler.sync_defaults_failed", error=str(exc))
 
     # ──────────────────────────────────────────────────────────────
     # Idempotency guard (AC 9)
