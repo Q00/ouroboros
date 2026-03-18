@@ -36,6 +36,8 @@ _TOP_LEVEL_EVENT_MESSAGE_TYPES: dict[str, str] = {
     "error": "assistant",
 }
 
+_INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
+
 _SKILL_COMMAND_PATTERN = re.compile(
     r"^\s*(?:(?P<ooo_prefix>ooo)\s+(?P<ooo_skill>[a-z0-9][a-z0-9_-]*)|"
     r"(?P<slash_prefix>/ouroboros:)(?P<slash_skill>[a-z0-9][a-z0-9_-]*))"
@@ -412,19 +414,71 @@ class CodexCliRuntime:
         """Look up a local MCP handler by tool name."""
         return self._get_builtin_mcp_handlers().get(tool_name)
 
+    def _build_tool_arguments(
+        self,
+        intercept: SkillInterceptRequest,
+        current_handle: RuntimeHandle | None,
+    ) -> dict[str, Any]:
+        """Build the MCP argument payload for an intercepted skill."""
+        if intercept.mcp_tool != "ouroboros_interview" or current_handle is None:
+            return dict(intercept.mcp_args)
+
+        session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
+        if not isinstance(session_id, str) or not session_id.strip():
+            return dict(intercept.mcp_args)
+
+        arguments: dict[str, Any] = {"session_id": session_id.strip()}
+        if intercept.first_argument is not None:
+            arguments["answer"] = intercept.first_argument
+        return arguments
+
+    def _build_resume_handle(
+        self,
+        current_handle: RuntimeHandle | None,
+        intercept: SkillInterceptRequest,
+        tool_result: Any,
+    ) -> RuntimeHandle | None:
+        """Attach interview session metadata to the runtime handle."""
+        if intercept.mcp_tool != "ouroboros_interview":
+            return current_handle
+
+        session_id = tool_result.meta.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            if session_id is not None:
+                log.warning(
+                    "codex_cli_runtime.resume_handle.invalid_session_id",
+                    session_id_type=type(session_id).__name__,
+                    session_id_value=repr(session_id),
+                )
+            return current_handle
+
+        metadata = dict(current_handle.metadata) if current_handle is not None else {}
+        metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
+        updated_at = datetime.now(UTC).isoformat()
+
+        if current_handle is not None:
+            return replace(current_handle, metadata=metadata, updated_at=updated_at)
+
+        return RuntimeHandle(
+            backend=self.runtime_backend,
+            cwd=self.working_directory,
+            approval_mode=self.permission_mode,
+            updated_at=updated_at,
+            metadata=metadata,
+        )
+
     async def _dispatch_skill_intercept_locally(
         self,
         intercept: SkillInterceptRequest,
         current_handle: RuntimeHandle | None,
     ) -> tuple[AgentMessage, ...] | None:
         """Dispatch an exact-prefix intercept to the matching local MCP handler."""
-        del current_handle  # Intercepted MCP tools do not resume backend CLI sessions.
-
         handler = self._get_mcp_tool_handler(intercept.mcp_tool)
         if handler is None:
             raise LookupError(f"No local handler registered for tool: {intercept.mcp_tool}")
 
-        tool_result = await handler.handle(dict(intercept.mcp_args))
+        tool_arguments = self._build_tool_arguments(intercept, current_handle)
+        tool_result = await handler.handle(tool_arguments)
         if tool_result.is_err:
             error = tool_result.error
             error_data = {
@@ -440,9 +494,9 @@ class CodexCliRuntime:
             return (
                 self._build_tool_message(
                     tool_name=intercept.mcp_tool,
-                    tool_input=dict(intercept.mcp_args),
+                    tool_input=tool_arguments,
                     content=f"Calling tool: {intercept.mcp_tool}",
-                    handle=None,
+                    handle=current_handle,
                     extra_data={
                         "command_prefix": intercept.command_prefix,
                         "skill_name": intercept.skill_name,
@@ -452,10 +506,12 @@ class CodexCliRuntime:
                     type="result",
                     content=str(error),
                     data=error_data,
+                    resume_handle=current_handle,
                 ),
             )
 
         resolved_result = tool_result.value
+        resume_handle = self._build_resume_handle(current_handle, intercept, resolved_result)
         result_text = resolved_result.text_content.strip() or f"{intercept.mcp_tool} completed."
         result_data: dict[str, Any] = {
             "subtype": "error" if resolved_result.is_error else "success",
@@ -467,9 +523,9 @@ class CodexCliRuntime:
         return (
             self._build_tool_message(
                 tool_name=intercept.mcp_tool,
-                tool_input=dict(intercept.mcp_args),
+                tool_input=tool_arguments,
                 content=f"Calling tool: {intercept.mcp_tool}",
-                handle=None,
+                handle=resume_handle,
                 extra_data={
                     "command_prefix": intercept.command_prefix,
                     "skill_name": intercept.skill_name,
@@ -479,6 +535,7 @@ class CodexCliRuntime:
                 type="result",
                 content=result_text,
                 data=result_data,
+                resume_handle=resume_handle,
             ),
         )
 

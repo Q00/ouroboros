@@ -613,11 +613,13 @@ class StartExecuteSeedHandler:
         from ouroboros.providers.factory import resolve_llm_backend
 
         try:
-            runtime_backend = resolve_agent_runtime_backend()
+            runtime_backend = resolve_agent_runtime_backend(
+                self._execute_handler.agent_runtime_backend
+            )
         except (ValueError, Exception):
             runtime_backend = "unknown"
         try:
-            llm_backend = resolve_llm_backend()
+            llm_backend = resolve_llm_backend(self._execute_handler.llm_backend)
         except (ValueError, Exception):
             llm_backend = "unknown"
 

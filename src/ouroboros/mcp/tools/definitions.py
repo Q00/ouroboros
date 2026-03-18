@@ -182,12 +182,13 @@ def get_ouroboros_tools(
     llm_backend: str | None = None,
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers."""
+    execute_seed = ExecuteSeedHandler(
+        agent_runtime_backend=runtime_backend,
+        llm_backend=llm_backend,
+    )
     return (
-        ExecuteSeedHandler(
-            agent_runtime_backend=runtime_backend,
-            llm_backend=llm_backend,
-        ),
-        StartExecuteSeedHandler(),
+        execute_seed,
+        StartExecuteSeedHandler(execute_handler=execute_seed),
         SessionStatusHandler(),
         JobStatusHandler(),
         JobWaitHandler(),
