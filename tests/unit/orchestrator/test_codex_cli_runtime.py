@@ -927,13 +927,13 @@ class TestCodexCliRuntime:
             def __init__(self) -> None:
                 self.calls: list[dict[str, str]] = []
 
-            async def handle(self, arguments: dict[str, str]) -> Result[MCPToolResult, MCPToolError]:
+            async def handle(
+                self, arguments: dict[str, str]
+            ) -> Result[MCPToolResult, MCPToolError]:
                 self.calls.append(arguments)
                 return Result.ok(
                     MCPToolResult(
-                        content=(
-                            MCPContentItem(type=ContentType.TEXT, text="Next question"),
-                        ),
+                        content=(MCPContentItem(type=ContentType.TEXT, text="Next question"),),
                         is_error=False,
                         meta={"session_id": "interview-456"},
                     )
@@ -965,8 +965,7 @@ class TestCodexCliRuntime:
         assert messages[-1].resume_handle is not None
         assert messages[-1].resume_handle.native_session_id == "thread-123"
         assert (
-            messages[-1].resume_handle.metadata["ouroboros_interview_session_id"]
-            == "interview-456"
+            messages[-1].resume_handle.metadata["ouroboros_interview_session_id"] == "interview-456"
         )
         assert messages[-1].content == "Next question"
 
