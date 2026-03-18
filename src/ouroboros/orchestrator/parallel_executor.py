@@ -50,7 +50,9 @@ from ouroboros.orchestrator.events import (
 from ouroboros.orchestrator.level_context import (
     LevelContext,
     build_context_prompt,
+    deserialize_level_contexts,
     extract_level_context,
+    serialize_level_contexts,
 )
 
 if TYPE_CHECKING:
@@ -248,7 +250,7 @@ class ParallelACExecutor:
                 return True
             except Exception as e:
                 if attempt < max_retries - 1:
-                    wait = min(1.0 * (2 ** attempt), 5.0)
+                    wait = min(1.0 * (2**attempt), 5.0)
                     log.warning(
                         "parallel_executor.event_write.retry",
                         event_type=event.type,
@@ -314,14 +316,21 @@ class ParallelACExecutor:
                         for idx in cp.state.get("failed_indices", []):
                             failed_indices.add(int(idx))
                         completed_count = cp.state.get("completed_count", 0)
+                        # Restore level contexts so subsequent levels
+                        # have access to completed levels' output
+                        saved_contexts = cp.state.get("level_contexts", [])
+                        if saved_contexts:
+                            level_contexts = deserialize_level_contexts(saved_contexts)
                         log.info(
                             "parallel_executor.recovery.resuming",
                             from_level=resume_from_level,
                             seed_id=seed_id,
+                            restored_contexts=len(level_contexts),
                         )
                         self._console.print(
                             f"[cyan]Resuming from level {resume_from_level + 1} "
-                            f"(checkpoint recovered)[/cyan]"
+                            f"(checkpoint recovered, "
+                            f"{len(level_contexts)} level context(s) restored)[/cyan]"
                         )
             except Exception as e:
                 log.warning(
@@ -531,13 +540,22 @@ class ParallelACExecutor:
                             success=False,
                             error=str(result),
                         )
-                    elif (
-                        isinstance(result, ACExecutionResult)
-                        and result.error == _STALL_SENTINEL
-                    ):
+                    elif isinstance(result, ACExecutionResult) and result.error == _STALL_SENTINEL:
                         # Stalled → retry if attempts remain
                         if stall_attempt < MAX_STALL_RETRIES:
                             still_pending.append(ac_idx)
+                            ac_id = f"ac_{ac_idx}"
+                            await self._safe_emit_event(
+                                create_ac_stall_detected_event(
+                                    session_id=session_id,
+                                    ac_index=ac_idx,
+                                    ac_id=ac_id,
+                                    silent_seconds=STALL_TIMEOUT_SECONDS,
+                                    attempt=stall_attempt + 1,
+                                    max_attempts=MAX_STALL_RETRIES + 1,
+                                    action="restart",
+                                )
+                            )
                             log.warning(
                                 "parallel_executor.supervisor.stall_retry",
                                 session_id=session_id,
@@ -554,15 +572,17 @@ class ParallelACExecutor:
                         else:
                             # Exhausted retries → permanent failure
                             ac_id = f"ac_{ac_idx}"
-                            await self._safe_emit_event(create_ac_stall_detected_event(
-                                session_id=session_id,
-                                ac_index=ac_idx,
-                                ac_id=ac_id,
-                                silent_seconds=STALL_TIMEOUT_SECONDS,
-                                attempt=stall_attempt + 1,
-                                max_attempts=MAX_STALL_RETRIES + 1,
-                                action="abandon",
-                            ))
+                            await self._safe_emit_event(
+                                create_ac_stall_detected_event(
+                                    session_id=session_id,
+                                    ac_index=ac_idx,
+                                    ac_id=ac_id,
+                                    silent_seconds=STALL_TIMEOUT_SECONDS,
+                                    attempt=stall_attempt + 1,
+                                    max_attempts=MAX_STALL_RETRIES + 1,
+                                    action="abandon",
+                                )
+                            )
                             level_result_map[ac_idx] = ACExecutionResult(
                                 ac_index=ac_idx,
                                 ac_content=seed.acceptance_criteria[ac_idx],
@@ -701,6 +721,7 @@ class ParallelACExecutor:
                             "ac_statuses": {str(k): v for k, v in ac_statuses.items()},
                             "failed_indices": sorted(failed_indices),
                             "completed_count": completed_count,
+                            "level_contexts": serialize_level_contexts(level_contexts),
                         },
                     )
                     self._checkpoint_store.save(checkpoint)
@@ -1162,11 +1183,7 @@ When complete, explicitly state: [TASK_COMPLETE]
         success = False
 
         # AC identifier for events
-        ac_id = (
-            f"ac_{ac_index}"
-            if not is_sub_ac
-            else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
-        )
+        ac_id = f"ac_{ac_index}" if not is_sub_ac else f"sub_ac_{parent_ac_index}_{sub_ac_index}"
 
         # Stall detection: CancelScope with resettable deadline (RC6)
         message_count = 0
@@ -1201,13 +1218,15 @@ When complete, explicitly state: [TASK_COMPLETE]
                     # RC1: Emit heartbeat piggybacking on message flow
                     now = time.monotonic()
                     if now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS:
-                        await self._safe_emit_event(create_heartbeat_event(
-                            session_id=session_id,
-                            ac_index=ac_index,
-                            ac_id=ac_id,
-                            elapsed_seconds=now - exec_start,
-                            message_count=message_count,
-                        ))
+                        await self._safe_emit_event(
+                            create_heartbeat_event(
+                                session_id=session_id,
+                                ac_index=ac_index,
+                                ac_id=ac_id,
+                                elapsed_seconds=now - exec_start,
+                                message_count=message_count,
+                            )
+                        )
                         last_heartbeat = now
 
                     if message.tool_name:
@@ -1259,15 +1278,8 @@ When complete, explicitly state: [TASK_COMPLETE]
                     silent_seconds=STALL_TIMEOUT_SECONDS,
                     message_count=message_count,
                 )
-                await self._safe_emit_event(create_ac_stall_detected_event(
-                    session_id=session_id,
-                    ac_index=ac_index,
-                    ac_id=ac_id,
-                    silent_seconds=STALL_TIMEOUT_SECONDS,
-                    attempt=0,
-                    max_attempts=MAX_STALL_RETRIES + 1,
-                    action="restart",
-                ))
+                # NOTE: Stall event emission is handled by the supervisor loop
+                # which knows the correct attempt number and action (restart/abandon).
                 return ACExecutionResult(
                     ac_index=ac_index,
                     ac_content=ac_content,
@@ -1432,12 +1444,8 @@ When complete, explicitly state: [TASK_COMPLETE]
                     execution_id=execution_id,
                     seed=seed,
                     ac_statuses=ac_statuses,
-                    executing_indices=[
-                        i for i, s in ac_statuses.items() if s == "executing"
-                    ],
-                    completed_count=sum(
-                        1 for s in ac_statuses.values() if s == "completed"
-                    ),
+                    executing_indices=[i for i, s in ac_statuses.items() if s == "executing"],
+                    completed_count=sum(1 for s in ac_statuses.values() if s == "completed"),
                     current_level=0,
                     total_levels=0,
                     activity="Monitoring",
@@ -1445,7 +1453,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 consecutive_errors = 0
             except Exception as e:
                 consecutive_errors += 1
-                wait = min(2.0 ** consecutive_errors, 30.0)
+                wait = min(2.0**consecutive_errors, 30.0)
                 log.warning(
                     "parallel_executor.progress_emitter.error",
                     error=str(e),

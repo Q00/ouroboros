@@ -5,11 +5,14 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.level_context import (
     ACContextSummary,
     LevelContext,
     build_context_prompt,
+    deserialize_level_contexts,
     extract_level_context,
+    serialize_level_contexts,
 )
 
 
@@ -259,3 +262,95 @@ class TestExtractLevelContext:
         assert ctx.completed_acs[0].success is True
         assert ctx.completed_acs[1].success is False
         assert ctx.completed_acs[2].success is True
+
+
+class TestLevelContextSerialization:
+    """Tests for serialize/deserialize round-trip of level contexts."""
+
+    def test_round_trip_basic(self) -> None:
+        """Test serialization round-trip for a basic context."""
+        original = [
+            LevelContext(
+                level_number=0,
+                completed_acs=(
+                    ACContextSummary(
+                        ac_index=0,
+                        ac_content="Create model",
+                        success=True,
+                        tools_used=("Read", "Write"),
+                        files_modified=("src/model.py",),
+                        key_output="Model created",
+                    ),
+                ),
+            ),
+        ]
+        restored = deserialize_level_contexts(serialize_level_contexts(original))
+        assert len(restored) == 1
+        assert restored[0].level_number == 0
+        ac = restored[0].completed_acs[0]
+        assert ac.ac_index == 0
+        assert ac.ac_content == "Create model"
+        assert ac.success is True
+        assert ac.tools_used == ("Read", "Write")
+        assert ac.files_modified == ("src/model.py",)
+        assert ac.key_output == "Model created"
+
+    def test_round_trip_with_coordinator_review(self) -> None:
+        """Test serialization preserves coordinator review including conflicts."""
+        review = CoordinatorReview(
+            level_number=1,
+            conflicts_detected=(
+                FileConflict(
+                    file_path="src/shared.py",
+                    ac_indices=(0, 2),
+                    resolved=True,
+                    resolution_description="Merged imports",
+                ),
+            ),
+            review_summary="Conflict resolved",
+            fixes_applied=("merged imports",),
+            warnings_for_next_level=("watch out for circular deps",),
+            duration_seconds=2.5,
+            session_id="sess_review",
+        )
+        original = [
+            LevelContext(
+                level_number=1,
+                completed_acs=(ACContextSummary(ac_index=0, ac_content="AC", success=True),),
+                coordinator_review=review,
+            ),
+        ]
+        restored = deserialize_level_contexts(serialize_level_contexts(original))
+        r = restored[0].coordinator_review
+        assert r is not None
+        assert r.level_number == 1
+        assert r.review_summary == "Conflict resolved"
+        assert r.fixes_applied == ("merged imports",)
+        assert r.warnings_for_next_level == ("watch out for circular deps",)
+        assert r.duration_seconds == 2.5
+        assert r.session_id == "sess_review"
+        assert len(r.conflicts_detected) == 1
+        fc = r.conflicts_detected[0]
+        assert fc.file_path == "src/shared.py"
+        assert fc.ac_indices == (0, 2)
+        assert fc.resolved is True
+        assert fc.resolution_description == "Merged imports"
+
+    def test_round_trip_empty(self) -> None:
+        """Test serialization of empty context list."""
+        assert deserialize_level_contexts(serialize_level_contexts([])) == []
+
+    def test_round_trip_multiple_levels(self) -> None:
+        """Test serialization of multiple levels."""
+        original = [
+            LevelContext(
+                level_number=i,
+                completed_acs=(ACContextSummary(ac_index=i, ac_content=f"AC {i}", success=True),),
+            )
+            for i in range(3)
+        ]
+        restored = deserialize_level_contexts(serialize_level_contexts(original))
+        assert len(restored) == 3
+        for i, ctx in enumerate(restored):
+            assert ctx.level_number == i
+            assert ctx.completed_acs[0].ac_index == i

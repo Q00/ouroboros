@@ -14,8 +14,8 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
 
@@ -208,9 +208,66 @@ def extract_level_context(
     )
 
 
+def serialize_level_contexts(contexts: list[LevelContext]) -> list[dict[str, Any]]:
+    """Serialize level contexts for checkpoint storage.
+
+    Uses dataclasses.asdict() for complete, field-addition-safe serialization.
+    All nested types (ACContextSummary, CoordinatorReview, FileConflict) are
+    frozen dataclasses composed of primitives and tuples, so asdict() produces
+    a fully JSON-serializable dict tree (tuples become lists).
+    """
+    return [asdict(ctx) for ctx in contexts]
+
+
+def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]:
+    """Deserialize level contexts from checkpoint data.
+
+    Reconstructs the typed dataclass tree, converting lists back to tuples
+    where the frozen dataclasses expect them.
+    """
+    from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
+
+    result: list[LevelContext] = []
+    for d in data:
+        review = None
+        if d.get("coordinator_review"):
+            rd = d["coordinator_review"]
+            review = CoordinatorReview(
+                **{
+                    **rd,
+                    "conflicts_detected": tuple(
+                        FileConflict(**{**fc, "ac_indices": tuple(fc["ac_indices"])})
+                        for fc in rd.get("conflicts_detected", ())
+                    ),
+                    "fixes_applied": tuple(rd.get("fixes_applied", ())),
+                    "warnings_for_next_level": tuple(rd.get("warnings_for_next_level", ())),
+                }
+            )
+
+        result.append(
+            LevelContext(
+                level_number=d["level_number"],
+                completed_acs=tuple(
+                    ACContextSummary(
+                        **{
+                            **ac,
+                            "tools_used": tuple(ac.get("tools_used", ())),
+                            "files_modified": tuple(ac.get("files_modified", ())),
+                        }
+                    )
+                    for ac in d.get("completed_acs", ())
+                ),
+                coordinator_review=review,
+            )
+        )
+    return result
+
+
 __all__ = [
     "ACContextSummary",
     "LevelContext",
     "build_context_prompt",
+    "deserialize_level_contexts",
     "extract_level_context",
+    "serialize_level_contexts",
 ]
