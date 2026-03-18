@@ -686,6 +686,7 @@ class CodexCliRuntime:
         output_last_message_path: str,
         *,
         resume_session_id: str | None = None,
+        prompt: str | None = None,
     ) -> list[str]:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
         command = [self._cli_path, "exec"]
@@ -726,6 +727,14 @@ class CodexCliRuntime:
 
     def _requires_process_stdin(self) -> bool:
         """Return True when the runtime needs a writable stdin pipe."""
+        return True
+
+    def _feeds_prompt_via_stdin(self) -> bool:
+        """Return True when prompt should be written to stdin (Codex default).
+
+        Override to False for runtimes that accept the prompt as a CLI
+        positional argument (e.g. ``opencode run <prompt>``).
+        """
         return True
 
     async def _handle_runtime_event(
@@ -1403,6 +1412,7 @@ class CodexCliRuntime:
         command = self._build_command(
             output_last_message_path=str(output_path),
             resume_session_id=attempted_resume_session_id,
+            prompt=composed_prompt,
         )
 
         log.info(
@@ -1449,8 +1459,9 @@ class CodexCliRuntime:
             return
 
         # Feed prompt via stdin to avoid OS ARG_MAX limits (~262KB on macOS).
+        # Runtimes that accept prompt as a CLI arg (e.g. opencode) skip this.
         process_stdin = getattr(process, "stdin", None)
-        if composed_prompt and process_stdin is not None:
+        if composed_prompt and process_stdin is not None and self._feeds_prompt_via_stdin():
             process_stdin.write(composed_prompt.encode("utf-8"))
             await process_stdin.drain()
             process_stdin.close()
