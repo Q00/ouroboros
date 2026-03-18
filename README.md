@@ -1,3 +1,7 @@
+<p align="right">
+  <strong>English</strong> | <a href="./README.ko.md">한국어</a>
+</p>
+
 <p align="center">
   <br/>
   ◯ ─────────── ◯
