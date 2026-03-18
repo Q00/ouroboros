@@ -5,18 +5,18 @@ with aiosqlite backend.
 """
 
 import asyncio
-import logging
 from collections.abc import Mapping
+import logging
 from pathlib import Path
 
 from sqlalchemy import event, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-logger = logging.getLogger(__name__)
-
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.schema import events_table, metadata
+
+logger = logging.getLogger(__name__)
 
 _RAW_SUBSCRIBED_EVENT_TYPE_KEYS = frozenset({"type", "event", "kind", "name"})
 _RAW_SUBSCRIBED_EVENT_SIGNAL_KEYS = frozenset(
@@ -148,7 +148,7 @@ class EventStore:
 
             # Enable WAL mode and set busy timeout on every new connection
             @event.listens_for(self._engine.sync_engine, "connect")
-            def _set_sqlite_pragmas(dbapi_conn, connection_record):
+            def _set_sqlite_pragmas(dbapi_conn, _connection_record):
                 cursor = dbapi_conn.cursor()
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA synchronous=NORMAL")
@@ -179,16 +179,12 @@ class EventStore:
         if not isinstance(event, BaseEvent):
             self._raise_invalid_append_input(event, operation="append")
 
-        last_err: Exception | None = None
         for attempt in range(3):
             try:
                 async with self._engine.begin() as conn:
-                    await conn.execute(
-                        events_table.insert().values(**event.to_db_dict())
-                    )
+                    await conn.execute(events_table.insert().values(**event.to_db_dict()))
                 return
             except Exception as e:
-                last_err = e
                 if "database is locked" in str(e) and attempt < 2:
                     logger.warning(
                         "event_store.append.retry",
