@@ -384,24 +384,32 @@ class OrchestratorRunner:
         """Register an active session for cancellation tracking.
 
         Called at the start of execution to enable in-flight cancellation.
+        Also writes a heartbeat file so the orphan detector knows this
+        session is alive (runtime-agnostic mechanism).
 
         Args:
             execution_id: Execution ID for external lookup.
             session_id: Session ID for internal tracking.
         """
+        from ouroboros.orchestrator.heartbeat import acquire as acquire_lock
+
         self._active_sessions[execution_id] = session_id
+        acquire_lock(session_id)
 
     def _unregister_session(self, execution_id: str, session_id: str) -> None:
         """Unregister a session after execution completes.
 
         Called at the end of execution (success, failure, or cancellation)
-        to clean up tracking state.
+        to clean up tracking state and remove the heartbeat file.
 
         Args:
             execution_id: Execution ID to remove.
             session_id: Session ID to remove.
         """
+        from ouroboros.orchestrator.heartbeat import release as release_lock
+
         self._active_sessions.pop(execution_id, None)
+        release_lock(session_id)
 
     def _deserialize_runtime_handle(self, progress: dict[str, Any]) -> RuntimeHandle | None:
         """Deserialize runtime resume state from session progress."""
@@ -1173,15 +1181,36 @@ class OrchestratorRunner:
 
         # Check for parallel execution mode
         if parallel and len(seed.acceptance_criteria) > 1:
-            return await self._execute_parallel(
-                seed=seed,
-                exec_id=exec_id,
-                tracker=tracker,
-                merged_tools=merged_tools,
-                tool_catalog=tool_catalog,
-                system_prompt=system_prompt,
-                start_time=start_time,
-            )
+            try:
+                return await self._execute_parallel(
+                    seed=seed,
+                    exec_id=exec_id,
+                    tracker=tracker,
+                    merged_tools=merged_tools,
+                    tool_catalog=tool_catalog,
+                    system_prompt=system_prompt,
+                    start_time=start_time,
+                )
+            except Exception as exc:
+                log.exception(
+                    "orchestrator.runner.parallel_execution_failed",
+                    execution_id=exec_id,
+                    session_id=tracker.session_id,
+                )
+                duration = (datetime.now(UTC) - start_time).total_seconds()
+                failed_event = create_session_failed_event(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    error=str(exc),
+                    duration=duration,
+                )
+                await self._event_store.append(failed_event)
+                return Result.err(
+                    OrchestratorError(
+                        message=f"Parallel execution failed: {exc}",
+                        error_type="parallel_execution_error",
+                    )
+                )
 
         try:
             # Use simple status spinner with log-style output for changes

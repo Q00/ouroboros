@@ -34,7 +34,6 @@ from ouroboros.tui.events import (
     create_message_from_event,
 )
 from ouroboros.tui.screens import (
-    DashboardScreen,
     DashboardScreenV3,
     DebugScreen,
     ExecutionScreen,
@@ -339,36 +338,24 @@ class OuroborosTUI(App[None]):
         self._state.session_id = message.session_id
         self._state.status = message.status
         self._state.is_paused = message.status == "paused"
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_execution_updated"):
-                screen.on_execution_updated(message)
+        self._forward_to_dashboard("on_execution_updated", message)
 
     def on_phase_changed(self, message: PhaseChanged) -> None:
         self._state.current_phase = message.current_phase
         self._state.iteration = message.iteration
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_phase_changed"):
-                screen.on_phase_changed(message)
+        self._forward_to_dashboard("on_phase_changed", message)
 
     def on_drift_updated(self, message: DriftUpdated) -> None:
         self._state.goal_drift = message.goal_drift
         self._state.constraint_drift = message.constraint_drift
         self._state.ontology_drift = message.ontology_drift
         self._state.combined_drift = message.combined_drift
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_drift_updated"):
-                screen.on_drift_updated(message)
+        self._forward_to_dashboard("on_drift_updated", message)
 
     def on_cost_updated(self, message: CostUpdated) -> None:
         self._state.total_tokens = message.total_tokens
         self._state.total_cost_usd = message.total_cost_usd
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_cost_updated"):
-                screen.on_cost_updated(message)
+        self._forward_to_dashboard("on_cost_updated", message)
 
     def on_ac_updated(self, message: ACUpdated) -> None:
         if message.ac_id:
@@ -376,10 +363,7 @@ class OuroborosTUI(App[None]):
             if message.ac_id in nodes:
                 nodes[message.ac_id]["status"] = message.status
                 nodes[message.ac_id]["is_atomic"] = message.is_atomic
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_ac_updated"):
-                screen.on_ac_updated(message)
+        self._forward_to_dashboard("on_ac_updated", message)
 
     def on_subtask_updated(self, message: SubtaskUpdated) -> None:
         """Handle sub-task updates and add to AC tree (SSOT)."""
@@ -408,12 +392,7 @@ class OuroborosTUI(App[None]):
 
         self._state.ac_tree["nodes"] = nodes
         self._notify_ac_tree_updated()
-
-        # Forward to current screen
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_subtask_updated"):
-                screen.on_subtask_updated(message)
+        self._forward_to_dashboard("on_subtask_updated", message)
 
     def on_tool_call_started(self, message: ToolCallStarted) -> None:
         """Handle tool call started - track active tools."""
@@ -423,10 +402,7 @@ class OuroborosTUI(App[None]):
             "call_index": str(message.call_index),
         }
         self._notify_ac_tree_updated()
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_tool_call_started"):
-                screen.on_tool_call_started(message)
+        self._forward_to_dashboard("on_tool_call_started", message)
 
     def on_tool_call_completed(self, message: ToolCallCompleted) -> None:
         """Handle tool call completed - move to history."""
@@ -444,18 +420,12 @@ class OuroborosTUI(App[None]):
         # Keep last 20 entries per AC
         if len(history) > 20:
             self._state.tool_history[message.ac_id] = history[-20:]
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_tool_call_completed"):
-                screen.on_tool_call_completed(message)
+        self._forward_to_dashboard("on_tool_call_completed", message)
 
     def on_agent_thinking_updated(self, message: AgentThinkingUpdated) -> None:
         """Handle agent thinking update."""
         self._state.thinking[message.ac_id] = message.thinking_text
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_agent_thinking_updated"):
-                screen.on_agent_thinking_updated(message)
+        self._forward_to_dashboard("on_agent_thinking_updated", message)
 
     def on_workflow_progress_updated(self, message: WorkflowProgressUpdated) -> None:
         # Update state with AC tree from workflow progress (smart merge)
@@ -473,27 +443,20 @@ class OuroborosTUI(App[None]):
         if message.current_phase:
             self._state.current_phase = message.current_phase.lower()
 
-        # Forward to current screen
-        if self._screen_stack:
-            screen = self.screen
-            if hasattr(screen, "on_workflow_progress_updated"):
-                screen.on_workflow_progress_updated(message)
+        # Forward to dashboard, execution, and debug screens
+        self._forward_to_dashboard("on_workflow_progress_updated", message)
 
-        # Also forward to execution screen for event timeline
-        try:
-            execution_screen = self.get_screen("execution")
-            if execution_screen and hasattr(execution_screen, "on_workflow_progress_updated"):
-                execution_screen.on_workflow_progress_updated(message)
-        except Exception:
-            pass  # Screen might not be installed yet
-
-        # Update debug screen with new state
-        try:
-            debug_screen = self.get_screen("debug")
-            if debug_screen and hasattr(debug_screen, "update_state"):
-                debug_screen.update_state(self._state)
-        except Exception:
-            pass  # Screen might not be installed yet
+        for screen_name, method in (
+            ("execution", "on_workflow_progress_updated"),
+            ("debug", "update_state"),
+        ):
+            try:
+                s = self.get_screen(screen_name)
+                if s and hasattr(s, method):
+                    arg = self._state if method == "update_state" else message
+                    getattr(s, method)(arg)
+            except Exception:
+                pass
 
     def _convert_ac_list_to_tree(
         self,
@@ -723,23 +686,27 @@ class OuroborosTUI(App[None]):
         self._state.ac_tree = tree_data
         self._notify_ac_tree_updated()
 
-    def _notify_ac_tree_updated(self) -> None:
-        """Notify dashboard that AC tree has been updated.
-
-        Uses get_screen() to reach the installed dashboard even when
-        another screen (e.g. session selector) is currently active.
-        """
-        for screen_name in ("dashboard", "dashboard_v2"):
-            try:
-                screen = self.get_screen(screen_name)
-            except Exception:
-                continue
+    def _get_dashboard_screen(self) -> DashboardScreenV3 | None:
+        """Return the installed dashboard screen regardless of which screen is active."""
+        try:
+            screen = self.get_screen("dashboard")
             if isinstance(screen, DashboardScreenV3):
-                if hasattr(screen, "_tree") and screen._tree is not None:
-                    screen._tree.update_tree(self._state.ac_tree)
-            elif isinstance(screen, DashboardScreen):
-                if hasattr(screen, "_ac_tree") and screen._ac_tree is not None:
-                    screen._ac_tree.update_tree(self._state.ac_tree)
+                return screen
+        except Exception:
+            pass
+        return None
+
+    def _forward_to_dashboard(self, method_name: str, message: Any) -> None:
+        """Forward a message to the dashboard screen even when it's not active."""
+        dashboard = self._get_dashboard_screen()
+        if dashboard is not None and hasattr(dashboard, method_name):
+            getattr(dashboard, method_name)(message)
+
+    def _notify_ac_tree_updated(self) -> None:
+        """Notify dashboard that AC tree has been updated."""
+        dashboard = self._get_dashboard_screen()
+        if dashboard is not None and hasattr(dashboard, "_tree") and dashboard._tree is not None:
+            dashboard._tree.update_tree(self._state.ac_tree)
 
     async def on_unmount(self) -> None:
         if self._subscription_task is not None:

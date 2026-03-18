@@ -3074,17 +3074,22 @@ When complete, explicitly state: [TASK_COMPLETE]
         sub_task_desc: str,
         status: str,
     ) -> None:
-        """Emit sub-task event for TUI tree updates."""
+        """Emit sub-task event for TUI tree updates.
+
+        ``ac_index`` arrives 0-based from the executor loop but the TUI
+        tree keys AC nodes as ``ac_{1-based}``, so we convert here.
+        """
         from ouroboros.events.base import BaseEvent
 
+        ac_index_1 = ac_index + 1  # 0-based → 1-based for TUI node keys
         event = BaseEvent(
             type="execution.subtask.updated",
             aggregate_type="execution",
             aggregate_id=execution_id,
             data={
-                "ac_index": ac_index,
+                "ac_index": ac_index_1,
                 "sub_task_index": sub_task_index,
-                "sub_task_id": f"ac_{ac_index}_sub_{sub_task_index}",
+                "sub_task_id": f"ac_{ac_index_1}_sub_{sub_task_index}",
                 "content": sub_task_desc,
                 "status": status,
             },

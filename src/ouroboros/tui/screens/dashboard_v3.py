@@ -631,9 +631,15 @@ class DashboardScreenV3(Screen[None]):
     # ─────────────────────────────────────────────────────────────────────────
 
     def on_show(self) -> None:
-        """Refresh AC tree when screen becomes active."""
-        if self._tree and self._state and self._state.ac_tree:
+        """Refresh all widgets from state when screen becomes active."""
+        if not self._state:
+            return
+        if self._tree and self._state.ac_tree:
             self._tree.update_tree(self._state.ac_tree)
+        if self._phase_bar and self._state.current_phase:
+            self._phase_bar.phase = self._state.current_phase
+        if self._activity_bar:
+            self._activity_bar.refresh()
 
     # ─────────────────────────────────────────────────────────────────────────
     # Message Handlers
