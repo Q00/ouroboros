@@ -88,51 +88,33 @@ Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business
 
    Display all applicable alerts, then proceed to present the question.
 
-3. **Present the question — render UI dynamically based on `meta.input_type`**:
+3. **Present to the user — check `meta.ask_user_question` first**:
 
-   Every MCP response includes `meta.input_type` which tells you how to present the content to the user. Render accordingly:
+   **If `meta.ask_user_question` exists** (selection steps like project type, repo selection):
+   - First, output the MCP content text verbatim as a regular text message
+   - Then pass `meta.ask_user_question` DIRECTLY to the `AskUserQuestion` tool as-is. Do NOT modify the question, header, or options. Example:
+     ```
+     AskUserQuestion(questions=[meta.ask_user_question])
+     ```
+     The MCP server has already formatted the question and options in the exact AskUserQuestion format. Your only job is to relay it.
 
-   | `meta.input_type` | UI Rendering |
-   |---|---|
-   | `"freeText"` + selection step | **First** output the MCP content text verbatim as a regular text message (it contains the numbered repo list). **Then** use `AskUserQuestion` with ONLY a short input prompt. See below. |
-   | `"freeText"` + interview | `AskUserQuestion` with the question verbatim + 2-3 suggested options. |
-   | `"singleSelect"` | `AskUserQuestion` with `multiSelect: false`, using `meta.options` as-is. |
-
-   **How to detect selection steps:** `meta.status` starts with `"awaiting_repo_"` or is `"awaiting_project_type"` or `"confirm_repos"`.
-
-   Example for selection step (repo add/remove):
-
-   **Step A — Output the full list as text (NOT inside AskUserQuestion):**
-   Just print the MCP content text verbatim. This ensures the full numbered list is visible.
-
-   **Step B — Ask for input:**
-   ```json
-   {
-     "questions": [{
-       "question": "Enter numbers or names (comma-separated), or 'none' to skip:",
-       "header": "Select",
-       "options": [
-         {"label": "none", "description": "Skip this step"}
-       ],
-       "multiSelect": false
-     }]
-   }
-   ```
-
-   Example for interview question:
-   ```json
-   {
-     "questions": [{
-       "question": "<meta.question — use verbatim>",
-       "header": "Q<N>",
-       "options": [
-         {"label": "<option 1>", "description": "<brief explanation>"},
-         {"label": "<option 2>", "description": "<brief explanation>"}
-       ],
-       "multiSelect": false
-     }]
-   }
-   ```
+   **If `meta.ask_user_question` does NOT exist** (interview questions):
+   - Use `meta.question` as the question text
+   - Generate 2-3 suggested answer options yourself (binary → natural choices, scope → categories, open-ended → common PM responses)
+   - Example:
+     ```json
+     {
+       "questions": [{
+         "question": "<meta.question — use verbatim>",
+         "header": "Q<N>",
+         "options": [
+           {"label": "<your suggested option 1>", "description": "<brief explanation>"},
+           {"label": "<your suggested option 2>", "description": "<brief explanation>"}
+         ],
+         "multiSelect": false
+       }]
+     }
+     ```
 
 4. **Relay the answer — use `meta.response_param` as the parameter name**:
 

@@ -806,25 +806,19 @@ class PMInterviewHandler:
             extra={"initial_context": initial_context},
         )
 
-        options = [
-            {
-                "value": "brownfield",
-                "label": "Add to existing project",
-                "selected": False,
-            },
-            {
-                "value": "greenfield",
-                "label": "Start a new project",
-                "selected": False,
-            },
-        ]
-
         meta = {
             "session_id": session_id,
             "status": "awaiting_project_type",
-            "input_type": "singleSelect",
-            "options": options,
             "response_param": "answer",
+            "ask_user_question": {
+                "question": "Is this an addition to an existing codebase, or a brand-new project?",
+                "header": "Project type",
+                "options": [
+                    {"label": "Add to existing project", "description": "Brownfield — use registered repos as context"},
+                    {"label": "Start a new project", "description": "Greenfield — no existing codebase"},
+                ],
+                "multiSelect": False,
+            },
         }
 
         log.info("pm_handler.step1_ask_project_type", session_id=session_id)
@@ -1101,15 +1095,7 @@ class PMInterviewHandler:
             repo_count=len(repo_list),
         )
 
-        meta: dict[str, Any] = {
-            "session_id": session_id,
-            "status": "awaiting_repo_select",
-            "input_type": "freeText",
-            "response_param": "answer",
-            "repos": repo_list,
-            "repo_count": len(repo_list),
-        }
-
+        # Build numbered list text
         repo_lines = []
         for i, r in enumerate(repo_list, 1):
             label = r["name"]
@@ -1121,10 +1107,25 @@ class PMInterviewHandler:
         repo_list_text = "\n".join(repo_lines)
 
         content_text = (
-            "Select repos for brownfield context "
-            "(by number or name, comma-separated, or 'none' for greenfield):\n\n"
+            f"Found {len(repo_list)} repositories (★ = currently selected):\n\n"
             f"{repo_list_text}"
         )
+
+        meta: dict[str, Any] = {
+            "session_id": session_id,
+            "status": "awaiting_repo_select",
+            "response_param": "answer",
+            "repos": repo_list,
+            "repo_count": len(repo_list),
+            "ask_user_question": {
+                "question": "Which repos to use as brownfield context? Enter numbers or names (comma-separated), or 'none' for greenfield.",
+                "header": "Select repos",
+                "options": [
+                    {"label": "none", "description": "Skip — proceed as greenfield (no existing codebase)"},
+                ],
+                "multiSelect": False,
+            },
+        }
 
         return Result.ok(
             MCPToolResult(
@@ -1174,7 +1175,6 @@ class PMInterviewHandler:
                 count=len(final_defaults),
             )
         else:
-            repo_list_text = "  (none)"
             log.info("pm_handler.step_confirm_repos.greenfield", session_id=session_id)
 
         # Auto-start interview with the confirmed repos

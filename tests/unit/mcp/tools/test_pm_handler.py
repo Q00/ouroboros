@@ -823,12 +823,12 @@ class TestHandleStartBrownfield:
         assert result.is_ok
         meta = result.value.meta
         assert meta["status"] == "awaiting_project_type"
-        assert meta["input_type"] == "singleSelect"
         assert meta["response_param"] == "answer"
         assert "session_id" in meta
-        assert len(meta["options"]) == 2
-        assert meta["options"][0]["value"] == "brownfield"
-        assert meta["options"][1]["value"] == "greenfield"
+        auq = meta["ask_user_question"]
+        assert "existing codebase" in auq["question"] or "brand-new project" in auq["question"]
+        assert len(auq["options"]) == 2
+        assert auq["multiSelect"] is False
 
         # Engine should NOT have been called — interview not started yet
         engine.ask_opening_and_start.assert_not_called()
@@ -890,11 +890,10 @@ class TestHandleStartBrownfield:
         assert meta["repos"][1]["path"] == "/home/user/other-repo"
         assert meta["session_id"] == session_id
 
-        # freeText UI hints in meta (user answers with numbers/names)
-        assert meta["input_type"] == "freeText"
+        # ask_user_question UI hints in meta (user answers with numbers/names)
         assert meta["response_param"] == "answer"
-        # No "options" field — repos shown as numbered text in content
-        assert "options" not in meta
+        auq = meta["ask_user_question"]
+        assert "brownfield context" in auq["question"]
 
         # Human-readable content includes numbered repo list with ★ for defaults
         content_text = result.value.content[0].text
@@ -942,8 +941,8 @@ class TestHandleStartBrownfield:
         content_text = result.value.content[0].text
         # Name present in numbered list
         assert "plain-repo" in content_text
-        # No star marker (not default)
-        assert "★" not in content_text
+        # Repo line itself should NOT have ★ (not default), but header has legend
+        assert "plain-repo ★" not in content_text
 
     @pytest.mark.asyncio
     async def test_start_step2_with_selected_repos(self, tmp_path: Path) -> None:
@@ -1819,7 +1818,7 @@ class TestAutoDetectIntegration:
         assert result.is_ok
         # New 3-step flow: step 1 returns project type choice
         assert result.value.meta["status"] == "awaiting_project_type"
-        assert result.value.meta["input_type"] == "singleSelect"
+        assert "ask_user_question" in result.value.meta
         # Engine should NOT have been started yet
         engine.ask_opening_and_start.assert_not_called()
 
@@ -2320,7 +2319,7 @@ class TestRestartRecovery:
         meta = result.value.meta
         # Recovery with no repos goes back to project type selection
         assert meta["status"] == "awaiting_project_type"
-        assert meta["input_type"] == "singleSelect"
+        assert "ask_user_question" in meta
         assert meta["response_param"] == "answer"
 
     @pytest.mark.asyncio
@@ -2501,7 +2500,7 @@ class TestTwoStepStartOrchestrationFlow:
         assert step1_result.is_ok
         step1_meta = step1_result.value.meta
         assert step1_meta["status"] == "awaiting_project_type"
-        assert step1_meta["input_type"] == "singleSelect"
+        assert "ask_user_question" in step1_meta
         session_id = step1_meta["session_id"]
 
         # Engine should NOT have been started
@@ -2518,7 +2517,7 @@ class TestTwoStepStartOrchestrationFlow:
         assert step1b_result.is_ok
         step1b_meta = step1b_result.value.meta
         assert step1b_meta["status"] == "awaiting_repo_select"
-        assert step1b_meta["input_type"] == "freeText"
+        assert "ask_user_question" in step1b_meta
         # ALL repos shown with ★ for defaults
         assert step1b_meta["repo_count"] == 2
 
@@ -2868,8 +2867,7 @@ class TestTwoStepStartOrchestrationFlow:
         assert result.is_ok
         meta = result.value.meta
         assert meta["status"] == "awaiting_repo_select"
-        assert meta["input_type"] == "freeText"
-        assert "options" not in meta
+        assert "ask_user_question" in meta
         # ALL repos shown in the select step
         assert meta["repo_count"] == 3
         assert len(meta["repos"]) == 3
