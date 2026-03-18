@@ -94,11 +94,25 @@ Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business
 
    | `meta.input_type` | UI Rendering |
    |---|---|
-   | `"freeText"` | `AskUserQuestion` with the question verbatim. Generate 2-3 suggested options (binary → natural choices, scope → categories, open-ended → common PM responses). User can always type a custom response. |
-   | `"multiSelect"` | `AskUserQuestion` with `multiSelect: true`, using `meta.options` as-is (each has `value`, `label`, and optionally `selected`). Do NOT generate your own options. |
+   | `"freeText"` | Check `meta.status`: if it starts with `"awaiting_repo_"` or is `"awaiting_project_type"`, this is a **selection step** — show the MCP content text verbatim (it contains the numbered list) and use `AskUserQuestion` with a simple prompt asking the user to type numbers/names. Do NOT generate your own options — just let the user type freely (use "Type something" as the only option). For **interview questions** (status = `"interview_started"`), generate 2-3 suggested options as usual. |
    | `"singleSelect"` | `AskUserQuestion` with `multiSelect: false`, using `meta.options` as-is. |
 
-   Example for `freeText` (interview question):
+   Example for `freeText` — selection step (repo add/remove):
+   ```json
+   {
+     "questions": [{
+       "question": "<content text from MCP — contains numbered list>",
+       "header": "Repo selection",
+       "options": [
+         {"label": "Type numbers", "description": "e.g. 1,3,5 or repo-name, or 'none' to skip"}
+       ],
+       "multiSelect": false
+     }]
+   }
+   ```
+   The user types their answer (numbers, names, or "none") in the custom text input.
+
+   Example for `freeText` — interview question:
    ```json
    {
      "questions": [{
@@ -109,18 +123,6 @@ Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business
          {"label": "<option 2>", "description": "<brief explanation>"}
        ],
        "multiSelect": false
-     }]
-   }
-   ```
-
-   Example for `multiSelect` (repo selection):
-   ```json
-   {
-     "questions": [{
-       "question": "<content text from MCP response>",
-       "header": "Select repositories",
-       "options": "<meta.options as-is>",
-       "multiSelect": true
      }]
    }
    ```
