@@ -829,9 +829,13 @@ class PMInterviewHandler:
                     MCPContentItem(
                         type=ContentType.TEXT,
                         text=(
-                            f"PM interview session created: {session_id}\n\n"
-                            "Is this an addition to an existing codebase, "
-                            "or a brand-new project?"
+                            f"Session: {session_id}\n\n"
+                            "Use AskUserQuestion now with exactly these parameters:\n"
+                            '{"questions": [{"question": "Is this an addition to an existing codebase, or a brand-new project?", '
+                            '"header": "Project type", '
+                            '"options": [{"label": "Add to existing project", "description": "Brownfield"}, '
+                            '{"label": "Start a new project", "description": "Greenfield"}], '
+                            '"multiSelect": false}]}'
                         ),
                     ),
                 ),
