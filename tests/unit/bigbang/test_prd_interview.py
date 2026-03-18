@@ -1189,3 +1189,74 @@ class TestSaveAndLoadState:
         result = await engine.load_state("test_001")
         assert result.is_ok
         assert result.value.interview_id == "test_001"
+
+
+# ──────────────────────────────────────────────────────────────
+# restore_meta tests
+# ──────────────────────────────────────────────────────────────
+
+
+class TestRestoreMeta:
+    """Tests for PRDInterviewEngine.restore_meta()."""
+
+    def test_restore_meta_sets_all_fields(self) -> None:
+        engine = _make_engine()
+        meta = {
+            "deferred_items": ["item1", "item2"],
+            "decide_later_items": ["dl1"],
+            "codebase_context": "some context",
+            "pending_reframe": {"reframed": "q_reframed", "original": "q_original"},
+        }
+
+        engine.restore_meta(meta)
+
+        assert engine.deferred_items == ["item1", "item2"]
+        assert engine.decide_later_items == ["dl1"]
+        assert engine.codebase_context == "some context"
+        assert engine._reframe_map["q_reframed"] == "q_original"
+
+    def test_restore_meta_syncs_classifier_codebase_context(self) -> None:
+        engine = _make_engine()
+        meta = {
+            "codebase_context": "brownfield info here",
+        }
+
+        engine.restore_meta(meta)
+
+        assert engine.classifier.codebase_context == "brownfield info here"
+
+    def test_restore_meta_defaults_on_empty_dict(self) -> None:
+        engine = _make_engine()
+        # Pre-populate to verify reset
+        engine.deferred_items = ["old"]
+        engine.decide_later_items = ["old_dl"]
+        engine.codebase_context = "old context"
+
+        engine.restore_meta({})
+
+        assert engine.deferred_items == []
+        assert engine.decide_later_items == []
+        assert engine.codebase_context == ""
+        assert engine.classifier.codebase_context == ""
+
+    def test_restore_meta_skips_pending_reframe_when_none(self) -> None:
+        engine = _make_engine()
+        meta: dict[str, object] = {
+            "deferred_items": [],
+            "decide_later_items": [],
+            "codebase_context": "",
+            "pending_reframe": None,
+        }
+
+        engine.restore_meta(meta)
+
+        assert engine._reframe_map == {}
+
+    def test_restore_meta_handles_none_codebase_context(self) -> None:
+        engine = _make_engine()
+        meta = {"codebase_context": None}
+
+        engine.restore_meta(meta)
+
+        assert engine.codebase_context == ""
+        assert engine.classifier.codebase_context == ""

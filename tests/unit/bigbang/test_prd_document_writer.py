@@ -6,14 +6,11 @@ that takes markdown output and writes it to disk as prd.md.
 
 from pathlib import Path
 
-import pytest
-
 from ouroboros.bigbang.prd_document import (
     generate_prd_markdown,
     save_prd_document,
 )
 from ouroboros.bigbang.prd_seed import PRDSeed, UserStory
-
 
 # ──────────────────────────────────────────────────────────────────
 # Helpers

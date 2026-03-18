@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "ouroboros": {
-      "command": "uvx",
-      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
+      "command": "/Users/heechul/.local/bin/ouroboros",
+      "args": ["mcp", "serve"]
     }
   }
 }

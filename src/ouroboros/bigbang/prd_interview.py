@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+from typing import Any
 
 import structlog
 import yaml
@@ -664,6 +665,32 @@ class PRDInterviewEngine:
             Result containing loaded state or ValidationError.
         """
         return await self.inner.load_state(interview_id)
+
+    def restore_meta(self, meta: dict[str, Any]) -> None:
+        """Restore PRD-specific metadata into this engine from a loaded dict.
+
+        Sets ``deferred_items``, ``decide_later_items``, ``codebase_context``,
+        ``pending_reframe`` (via ``_reframe_map``), and syncs the classifier's
+        ``codebase_context`` so that subsequent classification calls use the
+        brownfield context.
+
+        This is the inverse of the meta dict produced by
+        :func:`prd_handler._save_prd_meta`.
+
+        Args:
+            meta: Dictionary previously persisted as ``prd_meta_{session_id}.json``.
+                  Expected keys: ``deferred_items``, ``decide_later_items``,
+                  ``codebase_context``, ``pending_reframe``.
+        """
+        self.deferred_items = list(meta.get("deferred_items", []))
+        self.decide_later_items = list(meta.get("decide_later_items", []))
+        self.codebase_context = meta.get("codebase_context", "") or ""
+        # Sync classifier so brownfield context is available for classification
+        self.classifier.codebase_context = self.codebase_context
+        # Restore the reframe map from pending_reframe if present
+        pending = meta.get("pending_reframe")
+        if pending and isinstance(pending, dict):
+            self._reframe_map[pending["reframed"]] = pending["original"]
 
     # ──────────────────────────────────────────────────────────────
     # PRDSeed extraction

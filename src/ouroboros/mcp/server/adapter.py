@@ -615,6 +615,7 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
     )
+    from ouroboros.mcp.tools.prd_handler import PRDInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
@@ -1152,6 +1153,9 @@ def create_ouroboros_server(
             event_store=event_store,
             llm_adapter=llm_adapter,
             llm_backend=llm_backend,
+        ),
+        PRDInterviewHandler(
+            data_dir=state_dir,
         ),
         EvaluateHandler(
             event_store=event_store,
