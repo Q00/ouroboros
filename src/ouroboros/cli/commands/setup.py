@@ -91,8 +91,22 @@ def _setup_claude(claude_path: str) -> None:
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
 
-    if not config_path.exists():
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text()) or {}
+    else:
         create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text()) or {}
+
+    # Set runtime and LLM backend to claude
+    config_dict.setdefault("orchestrator", {})
+    config_dict["orchestrator"]["runtime_backend"] = "claude"
+    config_dict["orchestrator"]["claude_path"] = claude_path
+
+    config_dict.setdefault("llm", {})
+    config_dict["llm"]["backend"] = "claude"
+
+    with config_path.open("w") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     # Register MCP server in ~/.claude/mcp.json
     mcp_config_path = Path.home() / ".claude" / "mcp.json"

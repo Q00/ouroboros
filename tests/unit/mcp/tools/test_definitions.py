@@ -34,6 +34,7 @@ from ouroboros.mcp.tools.definitions import (
     generate_seed_handler,
     get_ouroboros_tools,
     interview_handler,
+    start_execute_seed_handler,
 )
 from ouroboros.mcp.tools.qa import QAHandler
 from ouroboros.mcp.types import ToolInputType
@@ -2003,3 +2004,22 @@ class TestCancelExecutionHandler:
 
         assert result.is_err
         assert "failed to cancel" in str(result.error).lower()
+
+
+class TestStartExecuteSeedHandlerBackendPropagation:
+    """Review finding #5: start_execute_seed_handler must propagate backends."""
+
+    def test_factory_passes_backends_to_execute_handler(self):
+        handler = start_execute_seed_handler(
+            runtime_backend="codex",
+            llm_backend="codex",
+        )
+        inner = handler._execute_handler
+        assert inner.agent_runtime_backend == "codex"
+        assert inner.llm_backend == "codex"
+
+    def test_factory_defaults_to_none(self):
+        handler = start_execute_seed_handler()
+        inner = handler._execute_handler
+        assert inner.agent_runtime_backend is None
+        assert inner.llm_backend is None

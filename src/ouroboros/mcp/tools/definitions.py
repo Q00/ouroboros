@@ -68,9 +68,17 @@ def execute_seed_handler(
     )
 
 
-def start_execute_seed_handler() -> StartExecuteSeedHandler:
+def start_execute_seed_handler(
+    *,
+    runtime_backend: str | None = None,
+    llm_backend: str | None = None,
+) -> StartExecuteSeedHandler:
     """Create a StartExecuteSeedHandler instance."""
-    return StartExecuteSeedHandler()
+    execute_handler = ExecuteSeedHandler(
+        agent_runtime_backend=runtime_backend,
+        llm_backend=llm_backend,
+    )
+    return StartExecuteSeedHandler(execute_handler=execute_handler)
 
 
 def session_status_handler() -> SessionStatusHandler:
