@@ -819,6 +819,7 @@ class TestOuroborosTools:
         """Tool factory propagates llm backend to LLM-only handlers."""
         tools = get_ouroboros_tools(runtime_backend="codex", llm_backend="litellm")
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
+        start_execute_handler = next(h for h in tools if isinstance(h, StartExecuteSeedHandler))
         generate_handler = next(h for h in tools if isinstance(h, GenerateSeedHandler))
         interview_handler_instance = next(h for h in tools if isinstance(h, InterviewHandler))
         evaluate_handler_instance = next(h for h in tools if isinstance(h, EvaluateHandler))
@@ -826,6 +827,9 @@ class TestOuroborosTools:
 
         assert execute_handler.agent_runtime_backend == "codex"
         assert execute_handler.llm_backend == "litellm"
+        assert start_execute_handler._execute_handler is execute_handler
+        assert start_execute_handler._execute_handler.agent_runtime_backend == "codex"
+        assert start_execute_handler._execute_handler.llm_backend == "litellm"
         assert generate_handler.llm_backend == "litellm"
         assert interview_handler_instance.llm_backend == "litellm"
         assert evaluate_handler_instance.llm_backend == "litellm"

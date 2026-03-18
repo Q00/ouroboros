@@ -1128,6 +1128,8 @@ def create_ouroboros_server(
     execute_seed = ExecuteSeedHandler(
         event_store=event_store,
         llm_adapter=llm_adapter,
+        agent_runtime_backend=runtime_backend,
+        llm_backend=llm_backend,
     )
     evolve_step = EvolveStepHandler(
         evolutionary_loop=evolutionary_loop,

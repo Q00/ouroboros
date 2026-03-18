@@ -901,6 +901,76 @@ class TestCodexCliRuntime:
         ]
 
     @pytest.mark.asyncio
+    async def test_execute_task_local_interview_dispatch_preserves_resume_handle(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Local interview dispatch reuses the native runtime handle and interview session."""
+        self._write_skill(
+            tmp_path,
+            "interview",
+            [
+                "name: interview",
+                'description: "Socratic interview to crystallize vague requirements"',
+                "mcp_tool: ouroboros_interview",
+                "mcp_args:",
+                '  initial_context: "$1"',
+            ],
+        )
+        resume_handle = RuntimeHandle(
+            backend="codex_cli",
+            native_session_id="thread-123",
+            metadata={"ouroboros_interview_session_id": "interview-123"},
+        )
+
+        class _FakeInterviewHandler:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, str]] = []
+
+            async def handle(self, arguments: dict[str, str]) -> Result[MCPToolResult, MCPToolError]:
+                self.calls.append(arguments)
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(type=ContentType.TEXT, text="Next question"),
+                        ),
+                        is_error=False,
+                        meta={"session_id": "interview-456"},
+                    )
+                )
+
+        handler = _FakeInterviewHandler()
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+        )
+        runtime._builtin_mcp_handlers = {"ouroboros_interview": handler}
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        ) as mock_exec:
+            messages = [
+                message
+                async for message in runtime.execute_task(
+                    'ooo interview "Use PostgreSQL"',
+                    resume_handle=resume_handle,
+                )
+            ]
+
+        mock_exec.assert_not_called()
+        assert handler.calls == [{"session_id": "interview-123", "answer": "Use PostgreSQL"}]
+        assert messages[0].resume_handle is not None
+        assert messages[0].resume_handle.native_session_id == "thread-123"
+        assert messages[-1].resume_handle is not None
+        assert messages[-1].resume_handle.native_session_id == "thread-123"
+        assert (
+            messages[-1].resume_handle.metadata["ouroboros_interview_session_id"]
+            == "interview-456"
+        )
+        assert messages[-1].content == "Next question"
+
+    @pytest.mark.asyncio
     async def test_execute_task_preserves_nonrecoverable_dispatch_errors(
         self,
         tmp_path: Path,
