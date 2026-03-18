@@ -27,7 +27,6 @@ from typing import Any
 import structlog
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
-from ouroboros.bigbang.brownfield import get_default_brownfield_context
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewRound,
@@ -45,7 +44,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
-from ouroboros.persistence.brownfield import BrownfieldStore
+from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 
 log = structlog.get_logger()
 
@@ -64,37 +63,57 @@ def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
 
 def _save_pm_meta(
     session_id: str,
-    engine: PMInterviewEngine,
+    engine: PMInterviewEngine | None = None,
     cwd: str = "",
     data_dir: Path | None = None,
+    *,
+    status: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Persist PM-specific metadata that isn't in InterviewState.
 
-    Fields (limited to 5):
+    Fields:
         deferred_items: list[str]
         decide_later_items: list[str]
         codebase_context: str
         pending_reframe: dict | None
         cwd: str
+        status: str | None  — e.g. "awaiting_repo_selection", "interview_started"
     """
-    reframe_map = engine._reframe_map
-    # pending_reframe: single {reframed, original} object or None
-    pending_reframe: dict[str, str] | None = None
-    if reframe_map:
-        # Take the most recent entry (last inserted)
-        reframed = next(reversed(reframe_map))
-        pending_reframe = {
-            "reframed": reframed,
-            "original": reframe_map[reframed],
+    # Engine may be None for step-1 (awaiting_repo_selection) saves
+    if engine is not None:
+        reframe_map = engine._reframe_map
+        # pending_reframe: single {reframed, original} object or None
+        pending_reframe: dict[str, str] | None = None
+        if reframe_map:
+            # Take the most recent entry (last inserted)
+            reframed = next(reversed(reframe_map))
+            pending_reframe = {
+                "reframed": reframed,
+                "original": reframe_map[reframed],
+            }
+
+        meta: dict[str, Any] = {
+            "deferred_items": list(engine.deferred_items),
+            "decide_later_items": list(engine.decide_later_items),
+            "codebase_context": engine.codebase_context,
+            "pending_reframe": pending_reframe,
+            "cwd": cwd,
+        }
+    else:
+        meta = {
+            "deferred_items": [],
+            "decide_later_items": [],
+            "codebase_context": "",
+            "pending_reframe": None,
+            "cwd": cwd,
         }
 
-    meta = {
-        "deferred_items": list(engine.deferred_items),
-        "decide_later_items": list(engine.decide_later_items),
-        "codebase_context": engine.codebase_context,
-        "pending_reframe": pending_reframe,
-        "cwd": cwd,
-    }
+    if status is not None:
+        meta["status"] = status
+
+    if extra:
+        meta.update(extra)
 
     path = _meta_path(session_id, data_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,13 +159,24 @@ def _detect_action(arguments: dict[str, Any]) -> str:
 
     Detection rules (evaluated in order):
     1. If ``action`` is explicitly provided, return it as-is.
-    2. If ``initial_context`` is present → ``"start"``
-    3. If ``session_id`` is present (with or without ``answer``) → ``"resume"``
-    4. Otherwise → ``"unknown"`` (caller should return an error).
+    2. If ``selected_repos`` **and** ``initial_context`` both present →
+       ``"start"`` (backward-compat 1-step, AC 8).
+    3. If ``selected_repos`` is present (without ``initial_context``) →
+       ``"select_repos"`` (2-step start step 2).
+    4. If ``initial_context`` is present → ``"start"``
+    5. If ``session_id`` is present (with or without ``answer``) → ``"resume"``
+    6. Otherwise → ``"unknown"`` (caller should return an error).
     """
     explicit = arguments.get("action")
     if explicit:
         return explicit
+
+    if arguments.get("selected_repos") is not None:
+        # Backward compat (AC 8): when both initial_context and selected_repos
+        # are present, treat as 1-step start so the caller skips step 1.
+        if arguments.get("initial_context"):
+            return "start"
+        return "select_repos"
 
     if arguments.get("initial_context"):
         return "start"
@@ -362,6 +392,19 @@ class PMInterviewHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="selected_repos",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "List of repository paths selected for brownfield context "
+                        "(2-step start: returned by step 1, sent back in step 2). "
+                        "All repos are assigned role=main. "
+                        "When provided with initial_context, starts the interview "
+                        "with the selected brownfield repos."
+                    ),
+                    required=False,
+                    items={"type": "string"},
+                ),
             ),
         )
 
@@ -392,6 +435,7 @@ class PMInterviewHandler:
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
         cwd = arguments.get("cwd") or os.getcwd()
+        selected_repos: list[str] | None = arguments.get("selected_repos")
 
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
@@ -403,12 +447,31 @@ class PMInterviewHandler:
             if action == "generate" and session_id:
                 return await self._handle_generate(engine, session_id, cwd)
 
+            # ── Step 2: repo selection (AC 4) ─────────────────────
+            if action == "select_repos" and selected_repos is not None:
+                return await self._handle_select_repos(
+                    engine, selected_repos, session_id, initial_context, cwd,
+                )
+
             # ── Start new interview ────────────────────────────────
             if action == "start" and initial_context:
-                return await self._handle_start(engine, initial_context, cwd)
+                return await self._handle_start(
+                    engine, initial_context, cwd, selected_repos=selected_repos,
+                )
 
             # ── Resume with answer ─────────────────────────────────
             if action == "resume" and session_id:
+                # ── AC 10: restart recovery ───────────────────────
+                # After MCP server restart, in-memory state is lost.
+                # Check pm_meta to see if this session was waiting for
+                # repo selection — if so, re-send the repo list instead
+                # of trying to load a non-existent InterviewState.
+                recovered = await self._maybe_recover_awaiting_session(
+                    session_id, cwd,
+                )
+                if recovered is not None:
+                    return recovered
+
                 return await self._handle_answer(engine, session_id, answer, cwd)
 
             return Result.err(
@@ -436,32 +499,65 @@ class PMInterviewHandler:
         engine: PMInterviewEngine,
         initial_context: str,
         cwd: str,
+        *,
+        selected_repos: list[str] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Start a new PM interview session."""
-        # Auto-detect brownfield from DB default repo (not cwd)
+        """Start a new PM interview session (supports 2-step start).
+
+        2-step start pattern:
+            Step 1 — ``selected_repos`` absent:
+                Query DB for all repos.  If repos exist, return the list
+                and save ``pm_meta.status = "awaiting_repo_selection"``
+                without starting the actual interview engine.
+
+            Step 2 — ``selected_repos`` present (+ ``initial_context``):
+                Start the interview with the selected repos as brownfield
+                context (all repos assigned ``role: main``).
+
+        Greenfield fast-path: if no repos in DB at step 1, skip straight
+        to the full interview start (no step 2 needed).
+
+        Backward compat: ``selected_repos`` with ``initial_context`` in
+        a single call behaves identically to the old 1-step flow.
+        """
+        # ── Step-1: repo selection needed? ────────────────────────
+        if selected_repos is None:
+            all_repos = await self._query_all_repos()
+
+            if all_repos:
+                # Repos exist → return list, save awaiting status
+                return self._step1_awaiting_repo_selection(
+                    initial_context, cwd, all_repos,
+                )
+
+            # No repos in DB → auto-greenfield, fall through to full start
+            log.info("pm_handler.start.auto_greenfield")
+
+        # ── Full interview start (step-2 or greenfield) ───────────
         brownfield_repos = None
-        try:
-            store = BrownfieldStore()
-            await store.initialize()
-            try:
-                default_repo = await get_default_brownfield_context(store)
-                if default_repo is not None:
-                    brownfield_repos = [
-                        {
-                            "path": default_repo.path,
-                            "name": default_repo.name,
-                            "role": "primary",
-                        }
-                    ]
-                    log.info(
-                        "pm_handler.brownfield_from_db",
-                        path=default_repo.path,
-                        name=default_repo.name,
-                    )
-            finally:
-                await store.close()
-        except Exception as exc:
-            log.warning("pm_handler.brownfield_db_failed", error=str(exc))
+        if selected_repos:
+            resolved = await self._resolve_repos_from_db(selected_repos)
+            if resolved:
+                brownfield_repos = [
+                    {
+                        "path": r.path,
+                        "name": r.name,
+                        "role": "main",
+                        **({"desc": r.desc} if r.desc else {}),
+                    }
+                    for r in resolved
+                ]
+                log.info(
+                    "pm_handler.start.selected_repos",
+                    count=len(resolved),
+                    paths=[r.path for r in resolved],
+                )
+            else:
+                # All selected paths missing from DB → auto-greenfield
+                log.info(
+                    "pm_handler.start.selected_repos_all_missing",
+                    requested=selected_repos,
+                )
 
         result = await engine.ask_opening_and_start(
             user_response=initial_context,
@@ -504,7 +600,10 @@ class PMInterviewHandler:
 
         # Persist
         await engine.save_state(state)
-        _save_pm_meta(state.interview_id, engine, cwd=cwd, data_dir=self.data_dir)
+        _save_pm_meta(
+            state.interview_id, engine, cwd=cwd, data_dir=self.data_dir,
+            status="interview_started",
+        )
 
         # Include pending_reframe in response meta if a reframe occurred
         pending_reframe = None
@@ -517,6 +616,9 @@ class PMInterviewHandler:
 
         meta = {
             "session_id": state.interview_id,
+            "status": "interview_started",
+            "input_type": "freeText",
+            "response_param": "answer",
             "question": question,
             "is_brownfield": state.is_brownfield,
             "pending_reframe": pending_reframe,
@@ -545,6 +647,350 @@ class PMInterviewHandler:
                 is_error=False,
                 meta=meta,
             )
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # Step-1 helpers (2-step start)
+    # ──────────────────────────────────────────────────────────────
+
+    async def _query_all_repos(self) -> list[BrownfieldRepo]:
+        """Query DB for all registered brownfield repos."""
+        try:
+            store = BrownfieldStore()
+            await store.initialize()
+            try:
+                return await store.list()
+            finally:
+                await store.close()
+        except Exception as exc:
+            log.warning("pm_handler.query_repos_failed", error=str(exc))
+            return []
+
+    async def _resolve_repos_from_db(
+        self, paths: list[str],
+    ) -> list[BrownfieldRepo]:
+        """Look up selected paths in the DB, returning only those that exist.
+
+        Paths that are not registered in the brownfield_repos table are
+        silently ignored.  If *all* paths are missing the caller should
+        treat the session as greenfield.
+
+        Args:
+            paths: List of absolute filesystem paths chosen by the user.
+
+        Returns:
+            List of :class:`BrownfieldRepo` instances for paths found in DB,
+            preserving the order of *paths*.
+        """
+        all_repos = await self._query_all_repos()
+        repo_by_path: dict[str, BrownfieldRepo] = {r.path: r for r in all_repos}
+
+        resolved: list[BrownfieldRepo] = []
+        for p in paths:
+            repo = repo_by_path.get(p)
+            if repo is not None:
+                resolved.append(repo)
+            else:
+                log.warning(
+                    "pm_handler.resolve_repos.path_not_in_db",
+                    path=p,
+                )
+        return resolved
+
+    def _step1_awaiting_repo_selection(
+        self,
+        initial_context: str,
+        cwd: str,
+        repos: list[BrownfieldRepo],
+        *,
+        session_id: str | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Return repo list and save pm_meta with awaiting_repo_selection status.
+
+        Generates a session_id using the interview naming pattern but does NOT
+        start the interview engine yet — that happens in step 2 when the caller
+        sends back ``selected_repos``.
+
+        If ``session_id`` is provided (e.g. during restart recovery), reuses it
+        instead of generating a new one.
+        """
+        if session_id is None:
+            from datetime import UTC, datetime
+
+            session_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+
+        # Serialize repos for the response
+        repo_list = [
+            {
+                "path": r.path,
+                "name": r.name,
+                "desc": r.desc or "",
+                "is_default": r.is_default,
+            }
+            for r in repos
+        ]
+
+        # Build multiSelect options for the caller UI
+        options = [
+            {
+                "value": r.path,
+                "label": f"{r.name}" + (f" — {r.desc}" if r.desc else ""),
+                "selected": r.is_default,
+            }
+            for r in repos
+        ]
+
+        # Persist minimal pm_meta so step 2 can pick up
+        _save_pm_meta(
+            session_id,
+            engine=None,
+            cwd=cwd,
+            data_dir=self.data_dir,
+            status="awaiting_repo_selection",
+            extra={"initial_context": initial_context},
+        )
+
+        log.info(
+            "pm_handler.step1_awaiting_repo_selection",
+            session_id=session_id,
+            repo_count=len(repo_list),
+        )
+
+        meta: dict[str, Any] = {
+            "session_id": session_id,
+            "status": "awaiting_repo_selection",
+            "input_type": "multiSelect",
+            "options": options,
+            "response_param": "selected_repos",
+            "repos": repo_list,
+            "repo_count": len(repo_list),
+        }
+
+        # Build human-readable repo list text
+        repo_lines = []
+        for r in repo_list:
+            label = r["name"]
+            if r.get("desc"):
+                label += f" — {r['desc']}"
+            if r.get("is_default"):
+                label += " (default)"
+            repo_lines.append(f"  • {r['path']}  [{label}]")
+        repo_list_text = "\n".join(repo_lines)
+
+        content_text = (
+            f"Session created: {session_id}\n\n"
+            f"Found {len(repo_list)} registered repository(ies). "
+            f"Please select which repos to include as brownfield context:\n\n"
+            f"{repo_list_text}\n\n"
+            f"Reply with selected_repos (list of paths) + initial_context "
+            f"to start the interview."
+        )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=content_text,
+                    ),
+                ),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # Step 2: select_repos (AC 4)
+    # ──────────────────────────────────────────────────────────────
+
+    async def _handle_select_repos(
+        self,
+        engine: PMInterviewEngine,
+        selected_repos: list[str],
+        session_id: str | None,
+        initial_context: str | None,
+        cwd: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle step 2 of the 2-step start: user has selected repos.
+
+        Backward compat: if ``initial_context`` is provided alongside
+        ``selected_repos``, behave identically to the old 1-step flow
+        (no pm_meta lookup needed).
+
+        Otherwise, ``session_id`` is required to recover the saved
+        ``initial_context`` from pm_meta written during step 1.
+        """
+        # ── Backward-compat 1-step: both selected_repos + initial_context ──
+        if initial_context:
+            return await self._handle_start(
+                engine, initial_context, cwd, selected_repos=selected_repos,
+            )
+
+        # ── 2-step: recover initial_context from pm_meta ──────────────
+        if not session_id:
+            return Result.err(
+                MCPToolError(
+                    "select_repos requires session_id (from step 1) "
+                    "or initial_context for 1-step start",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+
+        meta = _load_pm_meta(session_id, data_dir=self.data_dir)
+        if meta is None:
+            return Result.err(
+                MCPToolError(
+                    f"No pm_meta found for session {session_id}. "
+                    "The session may have expired or never been created.",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+
+        # ── Idempotency (AC 9): session already started ──────────
+        # If select_repos is called again on an already-started session,
+        # return the first question from InterviewState instead of
+        # re-starting the interview.
+        if meta.get("status") == "interview_started":
+            return await self._idempotent_select_repos(engine, session_id, meta)
+
+        saved_context = meta.get("initial_context", "")
+        if not saved_context:
+            return Result.err(
+                MCPToolError(
+                    f"pm_meta for {session_id} has no initial_context. "
+                    "Cannot proceed with repo selection.",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+
+        log.info(
+            "pm_handler.select_repos.step2",
+            session_id=session_id,
+            repo_count=len(selected_repos),
+        )
+
+        return await self._handle_start(
+            engine, saved_context, cwd, selected_repos=selected_repos,
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # Idempotency guard (AC 9)
+    # ──────────────────────────────────────────────────────────────
+
+    async def _idempotent_select_repos(
+        self,
+        engine: PMInterviewEngine,
+        session_id: str,
+        meta: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Return the first question when select_repos is called on an already-started session.
+
+        This handles the case where the caller sends ``select_repos`` more
+        than once for the same session.  Instead of re-starting the
+        interview (which would create duplicate state), we load the existing
+        ``InterviewState`` and replay the first question from its rounds.
+        """
+        log.info(
+            "pm_handler.select_repos.idempotent",
+            session_id=session_id,
+        )
+
+        load_result = await engine.load_state(session_id)
+        if load_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Session {session_id} is marked as started but state "
+                    f"could not be loaded: {load_result.error}",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+
+        state = load_result.value
+        first_question = (
+            state.rounds[0].question if state.rounds else "No question available."
+        )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            f"PM interview started. Session ID: {session_id}\n\n"
+                            f"{first_question}"
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "session_id": session_id,
+                    "status": "interview_started",
+                    "question": first_question,
+                    "is_brownfield": state.is_brownfield,
+                    "idempotent": True,
+                },
+            )
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # Restart recovery (AC 10)
+    # ──────────────────────────────────────────────────────────────
+
+    async def _maybe_recover_awaiting_session(
+        self,
+        session_id: str,
+        cwd: str,
+    ) -> Result[MCPToolResult, MCPServerError] | None:
+        """Recover a session stuck in ``awaiting_repo_selection`` after restart.
+
+        After an MCP server restart, all in-memory state is lost.  If a
+        session was between step 1 and step 2 of the 2-step start, there
+        is a ``pm_meta`` file on disk with ``status="awaiting_repo_selection"``
+        but no ``InterviewState`` file (the engine was never started).
+
+        This method detects that situation and re-sends the repo selection
+        prompt so the user can pick up where they left off.
+
+        Returns ``None`` if the session is *not* in awaiting state (i.e.
+        the normal resume path should be used).
+        """
+        meta = _load_pm_meta(session_id, self.data_dir)
+        if meta is None or meta.get("status") != "awaiting_repo_selection":
+            return None
+
+        log.info(
+            "pm_handler.restart_recovery.awaiting_repo_selection",
+            session_id=session_id,
+        )
+
+        # Re-query repos from DB (they may have changed since step 1)
+        all_repos = await self._query_all_repos()
+
+        if not all_repos:
+            # Repos were removed between step 1 and restart → auto-greenfield
+            saved_context = meta.get("initial_context", "")
+            if not saved_context:
+                return Result.err(
+                    MCPToolError(
+                        f"Session {session_id} was awaiting repo selection "
+                        "but has no initial_context in pm_meta.",
+                        tool_name="ouroboros_pm_interview",
+                    )
+                )
+
+            log.info(
+                "pm_handler.restart_recovery.auto_greenfield",
+                session_id=session_id,
+            )
+            engine = self._get_engine()
+            return await self._handle_start(engine, saved_context, cwd)
+
+        # Re-send the repo selection prompt (preserves the same session_id)
+        return self._step1_awaiting_repo_selection(
+            meta.get("initial_context", ""),
+            cwd,
+            all_repos,
+            session_id=session_id,
         )
 
     # ──────────────────────────────────────────────────────────────
@@ -715,6 +1161,8 @@ class PMInterviewHandler:
 
         response_meta = {
             "session_id": session_id,
+            "input_type": "freeText",
+            "response_param": "answer",
             "question": question,
             "is_complete": False,
             "classification": classification,

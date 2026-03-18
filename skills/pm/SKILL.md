@@ -50,7 +50,21 @@ Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business
      initial_context: <user's topic or idea>
      cwd: <current working directory>
    ```
-   The tool auto-detects brownfield projects from `cwd` and scans the codebase.
+
+   **2-step start (brownfield repo selection):** If brownfield repos exist in the DB, the tool returns a repo selection prompt instead of starting the interview immediately. Present the returned `meta.options` to the user via `AskUserQuestion` (multiSelect). Then relay the selection back:
+   ```
+   Tool: ouroboros_pm_interview
+   Arguments:
+     session_id: <session ID from step 1>
+     selected_repos: [<selected repo paths>]
+   ```
+   The tool then starts the interview with the selected repos as brownfield context (all assigned `role: main`).
+
+   **Auto-greenfield:** If no repos exist in the DB, the tool skips repo selection and starts the interview immediately (greenfield mode).
+
+   **1-step shortcut:** If `selected_repos` is provided alongside `initial_context`, the tool starts immediately with those repos (no selection prompt).
+
+   `cwd` is used only for PM document output path, NOT for brownfield detection.
    Returns a `session_id`, the first question, and metadata including any `pending_reframe` or newly deferred items.
 
 #### Interview Loop
@@ -74,12 +88,21 @@ Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business
 
    Display all applicable alerts, then proceed to present the question.
 
-3. **Present the question using AskUserQuestion**:
-   Pass the question from the MCP tool **verbatim** to the user via `AskUserQuestion`:
+3. **Present the question — render UI dynamically based on `meta.input_type`**:
+
+   Every MCP response includes `meta.input_type` which tells you how to present the content to the user. Render accordingly:
+
+   | `meta.input_type` | UI Rendering |
+   |---|---|
+   | `"freeText"` | `AskUserQuestion` with the question verbatim. Generate 2-3 suggested options (binary → natural choices, scope → categories, open-ended → common PM responses). User can always type a custom response. |
+   | `"multiSelect"` | `AskUserQuestion` with `multiSelect: true`, using `meta.options` as-is (each has `value`, `label`, and optionally `selected`). Do NOT generate your own options. |
+   | `"singleSelect"` | `AskUserQuestion` with `multiSelect: false`, using `meta.options` as-is. |
+
+   Example for `freeText` (interview question):
    ```json
    {
      "questions": [{
-       "question": "<question from MCP tool — use verbatim>",
+       "question": "<meta.question — use verbatim>",
        "header": "Q<N>",
        "options": [
          {"label": "<option 1>", "description": "<brief explanation>"},
@@ -90,20 +113,34 @@ Use the `ouroboros_pm_interview` MCP tool for the entire interview. All business
    }
    ```
 
-   **Generating options** — analyze the question and suggest 2-3 likely answers:
-   - Binary questions (yes/no, this/that): use the natural choices
-   - Scope questions: suggest representative answer categories
-   - Open-ended questions: suggest common PM-level responses
-   - The user can always type a custom response via "Other"
+   Example for `multiSelect` (repo selection):
+   ```json
+   {
+     "questions": [{
+       "question": "<content text from MCP response>",
+       "header": "Select repositories",
+       "options": "<meta.options as-is>",
+       "multiSelect": true
+     }]
+   }
+   ```
 
-4. **Relay the answer back**:
+4. **Relay the answer — use `meta.response_param` as the parameter name**:
+
+   Every MCP response includes `meta.response_param` which tells you which parameter to pass the user's answer back as. Do NOT hardcode parameter names.
+
    ```
    Tool: ouroboros_pm_interview
    Arguments:
-     session_id: <session ID from start>
-     answer: <user's selected option or custom text>
+     session_id: <session ID from meta.session_id>
+     <meta.response_param>: <user's response>
    ```
-   The tool records the answer, classifies the next question internally (pass-through, reframe, or decide-later), and returns the next question along with updated metadata.
+
+   Examples:
+   - When `meta.response_param` is `"answer"` → `{ session_id: "...", answer: "user's text" }`
+   - When `meta.response_param` is `"selected_repos"` → `{ session_id: "...", selected_repos: ["repo1", "repo2"] }`
+
+   The tool records the response, performs any internal classification (pass-through, reframe, or decide-later for interview answers), and returns the next step along with updated metadata including the next `input_type` and `response_param`.
 
 5. **Repeat steps 2-4** until the MCP tool response contains `meta.is_complete == true`.
 

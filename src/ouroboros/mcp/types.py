@@ -75,6 +75,7 @@ class MCPToolParameter:
         required: Whether the parameter is required.
         default: Default value if not provided.
         enum: Allowed values if restricted.
+        items: JSON Schema for array items (e.g. ``{"type": "string"}``).
     """
 
     name: str
@@ -83,6 +84,7 @@ class MCPToolParameter:
     required: bool = True
     default: Any = None
     enum: tuple[str, ...] | None = None
+    items: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +121,8 @@ class MCPToolDefinition:
                 prop["default"] = param.default
             if param.enum is not None:
                 prop["enum"] = list(param.enum)
+            if param.items is not None:
+                prop["items"] = dict(param.items)
             properties[param.name] = prop
             if param.required:
                 required.append(param.name)
