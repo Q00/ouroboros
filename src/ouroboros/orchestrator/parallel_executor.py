@@ -3254,7 +3254,7 @@ When complete, explicitly state: [TASK_COMPLETE]
             )
             acceptance_criteria.append(
                 {
-                    "index": i,
+                    "index": i + 1,
                     "ac_id": runtime_scope.aggregate_id,
                     "content": ac_content,
                     "status": status,

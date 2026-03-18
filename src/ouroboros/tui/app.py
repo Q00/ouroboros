@@ -724,9 +724,16 @@ class OuroborosTUI(App[None]):
         self._notify_ac_tree_updated()
 
     def _notify_ac_tree_updated(self) -> None:
-        """Notify dashboard that AC tree has been updated."""
-        if self._screen_stack:
-            screen = self.screen
+        """Notify dashboard that AC tree has been updated.
+
+        Uses get_screen() to reach the installed dashboard even when
+        another screen (e.g. session selector) is currently active.
+        """
+        for screen_name in ("dashboard", "dashboard_v2"):
+            try:
+                screen = self.get_screen(screen_name)
+            except Exception:
+                continue
             if isinstance(screen, DashboardScreenV3):
                 if hasattr(screen, "_tree") and screen._tree is not None:
                     screen._tree.update_tree(self._state.ac_tree)
