@@ -472,7 +472,7 @@ class PMInterviewHandler:
                             engine, session_id, answer, cwd, meta_data,
                         )
 
-                    # User answered repo selection
+                    # User answered repo selection (legacy 1-step path)
                     if status == "awaiting_repo_selection" and answer:
                         selected = self._parse_repo_selection(answer, meta_data)
                         if selected:
@@ -485,6 +485,28 @@ class PMInterviewHandler:
                         )
                         if recovered is not None:
                             return recovered
+
+                    # 3-sub-step flow: user answered "add repos" step
+                    if status == "awaiting_repo_add" and answer:
+                        return await self._handle_repo_add_answer(
+                            session_id, answer, cwd, meta_data,
+                        )
+
+                    # 3-sub-step flow: user answered "remove repos" step
+                    if status == "awaiting_repo_remove" and answer:
+                        return await self._handle_repo_remove_answer(
+                            session_id, answer, cwd, meta_data,
+                        )
+
+                    # 3-sub-step flow: confirm_repos (auto-transitions, but
+                    # handle gracefully if somehow hit)
+                    if status == "confirm_repos":
+                        initial_ctx = meta_data.get("initial_context", "")
+                        if initial_ctx:
+                            return await self._step_confirm_repos(
+                                initial_ctx, cwd, session_id=session_id,
+                            )
+
 
                 return await self._handle_answer(engine, session_id, answer, cwd)
 
@@ -670,7 +692,7 @@ class PMInterviewHandler:
         initial_context = meta_data.get("initial_context", "")
 
         if "brownfield" in answer.lower() or "기존" in answer or "existing" in answer.lower():
-            # Brownfield → show repo selection
+            # Brownfield → show repo add step
             all_repos = await self._query_all_repos()
             if not all_repos:
                 # No repos in DB → auto-scan home directory
@@ -678,7 +700,7 @@ class PMInterviewHandler:
                 all_repos = await self._auto_scan_repos()
 
             if all_repos:
-                return self._step1_awaiting_repo_selection(
+                return await self._step_repo_add(
                     initial_context, cwd, all_repos, session_id=session_id,
                 )
 
@@ -946,6 +968,10 @@ class PMInterviewHandler:
 
         If ``session_id`` is provided (e.g. during restart recovery), reuses it
         instead of generating a new one.
+
+        .. deprecated:: Use _step_repo_add / _step_repo_remove / _step_confirm_repos
+           for the 3-sub-step flow.  Kept for backward compat with the 1-step
+           ``selected_repos`` parameter path.
         """
         if session_id is None:
             from datetime import UTC, datetime
@@ -1025,6 +1051,335 @@ class PMInterviewHandler:
                 is_error=False,
                 meta=meta,
             )
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # 3-sub-step brownfield repo selection flow
+    # ──────────────────────────────────────────────────────────────
+
+    async def _step_repo_add(
+        self,
+        initial_context: str,
+        cwd: str,
+        repos: list[BrownfieldRepo],
+        *,
+        session_id: str | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Sub-step 1: Show NON-default repos and ask which to ADD.
+
+        If ALL repos are already default, skips directly to sub-step 2
+        (``_step_repo_remove``).
+        """
+        if session_id is None:
+            from datetime import UTC, datetime
+
+            session_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+
+        non_default = [r for r in repos if not r.is_default]
+
+        # If all repos are already default, skip to remove step
+        if not non_default:
+            log.info("pm_handler.step_repo_add.all_default_skip", session_id=session_id)
+            return await self._step_repo_remove(initial_context, cwd, session_id=session_id)
+
+        # Build numbered list of non-default repos
+        repo_list = [
+            {
+                "path": r.path,
+                "name": r.name,
+                "desc": r.desc or "",
+                "is_default": r.is_default,
+            }
+            for r in non_default
+        ]
+
+        repo_map = {str(i + 1): r.path for i, r in enumerate(non_default)}
+        name_map = {r.name.lower(): r.path for r in non_default}
+
+        _save_pm_meta(
+            session_id,
+            engine=None,
+            cwd=cwd,
+            data_dir=self.data_dir,
+            status="awaiting_repo_add",
+            extra={
+                "initial_context": initial_context,
+                "repo_map": repo_map,
+                "name_map": name_map,
+            },
+        )
+
+        log.info(
+            "pm_handler.step_repo_add",
+            session_id=session_id,
+            repo_count=len(repo_list),
+        )
+
+        meta: dict[str, Any] = {
+            "session_id": session_id,
+            "status": "awaiting_repo_add",
+            "input_type": "freeText",
+            "response_param": "answer",
+            "repos": repo_list,
+            "repo_count": len(repo_list),
+        }
+
+        repo_lines = []
+        for i, r in enumerate(repo_list, 1):
+            label = r["name"]
+            if r.get("desc"):
+                label += f" — {r['desc']}"
+            repo_lines.append(f"  {i}. {label}")
+        repo_list_text = "\n".join(repo_lines)
+
+        content_text = (
+            "Select repos to ADD as brownfield context "
+            "(by number or name, comma-separated, or 'none' to skip):\n\n"
+            f"{repo_list_text}"
+        )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(type=ContentType.TEXT, text=content_text),
+                ),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
+    async def _step_repo_remove(
+        self,
+        initial_context: str,
+        cwd: str,
+        *,
+        session_id: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Sub-step 2: Show CURRENT default repos and ask which to REMOVE.
+
+        If no default repos exist, skips directly to sub-step 3
+        (``_step_confirm_repos``).
+        """
+        all_repos = await self._query_all_repos()
+        defaults = [r for r in all_repos if r.is_default]
+
+        if not defaults:
+            log.info("pm_handler.step_repo_remove.no_defaults_skip", session_id=session_id)
+            return await self._step_confirm_repos(initial_context, cwd, session_id=session_id)
+
+        repo_list = [
+            {
+                "path": r.path,
+                "name": r.name,
+                "desc": r.desc or "",
+                "is_default": r.is_default,
+            }
+            for r in defaults
+        ]
+
+        repo_map = {str(i + 1): r.path for i, r in enumerate(defaults)}
+        name_map = {r.name.lower(): r.path for r in defaults}
+
+        _save_pm_meta(
+            session_id,
+            engine=None,
+            cwd=cwd,
+            data_dir=self.data_dir,
+            status="awaiting_repo_remove",
+            extra={
+                "initial_context": initial_context,
+                "repo_map": repo_map,
+                "name_map": name_map,
+            },
+        )
+
+        log.info(
+            "pm_handler.step_repo_remove",
+            session_id=session_id,
+            repo_count=len(repo_list),
+        )
+
+        meta: dict[str, Any] = {
+            "session_id": session_id,
+            "status": "awaiting_repo_remove",
+            "input_type": "freeText",
+            "response_param": "answer",
+            "repos": repo_list,
+            "repo_count": len(repo_list),
+        }
+
+        repo_lines = []
+        for i, r in enumerate(repo_list, 1):
+            label = r["name"]
+            if r.get("desc"):
+                label += f" — {r['desc']}"
+            repo_lines.append(f"  {i}. {label}")
+        repo_list_text = "\n".join(repo_lines)
+
+        content_text = (
+            "Current brownfield repos. Select any to REMOVE "
+            "(by number or name, comma-separated, or 'none' to skip):\n\n"
+            f"{repo_list_text}"
+        )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(type=ContentType.TEXT, text=content_text),
+                ),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
+    async def _step_confirm_repos(
+        self,
+        initial_context: str,
+        cwd: str,
+        *,
+        session_id: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Sub-step 3: Query DB for final is_default=true repos, show confirmation,
+        then auto-start interview with those repos as brownfield context.
+        """
+        all_repos = await self._query_all_repos()
+        final_defaults = [r for r in all_repos if r.is_default]
+
+        selected_paths = [r.path for r in final_defaults]
+
+        if final_defaults:
+            repo_lines = []
+            for i, r in enumerate(final_defaults, 1):
+                label = r.name
+                if r.desc:
+                    label += f" — {r.desc}"
+                repo_lines.append(f"  {i}. {label}")
+            repo_list_text = "\n".join(repo_lines)
+            log.info(
+                "pm_handler.step_confirm_repos",
+                session_id=session_id,
+                count=len(final_defaults),
+            )
+        else:
+            repo_list_text = "  (none)"
+            log.info("pm_handler.step_confirm_repos.greenfield", session_id=session_id)
+
+        # Auto-start interview with the confirmed repos
+        engine = self._get_engine()
+        return await self._handle_start(
+            engine, initial_context, cwd, selected_repos=selected_paths,
+        )
+
+    async def _update_repo_defaults(
+        self,
+        paths: list[str],
+        *,
+        is_default: bool,
+    ) -> None:
+        """Set is_default for specific repo paths in DB.
+
+        Also triggers desc generation for newly-added repos (is_default=True)
+        that have empty desc.
+        """
+        from pathlib import Path as _Path
+
+        from sqlalchemy import update
+
+        from ouroboros.persistence.schema import brownfield_repos_table as t
+
+        try:
+            store = BrownfieldStore()
+            await store.initialize()
+            try:
+                db_engine = store._ensure_initialized("_update_repo_defaults")
+                path_set = set(paths)
+
+                async with db_engine.begin() as conn:
+                    if path_set:
+                        await conn.execute(
+                            update(t)
+                            .where(t.c.path.in_(path_set))
+                            .values(is_default=is_default)
+                        )
+
+                log.info(
+                    "pm_handler.update_repo_defaults",
+                    count=len(paths),
+                    is_default=is_default,
+                )
+
+                # Generate desc for newly-added repos that lack one
+                if is_default:
+                    from ouroboros.bigbang.brownfield import generate_desc
+
+                    all_repos = await store.list()
+                    for repo in all_repos:
+                        if repo.path in path_set and not repo.desc:
+                            try:
+                                llm_adapter = self._get_engine().inner.llm_adapter
+                                desc = await generate_desc(_Path(repo.path), llm_adapter)
+                                if desc:
+                                    await store.update_desc(repo.path, desc)
+                                    log.info("pm_handler.desc_generated", path=repo.path)
+                            except Exception as exc:
+                                log.warning(
+                                    "pm_handler.desc_generation_failed",
+                                    path=repo.path,
+                                    error=str(exc),
+                                )
+            finally:
+                await store.close()
+        except Exception as exc:
+            log.warning("pm_handler.update_repo_defaults_failed", error=str(exc))
+
+    async def _handle_repo_add_answer(
+        self,
+        session_id: str,
+        answer: str,
+        cwd: str,
+        meta_data: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle user answer to the 'add repos' sub-step.
+
+        Parse selected repos, set is_default=True in DB, then transition
+        to ``_step_repo_remove``.
+        """
+        initial_context = meta_data.get("initial_context", "")
+
+        # Check for skip/none
+        skip = answer.strip().lower() in ("none", "skip", "")
+        if not skip:
+            selected = self._parse_repo_selection(answer, meta_data)
+            if selected:
+                await self._update_repo_defaults(selected, is_default=True)
+
+        return await self._step_repo_remove(
+            initial_context, cwd, session_id=session_id,
+        )
+
+    async def _handle_repo_remove_answer(
+        self,
+        session_id: str,
+        answer: str,
+        cwd: str,
+        meta_data: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Handle user answer to the 'remove repos' sub-step.
+
+        Parse selected repos, set is_default=False in DB, then transition
+        to ``_step_confirm_repos``.
+        """
+        initial_context = meta_data.get("initial_context", "")
+
+        # Check for skip/none
+        skip = answer.strip().lower() in ("none", "skip", "")
+        if not skip:
+            selected = self._parse_repo_selection(answer, meta_data)
+            if selected:
+                await self._update_repo_defaults(selected, is_default=False)
+
+        return await self._step_confirm_repos(
+            initial_context, cwd, session_id=session_id,
         )
 
     # ──────────────────────────────────────────────────────────────
