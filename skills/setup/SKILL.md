@@ -394,50 +394,36 @@ That's fine — you can register repos later with:
 ```
 Skip the default selection prompt and proceed to Step 6.
 
-**Default repo selection prompt (via AskUserQuestion):**
+**Default repo selection:**
 
-```json
-{
-  "questions": [{
-    "question": "Which repository would you like as your default brownfield context? The default repo is used automatically in PM interviews.",
-    "header": "Default Brownfield Repository",
-    "options": [
-      {
-        "label": "ouroboros",
-        "description": "~/ouroboros"
-      },
-      {
-        "label": "my-webapp",
-        "description": "~/projects/my-webapp"
-      },
-      {
-        "label": "Skip — choose later",
-        "description": "You can set a default anytime with: ooo brownfield set_default"
-      }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+After showing the repo list, ask which repos to use as default brownfield context for PM interviews.
 
-- Options are dynamically generated from the discovered repos list
-- Always include a **"Skip — choose later"** option as the last choice
-- If the user selects a repo, call `set_default(path)` which sets `is_default=true` and generates a one-line description from README/CLAUDE.md using the Frugal (Haiku) model
-- If the user selects **Skip**, proceed without setting a default
+1. First, print the numbered repo list (same as above) so the user can see the numbers.
+
+2. Build the recommended option from already-default repos. Query DB for current `is_default=true` repos and get their numbers from the list.
+
+3. Use `AskUserQuestion` with exactly 2 options:
+   - Option 1: The current default repo numbers as recommended (e.g. "18, 19 (Recommended)"). If no defaults exist, use "none (Recommended)".
+   - The user can always "Type something" to enter custom numbers (e.g. "6, 18, 19, 25").
+
+4. After the user responds:
+   - Call `ouroboros_brownfield(action="set_default", paths=[], is_default=false)` to clear ALL defaults
+   - Parse the user's answer (numbers like "6, 18, 19" → resolve to repo paths)
+   - For each selected repo, call `ouroboros_brownfield(action="set_default", path=<repo_path>, is_default=true)`
+   - This generates a one-line description from README/CLAUDE.md using the Frugal (Haiku) model for repos missing descriptions
 
 **Celebration Checkpoint 5.5:**
 ```
-Brownfield registry updated!
-Default: ouroboros (~/ouroboros)
+Brownfield defaults updated!
+Defaults: podo-app, podo-backend, grape
 
-Your existing code will inform future PM interviews
-for smarter, context-aware project planning.
+These repos will be used as context in PM interviews.
 ```
 
-Or if skipped:
+Or if "none" selected:
 ```
-Brownfield repos registered! You can set a default later:
-  ooo brownfield set_default
+No default repos set. PM interviews will run in greenfield mode.
+You can set defaults anytime by running ooo setup again.
 ```
 
 ---
