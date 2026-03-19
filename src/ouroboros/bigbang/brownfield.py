@@ -257,23 +257,46 @@ async def scan_and_register(
     Returns:
         List of all registered BrownfieldRepo instances.
     """
+    # Preserve existing defaults before re-scan
+    existing_defaults: set[str] = set()
+    existing_descs: dict[str, str] = {}
+    try:
+        old_repos = await store.list()
+        for r in old_repos:
+            if r.is_default:
+                existing_defaults.add(r.path)
+            if r.desc:
+                existing_descs[r.path] = r.desc
+    except Exception:
+        pass  # First run — no existing data
+
     scanned = scan_home_for_repos(root)
 
     if not scanned:
         log.info("brownfield.scan_and_register.no_repos")
         return await store.list()
 
-    # Bulk insert all scanned repos with is_default=False, desc=""
+    # Clear and re-register
+    await store.clear_all()
     inserted = await store.bulk_register(scanned)
     log.info("brownfield.bulk_registered", count=inserted)
 
-    # Set default if none exists
-    current_default = await store.get_default()
-    if current_default is None:
-        all_repos = await store.list()
-        if all_repos:
-            await store.set_default(all_repos[0].path)
-            log.info("brownfield.default_set", path=all_repos[0].path)
+    # Restore previous defaults and descriptions
+    all_repos = await store.list()
+    restored_count = 0
+    for r in all_repos:
+        if r.path in existing_defaults:
+            await store.update_is_default(r.path, is_default=True)
+            restored_count += 1
+        if r.path in existing_descs:
+            await store.update_desc(r.path, existing_descs[r.path])
+
+    if restored_count > 0:
+        log.info("brownfield.defaults_restored", count=restored_count)
+    elif all_repos:
+        # No previous defaults — set first repo as default
+        await store.update_is_default(all_repos[0].path, is_default=True)
+        log.info("brownfield.default_set", path=all_repos[0].path)
 
     return await store.list()
 

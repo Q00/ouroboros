@@ -342,7 +342,7 @@ class TestScanAndRegister:
         assert len(call_args) == 1
         assert call_args[0]["name"] == "my-repo"
         # Should set default since none existed
-        store.set_default.assert_called_once()
+        store.update_is_default.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_bulk_register_no_llm_during_scan(self, tmp_path: Path) -> None:
@@ -378,7 +378,7 @@ class TestScanAndRegister:
         store.bulk_register.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_skips_default_set_when_already_exists(self, tmp_path: Path) -> None:
+    async def test_restores_existing_defaults_after_rescan(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
@@ -398,8 +398,8 @@ class TestScanAndRegister:
 
         await scan_and_register(store, root=tmp_path)
 
-        # Should NOT call set_default since one already exists
-        store.set_default.assert_not_called()
+        # Should restore the existing default after re-scan
+        store.update_is_default.assert_called_with("/some/other", is_default=True)
 
     @pytest.mark.asyncio
     async def test_no_repos_found(self, tmp_path: Path) -> None:
@@ -872,7 +872,7 @@ class TestScanAndRegisterMocked:
         store.list.return_value = [
             BrownfieldRepo(path="/a", name="a"),
         ]
-        store.set_default.return_value = BrownfieldRepo(
+        store.update_is_default.return_value = BrownfieldRepo(
             path="/a", name="a", is_default=True,
         )
 
@@ -882,11 +882,11 @@ class TestScanAndRegisterMocked:
         ):
             await scan_and_register(store, root=Path("/fake"))
 
-        store.set_default.assert_called_once_with("/a")
+        store.update_is_default.assert_called_once_with("/a", is_default=True)
 
     @pytest.mark.asyncio
-    async def test_mocked_scan_preserves_existing_default(self) -> None:
-        """When default already exists, scan_and_register does NOT override."""
+    async def test_mocked_scan_restores_existing_default(self) -> None:
+        """When default already exists, scan_and_register restores it after re-scan."""
         fake_repos = [{"path": "/new", "name": "new"}]
         existing_default = BrownfieldRepo(
             path="/old", name="old", is_default=True,
@@ -903,7 +903,7 @@ class TestScanAndRegisterMocked:
         ):
             await scan_and_register(store, root=Path("/fake"))
 
-        store.set_default.assert_not_called()
+        store.update_is_default.assert_called_with("/old", is_default=True)
 
     @pytest.mark.asyncio
     async def test_mocked_scan_empty_returns_store_list(self) -> None:
