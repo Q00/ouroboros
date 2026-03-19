@@ -311,7 +311,7 @@ def default() -> None:
 
     Displays all registered repos and lets you pick a new default.
     """
-    console.print("\n[bold cyan]Set Default Brownfield Repo[/]\n")
+    console.print("\n[bold cyan]Set Default Brownfield Repos[/]\n")
 
     try:
         asyncio.run(_run_set_default())
@@ -341,6 +341,6 @@ async def _run_set_default() -> None:
         success = await _set_default_repo(selected["path"])
 
     if success:
-        print_success(f"Default set to: [cyan]{selected['name']}[/] ({selected['path']})")
+        print_success(f"Default repo added: [cyan]{selected['name']}[/] ({selected['path']})")
     else:
         print_error(f"Failed to set default: {selected['path']}")

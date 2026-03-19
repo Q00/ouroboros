@@ -379,23 +379,29 @@ async def _run_pm_interview(
 
     # Interview loop
     while not state.is_complete:
-        q_result = await engine.ask_next_question(state)
-        if q_result.is_err:
-            print_error(f"Question generation failed: {q_result.error}")
-            break
+        # Check for a pending unanswered question from a previous session
+        if state.rounds and state.rounds[-1].user_response is None:
+            question = state.rounds[-1].question
+        else:
+            q_result = await engine.ask_next_question(state)
+            if q_result.is_err:
+                print_error(f"Question generation failed: {q_result.error}")
+                break
 
-        question = q_result.value
+            question = q_result.value
 
         # Append unanswered round so the pending question is persisted
         # in InterviewState.  This ensures --resume can re-display it.
-        state.rounds.append(
-            InterviewRound(
-                round_number=state.current_round_number,
-                question=question,
-                user_response=None,
+        # Skip if we already have this as the last unanswered round (resume case).
+        if not (state.rounds and state.rounds[-1].user_response is None):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=state.current_round_number,
+                    question=question,
+                    user_response=None,
+                )
             )
-        )
-        state.mark_updated()
+            state.mark_updated()
 
         console.print(f"\n[bold yellow]?[/] {question}\n")
 
