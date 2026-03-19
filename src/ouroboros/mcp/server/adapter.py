@@ -615,6 +615,7 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
     )
+    from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
@@ -1157,6 +1158,7 @@ def create_ouroboros_server(
         PMInterviewHandler(
             data_dir=state_dir,
         ),
+        BrownfieldHandler(),
         EvaluateHandler(
             event_store=event_store,
             llm_adapter=llm_adapter,
