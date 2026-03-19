@@ -346,7 +346,7 @@ Join the community:
 
 ### Step 5.5: Brownfield Repository Scan
 
-Scan the user's home directory for existing git repositories and register them in the Ouroboros DB. This enables PM interviews to use brownfield context for existing projects.
+Scan the user's home directory for existing git repositories and register them in the Ouroboros DB. This enables interviews to use brownfield context for existing projects.
 
 **Show scanning indicator:**
 ```
@@ -382,7 +382,7 @@ This may take a moment...
   ...
 
 These repos are now registered in Ouroboros.
-When you start a PM interview, Ouroboros can use
+When you start a interview, Ouroboros can use
 your existing codebase as brownfield context.
 ```
 
@@ -403,7 +403,7 @@ Find current default repo numbers from the list (repos with `is_default=true` in
 ```json
 {
   "questions": [{
-    "question": "Which repos to set as default for PM interviews? Enter numbers like '6, 18, 19'.",
+    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
     "header": "Default Repos",
     "options": [
       {"label": "<default numbers> (Recommended)", "description": "<default repo names>"}
@@ -429,12 +429,12 @@ After the user responds:
 Brownfield defaults updated!
 Defaults: podo-app, podo-backend, grape
 
-These repos will be used as context in PM interviews.
+These repos will be used as context in interviews.
 ```
 
 Or if "none" selected:
 ```
-No default repos set. PM interviews will run in greenfield mode.
+No default repos set. interviews will run in greenfield mode.
 You can set defaults anytime by running ooo setup again.
 ```
 
