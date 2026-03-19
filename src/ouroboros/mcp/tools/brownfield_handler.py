@@ -261,16 +261,17 @@ class BrownfieldHandler:
         )
 
         repos_data = [r.to_dict() for r in repos]
-        default = await store.get_default()
+        defaults = await store.get_defaults()
 
         summary = f"Scan complete. {len(repos)} repositories registered."
-        if default:
-            summary += f"\nDefault: {default.name} ({default.path})"
+        if defaults:
+            names = ", ".join(f"{d.name} ({d.path})" for d in defaults)
+            summary += f"\nDefaults: {names}"
 
         log.info(
             "brownfield_handler.scan_complete",
             count=len(repos),
-            default=default.path if default else None,
+            defaults=[d.path for d in defaults],
         )
 
         return Result.ok(
@@ -286,7 +287,7 @@ class BrownfieldHandler:
                     "action": "scan",
                     "count": len(repos),
                     "repos": repos_data,
-                    "default": default.to_dict() if default else None,
+                    "defaults": [d.to_dict() for d in defaults],
                 },
             )
         )
@@ -462,7 +463,9 @@ class BrownfieldHandler:
                     "offset": offset,
                     "limit": limit,
                     "repos": repos_data,
-                    "default": paginated_first_default.to_dict() if paginated_first_default else None,
+                    "default": paginated_first_default.to_dict()
+                    if paginated_first_default
+                    else None,
                     "defaults": defaults_data,
                 },
             )

@@ -304,8 +304,8 @@ class TestPMSeedIncludesDBBrownfieldRepos:
             ],
         )
 
-        with patch.object(PMInterviewEngine, "load_brownfield_repos", return_value=db_repos):
-            result = await engine.generate_pm_seed(state)
+        engine._selected_brownfield_repos = db_repos
+        result = await engine.generate_pm_seed(state)
 
         assert result.is_ok
         seed = result.value

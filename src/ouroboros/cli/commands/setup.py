@@ -235,7 +235,9 @@ async def _run_full_setup() -> None:
         )
         console.print()
 
-    idx = _prompt_repo_selection(repos, "Select default repo")
+    idx = _prompt_repo_selection(
+        repos, "Select default repo (multiple defaults supported via MCP setup)"
+    )
     if idx is not None:
         selected = repos[idx]
         with console.status("[cyan]Setting default...[/]", spinner="dots"):

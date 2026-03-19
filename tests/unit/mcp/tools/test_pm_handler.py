@@ -38,6 +38,7 @@ def _make_engine_stub(
     engine.codebase_context = ""
     engine._reframe_map = {}
     engine.classifications = []
+    engine._selected_brownfield_repos = []
     return engine
 
 
@@ -168,6 +169,7 @@ class TestPrdMetaPersistence:
             "codebase_context": "ctx",
             "pending_reframe": {"reframed": "simple q", "original": "technical q"},
             "cwd": "/proj",
+            "brownfield_repos": [{"path": "/repo", "name": "repo"}],
         }
 
         _restore_engine_meta(engine, meta)
@@ -176,6 +178,7 @@ class TestPrdMetaPersistence:
         assert engine.decide_later_items == ["dl1"]
         assert engine.codebase_context == "ctx"
         assert engine._reframe_map["simple q"] == "technical q"
+        assert engine._selected_brownfield_repos == [{"path": "/repo", "name": "repo"}]
 
     def test_restore_without_pending_reframe(self) -> None:
         """Restore works when pending_reframe is None."""
@@ -265,8 +268,8 @@ class TestPrdMetaFileLocation:
         meta = _load_pm_meta("sess-nested", data_dir=nested_dir)
         assert meta is not None
 
-    def test_meta_file_has_exactly_five_fields(self, tmp_path: Path) -> None:
-        """pm_meta JSON contains exactly the 5 required fields."""
+    def test_meta_file_has_exactly_six_fields(self, tmp_path: Path) -> None:
+        """pm_meta JSON contains exactly the 6 required fields."""
         engine = _make_engine_stub(deferred=["d1"], decide_later=["dl1"])
         engine.codebase_context = "ctx"
         engine._reframe_map = {"simple": "complex"}
@@ -281,6 +284,7 @@ class TestPrdMetaFileLocation:
             "codebase_context",
             "pending_reframe",
             "cwd",
+            "brownfield_repos",
         }
         assert set(meta.keys()) == expected_keys
 

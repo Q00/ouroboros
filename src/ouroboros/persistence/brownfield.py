@@ -381,7 +381,9 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                result = await conn.execute(select(t).where(t.c.is_default.is_(True)).limit(1))
+                result = await conn.execute(
+                    select(t).where(t.c.is_default.is_(True)).order_by(t.c.path).limit(1)
+                )
                 row = result.mappings().first()
                 if row is None:
                     return None

@@ -170,6 +170,13 @@ class PMInterviewEngine:
     so that record_response can bundle the original technical question with
     the PM's answer before passing it to the inner InterviewEngine.
     """
+    _selected_brownfield_repos: list[dict[str, str]] = field(default_factory=list)
+    """Brownfield repos actually used in this session.
+
+    Stored during :meth:`start_interview` so that :meth:`generate_pm_seed`
+    can reference the same repos without querying the DB (which may have
+    changed since the interview started).
+    """
 
     @classmethod
     def create(
@@ -360,6 +367,7 @@ class PMInterviewEngine:
         """
         # Explore codebases if brownfield repos are provided
         if brownfield_repos:
+            self._selected_brownfield_repos = list(brownfield_repos)
             await self.explore_codebases(brownfield_repos)
 
         # Prepend PM context to the initial context
@@ -908,8 +916,8 @@ Brownfield codebase context:
             if item not in all_decide_later:
                 all_decide_later.append(item)
 
-        # Include brownfield repos
-        brownfield_repos = tuple(dict(r) for r in self.load_brownfield_repos())
+        # Include brownfield repos — use session-stored repos, not DB
+        brownfield_repos = tuple(dict(r) for r in self._selected_brownfield_repos)
 
         return PMSeed(
             product_name=data.get("product_name", ""),

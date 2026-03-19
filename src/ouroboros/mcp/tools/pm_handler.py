@@ -99,6 +99,7 @@ def _save_pm_meta(
             "codebase_context": engine.codebase_context,
             "pending_reframe": pending_reframe,
             "cwd": cwd,
+            "brownfield_repos": list(getattr(engine, "_selected_brownfield_repos", [])),
         }
     else:
         meta = {
@@ -107,6 +108,7 @@ def _save_pm_meta(
             "codebase_context": "",
             "pending_reframe": None,
             "cwd": cwd,
+            "brownfield_repos": [],
         }
 
     if status is not None:
@@ -141,6 +143,7 @@ def _restore_engine_meta(engine: PMInterviewEngine, meta: dict[str, Any]) -> Non
     engine.deferred_items = list(meta.get("deferred_items", []))
     engine.decide_later_items = list(meta.get("decide_later_items", []))
     engine.codebase_context = meta.get("codebase_context", "")
+    engine._selected_brownfield_repos = list(meta.get("brownfield_repos", []))
     # Restore the reframe map from pending_reframe if present
     pending = meta.get("pending_reframe")
     if pending and isinstance(pending, dict):
