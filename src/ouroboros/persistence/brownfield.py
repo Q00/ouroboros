@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, literal_column, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ouroboros.core.errors import PersistenceError
@@ -32,22 +32,21 @@ class BrownfieldRepo:
     name: str
     desc: str | None = None
     is_default: bool = False
+    id: int | None = None  # SQLite rowid
 
     # ── Serialization (backward-compat with BrownfieldEntry) ─────
 
     def to_dict(self) -> dict[str, str]:
-        """Serialize to a plain dict for API / template consumption.
-
-        Returns the same shape as the old ``BrownfieldEntry.to_dict()``
-        plus ``is_default``:
-        ``{"path": ..., "name": ..., "desc": ..., "is_default": ...}``.
-        """
-        return {
+        """Serialize to a plain dict for API / template consumption."""
+        d = {
             "path": self.path,
             "name": self.name,
             "desc": self.desc or "",
             "is_default": self.is_default,
         }
+        if self.id is not None:
+            d["id"] = self.id
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BrownfieldRepo:
@@ -94,6 +93,7 @@ class BrownfieldRepo:
             name=row["name"],
             desc=row.get("desc"),
             is_default=bool(row.get("is_default", False)),
+            id=row.get("rowid") or row.get("id"),
         )
 
 
@@ -214,7 +214,7 @@ class BrownfieldStore:
         try:
             async with engine.begin() as conn:
                 # Check if repo already exists
-                existing = await conn.execute(select(t).where(t.c.path == path))
+                existing = await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))
                 row = existing.mappings().first()
 
                 if row is not None:
@@ -228,7 +228,7 @@ class BrownfieldStore:
 
                     # Return with preserved values
                     result_row = (
-                        (await conn.execute(select(t).where(t.c.path == path))).mappings().first()
+                        (await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))).mappings().first()
                     )
                     return BrownfieldRepo.from_row(dict(result_row))  # type: ignore[arg-type]
 
@@ -328,7 +328,7 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                stmt = select(t).order_by(t.c.name)
+                stmt = select(literal_column("rowid"), t).order_by(t.c.name)
                 if offset > 0:
                     stmt = stmt.offset(offset)
                 if limit is not None:
@@ -382,7 +382,7 @@ class BrownfieldStore:
         try:
             async with engine.begin() as conn:
                 result = await conn.execute(
-                    select(t).where(t.c.is_default.is_(True)).order_by(t.c.path).limit(1)
+                    select(literal_column("rowid"), t).where(t.c.is_default.is_(True)).order_by(t.c.path).limit(1)
                 )
                 row = result.mappings().first()
                 if row is None:
@@ -414,7 +414,7 @@ class BrownfieldStore:
         try:
             async with engine.begin() as conn:
                 result = await conn.execute(
-                    select(t).where(t.c.is_default.is_(True)).order_by(t.c.path)
+                    select(literal_column("rowid"), t).where(t.c.is_default.is_(True)).order_by(t.c.path)
                 )
                 rows = result.mappings().all()
                 return [BrownfieldRepo.from_row(dict(row)) for row in rows]
@@ -461,7 +461,7 @@ class BrownfieldStore:
                     return None
 
                 # Fetch and return the updated row
-                result = await conn.execute(select(t).where(t.c.path == path))
+                result = await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))
                 row = result.mappings().first()
                 if row is None:
                     return None
@@ -487,7 +487,7 @@ class BrownfieldStore:
                 )
                 if result.rowcount == 0:
                     return None
-                row = (await conn.execute(select(t).where(t.c.path == path))).mappings().first()
+                row = (await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))).mappings().first()
                 return BrownfieldRepo.from_row(dict(row)) if row else None
         except Exception as e:
             raise PersistenceError(
@@ -495,6 +495,44 @@ class BrownfieldStore:
                 operation="update",
                 table="brownfield_repos",
                 details={"path": path},
+            ) from e
+
+    async def set_defaults_by_ids(self, ids: list[int]) -> list[BrownfieldRepo]:
+        """Replace all defaults with repos matching the given rowids.
+
+        Clears all existing defaults, then sets is_default=True for the
+        specified rowids. Returns the new default repos.
+        """
+        engine = self._ensure_initialized("set_defaults_by_ids")
+        t = brownfield_repos_table
+        try:
+            async with engine.begin() as conn:
+                # Clear all defaults
+                await conn.execute(
+                    update(t).where(t.c.is_default.is_(True)).values(is_default=False)
+                )
+                # Set new defaults by rowid
+                if ids:
+                    for rid in ids:
+                        await conn.execute(
+                            update(t)
+                            .where(literal_column("rowid") == rid)
+                            .values(is_default=True)
+                        )
+                # Return new defaults
+                result = await conn.execute(
+                    select(literal_column("rowid"), t)
+                    .where(t.c.is_default.is_(True))
+                    .order_by(t.c.name)
+                )
+                rows = result.mappings().all()
+                return [BrownfieldRepo.from_row(dict(row)) for row in rows]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to set defaults by ids: {e}",
+                operation="update",
+                table="brownfield_repos",
+                details={"ids": ids},
             ) from e
 
     async def update_desc(self, path: str, desc: str) -> BrownfieldRepo | None:
@@ -519,7 +557,7 @@ class BrownfieldStore:
                 if result.rowcount == 0:
                     return None
 
-                result = await conn.execute(select(t).where(t.c.path == path))
+                result = await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))
                 row = result.mappings().first()
                 if row is None:
                     return None

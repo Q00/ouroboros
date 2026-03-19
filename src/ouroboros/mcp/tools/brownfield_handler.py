@@ -104,7 +104,7 @@ class BrownfieldHandler:
                         " Auto-detected from parameters when omitted."
                     ),
                     required=False,
-                    enum=("scan", "register", "query", "set_default"),
+                    enum=("scan", "register", "query", "set_default", "set_defaults"),
                 ),
                 MCPToolParameter(
                     name="path",
@@ -156,6 +156,16 @@ class BrownfieldHandler:
                     name="scan_root",
                     type=ToolInputType.STRING,
                     description=("Root directory for 'scan' action. Defaults to ~/."),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="indices",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Comma-separated repo numbers from the scan list "
+                        "(e.g. '6,18,19'). Used with 'set_defaults' action to "
+                        "replace all defaults at once."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -213,10 +223,13 @@ class BrownfieldHandler:
             if action == "set_default":
                 return await self._handle_set_default(arguments)
 
+            if action == "set_defaults":
+                return await self._handle_set_defaults(arguments)
+
             return Result.err(
                 MCPToolError(
                     f"Unknown action: {action!r}. "
-                    "Must be one of: scan, register, query, set_default",
+                    "Must be one of: scan, register, query, set_default, set_defaults",
                     tool_name=_TOOL_NAME,
                 )
             )
@@ -260,18 +273,17 @@ class BrownfieldHandler:
         repos_data = [r.to_dict() for r in repos]
         defaults = await store.get_defaults()
 
-        # Build compact numbered list — name only, no paths
+        # Build compact list — {id}. {name} using SQLite rowid
         lines = [f"Scan complete. {len(repos)} repositories registered.", ""]
         for i, r in enumerate(repos, 1):
+            rid = r.id if r.id is not None else i
             marker = " *" if r.is_default else ""
-            lines.append(f"{i:>2}. {r.name}{marker}")
+            lines.append(f"{rid:>2}. {r.name}{marker}")
         lines.append("")
         if defaults:
-            default_nums = [
-                str(i) for i, r in enumerate(repos, 1) if r.is_default
-            ]
+            default_ids = ", ".join(str(d.id or "?") for d in defaults)
             names = ", ".join(d.name for d in defaults)
-            lines.append(f"Defaults (* marked): {', '.join(default_nums)} ({names})")
+            lines.append(f"Defaults (* marked): {default_ids} ({names})")
         else:
             lines.append("No defaults set.")
         summary = "\n".join(lines)
@@ -543,6 +555,70 @@ class BrownfieldHandler:
                 meta={
                     "action": "set_default",
                     "default": repo.to_dict(),
+                },
+            )
+        )
+
+    # ──────────────────────────────────────────────────────────────
+    # set_defaults — Replace all defaults by ID list
+    # ──────────────────────────────────────────────────────────────
+
+    async def _handle_set_defaults(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Replace all defaults using a comma-separated list of repo IDs."""
+        indices_str = arguments.get("indices", "")
+        if not indices_str:
+            return Result.err(
+                MCPToolError(
+                    "'indices' is required for 'set_defaults' action (e.g. '6,18,19')",
+                    tool_name=_TOOL_NAME,
+                )
+            )
+
+        try:
+            ids = [int(x.strip()) for x in str(indices_str).split(",") if x.strip()]
+        except ValueError:
+            return Result.err(
+                MCPToolError(
+                    f"Invalid indices: {indices_str!r}. Must be comma-separated numbers.",
+                    tool_name=_TOOL_NAME,
+                )
+            )
+
+        store = await self._get_store()
+        defaults = await store.set_defaults_by_ids(ids)
+
+        if not defaults:
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="No defaults set (no matching IDs found).",
+                        ),
+                    ),
+                    is_error=False,
+                    meta={"action": "set_defaults", "defaults": []},
+                )
+            )
+
+        names = ", ".join(f"{d.id}. {d.name}" for d in defaults)
+        log.info("brownfield_handler.set_defaults", ids=ids, names=names)
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=f"Defaults updated: {names}",
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "action": "set_defaults",
+                    "defaults": [d.to_dict() for d in defaults],
                 },
             )
         )

@@ -394,22 +394,18 @@ Use `AskUserQuestion` with the current default numbers from the scan response:
 
 Only ONE option: the current defaults as recommended. The user can "Type something" for custom numbers or "none".
 
-After the user responds, use the `ouroboros_brownfield` MCP tool (already loaded above):
+After the user responds, use ONE MCP call to update all defaults at once:
 
-1. Clear all defaults:
-   ```
-   Tool: ouroboros_brownfield
-   Arguments: { "action": "set_default", "path": "<each default repo path>", "is_default": false }
-   ```
-   (Call once per current default repo)
-3. Set selected repos as default:
-   ```
-   Tool: ouroboros_brownfield
-   Arguments: { "action": "set_default", "path": "<selected repo path>", "is_default": true }
-   ```
-   (Call once per selected repo — this also auto-generates desc from README)
+```
+Tool: ouroboros_brownfield
+Arguments: { "action": "set_defaults", "indices": "<comma-separated IDs>" }
+```
 
-If "none" → skip, no defaults.
+Example: if the user picks IDs 6, 18, 19 → `{ "action": "set_defaults", "indices": "6,18,19" }`
+
+This clears all existing defaults and sets the selected repos as default in one call.
+
+If "none" → `{ "action": "set_defaults", "indices": "" }` to clear all defaults.
 
 **Celebration Checkpoint 5.5:**
 ```

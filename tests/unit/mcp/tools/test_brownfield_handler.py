@@ -112,7 +112,7 @@ class TestBrownfieldHandlerDefinition:
         handler = BrownfieldHandler()
         defn = handler.definition
         action_param = next(p for p in defn.parameters if p.name == "action")
-        assert action_param.enum == ("scan", "register", "query", "set_default")
+        assert action_param.enum == ("scan", "register", "query", "set_default", "set_defaults")
         assert action_param.required is False
 
     def test_has_all_expected_parameters(self) -> None:
@@ -129,6 +129,7 @@ class TestBrownfieldHandlerDefinition:
             "scan_root",
             "offset",
             "limit",
+            "indices",
         }
 
     def test_input_schema_generation(self) -> None:
