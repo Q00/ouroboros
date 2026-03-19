@@ -359,15 +359,15 @@ Only GitHub-hosted repos will be registered.
 This may take a moment...
 ```
 
-**Implementation:**
+**Implementation — use MCP tools only, do NOT use CLI or Python scripts:**
 
-1. Call the brownfield scan logic (`scan_home_repos()`) which:
-   - Walks `~/` looking for `.git` directories
-   - Prunes `.git` subtrees (no descending into nested repos)
-   - Skips excluded directories (node_modules, .venv, __pycache__, .cache, Library, .Trash, vendor, .gradle, build, dist, target, .tox, .mypy_cache, .pytest_cache, .cargo, Pods, etc.)
-   - Filters to only repos whose `origin` remote URL contains `github.com`
-
-2. Bulk-register discovered repos via `BrownfieldStore.bulk_register()` (is_default=false, desc="")
+1. Load the brownfield MCP tool: `ToolSearch query: "+ouroboros brownfield"`
+2. Call scan+register:
+   ```
+   Tool: ouroboros_brownfield
+   Arguments: { "action": "scan" }
+   ```
+   This scans `~/` for GitHub repos and registers them in DB. Existing defaults are preserved.
 
 **Display discovered repos:**
 ```
@@ -396,9 +396,13 @@ Skip the default selection prompt and proceed to Step 6.
 
 **Default repo selection — IMMEDIATELY after showing the repo list:**
 
-Right after displaying the numbered repo list above, ask for defaults in the SAME response. Do NOT do any other work between showing the list and asking.
+Right after displaying the numbered repo list above, query current defaults via MCP:
+```
+Tool: ouroboros_brownfield
+Arguments: { "action": "query", "is_default": true }
+```
 
-Find current default repo numbers from the list (repos with `is_default=true` in DB). Use `AskUserQuestion` with exactly this format:
+Use the returned default repo paths to find their numbers in the displayed list. Then use `AskUserQuestion`:
 
 ```json
 {
@@ -415,10 +419,9 @@ Find current default repo numbers from the list (repos with `is_default=true` in
 
 Only ONE option: the current default numbers as recommended. The user can "Type something" (built-in) for custom numbers or "none".
 
-After the user responds, use the `ouroboros_brownfield` MCP tool:
+After the user responds, use the `ouroboros_brownfield` MCP tool (already loaded above):
 
-1. First, load the tool: `ToolSearch query: "+ouroboros brownfield"`
-2. Clear all defaults:
+1. Clear all defaults:
    ```
    Tool: ouroboros_brownfield
    Arguments: { "action": "set_default", "path": "<each default repo path>", "is_default": false }
