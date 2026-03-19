@@ -11,7 +11,7 @@ Usage:
 
 import asyncio
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from rich.prompt import Confirm, Prompt
 import typer
@@ -264,6 +264,29 @@ def _parse_selection(raw: str, total: int) -> set[int]:
     return indices
 
 
+def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
+    """Persist PM-specific metadata so ``--resume`` can restore it.
+
+    Writes to ``~/.ouroboros/data/pm_meta_{session_id}.json`` — the same
+    location used by the MCP handler's ``_save_pm_meta``.
+    """
+    import json
+
+    data_dir = Path.home() / ".ouroboros" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = data_dir / f"pm_meta_{session_id}.json"
+
+    meta = {
+        "deferred_items": list(engine.deferred_items),
+        "decide_later_items": list(engine.decide_later_items),
+        "codebase_context": engine.codebase_context,
+        "pending_reframe": None,
+        "cwd": "",
+    }
+
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 async def _run_pm_interview(
     resume_id: str | None,
     model: str,
@@ -307,7 +330,7 @@ async def _run_pm_interview(
         state = state_result.value
 
         # Restore PM-specific metadata (deferred items, decide-later, etc.)
-        data_dir = Path.home() / ".ouroboros"
+        data_dir = Path.home() / ".ouroboros" / "data"
         pm_meta_path = data_dir / f"pm_meta_{resume_id}.json"
         if pm_meta_path.exists():
             import json
@@ -340,6 +363,9 @@ async def _run_pm_interview(
         state = state_result.value
         print_success(f"Interview started (session: {state.interview_id})")
 
+        # Save pm_meta so --resume can find it later
+        _save_cli_pm_meta(state.interview_id, engine)
+
     # Interview loop
     while not state.is_complete:
         q_result = await engine.ask_next_question(state)
@@ -360,6 +386,7 @@ async def _run_pm_interview(
 
         await engine.record_response(state, user_response, question)
         await engine.save_state(state)
+        _save_cli_pm_meta(state.interview_id, engine)
 
     # Show decide-later summary at interview end
     decide_later_summary = engine.format_decide_later_summary()

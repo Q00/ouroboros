@@ -47,15 +47,22 @@ def _detect_action(arguments: dict[str, Any]) -> str:
 
     Detection rules (evaluated in order):
     1. If ``action`` is explicitly provided, return it as-is.
-    2. If ``path`` is present → ``"register"``
-    3. Otherwise → ``"query"`` (safe default — read-only).
+    2. If ``is_default`` is present → ``"set_default"``
+    3. If ``path`` is present with ``name`` → ``"register"``
+    4. If ``path`` is present without ``name`` → ``"set_default"``
+    5. Otherwise → ``"query"`` (safe default — read-only).
     """
     explicit = arguments.get("action")
     if explicit:
         return explicit
 
+    if "is_default" in arguments:
+        return "set_default"
+
     if arguments.get("path"):
-        return "register"
+        if arguments.get("name"):
+            return "register"
+        return "set_default"
 
     return "query"
 
@@ -127,6 +134,16 @@ class BrownfieldHandler:
                         "One-line description of the repository. Used with 'register'. Optional."
                     ),
                     required=False,
+                ),
+                MCPToolParameter(
+                    name="is_default",
+                    type=ToolInputType.BOOLEAN,
+                    description=(
+                        "For 'set_default' action: set to true to mark as default, "
+                        "false to unmark. Defaults to true."
+                    ),
+                    required=False,
+                    default=True,
                 ),
                 MCPToolParameter(
                     name="default_only",

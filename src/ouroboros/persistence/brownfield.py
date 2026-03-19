@@ -212,11 +212,28 @@ class BrownfieldStore:
                         update(t).where(t.c.is_default.is_(True)).values(is_default=False)
                     )
 
-                # SQLite upsert via INSERT OR REPLACE
+                # Check if repo already exists
+                existing = await conn.execute(select(t).where(t.c.path == path))
+                row = existing.mappings().first()
+
+                if row is not None:
+                    # Existing repo — only update fields that were explicitly provided
+                    updates: dict[str, Any] = {"name": name}
+                    if desc is not None:
+                        updates["desc"] = desc
+                    if is_default:
+                        updates["is_default"] = True
+                    await conn.execute(update(t).where(t.c.path == path).values(**updates))
+
+                    # Return with preserved values
+                    result_row = (
+                        (await conn.execute(select(t).where(t.c.path == path))).mappings().first()
+                    )
+                    return BrownfieldRepo.from_row(dict(result_row))  # type: ignore[arg-type]
+
+                # New repo — insert
                 await conn.execute(
-                    t.insert()
-                    .prefix_with("OR REPLACE")
-                    .values(
+                    t.insert().values(
                         path=path,
                         name=name,
                         desc=desc,

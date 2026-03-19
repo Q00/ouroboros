@@ -197,12 +197,12 @@ class TestScanAndRegisterRepos:
         mock_store.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_clears_table_before_scan(self) -> None:
-        """Table is cleared before scanning on setup re-run."""
+    async def test_does_not_call_clear_all_before_scan(self) -> None:
+        """Setup delegates clearing to scan_and_register — no separate clear_all."""
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
-        mock_store.clear_all = AsyncMock(return_value=5)
+        mock_store.clear_all = AsyncMock(return_value=0)
 
         with (
             patch(
@@ -217,37 +217,9 @@ class TestScanAndRegisterRepos:
         ):
             await _scan_and_register_repos()
 
-        # clear_all must be called before scan_and_register
-        mock_store.clear_all.assert_awaited_once()
+        # clear_all should NOT be called — scan_and_register handles it internally
+        mock_store.clear_all.assert_not_awaited()
         mock_scan.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_clear_then_scan_order(self) -> None:
-        """clear_all is called before scan_and_register (ordering check)."""
-        call_order: list[str] = []
-
-        mock_store = AsyncMock()
-        mock_store.initialize = AsyncMock()
-        mock_store.close = AsyncMock()
-        mock_store.clear_all = AsyncMock(side_effect=lambda: call_order.append("clear_all"))
-
-        async def fake_scan(store):
-            call_order.append("scan_and_register")
-            return []
-
-        with (
-            patch(
-                "ouroboros.cli.commands.setup.BrownfieldStore",
-                return_value=mock_store,
-            ),
-            patch(
-                "ouroboros.cli.commands.setup.scan_and_register",
-                side_effect=fake_scan,
-            ),
-        ):
-            await _scan_and_register_repos()
-
-        assert call_order == ["clear_all", "scan_and_register"]
 
 
 class TestListRepos:
@@ -523,12 +495,11 @@ class TestScanRegisterPipeline:
 
     @pytest.mark.asyncio
     async def test_store_lifecycle_order(self) -> None:
-        """Store operations happen in correct order: init → clear → scan → close."""
+        """Store operations happen in correct order: init → scan → close (no separate clear)."""
         call_order: list[str] = []
 
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock(side_effect=lambda: call_order.append("initialize"))
-        mock_store.clear_all = AsyncMock(side_effect=lambda: call_order.append("clear_all"))
         mock_store.close = AsyncMock(side_effect=lambda: call_order.append("close"))
 
         async def fake_scan(store):
@@ -547,7 +518,7 @@ class TestScanRegisterPipeline:
         ):
             await _scan_and_register_repos()
 
-        assert call_order == ["initialize", "clear_all", "scan_and_register", "close"]
+        assert call_order == ["initialize", "scan_and_register", "close"]
 
     @pytest.mark.asyncio
     async def test_scan_passes_store_to_scan_and_register(self) -> None:

@@ -124,7 +124,6 @@ async def _scan_and_register_repos() -> list[dict]:
     store = BrownfieldStore()
     try:
         await store.initialize()
-        await store.clear_all()
         repos = await scan_and_register(store)
         return [
             {

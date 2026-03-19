@@ -77,8 +77,15 @@ class TestDetectAction:
         assert _detect_action({"action": "query"}) == "query"
         assert _detect_action({"action": "set_default"}) == "set_default"
 
-    def test_path_implies_register(self) -> None:
-        assert _detect_action({"path": "/some/path"}) == "register"
+    def test_path_with_name_implies_register(self) -> None:
+        assert _detect_action({"path": "/some/path", "name": "repo"}) == "register"
+
+    def test_path_without_name_implies_set_default(self) -> None:
+        assert _detect_action({"path": "/some/path"}) == "set_default"
+
+    def test_is_default_implies_set_default(self) -> None:
+        assert _detect_action({"is_default": True, "path": "/p"}) == "set_default"
+        assert _detect_action({"is_default": False, "path": "/p"}) == "set_default"
 
     def test_empty_defaults_to_query(self) -> None:
         assert _detect_action({}) == "query"
@@ -86,6 +93,7 @@ class TestDetectAction:
     def test_explicit_overrides_auto(self) -> None:
         """Explicit action takes precedence over path-based detection."""
         assert _detect_action({"action": "set_default", "path": "/some/path"}) == "set_default"
+        assert _detect_action({"action": "register", "path": "/some/path"}) == "register"
 
 
 # ── Tool definition tests ────────────────────────────────────────
@@ -115,6 +123,7 @@ class TestBrownfieldHandlerDefinition:
             "path",
             "name",
             "desc",
+            "is_default",
             "default_only",
             "scan_root",
             "offset",
@@ -297,15 +306,28 @@ class TestBrownfieldHandlerDispatch:
 
     @pytest.mark.asyncio
     async def test_auto_detect_register(self) -> None:
-        """Providing path without action auto-detects 'register'."""
+        """Providing path + name without action auto-detects 'register'."""
         store = _make_store_stub()
         handler = BrownfieldHandler(_store=store)
 
-        result = await handler.handle({"path": "/home/user/auto-detect"})
+        result = await handler.handle({"path": "/home/user/auto-detect", "name": "auto-detect"})
 
         assert result.is_ok
         meta = result.value.meta
         assert meta["action"] == "register"
+
+    @pytest.mark.asyncio
+    async def test_auto_detect_set_default(self) -> None:
+        """Providing path without name auto-detects 'set_default'."""
+        repo = BrownfieldRepo(path="/home/user/my-repo", name="my-repo")
+        store = _make_store_stub(repos=[repo])
+        handler = BrownfieldHandler(_store=store)
+
+        result = await handler.handle({"path": "/home/user/my-repo"})
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["action"] == "set_default"
 
     @pytest.mark.asyncio
     async def test_auto_detect_query(self) -> None:
