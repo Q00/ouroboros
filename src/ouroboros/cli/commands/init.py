@@ -573,7 +573,7 @@ def _display_pm_seed_info(seed_path: Path) -> dict[str, str]:
         name = data.get("product_name", "") or "Unnamed"
         goal = data.get("goal", "") or "No goal specified"
         pm_id = data.get("pm_id", seed_path.stem)
-    except Exception:
+    except (yaml.YAMLError, OSError):
         name = seed_path.stem
         goal = "No goal specified"
         pm_id = seed_path.stem

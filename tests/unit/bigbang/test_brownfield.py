@@ -19,6 +19,7 @@ from ouroboros.bigbang.brownfield import (
     scan_home_for_repos,
     set_default_repo,
 )
+from ouroboros.core.errors import ProviderError
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 
 # ── BrownfieldEntry (re-exported BrownfieldRepo) ──────────────────
@@ -338,7 +339,7 @@ class TestGenerateDesc:
         (tmp_path / "README.md").write_text("# Project")
 
         mock_adapter = AsyncMock()
-        mock_adapter.complete.side_effect = Exception("LLM down")
+        mock_adapter.complete.side_effect = ProviderError("LLM down")
 
         desc = await generate_desc(tmp_path, mock_adapter)
         assert desc == ""
@@ -604,7 +605,7 @@ class TestRegisterRepo:
         (repo_dir / "README.md").write_text("# Project")
 
         mock_adapter = AsyncMock()
-        mock_adapter.complete.side_effect = Exception("LLM down")
+        mock_adapter.complete.side_effect = ProviderError("LLM down")
 
         store = AsyncMock(spec=BrownfieldStore)
         store.register.return_value = BrownfieldRepo(path=str(repo_dir.resolve()), name="proj")
@@ -790,7 +791,7 @@ class TestSetDefaultRepo:
         store.update_is_default.return_value = original_repo
 
         mock_adapter = AsyncMock()
-        mock_adapter.complete.side_effect = Exception("LLM down")
+        mock_adapter.complete.side_effect = ProviderError("LLM down")
 
         result = await set_default_repo(
             store=store,

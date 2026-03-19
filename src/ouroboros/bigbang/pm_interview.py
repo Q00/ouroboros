@@ -281,8 +281,8 @@ class PMInterviewEngine:
                 repos_explored=len(results),
                 context_length=len(self.codebase_context),
             )
-        except Exception as e:
-            log.warning("pm.explore_failed", error=str(e))
+        except (ProviderError, OSError) as e:
+            log.warning("pm.explore_failed", error=str(e), exc_info=e)
 
         self._explored = True
         return self.codebase_context

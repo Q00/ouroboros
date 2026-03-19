@@ -20,6 +20,7 @@ import subprocess
 
 import structlog
 
+from ouroboros.core.errors import ProviderError
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -214,11 +215,12 @@ async def generate_desc(
             desc = result.value.content.strip().rstrip(".")
             # Sanity: cap at 120 chars
             return desc[:120]
-    except Exception as exc:
+    except (ProviderError, OSError) as exc:
         log.warning(
             "brownfield.desc_generation_failed",
             path=str(repo_path),
             error=str(exc),
+            exc_info=exc,
         )
 
     return ""
@@ -342,11 +344,12 @@ async def register_repo(
     if desc is None and llm_adapter is not None:
         try:
             desc = await generate_desc(repo_path, llm_adapter, model)
-        except Exception as exc:
+        except (ProviderError, OSError) as exc:
             log.warning(
                 "brownfield.register_repo.desc_failed",
                 path=canonical_path,
                 error=str(exc),
+                exc_info=exc,
             )
 
     repo = await store.register(
@@ -409,11 +412,12 @@ async def set_default_repo(
                         path=path,
                         desc=desc[:60],
                     )
-        except Exception as exc:
+        except (ProviderError, OSError) as exc:
             log.warning(
                 "brownfield.set_default_repo.desc_failed",
                 path=path,
                 error=str(exc),
+                exc_info=exc,
             )
 
     log.info("brownfield.set_default_repo", path=path, name=repo.name)
