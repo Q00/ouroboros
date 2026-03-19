@@ -26,9 +26,7 @@ from typing import Any
 
 import structlog
 
-from ouroboros.bigbang.ambiguity import AmbiguityScorer
 from ouroboros.bigbang.interview import (
-    MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewRound,
     InterviewState,
 )
@@ -82,16 +80,7 @@ def _save_pm_meta(
     """
     # Engine may be None when saving before interview start
     if engine is not None:
-        reframe_map = engine._reframe_map
-        # pending_reframe: single {reframed, original} object or None
-        pending_reframe: dict[str, str] | None = None
-        if reframe_map:
-            # Take the most recent entry (last inserted)
-            reframed = next(reversed(reframe_map))
-            pending_reframe = {
-                "reframed": reframed,
-                "original": reframe_map[reframed],
-            }
+        pending_reframe = engine.get_pending_reframe()
 
         meta: dict[str, Any] = {
             "deferred_items": list(engine.deferred_items),
@@ -143,22 +132,19 @@ def _load_pm_meta(
 
 
 def _restore_engine_meta(engine: PMInterviewEngine, meta: dict[str, Any]) -> None:
-    """Restore PM-specific state into an engine from loaded meta."""
-    engine.deferred_items = list(meta.get("deferred_items", []))
-    engine.decide_later_items = list(meta.get("decide_later_items", []))
-    engine.codebase_context = meta.get("codebase_context", "")
-    engine._selected_brownfield_repos = list(meta.get("brownfield_repos", []))
-    # Restore the reframe map from pending_reframe if present
-    pending = meta.get("pending_reframe")
-    if pending and isinstance(pending, dict):
-        engine._reframe_map[pending["reframed"]] = pending["original"]
+    """Restore PM-specific state into an engine from loaded meta.
+
+    Delegates to ``engine.restore_meta()``.
+    """
+    engine.restore_meta(meta)
 
 
 def _last_classification(engine: PMInterviewEngine) -> str | None:
-    """Return the output_type string of the engine's last classification, or None."""
-    if engine.classifications:
-        return engine.classifications[-1].output_type.value
-    return None
+    """Return the output_type string of the engine's last classification, or None.
+
+    Delegates to ``engine.get_last_classification()``.
+    """
+    return engine.get_last_classification()
 
 
 def _detect_action(arguments: dict[str, Any]) -> str:
@@ -201,24 +187,11 @@ def _compute_deferred_diff(
 ) -> dict[str, Any]:
     """Compute the diff of deferred/decide-later items after ask_next_question.
 
-    Compares list lengths before and after the call to determine which
-    new items were added during classification.  Returns a dict with:
-        new_deferred: list of newly deferred question texts
-        new_decide_later: list of newly decide-later question texts
-        deferred_count: total deferred items
-        decide_later_count: total decide-later items
+    Delegates to ``engine.compute_deferred_diff()``.
 
     This is the core diff computation for AC 8.
     """
-    new_deferred = engine.deferred_items[deferred_len_before:]
-    new_decide_later = engine.decide_later_items[decide_later_len_before:]
-
-    return {
-        "new_deferred": list(new_deferred),
-        "new_decide_later": list(new_decide_later),
-        "deferred_count": len(engine.deferred_items),
-        "decide_later_count": len(engine.decide_later_items),
-    }
+    return engine.compute_deferred_diff(deferred_len_before, decide_later_len_before)
 
 
 async def _check_completion(
@@ -227,104 +200,12 @@ async def _check_completion(
 ) -> dict[str, Any] | None:
     """Check whether the interview should complete based on ambiguity or rounds.
 
-    Completion is determined by two signals (no user "done" signal):
-
-    1. **Ambiguity score** — after at least ``MIN_ROUNDS_BEFORE_EARLY_EXIT``
-       answered rounds, the scorer evaluates requirement clarity.  If the score
-       is ≤ ``AMBIGUITY_THRESHOLD`` (0.2) the interview is ready for PM
-       generation.
-
-    2. **Max-rounds safety cap** — after ``MAX_PM_INTERVIEW_ROUNDS`` rounds
-       the interview is force-completed to prevent runaway loops.
+    Delegates to ``engine.check_completion()``.
 
     Returns a dict with completion metadata if the interview should end,
     or ``None`` if the interview should continue.
     """
-    # Count only answered rounds (exclude the pending unanswered round)
-    answered_rounds = sum(1 for r in state.rounds if r.user_response is not None)
-
-    # ── Max-rounds hard cap ────────────────────────────────────────
-    if answered_rounds >= MAX_PM_INTERVIEW_ROUNDS:
-        log.info(
-            "pm_handler.completion.max_rounds",
-            session_id=state.interview_id,
-            rounds=answered_rounds,
-        )
-        return {
-            "interview_complete": True,
-            "completion_reason": "max_rounds",
-            "rounds_completed": answered_rounds,
-            "ambiguity_score": None,
-        }
-
-    # ── Ambiguity check (only after minimum rounds) ────────────────
-    if answered_rounds < MIN_ROUNDS_BEFORE_EARLY_EXIT:
-        return None
-
-    try:
-        # Build additional context for scorer: decide-later items are
-        # intentional deferrals that should not penalise clarity.
-        additional_context = ""
-        if engine.decide_later_items:
-            additional_context = "Decide-later items (intentional deferrals):\n"
-            additional_context += "\n".join(f"- {item}" for item in engine.decide_later_items)
-
-        scorer = AmbiguityScorer(
-            llm_adapter=engine.llm_adapter,
-            model=engine.model,
-        )
-        score_result = await scorer.score(
-            state,
-            is_brownfield=state.is_brownfield,
-            additional_context=additional_context,
-        )
-
-        if score_result.is_err:
-            log.warning(
-                "pm_handler.completion.scoring_failed",
-                session_id=state.interview_id,
-                error=str(score_result.error),
-            )
-            # Scoring failed — continue the interview rather than blocking
-            return None
-
-        ambiguity = score_result.value
-
-        # Persist score on state for downstream use
-        state.store_ambiguity(
-            score=ambiguity.overall_score,
-            breakdown=ambiguity.breakdown.model_dump(mode="json"),
-        )
-
-        if ambiguity.is_ready_for_seed:
-            log.info(
-                "pm_handler.completion.ambiguity_resolved",
-                session_id=state.interview_id,
-                ambiguity_score=ambiguity.overall_score,
-                rounds=answered_rounds,
-            )
-            return {
-                "interview_complete": True,
-                "completion_reason": "ambiguity_resolved",
-                "rounds_completed": answered_rounds,
-                "ambiguity_score": ambiguity.overall_score,
-            }
-
-        log.debug(
-            "pm_handler.completion.continuing",
-            session_id=state.interview_id,
-            ambiguity_score=ambiguity.overall_score,
-            rounds=answered_rounds,
-        )
-
-    except Exception as e:
-        log.warning(
-            "pm_handler.completion.check_error",
-            session_id=state.interview_id,
-            error=str(e),
-        )
-
-    return None
+    return await engine.check_completion(state, max_rounds=MAX_PM_INTERVIEW_ROUNDS)
 
 
 @dataclass
@@ -584,13 +465,7 @@ class PMInterviewHandler:
         )
 
         # Include pending_reframe in response meta if a reframe occurred
-        pending_reframe = None
-        if engine._reframe_map:
-            reframed = next(reversed(engine._reframe_map))
-            pending_reframe = {
-                "reframed": reframed,
-                "original": engine._reframe_map[reframed],
-            }
+        pending_reframe = engine.get_pending_reframe()
 
         meta = {
             "session_id": state.interview_id,
@@ -860,13 +735,7 @@ class PMInterviewHandler:
             pending_question = state.rounds[-1].question
             classification = _last_classification(engine)
 
-            pending_reframe = None
-            if engine._reframe_map:
-                reframed = next(reversed(engine._reframe_map))
-                pending_reframe = {
-                    "reframed": reframed,
-                    "original": engine._reframe_map[reframed],
-                }
+            pending_reframe = engine.get_pending_reframe()
 
             return Result.ok(
                 MCPToolResult(
@@ -1017,13 +886,7 @@ class PMInterviewHandler:
         _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
         # Include pending_reframe in response meta if a new reframe occurred
-        pending_reframe = None
-        if engine._reframe_map:
-            reframed = next(reversed(engine._reframe_map))
-            pending_reframe = {
-                "reframed": reframed,
-                "original": engine._reframe_map[reframed],
-            }
+        pending_reframe = engine.get_pending_reframe()
 
         # Extract classification from the last classify call
         classification = _last_classification(engine)

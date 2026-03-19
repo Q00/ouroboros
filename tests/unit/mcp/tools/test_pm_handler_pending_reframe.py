@@ -47,13 +47,9 @@ def tmp_data_dir(tmp_path: Path) -> Path:
 @pytest.fixture()
 def mock_engine() -> PMInterviewEngine:
     """Create a mock PMInterviewEngine with default empty state."""
-    engine = MagicMock(spec=PMInterviewEngine)
-    engine.deferred_items = []
-    engine.decide_later_items = []
-    engine.codebase_context = ""
-    engine._reframe_map = {}
-    engine.classifications = []
-    return engine
+    from tests.unit.mcp.tools.conftest import make_pm_engine_mock
+
+    return make_pm_engine_mock()
 
 
 @pytest.fixture()

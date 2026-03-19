@@ -25,11 +25,16 @@ from typing import Any
 import structlog
 import yaml
 
+from ouroboros.bigbang.ambiguity import AmbiguityScorer
 from ouroboros.bigbang.brownfield import (
     load_brownfield_repos_as_dicts as _load_brownfield_dicts,
 )
 from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
-from ouroboros.bigbang.interview import InterviewEngine, InterviewState
+from ouroboros.bigbang.interview import (
+    MIN_ROUNDS_BEFORE_EARLY_EXIT,
+    InterviewEngine,
+    InterviewState,
+)
 from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
@@ -48,6 +53,10 @@ from ouroboros.providers.base import (
 )
 
 log = structlog.get_logger()
+
+# Hard cap on interview rounds.  The ambiguity scorer should trigger
+# completion well before this, but this prevents runaway loops.
+MAX_PM_INTERVIEW_ROUNDS = 20
 
 _SEED_DIR = Path.home() / ".ouroboros" / "seeds"
 _PM_SYSTEM_PROMPT_PREFIX = """\
@@ -688,6 +697,179 @@ class PMInterviewEngine:
         pending = meta.get("pending_reframe")
         if pending and isinstance(pending, dict):
             self._reframe_map[pending["reframed"]] = pending["original"]
+
+    # ──────────────────────────────────────────────────────────────
+    # Public accessors for handler delegation
+    # ──────────────────────────────────────────────────────────────
+
+    def compute_deferred_diff(
+        self,
+        deferred_len_before: int,
+        decide_later_len_before: int,
+    ) -> dict[str, Any]:
+        """Compute the diff of deferred/decide-later items after ask_next_question.
+
+        Compares list lengths before and after the call to determine which
+        new items were added during classification.  Returns a dict with:
+            new_deferred: list of newly deferred question texts
+            new_decide_later: list of newly decide-later question texts
+            deferred_count: total deferred items
+            decide_later_count: total decide-later items
+
+        Args:
+            deferred_len_before: Length of deferred_items before the call.
+            decide_later_len_before: Length of decide_later_items before the call.
+
+        Returns:
+            Dict with new_deferred, new_decide_later, deferred_count, decide_later_count.
+        """
+        new_deferred = self.deferred_items[deferred_len_before:]
+        new_decide_later = self.decide_later_items[decide_later_len_before:]
+
+        return {
+            "new_deferred": list(new_deferred),
+            "new_decide_later": list(new_decide_later),
+            "deferred_count": len(self.deferred_items),
+            "decide_later_count": len(self.decide_later_items),
+        }
+
+    def get_pending_reframe(self) -> dict[str, str] | None:
+        """Return the most recent pending reframe as {reframed, original}, or None.
+
+        Encapsulates access to the internal ``_reframe_map`` so that callers
+        do not need to reach into private state.
+
+        Returns:
+            Dict with 'reframed' and 'original' keys, or None if no pending reframe.
+        """
+        if not self._reframe_map:
+            return None
+        reframed = next(reversed(self._reframe_map))
+        return {
+            "reframed": reframed,
+            "original": self._reframe_map[reframed],
+        }
+
+    def get_last_classification(self) -> str | None:
+        """Return the output_type string of the last classification, or None.
+
+        Returns:
+            The output_type value string (e.g. 'passthrough', 'reframed',
+            'deferred', 'decide_later'), or None if no classifications exist.
+        """
+        if self.classifications:
+            return self.classifications[-1].output_type.value
+        return None
+
+    async def check_completion(
+        self,
+        state: InterviewState,
+        max_rounds: int = MAX_PM_INTERVIEW_ROUNDS,
+    ) -> dict[str, Any] | None:
+        """Check whether the interview should complete based on ambiguity or rounds.
+
+        Completion is determined by two signals (no user "done" signal):
+
+        1. **Ambiguity score** -- after at least ``MIN_ROUNDS_BEFORE_EARLY_EXIT``
+           answered rounds, the scorer evaluates requirement clarity.  If the score
+           is <= threshold (0.2) the interview is ready for PM generation.
+
+        2. **Max-rounds safety cap** -- after *max_rounds* rounds the interview is
+           force-completed to prevent runaway loops.
+
+        Args:
+            state: Current interview state.
+            max_rounds: Maximum allowed answered rounds before forced completion.
+
+        Returns:
+            Dict with completion metadata if the interview should end,
+            or ``None`` if the interview should continue.
+        """
+        # Count only answered rounds (exclude the pending unanswered round)
+        answered_rounds = sum(1 for r in state.rounds if r.user_response is not None)
+
+        # ── Max-rounds hard cap ────────────────────────────────────────
+        if answered_rounds >= max_rounds:
+            log.info(
+                "pm.completion.max_rounds",
+                session_id=state.interview_id,
+                rounds=answered_rounds,
+            )
+            return {
+                "interview_complete": True,
+                "completion_reason": "max_rounds",
+                "rounds_completed": answered_rounds,
+                "ambiguity_score": None,
+            }
+
+        # ── Ambiguity check (only after minimum rounds) ────────────────
+        if answered_rounds < MIN_ROUNDS_BEFORE_EARLY_EXIT:
+            return None
+
+        try:
+            # Build additional context for scorer: decide-later items are
+            # intentional deferrals that should not penalise clarity.
+            additional_context = ""
+            if self.decide_later_items:
+                additional_context = "Decide-later items (intentional deferrals):\n"
+                additional_context += "\n".join(f"- {item}" for item in self.decide_later_items)
+
+            scorer = AmbiguityScorer(
+                llm_adapter=self.llm_adapter,
+                model=self.model,
+            )
+            score_result = await scorer.score(
+                state,
+                is_brownfield=state.is_brownfield,
+                additional_context=additional_context,
+            )
+
+            if score_result.is_err:
+                log.warning(
+                    "pm.completion.scoring_failed",
+                    session_id=state.interview_id,
+                    error=str(score_result.error),
+                )
+                # Scoring failed — continue the interview rather than blocking
+                return None
+
+            ambiguity = score_result.value
+
+            # Persist score on state for downstream use
+            state.store_ambiguity(
+                score=ambiguity.overall_score,
+                breakdown=ambiguity.breakdown.model_dump(mode="json"),
+            )
+
+            if ambiguity.is_ready_for_seed:
+                log.info(
+                    "pm.completion.ambiguity_resolved",
+                    session_id=state.interview_id,
+                    ambiguity_score=ambiguity.overall_score,
+                    rounds=answered_rounds,
+                )
+                return {
+                    "interview_complete": True,
+                    "completion_reason": "ambiguity_resolved",
+                    "rounds_completed": answered_rounds,
+                    "ambiguity_score": ambiguity.overall_score,
+                }
+
+            log.debug(
+                "pm.completion.continuing",
+                session_id=state.interview_id,
+                ambiguity_score=ambiguity.overall_score,
+                rounds=answered_rounds,
+            )
+
+        except Exception as e:
+            log.warning(
+                "pm.completion.check_error",
+                session_id=state.interview_id,
+                error=str(e),
+            )
+
+        return None
 
     # ──────────────────────────────────────────────────────────────
     # PMSeed extraction

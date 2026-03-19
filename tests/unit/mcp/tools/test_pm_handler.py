@@ -23,6 +23,7 @@ from ouroboros.mcp.tools.pm_handler import (
     _restore_engine_meta,
     _save_pm_meta,
 )
+from tests.unit.mcp.tools.conftest import make_pm_engine_mock
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -32,14 +33,12 @@ def _make_engine_stub(
     decide_later: list[str] | None = None,
 ) -> PMInterviewEngine:
     """Create a PMInterviewEngine stub with controllable lists."""
-    engine = MagicMock(spec=PMInterviewEngine)
-    engine.deferred_items = list(deferred or [])
-    engine.decide_later_items = list(decide_later or [])
-    engine.codebase_context = ""
-    engine._reframe_map = {}
-    engine.classifications = []
-    engine._selected_brownfield_repos = []
-    return engine
+    from tests.unit.mcp.tools.conftest import make_pm_engine_mock
+
+    return make_pm_engine_mock(
+        deferred_items=list(deferred or []),
+        decide_later_items=list(decide_later or []),
+    )
 
 
 def _make_state(
@@ -336,12 +335,7 @@ class TestPMHandlerDiffIntegration:
     async def test_handle_answer_includes_diff_in_meta(self, tmp_path: Path) -> None:
         """When answering, the response meta includes new_deferred/new_decide_later."""
         # Set up engine mock that simulates classification adding items
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = ["existing_deferred"]
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=["existing_deferred"], decide_later_items=[])
 
         state = _make_state(
             rounds=[
@@ -395,12 +389,7 @@ class TestPMHandlerDiffIntegration:
     @pytest.mark.asyncio
     async def test_handle_answer_no_new_items(self, tmp_path: Path) -> None:
         """When no items are deferred/decide-later, diff lists are empty."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = ["d1"]
-        engine.decide_later_items = ["dl1"]
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=["d1"], decide_later_items=["dl1"])
 
         state = _make_state(
             rounds=[
@@ -436,12 +425,7 @@ class TestPMHandlerDiffIntegration:
     @pytest.mark.asyncio
     async def test_handle_answer_includes_interview_complete_false(self, tmp_path: Path) -> None:
         """Non-complete response meta includes interview_complete=False."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(
             rounds=[
@@ -536,7 +520,7 @@ class TestCheckCompletion:
             ),
         )
 
-        with patch("ouroboros.mcp.tools.pm_handler.AmbiguityScorer") as mock_scorer_cls:
+        with patch("ouroboros.bigbang.pm_interview.AmbiguityScorer") as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
@@ -575,7 +559,7 @@ class TestCheckCompletion:
             ),
         )
 
-        with patch("ouroboros.mcp.tools.pm_handler.AmbiguityScorer") as mock_scorer_cls:
+        with patch("ouroboros.bigbang.pm_interview.AmbiguityScorer") as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
@@ -595,7 +579,7 @@ class TestCheckCompletion:
         engine.llm_adapter = MagicMock()
         engine.model = "test-model"
 
-        with patch("ouroboros.mcp.tools.pm_handler.AmbiguityScorer") as mock_scorer_cls:
+        with patch("ouroboros.bigbang.pm_interview.AmbiguityScorer") as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.err(ProviderError("LLM down")))
             mock_scorer_cls.return_value = mock_scorer
@@ -643,7 +627,7 @@ class TestCheckCompletion:
             ),
         )
 
-        with patch("ouroboros.mcp.tools.pm_handler.AmbiguityScorer") as mock_scorer_cls:
+        with patch("ouroboros.bigbang.pm_interview.AmbiguityScorer") as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
@@ -663,12 +647,7 @@ class TestHandlerCompletionIntegration:
     @pytest.mark.asyncio
     async def test_handle_answer_completion_via_ambiguity(self, tmp_path: Path) -> None:
         """When ambiguity is resolved, handle() returns completion response."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = ["d1"]
-        engine.decide_later_items = ["dl1"]
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=["d1"], decide_later_items=["dl1"])
         engine.format_decide_later_summary = MagicMock(
             return_value="Items to decide later:\n  1. dl1"
         )
@@ -726,12 +705,7 @@ class TestHandlerCompletionIntegration:
     @pytest.mark.asyncio
     async def test_no_done_signal_processing(self, tmp_path: Path) -> None:
         """User typing 'done' is treated as a normal answer, not a completion signal."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(
             rounds=[
@@ -817,12 +791,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_directly_starts_interview_with_defaults(self, tmp_path: Path) -> None:
         """Start auto-loads default repos from DB and starts interview directly."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="direct-start-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -863,12 +832,7 @@ class TestHandleStartBrownfield:
             ),
         ]
 
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="bf-auto-sess", is_brownfield=True)
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -903,12 +867,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_no_default_repos_starts_greenfield(self, tmp_path: Path) -> None:
         """When no default repos in DB, starts interview as greenfield."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="gf-auto-sess", is_brownfield=False)
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -938,12 +897,7 @@ class TestHandleStartBrownfield:
         """Step 2: When selected_repos provided, start interview with those repos."""
         from ouroboros.persistence.brownfield import BrownfieldRepo
 
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="brownfield-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -982,12 +936,7 @@ class TestHandleStartBrownfield:
         self, tmp_path: Path
     ) -> None:
         """Start with no selected_repos and no DB defaults starts greenfield."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="greenfield-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1019,12 +968,7 @@ class TestHandleStartBrownfield:
         self, tmp_path: Path
     ) -> None:
         """When DB default repo query returns empty, starts as greenfield."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="fallback-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1052,12 +996,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_returns_session_id_and_question(self, tmp_path: Path) -> None:
         """Start returns the session_id in meta and first question in content."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="new-sess-42")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1082,12 +1021,8 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_saves_pm_meta(self, tmp_path: Path) -> None:
         """Start persists pm_meta with cwd for later restoration."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = ["deferred_q"]
-        engine.decide_later_items = []
+        engine = make_pm_engine_mock(deferred_items=["deferred_q"], decide_later_items=[])
         engine.codebase_context = "some context"
-        engine._reframe_map = {}
-        engine.classifications = []
 
         state = _make_state(interview_id="meta-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1114,12 +1049,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_includes_diff_in_meta(self, tmp_path: Path) -> None:
         """Start response meta includes deferred/decide-later diff."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="diff-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1151,12 +1081,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_engine_error_returns_err(self, tmp_path: Path) -> None:
         """When engine.ask_opening_and_start fails, handle returns error."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         engine.ask_opening_and_start = AsyncMock(
             return_value=Result.err(MagicMock(__str__=lambda _s: "Validation failed"))
@@ -1177,12 +1102,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_question_error_returns_err(self, tmp_path: Path) -> None:
         """When engine.ask_next_question fails, handle returns error."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state()
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1205,12 +1125,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_cwd_defaults_to_getcwd(self, tmp_path: Path) -> None:
         """When cwd is not provided, defaults to os.getcwd()."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="default-cwd-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1230,12 +1145,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_records_unanswered_round(self, tmp_path: Path) -> None:
         """Start appends an unanswered round to state before saving."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="round-sess")
         state.rounds = []  # Start with no rounds
@@ -1268,9 +1178,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_includes_pending_reframe_in_meta(self, tmp_path: Path) -> None:
         """Start response includes pending_reframe when engine has reframe."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
         engine.codebase_context = ""
         engine._reframe_map = {"PM-friendly Q": "Original tech Q"}
 
@@ -1298,12 +1206,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_meta_contains_question_field(self, tmp_path: Path) -> None:
         """Response meta includes the generated question as a separate field."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="q-meta-sess")
         state.is_brownfield = False
@@ -1330,12 +1233,7 @@ class TestHandleStartBrownfield:
         """Response meta includes is_brownfield=True for brownfield projects."""
         (tmp_path / ".git").mkdir()
 
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="bf-meta-sess")
         state.is_brownfield = True
@@ -1358,12 +1256,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_meta_contains_is_brownfield_false(self, tmp_path: Path) -> None:
         """Response meta includes is_brownfield=False for greenfield projects."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="gf-meta-sess")
         state.is_brownfield = False
@@ -1386,12 +1279,7 @@ class TestHandleStartBrownfield:
     @pytest.mark.asyncio
     async def test_start_meta_has_all_required_fields(self, tmp_path: Path) -> None:
         """Response meta contains session_id, question, is_brownfield, and diff fields."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(interview_id="full-meta-sess")
         state.is_brownfield = False
@@ -1444,9 +1332,7 @@ class TestResumeMetaFields:
             QuestionCategory,
         )
 
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
         engine.codebase_context = ""
         engine._reframe_map = {}
         engine.classifications = [
@@ -1500,11 +1386,7 @@ class TestResumeMetaFields:
             QuestionCategory,
         )
 
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = ["old_deferred"]
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
+        engine = make_pm_engine_mock(deferred_items=["old_deferred"], decide_later_items=[])
         engine.classifications = [
             ClassificationResult(
                 original_question="What framework?",
@@ -1559,12 +1441,7 @@ class TestResumeMetaFields:
         self, tmp_path: Path
     ) -> None:
         """When engine has no classifications, classification is None."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
-        engine.codebase_context = ""
-        engine._reframe_map = {}
-        engine.classifications = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
 
         state = _make_state(
             interview_id="resume-noclassify",
@@ -1600,9 +1477,7 @@ class TestResumeMetaFields:
             QuestionCategory,
         )
 
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = ["d1"]
-        engine.decide_later_items = ["dl1"]
+        engine = make_pm_engine_mock(deferred_items=["d1"], decide_later_items=["dl1"])
         engine.codebase_context = ""
         engine._reframe_map = {}
         engine.classifications = [
@@ -1652,12 +1527,8 @@ class TestResumeMetaFields:
     @pytest.mark.asyncio
     async def test_resume_loads_state_and_meta(self, tmp_path: Path) -> None:
         """Resume loads InterviewState via engine and restores pm_meta."""
-        engine = MagicMock(spec=PMInterviewEngine)
-        engine.deferred_items = []
-        engine.decide_later_items = []
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
         engine.codebase_context = "existing context"
-        engine._reframe_map = {}
-        engine.classifications = []
 
         state = _make_state(
             interview_id="resume-load",

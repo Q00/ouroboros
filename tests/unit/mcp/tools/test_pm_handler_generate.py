@@ -74,11 +74,9 @@ def _make_engine_for_generate(
     """Create a mock PMInterviewEngine for generate tests."""
     if seed_path is None:
         seed_path = Path.home() / ".ouroboros" / "seeds" / "pm_seed_test123.yaml"
-    engine = MagicMock(spec=PMInterviewEngine)
-    engine.deferred_items = []
-    engine.decide_later_items = []
-    engine.codebase_context = ""
-    engine._reframe_map = {}
+    from tests.unit.mcp.tools.conftest import make_pm_engine_mock
+
+    engine = make_pm_engine_mock()
 
     engine.load_state = AsyncMock(return_value=Result.ok(state))
     engine.generate_pm_seed = AsyncMock(return_value=Result.ok(seed))
@@ -332,8 +330,9 @@ class TestHandleGenerate:
     async def test_generate_error_on_load_state_failure(self, tmp_path: Path) -> None:
         """Generate returns error when load_state fails."""
         from ouroboros.core.errors import ValidationError
+        from tests.unit.mcp.tools.conftest import make_pm_engine_mock
 
-        engine = MagicMock(spec=PMInterviewEngine)
+        engine = make_pm_engine_mock()
         engine.load_state = AsyncMock(
             return_value=Result.err(ValidationError("Not found", field="session_id"))
         )
@@ -353,9 +352,10 @@ class TestHandleGenerate:
     async def test_generate_error_on_seed_generation_failure(self, tmp_path: Path) -> None:
         """Generate returns error when generate_pm_seed fails."""
         from ouroboros.core.errors import ProviderError
+        from tests.unit.mcp.tools.conftest import make_pm_engine_mock
 
         state = _make_state()
-        engine = MagicMock(spec=PMInterviewEngine)
+        engine = make_pm_engine_mock()
         engine.load_state = AsyncMock(return_value=Result.ok(state))
         engine.generate_pm_seed = AsyncMock(return_value=Result.err(ProviderError("LLM failed")))
         engine.restore_meta = MagicMock()
@@ -423,7 +423,9 @@ class TestHandleGenerate:
     @pytest.mark.asyncio
     async def test_generate_requires_session_id(self, tmp_path: Path) -> None:
         """Generate with action='generate' but no session_id returns error."""
-        engine = MagicMock(spec=PMInterviewEngine)
+        from tests.unit.mcp.tools.conftest import make_pm_engine_mock
+
+        engine = make_pm_engine_mock()
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         result = await handler.handle(
