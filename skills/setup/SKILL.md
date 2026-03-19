@@ -415,38 +415,21 @@ Find current default repo numbers from the list (repos with `is_default=true` in
 
 Only ONE option: the current default numbers as recommended. The user can "Type something" (built-in) for custom numbers or "none".
 
-After the user responds, run this Python script via Bash to update the DB:
+After the user responds, use the `ouroboros_brownfield` MCP tool:
 
-```bash
-python3 -c "
-import asyncio
-from ouroboros.persistence.brownfield import BrownfieldStore
-from ouroboros.bigbang.brownfield import set_default_repo
-
-async def main():
-    store = BrownfieldStore()
-    await store.initialize()
-    # Clear all defaults
-    all_repos = await store.list()
-    for r in all_repos:
-        if r.is_default:
-            await store.set_default(r.path, is_default=False)
-    # Set selected repos as default (replace PATHS with actual paths)
-    for path in SELECTED_PATHS:
-        await store.set_default(path, is_default=True)
-    await store.close()
-
-SELECTED_PATHS = ['/Users/.../repo1', '/Users/.../repo2']  # Replace with actual paths
-asyncio.run(main())
-"
-```
-
-Replace `SELECTED_PATHS` with the actual repo paths resolved from the user's number selection.
-
-For generating descriptions, read each repo's README.md and write a one-line summary yourself, then update via:
-```python
-await store.update_desc(path, "one-line description here")
-```
+1. First, load the tool: `ToolSearch query: "+ouroboros brownfield"`
+2. Clear all defaults:
+   ```
+   Tool: ouroboros_brownfield
+   Arguments: { "action": "set_default", "path": "<each default repo path>", "is_default": false }
+   ```
+   (Call once per current default repo)
+3. Set selected repos as default:
+   ```
+   Tool: ouroboros_brownfield
+   Arguments: { "action": "set_default", "path": "<selected repo path>", "is_default": true }
+   ```
+   (Call once per selected repo — this also auto-generates desc from README)
 
 If "none" → skip, no defaults.
 
