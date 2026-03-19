@@ -305,6 +305,19 @@ async def _run_pm_interview(
             print_error(f"Failed to resume session: {state_result.error}")
             raise typer.Exit(code=1)
         state = state_result.value
+
+        # Restore PM-specific metadata (deferred items, decide-later, etc.)
+        data_dir = Path.home() / ".ouroboros"
+        pm_meta_path = data_dir / f"pm_meta_{resume_id}.json"
+        if pm_meta_path.exists():
+            import json
+
+            try:
+                meta = json.loads(pm_meta_path.read_text(encoding="utf-8"))
+                engine.restore_meta(meta)
+            except (json.JSONDecodeError, OSError):
+                print_warning("Could not load PM metadata; continuing without it.")
+
         print_success(f"Resumed session: {resume_id}")
     else:
         # New session — ask the opening question first
@@ -360,7 +373,7 @@ async def _run_pm_interview(
         if seed_result.is_ok:
             seed = seed_result.value
             seed_path = engine.save_pm_seed(seed)
-            doc_path = engine.save_pm_document(seed, output_path.parent)
+            doc_path = engine.save_pm_document(seed, output_path=output_path)
             print_success(f"PM seed saved: {seed_path}")
             print_success(f"PM document saved: {doc_path}")
         else:

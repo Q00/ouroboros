@@ -185,23 +185,33 @@ def generate_pm_markdown(seed: PMSeed) -> str:
 def save_pm_document(
     seed: PMSeed,
     output_dir: str | Path | None = None,
+    *,
+    output_path: str | Path | None = None,
 ) -> Path:
     """Generate and save a PM document.
 
     Args:
         seed: The PMSeed to generate the document from.
         output_dir: Directory to save pm.md in. Defaults to .ouroboros/.
+            Ignored when *output_path* is provided.
+        output_path: Full file path (directory + filename) for the PM
+            document. When given, *output_dir* is ignored and the file
+            is written to exactly this path.
 
     Returns:
         Path to the saved pm.md file.
     """
-    if output_dir is None:
+    if output_path is not None:
+        pm_path = Path(output_path)
+        pm_path.parent.mkdir(parents=True, exist_ok=True)
+    elif output_dir is None:
         output_dir = Path.cwd() / _DEFAULT_PM_DIR
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pm_path = output_dir / _PM_FILENAME
     else:
         output_dir = Path(output_dir)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    pm_path = output_dir / _PM_FILENAME
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pm_path = output_dir / _PM_FILENAME
 
     content = generate_pm_markdown(seed)
     pm_path.write_text(content, encoding="utf-8")

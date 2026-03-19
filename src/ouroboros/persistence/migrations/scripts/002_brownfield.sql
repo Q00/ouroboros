@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS brownfield_repos (
     path TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     desc TEXT,
-    is_default BOOLEAN NOT NULL DEFAULT 0
+    is_default BOOLEAN NOT NULL DEFAULT 0,
+    registered_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Index for quickly finding the default repo

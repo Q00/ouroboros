@@ -753,17 +753,22 @@ class PMInterviewEngine:
         self,
         seed: PMSeed,
         output_dir: str | Path | None = None,
+        *,
+        output_path: str | Path | None = None,
     ) -> Path:
         """Generate and save PM document (pm.md).
 
         Args:
             seed: The PMSeed to generate document from.
             output_dir: Directory to save in. Defaults to .ouroboros/.
+                Ignored when *output_path* is provided.
+            output_path: Full file path (directory + filename) for the PM
+                document. When given, *output_dir* is ignored.
 
         Returns:
             Path to the saved pm.md.
         """
-        return save_pm_document(seed, output_dir)
+        return save_pm_document(seed, output_dir, output_path=output_path)
 
     # ──────────────────────────────────────────────────────────────
     # Dev interview handoff

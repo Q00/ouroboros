@@ -1531,7 +1531,7 @@ class PMInterviewHandler:
         # Restore PM meta into engine
         meta = _load_pm_meta(session_id, self.data_dir)
         if meta:
-            _restore_engine_meta(engine, meta)
+            engine.restore_meta(meta)
 
         # Record answer if provided
         if answer and state.rounds:

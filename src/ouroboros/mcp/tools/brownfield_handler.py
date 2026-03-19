@@ -95,7 +95,8 @@ class BrownfieldHandler:
                         "Action to perform: 'scan' to discover repos from ~/,"
                         " 'register' to add a single repo,"
                         " 'query' to list all repos or get default,"
-                        " 'set_default' to change the default repo."
+                        " 'set_default' to toggle a repo's default flag"
+                        " (supports multiple defaults; does NOT clear others)."
                         " Auto-detected from parameters when omitted."
                     ),
                     required=False,
@@ -448,10 +449,15 @@ class BrownfieldHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Set a registered repo as the default brownfield context.
+        """Toggle a repo's default flag without clearing other defaults.
 
-        Delegates to :func:`bigbang.brownfield.set_default_repo` for
-        business-level validation and logging.
+        Uses ``update_is_default`` which sets the flag on the target repo
+        only — it does **not** clear ``is_default`` on other repos.  This
+        intentionally supports multiple simultaneous defaults so that PM
+        interviews can reference several brownfield repositories at once.
+
+        Delegates to :meth:`BrownfieldStore.update_is_default` for the
+        underlying write.
         """
         path = arguments.get("path")
         if not path:
