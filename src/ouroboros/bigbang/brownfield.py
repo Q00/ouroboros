@@ -275,15 +275,7 @@ async def scan_and_register(
 
     log.info("brownfield.upsert_registered", count=len(scanned_paths))
 
-    # If no repo has is_default=True yet, set the first scanned repo
-    all_repos = await store.list()
-    has_default = any(r.is_default for r in all_repos)
-    if not has_default and all_repos:
-        await store.update_is_default(all_repos[0].path, is_default=True)
-        log.info("brownfield.default_set", path=all_repos[0].path)
-        all_repos = await store.list()
-
-    return all_repos
+    return await store.list()
 
 
 async def get_default_brownfield_context(

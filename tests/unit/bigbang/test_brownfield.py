@@ -398,8 +398,8 @@ class TestScanAndRegister:
         store.register.assert_called_once_with(path=resolved, name="my-repo")
         # clear_all should NOT be called (upsert preserves manual entries)
         store.clear_all.assert_not_called()
-        # Should set default since none existed
-        store.update_is_default.assert_called_once()
+        # Should NOT auto-set default — user picks defaults via setup prompt
+        store.update_is_default.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_llm_during_scan(self, tmp_path: Path) -> None:
@@ -950,8 +950,8 @@ class TestScanAndRegisterMocked:
         store.clear_all.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mocked_scan_sets_first_as_default(self) -> None:
-        """When no default exists, first repo in list becomes default."""
+    async def test_mocked_scan_does_not_auto_set_default(self) -> None:
+        """Scan should NOT auto-set default — user picks via setup prompt."""
         fake_repos = [{"path": "/a", "name": "a"}]
 
         store = AsyncMock(spec=BrownfieldStore)
@@ -959,11 +959,6 @@ class TestScanAndRegisterMocked:
         store.list.return_value = [
             BrownfieldRepo(path="/a", name="a"),
         ]
-        store.update_is_default.return_value = BrownfieldRepo(
-            path="/a",
-            name="a",
-            is_default=True,
-        )
 
         with patch(
             "ouroboros.bigbang.brownfield.scan_home_for_repos",
@@ -971,7 +966,7 @@ class TestScanAndRegisterMocked:
         ):
             await scan_and_register(store, root=Path("/fake"))
 
-        store.update_is_default.assert_called_once_with("/a", is_default=True)
+        store.update_is_default.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_mocked_scan_preserves_existing_default(self) -> None:
