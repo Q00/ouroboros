@@ -100,7 +100,7 @@ def _setup_claude(claude_path: str) -> None:
     # Set runtime and LLM backend to claude
     config_dict.setdefault("orchestrator", {})
     config_dict["orchestrator"]["runtime_backend"] = "claude"
-    config_dict["orchestrator"]["claude_path"] = claude_path
+    config_dict["orchestrator"]["cli_path"] = claude_path
 
     config_dict.setdefault("llm", {})
     config_dict["llm"]["backend"] = "claude"

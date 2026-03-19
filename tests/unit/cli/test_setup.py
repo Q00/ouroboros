@@ -58,7 +58,7 @@ class TestSetupClaude:
         _run_setup_claude(config_dir, home_dir, "/opt/custom/bin/claude")
 
         saved = yaml.safe_load(config_path.read_text())
-        assert saved["orchestrator"]["claude_path"] == "/opt/custom/bin/claude"
+        assert saved["orchestrator"]["cli_path"] == "/opt/custom/bin/claude"
 
     def test_switch_codex_to_claude_overwrites_backend(self, tmp_config_env: tuple):
         """Switching from codex to claude must rewrite runtime_backend and llm.backend."""
@@ -81,4 +81,4 @@ class TestSetupClaude:
         saved = yaml.safe_load(config_path.read_text())
         assert saved["orchestrator"]["runtime_backend"] == "claude"
         assert saved["llm"]["backend"] == "claude"
-        assert saved["orchestrator"]["claude_path"] == "/usr/local/bin/claude"
+        assert saved["orchestrator"]["cli_path"] == "/usr/local/bin/claude"
