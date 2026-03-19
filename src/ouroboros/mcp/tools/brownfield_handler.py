@@ -360,7 +360,7 @@ class BrownfieldHandler:
         store = await self._get_store()
 
         if default_only:
-            defaults = await store.get_defaults()
+            defaults = list(await store.get_defaults())
             if not defaults:
                 return Result.ok(
                     MCPToolResult(
@@ -411,7 +411,7 @@ class BrownfieldHandler:
 
         # Paginated list
         repos = await store.list(offset=offset, limit=limit)
-        defaults = await store.get_defaults()
+        defaults = list(await store.get_defaults())
 
         if not repos and total == 0:
             return Result.ok(
@@ -444,7 +444,7 @@ class BrownfieldHandler:
 
         repos_data = [r.to_dict() for r in repos]
         defaults_data = [d.to_dict() for d in defaults]
-        first_default: BrownfieldRepo | None = defaults[0] if defaults else None
+        paginated_first_default = defaults[0] if defaults else None
 
         return Result.ok(
             MCPToolResult(
@@ -462,7 +462,7 @@ class BrownfieldHandler:
                     "offset": offset,
                     "limit": limit,
                     "repos": repos_data,
-                    "default": first_default.to_dict() if first_default else None,
+                    "default": paginated_first_default.to_dict() if paginated_first_default else None,
                     "defaults": defaults_data,
                 },
             )

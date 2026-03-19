@@ -6,6 +6,7 @@ with aiosqlite backend. Follows the same patterns as EventStore.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -392,7 +393,7 @@ class BrownfieldStore:
                 table="brownfield_repos",
             ) from e
 
-    async def get_defaults(self) -> list[BrownfieldRepo]:
+    async def get_defaults(self) -> Sequence[BrownfieldRepo]:
         """Get all brownfield repositories marked as default.
 
         Unlike :meth:`get_default` which returns only the first match,
