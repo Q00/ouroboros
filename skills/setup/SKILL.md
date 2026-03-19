@@ -418,7 +418,10 @@ Only ONE option: the current default numbers as recommended. The user can "Type 
 After the user responds:
    - Clear ALL defaults in DB (set all `is_default=false`)
    - Parse the response (numbers → repo paths from the numbered list)
-   - Set selected repos to `is_default=true` in DB
+   - For each selected repo:
+     1. Set `is_default=true` in DB
+     2. Read the repo's README.md (or CLAUDE.md) and generate a one-line description
+     3. Update `desc` in DB with the generated summary
    - If "none" → skip, no defaults
 
 **Celebration Checkpoint 5.5:**
