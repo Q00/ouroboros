@@ -365,6 +365,9 @@ class PMInterviewEngine:
         Returns:
             Result containing the new InterviewState or ValidationError.
         """
+        # Always reset brownfield repos for a fresh interview; set below if provided
+        self._selected_brownfield_repos = []
+
         # Explore codebases if brownfield repos are provided
         if brownfield_repos:
             self._selected_brownfield_repos = list(brownfield_repos)
@@ -644,6 +647,8 @@ class PMInterviewEngine:
         self.codebase_context = meta.get("codebase_context", "") or ""
         # Sync classifier so brownfield context is available for classification
         self.classifier.codebase_context = self.codebase_context
+        # Restore brownfield repo selection
+        self._selected_brownfield_repos = list(meta.get("brownfield_repos", []))
         # Restore the reframe map from pending_reframe if present
         pending = meta.get("pending_reframe")
         if pending and isinstance(pending, dict):

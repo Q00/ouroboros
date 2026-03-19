@@ -413,7 +413,9 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                result = await conn.execute(select(t).where(t.c.is_default.is_(True)))
+                result = await conn.execute(
+                    select(t).where(t.c.is_default.is_(True)).order_by(t.c.path)
+                )
                 rows = result.mappings().all()
                 return [BrownfieldRepo.from_row(dict(row)) for row in rows]
         except Exception as e:

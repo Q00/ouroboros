@@ -231,7 +231,7 @@ async def _run_full_setup() -> None:
     current_default = next((r for r in repos if r.get("is_default")), None)
     if current_default:
         print_info(
-            f"Current default: [cyan]{current_default['name']}[/] ({current_default['path']})"
+            f"Current defaults: [cyan]{current_default['name']}[/] ({current_default['path']})"
         )
         console.print()
 
@@ -243,7 +243,9 @@ async def _run_full_setup() -> None:
         with console.status("[cyan]Setting default...[/]", spinner="dots"):
             success = await _set_default_repo(selected["path"])
         if success:
-            print_success(f"Default repo set to: [cyan]{selected['name']}[/] ({selected['path']})")
+            print_success(
+                f"Default repos updated: [cyan]{selected['name']}[/] ({selected['path']})"
+            )
         else:
             print_error(f"Failed to set default: {selected['path']}")
     else:

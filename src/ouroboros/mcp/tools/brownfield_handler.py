@@ -287,6 +287,7 @@ class BrownfieldHandler:
                     "action": "scan",
                     "count": len(repos),
                     "repos": repos_data,
+                    "default": defaults[0].to_dict() if defaults else None,
                     "defaults": [d.to_dict() for d in defaults],
                 },
             )
