@@ -469,8 +469,15 @@ class BrownfieldHandler:
                 )
             )
 
+        is_default = arguments.get("is_default", True)
         store = await self._get_store()
-        repo = await set_default_repo(store=store, path=path)
+
+        if is_default is False:
+            # Just clear this repo's default without touching others
+            repo = await store.update_is_default(path, is_default=False)
+        else:
+            # Set as default — use update_is_default to NOT clear others
+            repo = await store.update_is_default(path, is_default=True)
 
         if repo is None:
             return Result.err(

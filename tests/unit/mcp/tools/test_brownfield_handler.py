@@ -36,6 +36,11 @@ def _make_store_stub(
          for r in all_repos if r.path == path),
         None,
     ))
+    store.update_is_default = AsyncMock(side_effect=lambda path, is_default=True: next(
+        (BrownfieldRepo(path=r.path, name=r.name, desc=r.desc, is_default=is_default)
+         for r in all_repos if r.path == path),
+        None,
+    ))
     store.initialize = AsyncMock()
     store.close = AsyncMock()
     return store
