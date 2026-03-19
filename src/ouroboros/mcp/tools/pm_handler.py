@@ -902,6 +902,47 @@ class PMInterviewHandler:
         if meta:
             engine.restore_meta(meta)
 
+        # If no answer provided, re-display the pending question (retry/reconnect)
+        if not answer and state.rounds and state.rounds[-1].user_response is None:
+            pending_question = state.rounds[-1].question
+            classification = _last_classification(engine)
+
+            pending_reframe = None
+            if engine._reframe_map:
+                reframed = next(reversed(engine._reframe_map))
+                pending_reframe = {
+                    "reframed": reframed,
+                    "original": engine._reframe_map[reframed],
+                }
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=f"Session {session_id}\n\n{pending_question}",
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "session_id": session_id,
+                        "input_type": "freeText",
+                        "response_param": "answer",
+                        "question": pending_question,
+                        "is_complete": False,
+                        "classification": classification,
+                        "deferred_this_round": [],
+                        "decide_later_this_round": [],
+                        "interview_complete": False,
+                        "pending_reframe": pending_reframe,
+                        "new_deferred": [],
+                        "new_decide_later": [],
+                        "deferred_count": len(engine.deferred_items),
+                        "decide_later_count": len(engine.decide_later_items),
+                    },
+                )
+            )
+
         # Record answer if provided
         if answer and state.rounds:
             last_question = state.rounds[-1].question

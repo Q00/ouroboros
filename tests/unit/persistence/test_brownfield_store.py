@@ -145,15 +145,18 @@ class TestBrownfieldStoreRegister:
         assert repos[0].desc == "new desc"
 
     @pytest.mark.asyncio
-    async def test_register_default_clears_previous_default(self, store: BrownfieldStore) -> None:
-        """Setting is_default=True on register clears old default."""
+    async def test_register_default_does_not_clear_previous_default(
+        self, store: BrownfieldStore
+    ) -> None:
+        """register(is_default=True) adds a new default without clearing others (multi-default)."""
         await store.register("/a", "a", is_default=True)
         await store.register("/b", "b", is_default=True)
 
         repos = await store.list()
         defaults = [r for r in repos if r.is_default]
-        assert len(defaults) == 1
-        assert defaults[0].path == "/b"
+        assert len(defaults) == 2
+        default_paths = {r.path for r in defaults}
+        assert default_paths == {"/a", "/b"}
 
     @pytest.mark.asyncio
     async def test_register_without_desc(self, store: BrownfieldStore) -> None:
@@ -488,7 +491,7 @@ class TestBrownfieldStoreSetDefault:
         )
 
         # Switch default to repo-b
-        result = await store.set_default("/home/user/repo-b")
+        result = await store.set_single_default("/home/user/repo-b")
         assert result is not None
         assert result.is_default is True
 
@@ -508,9 +511,9 @@ class TestBrownfieldStoreSetDefault:
         await store.register("/home/user/c", "c", desc="Desc C")
 
         # Switch A → B → C → A
-        await store.set_default("/home/user/b")
-        await store.set_default("/home/user/c")
-        await store.set_default("/home/user/a")
+        await store.set_single_default("/home/user/b")
+        await store.set_single_default("/home/user/c")
+        await store.set_single_default("/home/user/a")
 
         repos = await store.list()
         descs = {r.name: r.desc for r in repos}
@@ -523,16 +526,20 @@ class TestBrownfieldStoreSetDefault:
 
     @pytest.mark.asyncio
     async def test_register_with_default_preserves_other_desc(self, store: BrownfieldStore) -> None:
-        """register(is_default=True) must preserve desc on the old default."""
+        """register(is_default=True) must preserve desc AND is_default on existing repos.
+
+        With multi-default support, register() no longer clears other defaults.
+        Both old and new repos should be marked as default.
+        """
         await store.register("/home/user/old", "old", desc="Old desc", is_default=True)
 
-        # Register a new repo as default
+        # Register a new repo as default — old stays default too (multi-default)
         await store.register("/home/user/new", "new", desc="New desc", is_default=True)
 
         repos = await store.list()
         old = next(r for r in repos if r.name == "old")
         assert old.desc == "Old desc"
-        assert old.is_default is False
+        assert old.is_default is True  # NOT cleared — multi-default
 
         new = next(r for r in repos if r.name == "new")
         assert new.desc == "New desc"

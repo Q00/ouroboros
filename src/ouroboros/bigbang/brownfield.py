@@ -388,7 +388,7 @@ async def set_default_repo(
     Returns:
         The updated BrownfieldRepo, or None if the path is not registered.
     """
-    repo = await store.set_default(path)
+    repo = await store.set_single_default(path)
 
     if repo is None:
         log.warning("brownfield.set_default_repo.not_found", path=path)

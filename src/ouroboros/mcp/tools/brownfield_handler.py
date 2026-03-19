@@ -360,8 +360,8 @@ class BrownfieldHandler:
         store = await self._get_store()
 
         if default_only:
-            default = await store.get_default()
-            if default is None:
+            defaults = await store.get_defaults()
+            if not defaults:
                 return Result.ok(
                     MCPToolResult(
                         content=(
@@ -375,22 +375,28 @@ class BrownfieldHandler:
                             "action": "query",
                             "default_only": True,
                             "default": None,
+                            "defaults": [],
                         },
                     )
                 )
+            # Backward compat: "default" is the first; "defaults" is the full list
+            first_default = defaults[0]
+            defaults_data = [d.to_dict() for d in defaults]
+            names = ", ".join(d.name for d in defaults)
             return Result.ok(
                 MCPToolResult(
                     content=(
                         MCPContentItem(
                             type=ContentType.TEXT,
-                            text=f"Default: {default.name} ({default.path})",
+                            text=f"Default(s): {names}",
                         ),
                     ),
                     is_error=False,
                     meta={
                         "action": "query",
                         "default_only": True,
-                        "default": default.to_dict(),
+                        "default": first_default.to_dict(),
+                        "defaults": defaults_data,
                     },
                 )
             )
@@ -405,7 +411,7 @@ class BrownfieldHandler:
 
         # Paginated list
         repos = await store.list(offset=offset, limit=limit)
-        default = await store.get_default()
+        defaults = await store.get_defaults()
 
         if not repos and total == 0:
             return Result.ok(
@@ -425,6 +431,7 @@ class BrownfieldHandler:
                         "limit": limit,
                         "repos": [],
                         "default": None,
+                        "defaults": [],
                     },
                 )
             )
@@ -436,6 +443,8 @@ class BrownfieldHandler:
             lines.append(f"  • {r.name}{marker}: {r.path}{desc_part}")
 
         repos_data = [r.to_dict() for r in repos]
+        defaults_data = [d.to_dict() for d in defaults]
+        first_default = defaults[0] if defaults else None
 
         return Result.ok(
             MCPToolResult(
@@ -453,7 +462,8 @@ class BrownfieldHandler:
                     "offset": offset,
                     "limit": limit,
                     "repos": repos_data,
-                    "default": default.to_dict() if default else None,
+                    "default": first_default.to_dict() if first_default else None,
+                    "defaults": defaults_data,
                 },
             )
         )

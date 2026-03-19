@@ -16,6 +16,7 @@ from typing import Annotated, Any
 from rich.prompt import Confirm, Prompt
 import typer
 
+from ouroboros.bigbang.interview import InterviewRound
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 
@@ -383,6 +384,18 @@ async def _run_pm_interview(
             break
 
         question = q_result.value
+
+        # Append unanswered round so the pending question is persisted
+        # in InterviewState.  This ensures --resume can re-display it.
+        state.rounds.append(
+            InterviewRound(
+                round_number=state.current_round_number,
+                question=question,
+                user_response=None,
+            )
+        )
+        state.mark_updated()
+
         console.print(f"\n[bold yellow]?[/] {question}\n")
 
         # Persist state + meta AFTER displaying the question but BEFORE
@@ -398,6 +411,11 @@ async def _run_pm_interview(
             print_info("Finishing interview...")
             await engine.complete_interview(state)
             break
+
+        # Pop the unanswered round before recording so record_response
+        # can create a proper answered round (mirrors MCP handler pattern).
+        if state.rounds and state.rounds[-1].user_response is None:
+            state.rounds.pop()
 
         await engine.record_response(state, user_response, question)
         await engine.save_state(state)

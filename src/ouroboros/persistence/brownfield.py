@@ -115,8 +115,8 @@ class BrownfieldStore:
         # Get default repo
         default = await store.get_default()
 
-        # Set default
-        await store.set_default("/path/to/repo")
+        # Set single default (clears others)
+        await store.set_single_default("/path/to/repo")
 
         # Remove a repo
         await store.remove("/path/to/repo")
@@ -212,12 +212,6 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                # If setting as default, clear existing defaults first
-                if is_default:
-                    await conn.execute(
-                        update(t).where(t.c.is_default.is_(True)).values(is_default=False)
-                    )
-
                 # Check if repo already exists
                 existing = await conn.execute(select(t).where(t.c.path == path))
                 row = existing.mappings().first()
@@ -398,11 +392,43 @@ class BrownfieldStore:
                 table="brownfield_repos",
             ) from e
 
-    async def set_default(self, path: str) -> BrownfieldRepo | None:
-        """Set a repository as the default brownfield context.
+    async def get_defaults(self) -> list[BrownfieldRepo]:
+        """Get all brownfield repositories marked as default.
 
-        Clears the default flag on all other repos and sets it on the
-        specified repo. The repo must already be registered.
+        Unlike :meth:`get_default` which returns only the first match,
+        this returns every repo with ``is_default=True`` — needed for
+        multi-default support.
+
+        Returns:
+            List of default BrownfieldRepo instances (may be empty).
+
+        Raises:
+            PersistenceError: If the query fails.
+        """
+        engine = self._ensure_initialized("get_defaults")
+        t = brownfield_repos_table
+
+        try:
+            async with engine.begin() as conn:
+                result = await conn.execute(select(t).where(t.c.is_default.is_(True)))
+                rows = result.mappings().all()
+                return [BrownfieldRepo.from_row(dict(row)) for row in rows]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to get default brownfield repos: {e}",
+                operation="select",
+                table="brownfield_repos",
+            ) from e
+
+    async def set_single_default(self, path: str) -> BrownfieldRepo | None:
+        """Set a repository as the sole default brownfield context.
+
+        Clears the default flag on **all** other repos and sets it on the
+        specified repo.  Use this only when exactly one default is desired
+        (e.g. the legacy CLI ``set_default_repo`` flow).  For multi-default
+        support, use :meth:`update_is_default` instead.
+
+        The repo must already be registered.
 
         Args:
             path: Absolute filesystem path of the repo to set as default.
@@ -413,7 +439,7 @@ class BrownfieldStore:
         Raises:
             PersistenceError: If the operation fails.
         """
-        engine = self._ensure_initialized("set_default")
+        engine = self._ensure_initialized("set_single_default")
         t = brownfield_repos_table
 
         try:

@@ -26,6 +26,7 @@ def _make_store_stub(
     store.list = AsyncMock(return_value=all_repos)
     store.count = AsyncMock(return_value=total if total is not None else len(all_repos))
     store.get_default = AsyncMock(return_value=default)
+    store.get_defaults = AsyncMock(return_value=[default] if default else [])
     store.register = AsyncMock(
         side_effect=lambda path, name, desc=None, is_default=False: BrownfieldRepo(
             path=path,
@@ -34,7 +35,7 @@ def _make_store_stub(
             is_default=is_default,
         )
     )
-    store.set_default = AsyncMock(
+    store.set_single_default = AsyncMock(
         side_effect=lambda path: next(
             (
                 BrownfieldRepo(path=r.path, name=r.name, desc=r.desc, is_default=True)
