@@ -168,12 +168,8 @@ class ExecuteSeedHandler:
                     encoding="utf-8",
                 )
             except FileNotFoundError:
-                return Result.err(
-                    MCPToolError(
-                        f"Seed file not found: {seed_candidate}",
-                        tool_name="ouroboros_execute_seed",
-                    )
-                )
+                # Per tool contract: treat non-existent path as inline YAML
+                seed_content = str(seed_path)
             except OSError as e:
                 return Result.err(
                     MCPToolError(
@@ -547,12 +543,9 @@ class StartExecuteSeedHandler:
                 seed_content = await asyncio.to_thread(seed_candidate.read_text, encoding="utf-8")
                 arguments = {**arguments, "seed_content": seed_content}
             except FileNotFoundError:
-                return Result.err(
-                    MCPToolError(
-                        f"Seed file not found: {seed_candidate}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
+                # Per tool contract: treat non-existent path as inline YAML
+                seed_content = str(seed_path)
+                arguments = {**arguments, "seed_content": seed_content}
             except OSError as e:
                 return Result.err(
                     MCPToolError(
