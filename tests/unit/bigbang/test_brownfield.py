@@ -74,8 +74,15 @@ class TestHasGithubOrigin:
         # Create a real git repo with a GitHub origin
         subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(tmp_path), "remote", "add", "origin",
-             "https://github.com/user/repo.git"],
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/repo.git",
+            ],
             capture_output=True,
         )
         assert _has_github_origin(tmp_path) is True
@@ -83,8 +90,15 @@ class TestHasGithubOrigin:
     def test_returns_false_for_non_github_origin(self, tmp_path: Path) -> None:
         subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(tmp_path), "remote", "add", "origin",
-             "https://gitlab.com/user/repo.git"],
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "remote",
+                "add",
+                "origin",
+                "https://gitlab.com/user/repo.git",
+            ],
             capture_output=True,
         )
         assert _has_github_origin(tmp_path) is False
@@ -109,8 +123,15 @@ class TestScanHomeForRepos:
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin",
-             "git@github.com:user/my-project.git"],
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:user/my-project.git",
+            ],
             capture_output=True,
         )
 
@@ -124,8 +145,7 @@ class TestScanHomeForRepos:
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin",
-             "https://gitlab.com/user/repo.git"],
+            ["git", "-C", str(repo), "remote", "add", "origin", "https://gitlab.com/user/repo.git"],
             capture_output=True,
         )
 
@@ -138,8 +158,15 @@ class TestScanHomeForRepos:
         parent.mkdir()
         subprocess.run(["git", "init", str(parent)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(parent), "remote", "add", "origin",
-             "https://github.com/user/parent.git"],
+            [
+                "git",
+                "-C",
+                str(parent),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/parent.git",
+            ],
             capture_output=True,
         )
 
@@ -148,8 +175,15 @@ class TestScanHomeForRepos:
         nested.mkdir(parents=True)
         subprocess.run(["git", "init", str(nested)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(nested), "remote", "add", "origin",
-             "https://github.com/user/nested.git"],
+            [
+                "git",
+                "-C",
+                str(nested),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/nested.git",
+            ],
             capture_output=True,
         )
 
@@ -164,8 +198,7 @@ class TestScanHomeForRepos:
         nm.mkdir(parents=True)
         subprocess.run(["git", "init", str(nm)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(nm), "remote", "add", "origin",
-             "https://github.com/user/pkg.git"],
+            ["git", "-C", str(nm), "remote", "add", "origin", "https://github.com/user/pkg.git"],
             capture_output=True,
         )
 
@@ -178,8 +211,15 @@ class TestScanHomeForRepos:
         hidden.mkdir(parents=True)
         subprocess.run(["git", "init", str(hidden)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(hidden), "remote", "add", "origin",
-             "https://github.com/user/repo.git"],
+            [
+                "git",
+                "-C",
+                str(hidden),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/repo.git",
+            ],
             capture_output=True,
         )
 
@@ -196,8 +236,15 @@ class TestScanHomeForRepos:
             repo.mkdir()
             subprocess.run(["git", "init", str(repo)], capture_output=True)
             subprocess.run(
-                ["git", "-C", str(repo), "remote", "add", "origin",
-                 f"https://github.com/user/{name}.git"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "remote",
+                    "add",
+                    "origin",
+                    f"https://github.com/user/{name}.git",
+                ],
                 capture_output=True,
             )
 
@@ -211,8 +258,15 @@ class TestScanHomeForRepos:
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin",
-             "https://github.com/user/my-repo.git"],
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/my-repo.git",
+            ],
             capture_output=True,
         )
 
@@ -317,8 +371,15 @@ class TestScanAndRegister:
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin",
-             "https://github.com/user/my-repo.git"],
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/my-repo.git",
+            ],
             capture_output=True,
         )
 
@@ -326,9 +387,7 @@ class TestScanAndRegister:
         store = AsyncMock(spec=BrownfieldStore)
         store.get_default.return_value = None
         store.bulk_register.return_value = 1
-        store.list.return_value = [
-            BrownfieldRepo(path=str(repo.resolve()), name="my-repo")
-        ]
+        store.list.return_value = [BrownfieldRepo(path=str(repo.resolve()), name="my-repo")]
         store.set_default.return_value = BrownfieldRepo(
             path=str(repo.resolve()), name="my-repo", is_default=True
         )
@@ -351,8 +410,7 @@ class TestScanAndRegister:
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin",
-             "https://github.com/user/proj.git"],
+            ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/user/proj.git"],
             capture_output=True,
         )
         (repo / "README.md").write_text("# Great Project\nDoes great things")
@@ -364,13 +422,9 @@ class TestScanAndRegister:
             path=str(repo.resolve()), name="proj", is_default=True
         )
         store.bulk_register.return_value = 1
-        store.list.return_value = [
-            BrownfieldRepo(path=str(repo.resolve()), name="proj")
-        ]
+        store.list.return_value = [BrownfieldRepo(path=str(repo.resolve()), name="proj")]
 
-        await scan_and_register(
-            store, llm_adapter=mock_adapter, root=tmp_path
-        )
+        await scan_and_register(store, llm_adapter=mock_adapter, root=tmp_path)
 
         # LLM should NOT be called during scan — desc generation is deferred
         mock_adapter.complete.assert_not_called()
@@ -383,15 +437,12 @@ class TestScanAndRegister:
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin",
-             "https://github.com/user/repo.git"],
+            ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/user/repo.git"],
             capture_output=True,
         )
 
         store = AsyncMock(spec=BrownfieldStore)
-        existing_default = BrownfieldRepo(
-            path="/some/other", name="other", is_default=True
-        )
+        existing_default = BrownfieldRepo(path="/some/other", name="other", is_default=True)
         store.get_default.return_value = existing_default
         store.bulk_register.return_value = 1
         store.list.return_value = [existing_default]
@@ -419,8 +470,15 @@ class TestScanAndRegister:
             repo.mkdir()
             subprocess.run(["git", "init", str(repo)], capture_output=True)
             subprocess.run(
-                ["git", "-C", str(repo), "remote", "add", "origin",
-                 f"https://github.com/user/{name}.git"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "remote",
+                    "add",
+                    "origin",
+                    f"https://github.com/user/{name}.git",
+                ],
                 capture_output=True,
             )
 
@@ -548,9 +606,7 @@ class TestRegisterRepo:
         mock_adapter.complete.side_effect = Exception("LLM down")
 
         store = AsyncMock(spec=BrownfieldStore)
-        store.register.return_value = BrownfieldRepo(
-            path=str(repo_dir.resolve()), name="proj"
-        )
+        store.register.return_value = BrownfieldRepo(path=str(repo_dir.resolve()), name="proj")
 
         # Should not raise
         await register_repo(
@@ -570,9 +626,7 @@ class TestRegisterRepo:
         repo_dir.mkdir()
 
         store = AsyncMock(spec=BrownfieldStore)
-        store.register.return_value = BrownfieldRepo(
-            path=str(repo_dir.resolve()), name="proj"
-        )
+        store.register.return_value = BrownfieldRepo(path=str(repo_dir.resolve()), name="proj")
 
         await register_repo(store=store, path=str(repo_dir))
 
@@ -584,9 +638,7 @@ class TestRegisterRepo:
     @pytest.mark.asyncio
     async def test_preserves_nonexistent_path(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
-        store.register.return_value = BrownfieldRepo(
-            path="/nonexistent/repo", name="repo"
-        )
+        store.register.return_value = BrownfieldRepo(path="/nonexistent/repo", name="repo")
 
         await register_repo(store=store, path="/nonexistent/repo")
 
@@ -628,9 +680,7 @@ class TestSetDefaultRepo:
     @pytest.mark.asyncio
     async def test_delegates_to_store(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
-        expected = BrownfieldRepo(
-            path="/repo", name="repo", desc="Desc", is_default=True
-        )
+        expected = BrownfieldRepo(path="/repo", name="repo", desc="Desc", is_default=True)
         store.set_default.return_value = expected
 
         result = await set_default_repo(store=store, path="/repo")
@@ -759,12 +809,32 @@ class TestSetDefaultRepo:
 class TestSkipDirsVerification:
     """Verify that all hardcoded _SKIP_DIRS are correctly skipped during scan."""
 
-    EXPECTED_SKIP_DIRS = frozenset({
-        "node_modules", ".venv", "__pycache__", ".cache", "Library",
-        ".Trash", "vendor", ".gradle", "build", "dist", "target",
-        ".tox", ".mypy_cache", ".pytest_cache", ".cargo", "Pods",
-        ".npm", ".nvm", ".local", ".docker", ".rustup", "go",
-    })
+    EXPECTED_SKIP_DIRS = frozenset(
+        {
+            "node_modules",
+            ".venv",
+            "__pycache__",
+            ".cache",
+            "Library",
+            ".Trash",
+            "vendor",
+            ".gradle",
+            "build",
+            "dist",
+            "target",
+            ".tox",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".cargo",
+            "Pods",
+            ".npm",
+            ".nvm",
+            ".local",
+            ".docker",
+            ".rustup",
+            "go",
+        }
+    )
 
     def test_skip_dirs_constant_matches_expected(self) -> None:
         """Ensure _SKIP_DIRS hasn't drifted from the expected set."""
@@ -782,15 +852,20 @@ class TestSkipDirsVerification:
         nested.mkdir(parents=True)
         subprocess.run(["git", "init", str(nested)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(nested), "remote", "add", "origin",
-             "https://github.com/user/project.git"],
+            [
+                "git",
+                "-C",
+                str(nested),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/project.git",
+            ],
             capture_output=True,
         )
 
         result = scan_home_for_repos(tmp_path)
-        assert len(result) == 0, (
-            f"Repo inside '{skip_dir}' should be skipped but was found"
-        )
+        assert len(result) == 0, f"Repo inside '{skip_dir}' should be skipped but was found"
 
     def test_dot_prefixed_dirs_are_skipped(self, tmp_path: Path) -> None:
         """Any directory starting with '.' is pruned (not just those in _SKIP_DIRS)."""
@@ -799,8 +874,15 @@ class TestSkipDirsVerification:
             repo.mkdir(parents=True)
             subprocess.run(["git", "init", str(repo)], capture_output=True)
             subprocess.run(
-                ["git", "-C", str(repo), "remote", "add", "origin",
-                 "https://github.com/user/repo.git"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/user/repo.git",
+                ],
                 capture_output=True,
             )
 
@@ -813,8 +895,15 @@ class TestSkipDirsVerification:
         repo.mkdir(parents=True)
         subprocess.run(["git", "init", str(repo)], capture_output=True)
         subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin",
-             "https://github.com/user/my-app.git"],
+            [
+                "git",
+                "-C",
+                str(repo),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/user/my-app.git",
+            ],
             capture_output=True,
         )
 
@@ -849,7 +938,9 @@ class TestScanAndRegisterMocked:
             BrownfieldRepo(path="/home/user/beta", name="beta"),
         ]
         store.set_default.return_value = BrownfieldRepo(
-            path="/home/user/alpha", name="alpha", is_default=True,
+            path="/home/user/alpha",
+            name="alpha",
+            is_default=True,
         )
 
         with patch(
@@ -873,7 +964,9 @@ class TestScanAndRegisterMocked:
             BrownfieldRepo(path="/a", name="a"),
         ]
         store.update_is_default.return_value = BrownfieldRepo(
-            path="/a", name="a", is_default=True,
+            path="/a",
+            name="a",
+            is_default=True,
         )
 
         with patch(
@@ -889,7 +982,9 @@ class TestScanAndRegisterMocked:
         """When default already exists, scan_and_register restores it after re-scan."""
         fake_repos = [{"path": "/new", "name": "new"}]
         existing_default = BrownfieldRepo(
-            path="/old", name="old", is_default=True,
+            path="/old",
+            name="old",
+            is_default=True,
         )
 
         store = AsyncMock(spec=BrownfieldStore)
@@ -930,7 +1025,9 @@ class TestScanAndRegisterMocked:
 
         store = AsyncMock(spec=BrownfieldStore)
         store.get_default.return_value = BrownfieldRepo(
-            path="/repo", name="repo", is_default=True,
+            path="/repo",
+            name="repo",
+            is_default=True,
         )
         store.bulk_register.return_value = 1
         store.list.return_value = [
@@ -942,7 +1039,9 @@ class TestScanAndRegisterMocked:
             return_value=fake_repos,
         ):
             await scan_and_register(
-                store, llm_adapter=mock_adapter, root=Path("/fake"),
+                store,
+                llm_adapter=mock_adapter,
+                root=Path("/fake"),
             )
 
         mock_adapter.complete.assert_not_called()
@@ -1056,13 +1155,16 @@ class TestUserSelectionSimulation:
         mock_store.close = AsyncMock()
 
         # Step 1: Scan returns repos
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            new_callable=AsyncMock,
-            return_value=mock_repos,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ),
         ):
             repos = await _scan_and_register_repos()
 
@@ -1072,6 +1174,7 @@ class TestUserSelectionSimulation:
 
         # Step 2: Simulate user selecting repo #2
         from ouroboros.cli.commands.setup import _prompt_repo_selection
+
         with patch("ouroboros.cli.commands.setup.Prompt.ask", return_value="2"):
             idx = _prompt_repo_selection(repos)
         assert idx == 1
@@ -1080,13 +1183,16 @@ class TestUserSelectionSimulation:
 
         # Step 3: Set default
         mock_result = BrownfieldRepo(path="/b", name="beta", is_default=True)
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.set_default_repo",
-            new_callable=AsyncMock,
-            return_value=mock_result,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.set_default_repo",
+                new_callable=AsyncMock,
+                return_value=mock_result,
+            ),
         ):
             success = await _set_default_repo(selected["path"])
 

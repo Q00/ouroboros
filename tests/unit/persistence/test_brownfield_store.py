@@ -145,9 +145,7 @@ class TestBrownfieldStoreRegister:
         assert repos[0].desc == "new desc"
 
     @pytest.mark.asyncio
-    async def test_register_default_clears_previous_default(
-        self, store: BrownfieldStore
-    ) -> None:
+    async def test_register_default_clears_previous_default(self, store: BrownfieldStore) -> None:
         """Setting is_default=True on register clears old default."""
         await store.register("/a", "a", is_default=True)
         await store.register("/b", "b", is_default=True)
@@ -243,16 +241,12 @@ class TestBrownfieldStoreUpdateDesc:
         assert result.desc == "new description"
 
     @pytest.mark.asyncio
-    async def test_update_desc_nonexistent_returns_none(
-        self, store: BrownfieldStore
-    ) -> None:
+    async def test_update_desc_nonexistent_returns_none(self, store: BrownfieldStore) -> None:
         result = await store.update_desc("/nonexistent", "desc")
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_update_desc_preserves_other_fields(
-        self, store: BrownfieldStore
-    ) -> None:
+    async def test_update_desc_preserves_other_fields(self, store: BrownfieldStore) -> None:
         await store.register("/a", "a", desc="old", is_default=True)
         result = await store.update_desc("/a", "new")
         assert result is not None
@@ -294,9 +288,7 @@ class TestBrownfieldRepoDataclass:
             BrownfieldRepo.from_dict({"path": "/a", "name": "  "})
 
     def test_from_row(self) -> None:
-        repo = BrownfieldRepo.from_row(
-            {"path": "/a", "name": "a", "desc": "desc", "is_default": 1}
-        )
+        repo = BrownfieldRepo.from_row({"path": "/a", "name": "a", "desc": "desc", "is_default": 1})
         assert repo.is_default is True
 
 
@@ -529,9 +521,7 @@ class TestBrownfieldStoreSetDefault:
         assert defaults[0].name == "a"
 
     @pytest.mark.asyncio
-    async def test_register_with_default_preserves_other_desc(
-        self, store: BrownfieldStore
-    ) -> None:
+    async def test_register_with_default_preserves_other_desc(self, store: BrownfieldStore) -> None:
         """register(is_default=True) must preserve desc on the old default."""
         await store.register("/home/user/old", "old", desc="Old desc", is_default=True)
 

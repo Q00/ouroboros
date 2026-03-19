@@ -344,7 +344,8 @@ class AmbiguityScorer:
 IMPORTANT: If the additional context lists "decide-later" or "deferred" items, these are INTENTIONAL deferrals — the team has deliberately chosen to postpone those decisions. Do NOT penalise the clarity score for intentionally deferred items. Score only what is present and answerable."""
 
         if is_brownfield:
-            return """You are an expert requirements analyst. Evaluate the clarity of software requirements.
+            return (
+                """You are an expert requirements analyst. Evaluate the clarity of software requirements.
 
 Evaluate four components:
 1. Goal Clarity (35%): Is the goal specific and well-defined?
@@ -353,14 +354,18 @@ Evaluate four components:
 4. Context Clarity (15%): Is the existing codebase context clear? Are referenced codebases, patterns, and conventions well understood?
 
 Score each from 0.0 (unclear) to 1.0 (perfectly clear). Scores above 0.8 require very specific requirements.
-""" + deferral_instruction + """
+"""
+                + deferral_instruction
+                + """
 
 RESPOND ONLY WITH VALID JSON. No other text before or after.
 
 Required JSON format:
 {"goal_clarity_score": 0.0, "goal_clarity_justification": "string", "constraint_clarity_score": 0.0, "constraint_clarity_justification": "string", "success_criteria_clarity_score": 0.0, "success_criteria_clarity_justification": "string", "context_clarity_score": 0.0, "context_clarity_justification": "string"}"""
+            )
 
-        return """You are an expert requirements analyst. Evaluate the clarity of software requirements.
+        return (
+            """You are an expert requirements analyst. Evaluate the clarity of software requirements.
 
 Evaluate three components:
 1. Goal Clarity (40%): Is the goal specific and well-defined?
@@ -368,12 +373,15 @@ Evaluate three components:
 3. Success Criteria Clarity (30%): Are success criteria measurable?
 
 Score each from 0.0 (unclear) to 1.0 (perfectly clear). Scores above 0.8 require very specific requirements.
-""" + deferral_instruction + """
+"""
+            + deferral_instruction
+            + """
 
 RESPOND ONLY WITH VALID JSON. No other text before or after.
 
 Required JSON format:
 {"goal_clarity_score": 0.0, "goal_clarity_justification": "string", "constraint_clarity_score": 0.0, "constraint_clarity_justification": "string", "success_criteria_clarity_score": 0.0, "success_criteria_clarity_justification": "string"}"""
+        )
 
     def _build_scoring_user_prompt(
         self,

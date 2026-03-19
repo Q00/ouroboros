@@ -50,7 +50,9 @@ def _make_adapter() -> MagicMock:
     return adapter
 
 
-def _make_engine(adapter: MagicMock | None = None, tmp_path: Path | None = None) -> PMInterviewEngine:
+def _make_engine(
+    adapter: MagicMock | None = None, tmp_path: Path | None = None
+) -> PMInterviewEngine:
     """Create a PMInterviewEngine with mocked dependencies."""
     if adapter is None:
         adapter = _make_adapter()
@@ -153,9 +155,7 @@ class TestOpeningQuestion:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        result = await engine.ask_opening_and_start(
-            user_response="  Build a dashboard  \n"
-        )
+        result = await engine.ask_opening_and_start(user_response="  Build a dashboard  \n")
 
         assert result.is_ok
         assert "Build a dashboard" in result.value.initial_context
@@ -183,7 +183,9 @@ class TestOpeningQuestion:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        with patch.object(engine, "explore_codebases", new_callable=AsyncMock, return_value="") as mock_explore:
+        with patch.object(
+            engine, "explore_codebases", new_callable=AsyncMock, return_value=""
+        ) as mock_explore:
             result = await engine.ask_opening_and_start(
                 user_response="Build a feature on top of existing code",
                 brownfield_repos=[{"path": "/code/proj", "name": "proj", "desc": ""}],
@@ -261,7 +263,9 @@ class TestStartInterview:
             ):
                 result = await engine.start_interview(
                     initial_context="Add a notifications feature for users",
-                    brownfield_repos=[{"path": "/code/my-app", "name": "my-app", "desc": "Main app"}],
+                    brownfield_repos=[
+                        {"path": "/code/my-app", "name": "my-app", "desc": "Main app"}
+                    ],
                 )
 
         assert result.is_ok
@@ -347,12 +351,14 @@ class TestAskNextQuestion:
                 Result.ok(_mock_completion(planning_q)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": planning_q,
-                            "reasoning": "Business question about users",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": planning_q,
+                                "reasoning": "Business question about users",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -377,19 +383,23 @@ class TestAskNextQuestion:
         engine = _make_engine(adapter, tmp_path)
 
         dev_q = "Which database engine should we use — PostgreSQL or MongoDB?"
-        reframed_q = "What are your data storage needs — structured or flexible data, and how much volume?"
+        reframed_q = (
+            "What are your data storage needs — structured or flexible data, and how much volume?"
+        )
 
         adapter.complete = AsyncMock(
             side_effect=[
                 Result.ok(_mock_completion(dev_q)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "development",
-                            "reframed_question": reframed_q,
-                            "reasoning": "Database choice is dev concern, reframed to business need",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "development",
+                                "reframed_question": reframed_q,
+                                "reasoning": "Database choice is dev concern, reframed to business need",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -422,12 +432,14 @@ class TestAskNextQuestion:
                 # Classification: defer to dev
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "development",
-                            "reframed_question": dev_q,
-                            "reasoning": "Purely technical protocol choice",
-                            "defer_to_dev": True,
-                        })
+                        json.dumps(
+                            {
+                                "category": "development",
+                                "reframed_question": dev_q,
+                                "reasoning": "Purely technical protocol choice",
+                                "defer_to_dev": True,
+                            }
+                        )
                     )
                 ),
                 # Second question generation (recursive call): planning question
@@ -435,12 +447,14 @@ class TestAskNextQuestion:
                 # Classification: planning
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": planning_q,
-                            "reasoning": "User question",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": planning_q,
+                                "reasoning": "User question",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -477,23 +491,27 @@ class TestAskNextQuestion:
                 Result.ok(_mock_completion(dev_q)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "development",
-                            "reframed_question": dev_q,
-                            "reasoning": "Infrastructure choice is purely technical",
-                            "defer_to_dev": True,
-                        })
+                        json.dumps(
+                            {
+                                "category": "development",
+                                "reframed_question": dev_q,
+                                "reasoning": "Infrastructure choice is purely technical",
+                                "defer_to_dev": True,
+                            }
+                        )
                     )
                 ),
                 Result.ok(_mock_completion(planning_q)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": planning_q,
-                            "reasoning": "Business question",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": planning_q,
+                                "reasoning": "Business question",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -532,36 +550,42 @@ class TestAskNextQuestion:
                 Result.ok(_mock_completion(dev_q1)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "development",
-                            "reframed_question": dev_q1,
-                            "reasoning": "Protocol choice",
-                            "defer_to_dev": True,
-                        })
+                        json.dumps(
+                            {
+                                "category": "development",
+                                "reframed_question": dev_q1,
+                                "reasoning": "Protocol choice",
+                                "defer_to_dev": True,
+                            }
+                        )
                     )
                 ),
                 # Second dev question
                 Result.ok(_mock_completion(dev_q2)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "development",
-                            "reframed_question": dev_q2,
-                            "reasoning": "CI/CD is infra",
-                            "defer_to_dev": True,
-                        })
+                        json.dumps(
+                            {
+                                "category": "development",
+                                "reframed_question": dev_q2,
+                                "reasoning": "CI/CD is infra",
+                                "defer_to_dev": True,
+                            }
+                        )
                     )
                 ),
                 # Finally a planning question
                 Result.ok(_mock_completion(planning_q)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": planning_q,
-                            "reasoning": "User question",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": planning_q,
+                                "reasoning": "User question",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -630,14 +654,16 @@ class TestAskNextQuestion:
                 # Classification: decide_later
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "decide_later",
-                            "reframed_question": decide_later_q,
-                            "reasoning": "Scaling is a post-MVP concern",
-                            "defer_to_dev": False,
-                            "decide_later": True,
-                            "placeholder_response": placeholder,
-                        })
+                        json.dumps(
+                            {
+                                "category": "decide_later",
+                                "reframed_question": decide_later_q,
+                                "reasoning": "Scaling is a post-MVP concern",
+                                "defer_to_dev": False,
+                                "decide_later": True,
+                                "placeholder_response": placeholder,
+                            }
+                        )
                     )
                 ),
                 # Second question generation (recursive call): planning question
@@ -645,13 +671,15 @@ class TestAskNextQuestion:
                 # Classification: planning
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": planning_q,
-                            "reasoning": "User question",
-                            "defer_to_dev": False,
-                            "decide_later": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": planning_q,
+                                "reasoning": "User question",
+                                "defer_to_dev": False,
+                                "decide_later": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -801,12 +829,14 @@ class TestRecordResponse:
                 # Classifier reframes it
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "development",
-                            "reframed_question": reframed_q,
-                            "reasoning": "Database choice is dev concern",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "development",
+                                "reframed_question": reframed_q,
+                                "reasoning": "Database choice is dev concern",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -827,9 +857,7 @@ class TestRecordResponse:
         assert engine._reframe_map[reframed_q] == dev_q
 
         # Record response — should bundle
-        r_result = await engine.record_response(
-            state, "Structured relational data", reframed_q
-        )
+        r_result = await engine.record_response(state, "Structured relational data", reframed_q)
         assert r_result.is_ok
 
         # Verify bundled content in the round
@@ -872,25 +900,25 @@ class TestPMSeedGeneration:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        extraction_response = json.dumps({
-            "product_name": "TaskFlow",
-            "goal": "Help small teams manage tasks efficiently",
-            "user_stories": [
-                {
-                    "persona": "Team Lead",
-                    "action": "create and assign tasks",
-                    "benefit": "I can track team progress",
-                }
-            ],
-            "constraints": ["Must work offline", "Budget under $10k"],
-            "success_criteria": ["Users can create tasks in under 10 seconds"],
-            "deferred_items": [],
-            "assumptions": ["Teams have internet for sync"],
-        })
-
-        adapter.complete = AsyncMock(
-            return_value=Result.ok(_mock_completion(extraction_response))
+        extraction_response = json.dumps(
+            {
+                "product_name": "TaskFlow",
+                "goal": "Help small teams manage tasks efficiently",
+                "user_stories": [
+                    {
+                        "persona": "Team Lead",
+                        "action": "create and assign tasks",
+                        "benefit": "I can track team progress",
+                    }
+                ],
+                "constraints": ["Must work offline", "Budget under $10k"],
+                "success_criteria": ["Users can create tasks in under 10 seconds"],
+                "deferred_items": [],
+                "assumptions": ["Teams have internet for sync"],
+            }
         )
+
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(extraction_response)))
 
         state = InterviewState(
             interview_id="test_001",
@@ -922,19 +950,19 @@ class TestPMSeedGeneration:
         engine = _make_engine(adapter, tmp_path)
         engine.deferred_items = ["Should we use gRPC or REST?"]
 
-        extraction_response = json.dumps({
-            "product_name": "TaskFlow",
-            "goal": "Task management",
-            "user_stories": [],
-            "constraints": [],
-            "success_criteria": [],
-            "deferred_items": ["Database selection"],
-            "assumptions": [],
-        })
-
-        adapter.complete = AsyncMock(
-            return_value=Result.ok(_mock_completion(extraction_response))
+        extraction_response = json.dumps(
+            {
+                "product_name": "TaskFlow",
+                "goal": "Task management",
+                "user_stories": [],
+                "constraints": [],
+                "success_criteria": [],
+                "deferred_items": ["Database selection"],
+                "assumptions": [],
+            }
         )
+
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(extraction_response)))
 
         state = InterviewState(
             interview_id="test_001",
@@ -1008,9 +1036,7 @@ class TestPMSeed:
         original = PMSeed(
             product_name="TaskFlow",
             goal="Manage tasks",
-            user_stories=(
-                UserStory(persona="PM", action="create tasks", benefit="efficiency"),
-            ),
+            user_stories=(UserStory(persona="PM", action="create tasks", benefit="efficiency"),),
             constraints=("offline",),
             success_criteria=("fast creation",),
             deferred_items=("db choice",),

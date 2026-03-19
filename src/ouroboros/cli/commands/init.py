@@ -591,7 +591,9 @@ def _notify_pm_seed_detected(pm_seeds: list[Path]) -> None:
     """
     console.print()
     console.print("[bold cyan]╔══════════════════════════════════════════════╗[/]")
-    console.print("[bold cyan]║[/]  [bold yellow]PM Seed Auto-Detected[/]                      [bold cyan]║[/]")
+    console.print(
+        "[bold cyan]║[/]  [bold yellow]PM Seed Auto-Detected[/]                      [bold cyan]║[/]"
+    )
     console.print("[bold cyan]╚══════════════════════════════════════════════╝[/]")
     console.print()
 
@@ -768,7 +770,11 @@ def start(
                         default=False,
                     )
                     if use_pm:
-                        selected = _prompt_pm_seed_selection(pm_seeds) if len(pm_seeds) > 1 else pm_seeds[0]
+                        selected = (
+                            _prompt_pm_seed_selection(pm_seeds)
+                            if len(pm_seeds) > 1
+                            else pm_seeds[0]
+                        )
                         if selected:
                             context = _load_pm_seed_as_context(selected)
                             print_success(f"Using PM seed: {selected.name}")

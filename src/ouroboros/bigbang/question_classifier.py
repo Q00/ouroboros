@@ -35,9 +35,7 @@ _CLASSIFIER_MODEL = "claude-sonnet-4-20250514"
 _CLASSIFIER_TEMPERATURE = 0.2
 
 # Default placeholder when LLM doesn't provide one for decide-later
-_DEFAULT_PLACEHOLDER = (
-    "To be determined in a later phase once more information is available."
-)
+_DEFAULT_PLACEHOLDER = "To be determined in a later phase once more information is available."
 
 
 class QuestionCategory(StrEnum):
@@ -214,9 +212,7 @@ class QuestionClassifier:
         user_content_parts = [f"Question to classify:\n{question}"]
 
         if interview_context:
-            user_content_parts.append(
-                f"\nInterview context so far:\n{interview_context}"
-            )
+            user_content_parts.append(f"\nInterview context so far:\n{interview_context}")
 
         if self.codebase_context:
             user_content_parts.append(

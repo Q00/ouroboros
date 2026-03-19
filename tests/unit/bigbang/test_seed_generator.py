@@ -567,7 +567,9 @@ class TestSeedGeneratorRobustParsing:
                 "Let me explore the codebase to provide accurate context."
             )
         )
-        valid: Result = Result.ok(create_mock_completion_response(create_valid_extraction_response()))
+        valid: Result = Result.ok(
+            create_mock_completion_response(create_valid_extraction_response())
+        )
         mock_adapter.complete = AsyncMock(side_effect=[conversational, valid])
 
         with tempfile.TemporaryDirectory() as tmp_dir:

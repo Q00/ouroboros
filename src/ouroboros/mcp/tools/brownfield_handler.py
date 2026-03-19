@@ -123,8 +123,7 @@ class BrownfieldHandler:
                     name="desc",
                     type=ToolInputType.STRING,
                     description=(
-                        "One-line description of the repository. "
-                        "Used with 'register'. Optional."
+                        "One-line description of the repository. Used with 'register'. Optional."
                     ),
                     required=False,
                 ),
@@ -141,18 +140,13 @@ class BrownfieldHandler:
                 MCPToolParameter(
                     name="scan_root",
                     type=ToolInputType.STRING,
-                    description=(
-                        "Root directory for 'scan' action. Defaults to ~/."
-                    ),
+                    description=("Root directory for 'scan' action. Defaults to ~/."),
                     required=False,
                 ),
                 MCPToolParameter(
                     name="offset",
                     type=ToolInputType.INTEGER,
-                    description=(
-                        "Number of rows to skip for 'query' pagination. "
-                        "Defaults to 0."
-                    ),
+                    description=("Number of rows to skip for 'query' pagination. Defaults to 0."),
                     required=False,
                     default=0,
                 ),

@@ -94,7 +94,9 @@ class TestPMSeedSaveYAML:
         assert seeds_dir.exists()
         assert filepath.exists()
 
-    def test_default_output_dir_is_ouroboros_seeds(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_default_output_dir_is_ouroboros_seeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Default output directory is ~/.ouroboros/seeds/."""
         fake_home = tmp_path / "fakehome"
         fake_home.mkdir()
@@ -102,6 +104,7 @@ class TestPMSeedSaveYAML:
 
         # Re-import to pick up patched home
         import ouroboros.bigbang.pm_interview as mod
+
         monkeypatch.setattr(mod, "_SEED_DIR", fake_home / ".ouroboros" / "seeds")
 
         engine = _make_engine(tmp_path)
@@ -145,7 +148,9 @@ class TestPMSeedSaveYAML:
         assert loaded["codebase_context"] == "existing Flask app"
         assert loaded["brownfield_repos"] == [{"path": "/code/app", "name": "app", "desc": "main"}]
         assert loaded["deferred_decisions"] == ["Microservices vs monolith"]
-        assert loaded["referenced_repos"] == [{"path": "/code/lib", "name": "lib", "desc": "shared"}]
+        assert loaded["referenced_repos"] == [
+            {"path": "/code/lib", "name": "lib", "desc": "shared"}
+        ]
         assert "created_at" in loaded
 
     def test_yaml_roundtrip_produces_equal_seed(self, tmp_path: Path) -> None:
@@ -175,7 +180,7 @@ class TestPMSeedSaveYAML:
         seed = PMSeed()
         assert seed.pm_id.startswith("pm_seed_")
         # 12 hex chars after prefix
-        suffix = seed.pm_id[len("pm_seed_"):]
+        suffix = seed.pm_id[len("pm_seed_") :]
         assert len(suffix) == 12
         # Verify it's valid hex
         int(suffix, 16)

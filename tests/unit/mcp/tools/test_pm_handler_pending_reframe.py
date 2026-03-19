@@ -169,9 +169,7 @@ class TestPendingReframePersistence:
         self, mock_engine: PMInterviewEngine, tmp_data_dir: Path
     ) -> None:
         """Save then load preserves pending_reframe exactly."""
-        mock_engine._reframe_map = {
-            "How will users interact?": "What REST endpoints do we need?"
-        }
+        mock_engine._reframe_map = {"How will users interact?": "What REST endpoints do we need?"}
 
         _save_pm_meta("sess-006", mock_engine, data_dir=tmp_data_dir)
         loaded = _load_pm_meta("sess-006", tmp_data_dir)
@@ -191,9 +189,7 @@ class TestPendingReframePersistence:
 class TestRestoreEngineMeta:
     """Test restoring pending_reframe into engine._reframe_map."""
 
-    def test_restore_with_pending_reframe(
-        self, mock_engine: PMInterviewEngine
-    ) -> None:
+    def test_restore_with_pending_reframe(self, mock_engine: PMInterviewEngine) -> None:
         """Restoring meta with pending_reframe populates engine._reframe_map."""
         # Use a real dict for _reframe_map so we can verify mutations
         mock_engine._reframe_map = {}
@@ -215,9 +211,7 @@ class TestRestoreEngineMeta:
             "What user need does this address?": "What microservice architecture?"
         }
 
-    def test_restore_without_pending_reframe(
-        self, mock_engine: PMInterviewEngine
-    ) -> None:
+    def test_restore_without_pending_reframe(self, mock_engine: PMInterviewEngine) -> None:
         """Restoring meta without pending_reframe leaves _reframe_map empty."""
         mock_engine._reframe_map = {}
 
@@ -298,7 +292,9 @@ class TestPendingReframeInResponseMeta:
 
         handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
 
-        result = await handler.handle({"initial_context": "Build a chat app", "selected_repos": [], "cwd": "/tmp"})
+        result = await handler.handle(
+            {"initial_context": "Build a chat app", "selected_repos": [], "cwd": "/tmp"}
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -319,7 +315,9 @@ class TestPendingReframeInResponseMeta:
 
         handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
 
-        result = await handler.handle({"initial_context": "Build a chat app", "selected_repos": [], "cwd": "/tmp"})
+        result = await handler.handle(
+            {"initial_context": "Build a chat app", "selected_repos": [], "cwd": "/tmp"}
+        )
 
         assert result.is_ok
         assert result.value.meta["pending_reframe"] is None
@@ -370,11 +368,13 @@ class TestPendingReframeInResponseMeta:
 
         handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
 
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "Users will submit forms",
-            "cwd": "/tmp",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "Users will submit forms",
+                "cwd": "/tmp",
+            }
+        )
 
         assert result.is_ok
         # After recording the answer to a reframed question and getting
@@ -417,21 +417,27 @@ class TestPendingReframeInResponseMeta:
         mock_engine.save_state = AsyncMock(return_value=Result.ok(Path("/tmp/state.json")))
 
         # No pending_reframe in existing meta (previous question was passthrough)
-        _save_pm_meta_dict(session_id, {
-            "deferred_items": [],
-            "decide_later_items": [],
-            "codebase_context": "",
-            "pending_reframe": None,
-            "cwd": "/tmp",
-        }, tmp_data_dir)
+        _save_pm_meta_dict(
+            session_id,
+            {
+                "deferred_items": [],
+                "decide_later_items": [],
+                "codebase_context": "",
+                "pending_reframe": None,
+                "cwd": "/tmp",
+            },
+            tmp_data_dir,
+        )
 
         handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
 
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "We're solving onboarding friction",
-            "cwd": "/tmp",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "We're solving onboarding friction",
+                "cwd": "/tmp",
+            }
+        )
 
         assert result.is_ok
         assert result.value.meta["pending_reframe"] == {
@@ -477,11 +483,13 @@ class TestPendingReframeCycle:
 
         handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
 
-        start_result = await handler.handle({
-            "initial_context": "Build an admin panel",
-            "selected_repos": [],
-            "cwd": "/tmp",
-        })
+        start_result = await handler.handle(
+            {
+                "initial_context": "Build an admin panel",
+                "selected_repos": [],
+                "cwd": "/tmp",
+            }
+        )
 
         assert start_result.is_ok
         assert start_result.value.meta["pending_reframe"] == {
@@ -523,11 +531,13 @@ class TestPendingReframeCycle:
             return_value=Result.ok("What are the success metrics?")
         )
 
-        answer_result = await handler.handle({
-            "session_id": session_id,
-            "answer": "Admins, editors, and viewers",
-            "cwd": "/tmp",
-        })
+        answer_result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "Admins, editors, and viewers",
+                "cwd": "/tmp",
+            }
+        )
 
         assert answer_result.is_ok
 

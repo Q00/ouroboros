@@ -275,7 +275,13 @@ class TestPrdMetaFileLocation:
         meta = _load_pm_meta("sess-fields", data_dir=tmp_path)
 
         assert meta is not None
-        expected_keys = {"deferred_items", "decide_later_items", "codebase_context", "pending_reframe", "cwd"}
+        expected_keys = {
+            "deferred_items",
+            "decide_later_items",
+            "codebase_context",
+            "pending_reframe",
+            "cwd",
+        }
         assert set(meta.keys()) == expected_keys
 
     def test_meta_persists_across_multiple_saves(self, tmp_path: Path) -> None:
@@ -366,10 +372,12 @@ class TestPMHandlerDiffIntegration:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "session_id": "sess-1",
-            "answer": "We want user authentication",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "sess-1",
+                "answer": "We want user authentication",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -406,10 +414,12 @@ class TestPMHandlerDiffIntegration:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "session_id": "sess-2",
-            "answer": "The target is developers",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "sess-2",
+                "answer": "The target is developers",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -443,10 +453,12 @@ class TestPMHandlerDiffIntegration:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "session_id": "sess-3",
-            "answer": "Some answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "sess-3",
+                "answer": "Some answer",
+            }
+        )
 
         assert result.is_ok
         assert result.value.meta["interview_complete"] is False
@@ -519,9 +531,7 @@ class TestCheckCompletion:
             ),
         )
 
-        with patch(
-            "ouroboros.mcp.tools.pm_handler.AmbiguityScorer"
-        ) as mock_scorer_cls:
+        with patch("ouroboros.mcp.tools.pm_handler.AmbiguityScorer") as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
@@ -560,9 +570,7 @@ class TestCheckCompletion:
             ),
         )
 
-        with patch(
-            "ouroboros.mcp.tools.pm_handler.AmbiguityScorer"
-        ) as mock_scorer_cls:
+        with patch("ouroboros.mcp.tools.pm_handler.AmbiguityScorer") as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
@@ -582,13 +590,9 @@ class TestCheckCompletion:
         engine.llm_adapter = MagicMock()
         engine.model = "test-model"
 
-        with patch(
-            "ouroboros.mcp.tools.pm_handler.AmbiguityScorer"
-        ) as mock_scorer_cls:
+        with patch("ouroboros.mcp.tools.pm_handler.AmbiguityScorer") as mock_scorer_cls:
             mock_scorer = MagicMock()
-            mock_scorer.score = AsyncMock(
-                return_value=Result.err(ProviderError("LLM down"))
-            )
+            mock_scorer.score = AsyncMock(return_value=Result.err(ProviderError("LLM down")))
             mock_scorer_cls.return_value = mock_scorer
 
             result = await _check_completion(state, engine)
@@ -600,9 +604,7 @@ class TestCheckCompletion:
         """Only answered rounds count toward completion thresholds."""
         rounds = _make_answered_rounds(2)
         # Add an unanswered round (pending question)
-        rounds.append(
-            InterviewRound(round_number=3, question="Pending?", user_response=None)
-        )
+        rounds.append(InterviewRound(round_number=3, question="Pending?", user_response=None))
         state = _make_state(rounds=rounds)
         engine = _make_engine_stub()
 
@@ -636,9 +638,7 @@ class TestCheckCompletion:
             ),
         )
 
-        with patch(
-            "ouroboros.mcp.tools.pm_handler.AmbiguityScorer"
-        ) as mock_scorer_cls:
+        with patch("ouroboros.mcp.tools.pm_handler.AmbiguityScorer") as mock_scorer_cls:
             mock_scorer = MagicMock()
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
@@ -670,9 +670,7 @@ class TestHandlerCompletionIntegration:
 
         # 4 answered rounds + 1 unanswered
         rounds = _make_answered_rounds(4)
-        rounds.append(
-            InterviewRound(round_number=5, question="Current Q?", user_response=None)
-        )
+        rounds.append(InterviewRound(round_number=5, question="Current Q?", user_response=None))
         state = _make_state(rounds=rounds)
         state.is_brownfield = False
 
@@ -698,10 +696,12 @@ class TestHandlerCompletionIntegration:
             new_callable=AsyncMock,
             return_value=completion_meta,
         ):
-            result = await handler.handle({
-                "session_id": "sess-complete",
-                "answer": "Final answer",
-            })
+            result = await handler.handle(
+                {
+                    "session_id": "sess-complete",
+                    "answer": "Final answer",
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
@@ -744,10 +744,12 @@ class TestHandlerCompletionIntegration:
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         # User types "done" — should NOT trigger completion
-        result = await handler.handle({
-            "session_id": "sess-done",
-            "answer": "done",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "sess-done",
+                "answer": "done",
+            }
+        )
 
         assert result.is_ok
         # "done" is passed as a regular answer — interview continues
@@ -773,11 +775,10 @@ class TestGetEngine:
 
     def test_creates_engine_when_none_injected(self) -> None:
         """When no engine is injected, creates one with ClaudeAgentAdapter."""
-        with patch(
-            "ouroboros.mcp.tools.pm_handler.ClaudeAgentAdapter"
-        ) as mock_adapter_cls, patch(
-            "ouroboros.mcp.tools.pm_handler.PMInterviewEngine"
-        ) as mock_engine_cls:
+        with (
+            patch("ouroboros.mcp.tools.pm_handler.ClaudeAgentAdapter") as mock_adapter_cls,
+            patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
+        ):
             mock_adapter = MagicMock()
             mock_adapter_cls.return_value = mock_adapter
             mock_engine_cls.create.return_value = MagicMock()
@@ -792,11 +793,10 @@ class TestGetEngine:
 
     def test_uses_custom_data_dir(self, tmp_path: Path) -> None:
         """When data_dir is set, passes it to PMInterviewEngine.create."""
-        with patch(
-            "ouroboros.mcp.tools.pm_handler.ClaudeAgentAdapter"
-        ), patch(
-            "ouroboros.mcp.tools.pm_handler.PMInterviewEngine"
-        ) as mock_engine_cls:
+        with (
+            patch("ouroboros.mcp.tools.pm_handler.ClaudeAgentAdapter"),
+            patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
+        ):
             mock_engine_cls.create.return_value = MagicMock()
 
             handler = PMInterviewHandler(data_dir=tmp_path)
@@ -827,10 +827,12 @@ class TestHandleStartBrownfield:
 
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = []
-            result = await handler.handle({
-                "initial_context": "Build a task manager",
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Build a task manager",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
@@ -871,10 +873,12 @@ class TestHandleStartBrownfield:
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = mock_repos
 
-            result = await handler.handle({
-                "initial_context": "Build a task manager",
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Build a task manager",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
@@ -908,10 +912,12 @@ class TestHandleStartBrownfield:
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = []  # No defaults
 
-            result = await handler.handle({
-                "initial_context": "Build something",
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Build something",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         # Verify brownfield_repos was None (greenfield)
@@ -939,13 +945,17 @@ class TestHandleStartBrownfield:
 
         # Mock DB lookup to return the repo
         db_repo = BrownfieldRepo(path="/home/user/my-repo", name="my-repo")
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = [db_repo]
-            result = await handler.handle({
-                "initial_context": "Build a task manager",
-                "selected_repos": ["/home/user/my-repo"],
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Build a task manager",
+                    "selected_repos": ["/home/user/my-repo"],
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
 
@@ -959,7 +969,9 @@ class TestHandleStartBrownfield:
         assert brownfield_repos[0]["role"] == "main"
 
     @pytest.mark.asyncio
-    async def test_start_greenfield_when_no_selected_repos_and_no_defaults(self, tmp_path: Path) -> None:
+    async def test_start_greenfield_when_no_selected_repos_and_no_defaults(
+        self, tmp_path: Path
+    ) -> None:
         """Start with no selected_repos and no DB defaults starts greenfield."""
         engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
@@ -976,10 +988,12 @@ class TestHandleStartBrownfield:
 
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = []
-            result = await handler.handle({
-                "initial_context": "Build a new app",
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Build a new app",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
@@ -991,7 +1005,9 @@ class TestHandleStartBrownfield:
         assert brownfield_repos is None
 
     @pytest.mark.asyncio
-    async def test_start_graceful_on_db_error_falls_back_to_greenfield(self, tmp_path: Path) -> None:
+    async def test_start_graceful_on_db_error_falls_back_to_greenfield(
+        self, tmp_path: Path
+    ) -> None:
         """When DB default repo query returns empty, starts as greenfield."""
         engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
@@ -1008,10 +1024,12 @@ class TestHandleStartBrownfield:
 
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = []  # DB error / no defaults
-            result = await handler.handle({
-                "initial_context": "Build something",
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Build something",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
 
@@ -1031,18 +1049,18 @@ class TestHandleStartBrownfield:
 
         state = _make_state(interview_id="new-sess-42")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
-        engine.ask_next_question = AsyncMock(
-            return_value=Result.ok("Who are the target users?")
-        )
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Who are the target users?"))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "initial_context": "Build a task manager",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Build a task manager",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         assert result.value.meta["session_id"] == "new-sess-42"
@@ -1065,11 +1083,13 @@ class TestHandleStartBrownfield:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        await handler.handle({
-            "initial_context": "Build something",
-            "selected_repos": [],
-            "cwd": "/my/project",
-        })
+        await handler.handle(
+            {
+                "initial_context": "Build something",
+                "selected_repos": [],
+                "cwd": "/my/project",
+            }
+        )
 
         # Verify pm_meta was saved
         meta = _load_pm_meta("meta-sess", data_dir=tmp_path)
@@ -1100,11 +1120,13 @@ class TestHandleStartBrownfield:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "initial_context": "Build an app",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Build an app",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -1122,18 +1144,18 @@ class TestHandleStartBrownfield:
         engine._reframe_map = {}
 
         engine.ask_opening_and_start = AsyncMock(
-            return_value=Result.err(
-                MagicMock(__str__=lambda _s: "Validation failed")
-            )
+            return_value=Result.err(MagicMock(__str__=lambda _s: "Validation failed"))
         )
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "initial_context": "Build something",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Build something",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_err
 
@@ -1154,11 +1176,13 @@ class TestHandleStartBrownfield:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "initial_context": "Build something",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Build something",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_err
 
@@ -1203,11 +1227,13 @@ class TestHandleStartBrownfield:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        await handler.handle({
-            "initial_context": "Build something",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        await handler.handle(
+            {
+                "initial_context": "Build something",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         # Verify an unanswered round was added
         assert len(state.rounds) == 1
@@ -1237,11 +1263,13 @@ class TestHandleStartBrownfield:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "initial_context": "Build something",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Build something",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -1267,11 +1295,13 @@ class TestHandleStartBrownfield:
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "initial_context": "Build an app",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Build an app",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         assert result.value.meta["question"] == "What is your target audience?"
@@ -1294,11 +1324,13 @@ class TestHandleStartBrownfield:
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "initial_context": "Add auth",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Add auth",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         assert result.value.meta["is_brownfield"] is True
@@ -1319,11 +1351,13 @@ class TestHandleStartBrownfield:
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "initial_context": "Build something new",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Build something new",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         assert result.value.meta["is_brownfield"] is False
@@ -1344,11 +1378,13 @@ class TestHandleStartBrownfield:
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "s.json"))
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "initial_context": "Build an API",
-            "selected_repos": [],
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "initial_context": "Build an API",
+                "selected_repos": [],
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -1416,10 +1452,12 @@ class TestResumeMetaFields:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "session_id": "resume-ac3",
-            "answer": "User auth and dashboards",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "resume-ac3",
+                "answer": "User auth and dashboards",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -1480,10 +1518,12 @@ class TestResumeMetaFields:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "session_id": "resume-deferred",
-            "answer": "We need REST APIs",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "resume-deferred",
+                "answer": "We need REST APIs",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -1493,7 +1533,9 @@ class TestResumeMetaFields:
         assert meta["classification"] == "deferred"
 
     @pytest.mark.asyncio
-    async def test_resume_meta_classification_none_when_no_classifications(self, tmp_path: Path) -> None:
+    async def test_resume_meta_classification_none_when_no_classifications(
+        self, tmp_path: Path
+    ) -> None:
         """When engine has no classifications, classification is None."""
         engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
@@ -1518,10 +1560,12 @@ class TestResumeMetaFields:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "session_id": "resume-noclassify",
-            "answer": "Something",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "resume-noclassify",
+                "answer": "Something",
+            }
+        )
 
         assert result.is_ok
         assert result.value.meta["classification"] is None
@@ -1563,10 +1607,12 @@ class TestResumeMetaFields:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "session_id": "resume-complete",
-            "answer": "Final answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "resume-complete",
+                "answer": "Final answer",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -1608,10 +1654,12 @@ class TestResumeMetaFields:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "session_id": "resume-load",
-            "answer": "My answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "resume-load",
+                "answer": "My answer",
+            }
+        )
 
         assert result.is_ok
         # Verify engine.load_state was called with correct session_id
@@ -1656,11 +1704,16 @@ class TestDetectAction:
 
     def test_session_id_with_answer_and_cwd_auto_detects_resume(self):
         """session_id + answer + cwd without action → 'resume'."""
-        assert _detect_action({
-            "session_id": "abc-123",
-            "answer": "Yes",
-            "cwd": "/projects/myapp",
-        }) == "resume"
+        assert (
+            _detect_action(
+                {
+                    "session_id": "abc-123",
+                    "answer": "Yes",
+                    "cwd": "/projects/myapp",
+                }
+            )
+            == "resume"
+        )
 
     def test_no_params_returns_unknown(self):
         """Empty arguments → 'unknown'."""
@@ -1676,10 +1729,12 @@ class TestDetectAction:
 
     def test_initial_context_takes_priority_over_session_id(self):
         """When both initial_context and session_id provided, start wins."""
-        result = _detect_action({
-            "initial_context": "Build X",
-            "session_id": "s1",
-        })
+        result = _detect_action(
+            {
+                "initial_context": "Build X",
+                "session_id": "s1",
+            }
+        )
         assert result == "start"
 
     def test_empty_initial_context_falls_through(self):
@@ -1702,36 +1757,44 @@ class TestDetectAction:
 
     def test_selected_repos_with_initial_context_is_1step_start(self):
         """selected_repos + initial_context → 'start' (1-step backward compat, AC 8)."""
-        result = _detect_action({
-            "selected_repos": ["/path/a"],
-            "initial_context": "Build X",
-        })
+        result = _detect_action(
+            {
+                "selected_repos": ["/path/a"],
+                "initial_context": "Build X",
+            }
+        )
         assert result == "start"
 
     def test_selected_repos_takes_priority_over_session_id(self):
         """selected_repos takes priority over session_id."""
-        result = _detect_action({
-            "selected_repos": ["/path/a"],
-            "session_id": "s1",
-        })
+        result = _detect_action(
+            {
+                "selected_repos": ["/path/a"],
+                "session_id": "s1",
+            }
+        )
         assert result == "select_repos"
 
     def test_selected_repos_with_all_params_1step(self):
         """selected_repos + initial_context + session_id → 'start' (AC 8, initial_context wins)."""
-        result = _detect_action({
-            "selected_repos": ["/repo"],
-            "initial_context": "Build X",
-            "session_id": "s1",
-        })
+        result = _detect_action(
+            {
+                "selected_repos": ["/repo"],
+                "initial_context": "Build X",
+                "session_id": "s1",
+            }
+        )
         assert result == "start"
 
     def test_explicit_action_overrides_selected_repos(self):
         """Explicit action still takes precedence even with selected_repos."""
-        result = _detect_action({
-            "action": "resume",
-            "selected_repos": ["/path/a"],
-            "session_id": "s1",
-        })
+        result = _detect_action(
+            {
+                "action": "resume",
+                "selected_repos": ["/path/a"],
+                "session_id": "s1",
+            }
+        )
         assert result == "resume"
 
     def test_selected_repos_none_does_not_trigger(self):
@@ -1744,10 +1807,12 @@ class TestDetectAction:
 
     def test_empty_selected_repos_with_initial_context_is_1step(self):
         """Even empty selected_repos + initial_context → 'start' (AC 8)."""
-        result = _detect_action({
-            "selected_repos": [],
-            "initial_context": "Build X",
-        })
+        result = _detect_action(
+            {
+                "selected_repos": [],
+                "initial_context": "Build X",
+            }
+        )
         assert result == "start"
 
 
@@ -1800,10 +1865,12 @@ class TestAutoDetectIntegration:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         # No "action" key — auto-detects "resume" from session_id + answer
-        result = await handler.handle({
-            "session_id": "auto-resume",
-            "answer": "My answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": "auto-resume",
+                "answer": "My answer",
+            }
+        )
 
         assert result.is_ok
         engine.load_state.assert_called_once_with("auto-resume")
@@ -1889,12 +1956,16 @@ class TestSelectReposRouting:
             BrownfieldRepo(path="/repo/a", name="a"),
             BrownfieldRepo(path="/repo/b", name="b"),
         ]
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = db_repos
-            result = await handler.handle({
-                "selected_repos": ["/repo/a", "/repo/b"],
-                "initial_context": "Build a todo app",
-            })
+            result = await handler.handle(
+                {
+                    "selected_repos": ["/repo/a", "/repo/b"],
+                    "initial_context": "Build a todo app",
+                }
+            )
 
         assert result.is_ok
         # Should have called ask_opening_and_start with brownfield_repos
@@ -1926,12 +1997,16 @@ class TestSelectReposRouting:
         handler = self._make_handler(engine, tmp_path)
 
         db_repo = BrownfieldRepo(path="/repo/a", name="a")
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = [db_repo]
-            result = await handler.handle({
-                "selected_repos": ["/repo/a"],
-                "session_id": "interview_20260319_120000",
-            })
+            result = await handler.handle(
+                {
+                    "selected_repos": ["/repo/a"],
+                    "session_id": "interview_20260319_120000",
+                }
+            )
 
         assert result.is_ok
         # Should have recovered initial_context from pm_meta
@@ -1948,9 +2023,11 @@ class TestSelectReposRouting:
     async def test_select_repos_no_session_no_context_error(self, engine, tmp_path):
         """selected_repos without session_id or initial_context → error."""
         handler = self._make_handler(engine, tmp_path)
-        result = await handler.handle({
-            "selected_repos": ["/repo/a"],
-        })
+        result = await handler.handle(
+            {
+                "selected_repos": ["/repo/a"],
+            }
+        )
 
         assert result.is_err
         assert "session_id" in str(result.error)
@@ -1959,10 +2036,12 @@ class TestSelectReposRouting:
     async def test_select_repos_missing_pm_meta_error(self, engine, tmp_path):
         """selected_repos + session_id but no pm_meta on disk → error."""
         handler = self._make_handler(engine, tmp_path)
-        result = await handler.handle({
-            "selected_repos": ["/repo/a"],
-            "session_id": "nonexistent_session",
-        })
+        result = await handler.handle(
+            {
+                "selected_repos": ["/repo/a"],
+                "session_id": "nonexistent_session",
+            }
+        )
 
         assert result.is_err
         assert "No pm_meta" in str(result.error)
@@ -1980,10 +2059,12 @@ class TestSelectReposRouting:
         )
 
         handler = self._make_handler(engine, tmp_path)
-        result = await handler.handle({
-            "selected_repos": ["/repo/a"],
-            "session_id": "interview_20260319_130000",
-        })
+        result = await handler.handle(
+            {
+                "selected_repos": ["/repo/a"],
+                "session_id": "interview_20260319_130000",
+            }
+        )
 
         assert result.is_err
         assert "initial_context" in str(result.error)
@@ -2017,10 +2098,12 @@ class TestSelectReposRouting:
         engine.load_state = AsyncMock(return_value=Result.ok(state))
 
         handler = self._make_handler(engine, tmp_path)
-        result = await handler.handle({
-            "selected_repos": ["/repo/a"],
-            "session_id": session_id,
-        })
+        result = await handler.handle(
+            {
+                "selected_repos": ["/repo/a"],
+                "session_id": session_id,
+            }
+        )
 
         assert result.is_ok
         tool_result = result.value
@@ -2055,15 +2138,15 @@ class TestSelectReposRouting:
         )
 
         # Engine can't load state (e.g., file corrupted)
-        engine.load_state = AsyncMock(
-            return_value=Result.err(Exception("state file corrupted"))
-        )
+        engine.load_state = AsyncMock(return_value=Result.err(Exception("state file corrupted")))
 
         handler = self._make_handler(engine, tmp_path)
-        result = await handler.handle({
-            "selected_repos": ["/repo/a"],
-            "session_id": session_id,
-        })
+        result = await handler.handle(
+            {
+                "selected_repos": ["/repo/a"],
+                "session_id": session_id,
+            }
+        )
 
         assert result.is_err
         assert "marked as started" in str(result.error)
@@ -2153,12 +2236,16 @@ class TestResolveReposFromDB:
 
         handler = self._make_handler(engine, tmp_path)
 
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = []  # All missing
-            result = await handler.handle({
-                "selected_repos": ["/gone/a"],
-                "initial_context": "Build something",
-            })
+            result = await handler.handle(
+                {
+                    "selected_repos": ["/gone/a"],
+                    "initial_context": "Build something",
+                }
+            )
 
         assert result.is_ok
         # Should have started as greenfield (brownfield_repos=None)
@@ -2178,12 +2265,16 @@ class TestResolveReposFromDB:
         handler = self._make_handler(engine, tmp_path)
 
         db_repo = BrownfieldRepo(path="/repo/a", name="alpha", desc="A project")
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = [db_repo]
-            result = await handler.handle({
-                "selected_repos": ["/repo/a", "/repo/gone"],
-                "initial_context": "Build something",
-            })
+            result = await handler.handle(
+                {
+                    "selected_repos": ["/repo/a", "/repo/gone"],
+                    "initial_context": "Build something",
+                }
+            )
 
         assert result.is_ok
         call_kwargs = engine.ask_opening_and_start.call_args
@@ -2215,9 +2306,12 @@ class TestRestartRecovery:
             status="interview_started",
         )
 
-        state = _make_state(interview_id=session_id, rounds=[
-            InterviewRound(round_number=1, question="Q1", user_response=None),
-        ])
+        state = _make_state(
+            interview_id=session_id,
+            rounds=[
+                InterviewRound(round_number=1, question="Q1", user_response=None),
+            ],
+        )
         engine = _make_engine_stub()
         engine.load_state = AsyncMock(return_value=Result.ok(state))
         engine.record_response = AsyncMock(return_value=Result.ok(state))
@@ -2226,10 +2320,12 @@ class TestRestartRecovery:
 
         handler = self._make_handler(engine, tmp_path)
 
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "My answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "My answer",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -2249,9 +2345,12 @@ class TestRestartRecovery:
             status="interview_started",
         )
 
-        state = _make_state(interview_id=session_id, rounds=[
-            InterviewRound(round_number=1, question="Q1", user_response=None),
-        ])
+        state = _make_state(
+            interview_id=session_id,
+            rounds=[
+                InterviewRound(round_number=1, question="Q1", user_response=None),
+            ],
+        )
         engine = _make_engine_stub()
         engine.load_state = AsyncMock(return_value=Result.ok(state))
         engine.record_response = AsyncMock(return_value=Result.ok(state))
@@ -2260,10 +2359,12 @@ class TestRestartRecovery:
 
         handler = self._make_handler(engine, tmp_path)
 
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "Some answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "Some answer",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -2285,9 +2386,12 @@ class TestRestartRecovery:
         )
 
         # Set up engine for normal resume
-        state = _make_state(interview_id=session_id, rounds=[
-            InterviewRound(round_number=1, question="Q1", user_response=None),
-        ])
+        state = _make_state(
+            interview_id=session_id,
+            rounds=[
+                InterviewRound(round_number=1, question="Q1", user_response=None),
+            ],
+        )
         engine = _make_engine_stub()
         engine.load_state = AsyncMock(return_value=Result.ok(state))
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
@@ -2295,10 +2399,12 @@ class TestRestartRecovery:
         engine.record_response = AsyncMock(return_value=Result.ok(state))
 
         handler = self._make_handler(engine, tmp_path)
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "My answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "My answer",
+            }
+        )
 
         assert result.is_ok
         # Normal resume path was taken (engine.load_state was called)
@@ -2310,19 +2416,24 @@ class TestRestartRecovery:
         session_id = "interview_20260319_140000"
 
         engine = _make_engine_stub()
-        state = _make_state(interview_id=session_id, rounds=[
-            InterviewRound(round_number=1, question="Q1", user_response=None),
-        ])
+        state = _make_state(
+            interview_id=session_id,
+            rounds=[
+                InterviewRound(round_number=1, question="Q1", user_response=None),
+            ],
+        )
         engine.load_state = AsyncMock(return_value=Result.ok(state))
         engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
         engine.save_state = AsyncMock()
         engine.record_response = AsyncMock(return_value=Result.ok(state))
 
         handler = self._make_handler(engine, tmp_path)
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "My answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "My answer",
+            }
+        )
 
         assert result.is_ok
         engine.load_state.assert_called_once_with(session_id)
@@ -2333,16 +2444,16 @@ class TestRestartRecovery:
         session_id = "interview_20260319_140000"
 
         engine = _make_engine_stub()
-        engine.load_state = AsyncMock(
-            return_value=Result.err(Exception("state not found"))
-        )
+        engine.load_state = AsyncMock(return_value=Result.err(Exception("state not found")))
 
         handler = self._make_handler(engine, tmp_path)
 
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "My answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "My answer",
+            }
+        )
 
         assert result.is_err
 
@@ -2359,9 +2470,12 @@ class TestRestartRecovery:
             status="interview_started",
         )
 
-        state = _make_state(interview_id=session_id, rounds=[
-            InterviewRound(round_number=1, question="Q1", user_response=None),
-        ])
+        state = _make_state(
+            interview_id=session_id,
+            rounds=[
+                InterviewRound(round_number=1, question="Q1", user_response=None),
+            ],
+        )
         engine = _make_engine_stub()
         engine.load_state = AsyncMock(return_value=Result.ok(state))
         engine.record_response = AsyncMock(return_value=Result.ok(state))
@@ -2370,10 +2484,12 @@ class TestRestartRecovery:
 
         handler = self._make_handler(engine, tmp_path)
 
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "My answer",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "My answer",
+            }
+        )
 
         assert result.is_ok
         assert result.value.meta["session_id"] == session_id
@@ -2415,7 +2531,9 @@ class TestTwoStepStartOrchestrationFlow:
         handler = self._make_handler(engine, tmp_path)
 
         default_repos = [
-            BrownfieldRepo(path="/repos/frontend", name="frontend", desc="React app", is_default=True),
+            BrownfieldRepo(
+                path="/repos/frontend", name="frontend", desc="React app", is_default=True
+            ),
         ]
 
         # ── Step 1: initial_context → interview starts directly ──
@@ -2426,10 +2544,12 @@ class TestTwoStepStartOrchestrationFlow:
 
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = default_repos
-            step1_result = await handler.handle({
-                "initial_context": "Add a notification system",
-                "cwd": str(tmp_path),
-            })
+            step1_result = await handler.handle(
+                {
+                    "initial_context": "Add a notification system",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert step1_result.is_ok
         step1_meta = step1_result.value.meta
@@ -2444,7 +2564,9 @@ class TestTwoStepStartOrchestrationFlow:
         state2 = _make_state(
             interview_id=session_id,
             rounds=[
-                InterviewRound(round_number=1, question="What notifications do you need?", user_response=None),
+                InterviewRound(
+                    round_number=1, question="What notifications do you need?", user_response=None
+                ),
             ],
             is_brownfield=True,
         )
@@ -2453,12 +2575,16 @@ class TestTwoStepStartOrchestrationFlow:
         engine.ask_next_question.return_value = Result.ok("Who should receive notifications?")
 
         # Save pm_meta as engine would after start
-        _save_pm_meta(session_id, engine, cwd=str(tmp_path), data_dir=tmp_path, status="interview_started")
+        _save_pm_meta(
+            session_id, engine, cwd=str(tmp_path), data_dir=tmp_path, status="interview_started"
+        )
 
-        step2_result = await handler.handle({
-            "session_id": session_id,
-            "answer": "Push notifications and emails",
-        })
+        step2_result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "Push notifications and emails",
+            }
+        )
 
         assert step2_result.is_ok
         step2_meta = step2_result.value.meta
@@ -2495,12 +2621,16 @@ class TestTwoStepStartOrchestrationFlow:
             BrownfieldRepo(path="/c", name="charlie", desc="Service C"),
         ]
 
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = db_repos
-            result = await handler.handle({
-                "selected_repos": ["/a", "/b", "/c"],
-                "session_id": session_id,
-            })
+            result = await handler.handle(
+                {
+                    "selected_repos": ["/a", "/b", "/c"],
+                    "session_id": session_id,
+                }
+            )
 
         assert result.is_ok
         call_kwargs = engine.ask_opening_and_start.call_args
@@ -2532,12 +2662,16 @@ class TestTwoStepStartOrchestrationFlow:
         engine.ask_next_question.return_value = Result.ok("Describe the project")
         engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = []  # Empty: user deselected all (or all missing)
-            result = await handler.handle({
-                "selected_repos": [],
-                "session_id": session_id,
-            })
+            result = await handler.handle(
+                {
+                    "selected_repos": [],
+                    "session_id": session_id,
+                }
+            )
 
         assert result.is_ok
         # Should start as greenfield
@@ -2556,10 +2690,12 @@ class TestTwoStepStartOrchestrationFlow:
 
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = []
-            result = await handler.handle({
-                "initial_context": "Brand new project",
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Brand new project",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
@@ -2584,13 +2720,17 @@ class TestTwoStepStartOrchestrationFlow:
         engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
         db_repo = BrownfieldRepo(path="/repo/main", name="main-app", desc="Main application")
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = [db_repo]
-            result = await handler.handle({
-                "initial_context": "Add auth module",
-                "selected_repos": ["/repo/main"],
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Add auth module",
+                    "selected_repos": ["/repo/main"],
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
@@ -2616,16 +2756,19 @@ class TestTwoStepStartOrchestrationFlow:
 
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = []
-            result = await handler.handle({
-                "initial_context": "Migrate to microservices",
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Migrate to microservices",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         session_id = result.value.meta["session_id"]
 
         # Verify pm_meta on disk has interview_started status
         import json
+
         meta_file = tmp_path / f"pm_meta_{session_id}.json"
         assert meta_file.exists()
         saved_meta = json.loads(meta_file.read_text())
@@ -2653,12 +2796,16 @@ class TestTwoStepStartOrchestrationFlow:
         engine.ask_next_question.return_value = Result.ok("First question?")
         engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = [BrownfieldRepo(path="/r", name="r")]
-            result = await handler.handle({
-                "selected_repos": ["/r"],
-                "session_id": session_id,
-            })
+            result = await handler.handle(
+                {
+                    "selected_repos": ["/r"],
+                    "session_id": session_id,
+                }
+            )
 
         assert result.is_ok
         # Session ID must match step 1's session ID
@@ -2683,10 +2830,12 @@ class TestTwoStepStartOrchestrationFlow:
 
         with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
             mock_defaults.return_value = default_repos
-            result = await handler.handle({
-                "initial_context": "Some feature",
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Some feature",
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
@@ -2717,7 +2866,9 @@ class TestTwoStepStartOrchestrationFlow:
         state = _make_state(
             interview_id=session_id,
             rounds=[
-                InterviewRound(round_number=1, question="What search features?", user_response=None),
+                InterviewRound(
+                    round_number=1, question="What search features?", user_response=None
+                ),
             ],
             is_brownfield=True,
         )
@@ -2726,10 +2877,12 @@ class TestTwoStepStartOrchestrationFlow:
         engine.ask_next_question.return_value = Result.ok("Who uses the search?")
         engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "Full-text search and filters",
-        })
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "Full-text search and filters",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -2752,13 +2905,17 @@ class TestTwoStepStartOrchestrationFlow:
         no_desc_repo = BrownfieldRepo(path="/repo/plain", name="plain")
         with_desc_repo = BrownfieldRepo(path="/repo/documented", name="documented", desc="Has docs")
 
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
+        with patch.object(
+            handler, "_resolve_repos_from_db", new_callable=AsyncMock
+        ) as mock_resolve:
             mock_resolve.return_value = [no_desc_repo, with_desc_repo]
-            result = await handler.handle({
-                "initial_context": "Test project",
-                "selected_repos": ["/repo/plain", "/repo/documented"],
-                "cwd": str(tmp_path),
-            })
+            result = await handler.handle(
+                {
+                    "initial_context": "Test project",
+                    "selected_repos": ["/repo/plain", "/repo/documented"],
+                    "cwd": str(tmp_path),
+                }
+            )
 
         assert result.is_ok
         call_kwargs = engine.ask_opening_and_start.call_args
@@ -2796,10 +2953,12 @@ class TestTwoStepStartOrchestrationFlow:
         engine.load_state = AsyncMock(return_value=Result.ok(state))
 
         # Duplicate step 2 call
-        result = await handler.handle({
-            "selected_repos": ["/repo/a"],
-            "session_id": session_id,
-        })
+        result = await handler.handle(
+            {
+                "selected_repos": ["/repo/a"],
+                "session_id": session_id,
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta

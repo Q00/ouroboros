@@ -51,7 +51,9 @@ def _make_seed(**overrides) -> PMSeed:
     return PMSeed(**defaults)
 
 
-def _make_adapter(content: str = "# Widget Dashboard\n\n## Goal\n\nBuild a dashboard.") -> MagicMock:
+def _make_adapter(
+    content: str = "# Widget Dashboard\n\n## Goal\n\nBuild a dashboard.",
+) -> MagicMock:
     """Create a mock LLM adapter returning the given content."""
     adapter = MagicMock()
     adapter.complete = AsyncMock(
@@ -73,9 +75,7 @@ def _make_adapter(content: str = "# Widget Dashboard\n\n## Goal\n\nBuild a dashb
 def _make_failing_adapter() -> MagicMock:
     """Create a mock adapter that returns an error."""
     adapter = MagicMock()
-    adapter.complete = AsyncMock(
-        return_value=Result.err(ProviderError("Service unavailable"))
-    )
+    adapter.complete = AsyncMock(return_value=Result.err(ProviderError("Service unavailable")))
     return adapter
 
 

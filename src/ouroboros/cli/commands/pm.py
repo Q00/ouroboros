@@ -81,19 +81,14 @@ def pm_command(
 
     output_path = output or Path(".ouroboros/pm.md")
 
-    console.print(
-        "\n[bold cyan]Ouroboros PM Generator[/] - Product Requirements Document\n"
-    )
+    console.print("\n[bold cyan]Ouroboros PM Generator[/] - Product Requirements Document\n")
 
     if resume:
         print_info(f"Resuming PM session: {resume}")
     else:
         print_info("Starting new PM interview session...")
 
-    console.print(
-        f"  Model: [dim]{model}[/]\n"
-        f"  Output: [dim]{output_path}[/]\n"
-    )
+    console.print(f"  Model: [dim]{model}[/]\n  Output: [dim]{output_path}[/]\n")
 
     # PMInterviewEngine integration point — the sibling agent is building
     # PMInterviewEngine which will be wired in here.

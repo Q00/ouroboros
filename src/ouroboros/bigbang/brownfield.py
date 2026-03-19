@@ -37,30 +37,32 @@ BrownfieldEntry = BrownfieldRepo
 
 _FRUGAL_MODEL = "anthropic/claude-3-5-haiku-20241022"
 
-_SKIP_DIRS: frozenset[str] = frozenset({
-    "node_modules",
-    ".venv",
-    "__pycache__",
-    ".cache",
-    "Library",
-    ".Trash",
-    "vendor",
-    ".gradle",
-    "build",
-    "dist",
-    "target",
-    ".tox",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".cargo",
-    "Pods",
-    ".npm",
-    ".nvm",
-    ".local",
-    ".docker",
-    ".rustup",
-    "go",
-})
+_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        ".venv",
+        "__pycache__",
+        ".cache",
+        "Library",
+        ".Trash",
+        "vendor",
+        ".gradle",
+        "build",
+        "dist",
+        "target",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".cargo",
+        "Pods",
+        ".npm",
+        ".nvm",
+        ".local",
+        ".docker",
+        ".rustup",
+        "go",
+    }
+)
 
 _DESC_SYSTEM_PROMPT = (
     "You are a concise technical writer. "
@@ -131,11 +133,7 @@ def scan_home_for_repos(
             continue
 
         # Prune skip directories
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if d not in _SKIP_DIRS and not d.startswith(".")
-        ]
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
 
     repos.sort(key=lambda r: r["path"])
     log.info("brownfield.scan.complete", root=str(root), found=len(repos))

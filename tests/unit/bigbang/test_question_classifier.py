@@ -222,12 +222,14 @@ class TestQuestionClassifierPassthrough:
         adapter.complete = AsyncMock(
             return_value=Result.ok(
                 _mock_completion(
-                    json.dumps({
-                        "category": "planning",
-                        "reframed_question": planning_q,
-                        "reasoning": "Success metrics are a PM concern",
-                        "defer_to_dev": False,
-                    })
+                    json.dumps(
+                        {
+                            "category": "planning",
+                            "reframed_question": planning_q,
+                            "reasoning": "Success metrics are a PM concern",
+                            "defer_to_dev": False,
+                        }
+                    )
                 )
             )
         )
@@ -248,9 +250,7 @@ class TestQuestionClassifierPassthrough:
         question = "What is the target market?"
 
         adapter.complete = AsyncMock(
-            return_value=Result.ok(
-                _mock_completion("This is not valid JSON at all")
-            )
+            return_value=Result.ok(_mock_completion("This is not valid JSON at all"))
         )
 
         classifier = QuestionClassifier(llm_adapter=adapter)
@@ -272,12 +272,14 @@ class TestQuestionClassifierPassthrough:
         adapter.complete = AsyncMock(
             return_value=Result.ok(
                 _mock_completion(
-                    json.dumps({
-                        "category": "planning",
-                        "reframed_question": planning_q,
-                        "reasoning": "Timeline is PM domain",
-                        "defer_to_dev": False,
-                    })
+                    json.dumps(
+                        {
+                            "category": "planning",
+                            "reframed_question": planning_q,
+                            "reasoning": "Timeline is PM domain",
+                            "defer_to_dev": False,
+                        }
+                    )
                 )
             )
         )
@@ -302,14 +304,16 @@ class TestQuestionClassifierParseDecideLater:
         """Parses a well-formed decide-later JSON response."""
         classifier = QuestionClassifier(llm_adapter=MagicMock())
 
-        response = json.dumps({
-            "category": "decide_later",
-            "reframed_question": "How to handle scaling?",
-            "reasoning": "Post-MVP concern",
-            "defer_to_dev": False,
-            "decide_later": True,
-            "placeholder_response": "TBD after MVP launch.",
-        })
+        response = json.dumps(
+            {
+                "category": "decide_later",
+                "reframed_question": "How to handle scaling?",
+                "reasoning": "Post-MVP concern",
+                "defer_to_dev": False,
+                "decide_later": True,
+                "placeholder_response": "TBD after MVP launch.",
+            }
+        )
 
         result = classifier._parse_response(response, "How to handle scaling?")
 
@@ -323,11 +327,13 @@ class TestQuestionClassifierParseDecideLater:
         """If category is decide_later but flag is missing, flag is auto-set."""
         classifier = QuestionClassifier(llm_adapter=MagicMock())
 
-        response = json.dumps({
-            "category": "decide_later",
-            "reframed_question": "Q?",
-            "reasoning": "premature",
-        })
+        response = json.dumps(
+            {
+                "category": "decide_later",
+                "reframed_question": "Q?",
+                "reasoning": "premature",
+            }
+        )
 
         result = classifier._parse_response(response, "Q?")
 
@@ -339,13 +345,15 @@ class TestQuestionClassifierParseDecideLater:
         """decide_later=true with empty placeholder gets the default."""
         classifier = QuestionClassifier(llm_adapter=MagicMock())
 
-        response = json.dumps({
-            "category": "decide_later",
-            "reframed_question": "Q?",
-            "reasoning": "premature",
-            "decide_later": True,
-            "placeholder_response": "",
-        })
+        response = json.dumps(
+            {
+                "category": "decide_later",
+                "reframed_question": "Q?",
+                "reasoning": "premature",
+                "decide_later": True,
+                "placeholder_response": "",
+            }
+        )
 
         result = classifier._parse_response(response, "Q?")
 
@@ -356,11 +364,13 @@ class TestQuestionClassifierParseDecideLater:
         """Planning classification has decide_later=False by default."""
         classifier = QuestionClassifier(llm_adapter=MagicMock())
 
-        response = json.dumps({
-            "category": "planning",
-            "reframed_question": "Who are users?",
-            "reasoning": "Business question",
-        })
+        response = json.dumps(
+            {
+                "category": "planning",
+                "reframed_question": "Who are users?",
+                "reasoning": "Business question",
+            }
+        )
 
         result = classifier._parse_response(response, "Who are users?")
 
@@ -386,14 +396,16 @@ class TestQuestionClassifierDecideLater:
         adapter.complete = AsyncMock(
             return_value=Result.ok(
                 _mock_completion(
-                    json.dumps({
-                        "category": "decide_later",
-                        "reframed_question": question,
-                        "reasoning": "Multi-region is a future scaling concern",
-                        "defer_to_dev": False,
-                        "decide_later": True,
-                        "placeholder_response": "Will be determined after initial deployment.",
-                    })
+                    json.dumps(
+                        {
+                            "category": "decide_later",
+                            "reframed_question": question,
+                            "reasoning": "Multi-region is a future scaling concern",
+                            "defer_to_dev": False,
+                            "decide_later": True,
+                            "placeholder_response": "Will be determined after initial deployment.",
+                        }
+                    )
                 )
             )
         )

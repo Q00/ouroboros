@@ -1124,9 +1124,7 @@ class TestAmbiguityScorerAdditionalContext:
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
-                create_mock_completion_response(
-                    content=create_valid_scoring_response()
-                )
+                create_mock_completion_response(content=create_valid_scoring_response())
             )
         )
 
@@ -1151,9 +1149,7 @@ class TestAmbiguityScorerAdditionalContext:
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
-                create_mock_completion_response(
-                    content=create_valid_scoring_response()
-                )
+                create_mock_completion_response(content=create_valid_scoring_response())
             )
         )
 
@@ -1173,9 +1169,7 @@ class TestAmbiguityScorerAdditionalContext:
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
-                create_mock_completion_response(
-                    content=create_valid_scoring_response()
-                )
+                create_mock_completion_response(content=create_valid_scoring_response())
             )
         )
 
@@ -1196,9 +1190,7 @@ class TestAmbiguityScorerAdditionalContext:
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(
             return_value=Result.ok(
-                create_mock_completion_response(
-                    content=create_valid_scoring_response()
-                )
+                create_mock_completion_response(content=create_valid_scoring_response())
             )
         )
 
@@ -1273,9 +1265,7 @@ class TestAmbiguityScorerAdditionalContext:
             }
         )
         mock_adapter.complete = AsyncMock(
-            return_value=Result.ok(
-                create_mock_completion_response(content=brownfield_response)
-            )
+            return_value=Result.ok(create_mock_completion_response(content=brownfield_response))
         )
 
         scorer = AmbiguityScorer(llm_adapter=mock_adapter)

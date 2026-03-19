@@ -44,7 +44,9 @@ def _make_adapter() -> MagicMock:
     return adapter
 
 
-def _make_engine(adapter: MagicMock | None = None, tmp_path: Path | None = None) -> PMInterviewEngine:
+def _make_engine(
+    adapter: MagicMock | None = None, tmp_path: Path | None = None
+) -> PMInterviewEngine:
     """Create a PMInterviewEngine with mocked dependencies."""
     if adapter is None:
         adapter = _make_adapter()
@@ -74,12 +76,14 @@ class TestClassifierReceivesFullContext:
                 # Classification response
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": current_question,
-                            "reasoning": "Market question is PM-answerable",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": current_question,
+                                "reasoning": "Market question is PM-answerable",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -100,7 +104,9 @@ class TestClassifierReceivesFullContext:
         # Verify classify was called with the current question
         engine.classifier.classify.assert_called_once()
         call_kwargs = engine.classifier.classify.call_args
-        assert call_kwargs[1]["question"] == current_question or call_kwargs[0][0] == current_question
+        assert (
+            call_kwargs[1]["question"] == current_question or call_kwargs[0][0] == current_question
+        )
 
     @pytest.mark.asyncio
     async def test_classifier_receives_qa_history_from_rounds(self, tmp_path: Path) -> None:
@@ -133,12 +139,14 @@ class TestClassifierReceivesFullContext:
                 Result.ok(_mock_completion(next_question)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": next_question,
-                            "reasoning": "Metrics question",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": next_question,
+                                "reasoning": "Metrics question",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -152,7 +160,11 @@ class TestClassifierReceivesFullContext:
 
         # Extract the interview_context that was passed
         call_kwargs = engine.classifier.classify.call_args
-        interview_context = call_kwargs[1].get("interview_context") or call_kwargs[0][1] if len(call_kwargs[0]) > 1 else call_kwargs[1]["interview_context"]
+        interview_context = (
+            call_kwargs[1].get("interview_context") or call_kwargs[0][1]
+            if len(call_kwargs[0]) > 1
+            else call_kwargs[1]["interview_context"]
+        )
 
         # Should contain the initial context
         assert "Build a project tracker" in interview_context
@@ -187,12 +199,14 @@ class TestClassifierReceivesFullContext:
                 Result.ok(_mock_completion(next_question)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": next_question,
-                            "reasoning": "Data requirements question",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": next_question,
+                                "reasoning": "Data requirements question",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -253,12 +267,14 @@ class TestClassifierReceivesFullContext:
             # Second call: classification
             return Result.ok(
                 _mock_completion(
-                    json.dumps({
-                        "category": "planning",
-                        "reframed_question": current_question,
-                        "reasoning": "Compliance is PM domain",
-                        "defer_to_dev": False,
-                    })
+                    json.dumps(
+                        {
+                            "category": "planning",
+                            "reframed_question": current_question,
+                            "reasoning": "Compliance is PM domain",
+                            "defer_to_dev": False,
+                        }
+                    )
                 )
             )
 
@@ -312,12 +328,14 @@ class TestClassifierReceivesFullContext:
                 Result.ok(_mock_completion(next_q)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": next_q,
-                            "reasoning": "Scale question",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": next_q,
+                                "reasoning": "Scale question",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -330,7 +348,11 @@ class TestClassifierReceivesFullContext:
         assert result.is_ok
 
         call_kwargs = engine.classifier.classify.call_args
-        interview_context = call_kwargs[1].get("interview_context") or call_kwargs[0][1] if len(call_kwargs[0]) > 1 else call_kwargs[1]["interview_context"]
+        interview_context = (
+            call_kwargs[1].get("interview_context") or call_kwargs[0][1]
+            if len(call_kwargs[0]) > 1
+            else call_kwargs[1]["interview_context"]
+        )
 
         assert "real-time collaboration tool" in interview_context
 
@@ -352,12 +374,14 @@ class TestClassifierReceivesFullContext:
                 Result.ok(_mock_completion(next_q)),
                 Result.ok(
                     _mock_completion(
-                        json.dumps({
-                            "category": "planning",
-                            "reframed_question": next_q,
-                            "reasoning": "Platform scope question",
-                            "defer_to_dev": False,
-                        })
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": next_q,
+                                "reasoning": "Platform scope question",
+                                "defer_to_dev": False,
+                            }
+                        )
                     )
                 ),
             ]
@@ -370,7 +394,11 @@ class TestClassifierReceivesFullContext:
         assert result.is_ok
 
         call_kwargs = engine.classifier.classify.call_args
-        interview_context = call_kwargs[1].get("interview_context") or call_kwargs[0][1] if len(call_kwargs[0]) > 1 else call_kwargs[1]["interview_context"]
+        interview_context = (
+            call_kwargs[1].get("interview_context") or call_kwargs[0][1]
+            if len(call_kwargs[0]) > 1
+            else call_kwargs[1]["interview_context"]
+        )
 
         # Initial context should be present even with no rounds
         assert "Build a note-taking app" in interview_context
@@ -467,12 +495,14 @@ class TestClassifierReceivesFullContext:
                 return Result.ok(_mock_completion(current_q))
             return Result.ok(
                 _mock_completion(
-                    json.dumps({
-                        "category": "planning",
-                        "reframed_question": current_q,
-                        "reasoning": "Priority is a product decision",
-                        "defer_to_dev": False,
-                    })
+                    json.dumps(
+                        {
+                            "category": "planning",
+                            "reframed_question": current_q,
+                            "reasoning": "Priority is a product decision",
+                            "defer_to_dev": False,
+                        }
+                    )
                 )
             )
 

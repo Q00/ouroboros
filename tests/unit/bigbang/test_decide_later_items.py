@@ -238,9 +238,7 @@ class TestDecideLaterItemsList:
             ),
         ]
 
-        engine.classifier.classify = AsyncMock(
-            side_effect=[Result.ok(c) for c in classifications]
-        )
+        engine.classifier.classify = AsyncMock(side_effect=[Result.ok(c) for c in classifications])
         engine.inner.ask_next_question = AsyncMock(
             side_effect=[Result.ok(q1), Result.ok(q2), Result.ok(q3), Result.ok(passthrough_q)]
         )
@@ -407,16 +405,18 @@ class TestDecideLaterExtractionFlow:
         engine = _make_engine()
         engine.decide_later_items = ["What caching strategy?"]
 
-        response_json = json.dumps({
-            "product_name": "Task Manager",
-            "goal": "Manage tasks",
-            "user_stories": [],
-            "constraints": [],
-            "success_criteria": [],
-            "deferred_items": [],
-            "decide_later_items": ["What deployment model?"],
-            "assumptions": [],
-        })
+        response_json = json.dumps(
+            {
+                "product_name": "Task Manager",
+                "goal": "Manage tasks",
+                "user_stories": [],
+                "constraints": [],
+                "success_criteria": [],
+                "deferred_items": [],
+                "decide_later_items": ["What deployment model?"],
+                "assumptions": [],
+            }
+        )
 
         seed = engine._parse_pm_seed(response_json, interview_id="test-1")
 
@@ -431,16 +431,18 @@ class TestDecideLaterExtractionFlow:
         engine = _make_engine()
         engine.decide_later_items = ["What caching strategy?"]
 
-        response_json = json.dumps({
-            "product_name": "Test",
-            "goal": "Test",
-            "user_stories": [],
-            "constraints": [],
-            "success_criteria": [],
-            "deferred_items": [],
-            "decide_later_items": ["What caching strategy?"],  # Same as classifier
-            "assumptions": [],
-        })
+        response_json = json.dumps(
+            {
+                "product_name": "Test",
+                "goal": "Test",
+                "user_stories": [],
+                "constraints": [],
+                "success_criteria": [],
+                "deferred_items": [],
+                "decide_later_items": ["What caching strategy?"],  # Same as classifier
+                "assumptions": [],
+            }
+        )
 
         seed = engine._parse_pm_seed(response_json, interview_id="test-1")
 
@@ -452,16 +454,18 @@ class TestDecideLaterExtractionFlow:
         engine = _make_engine()
         engine.decide_later_items = ["Original question?"]
 
-        response_json = json.dumps({
-            "product_name": "Test",
-            "goal": "Test",
-            "user_stories": [],
-            "constraints": [],
-            "success_criteria": [],
-            "deferred_items": [],
-            "assumptions": [],
-            # No decide_later_items key
-        })
+        response_json = json.dumps(
+            {
+                "product_name": "Test",
+                "goal": "Test",
+                "user_stories": [],
+                "constraints": [],
+                "success_criteria": [],
+                "deferred_items": [],
+                "assumptions": [],
+                # No decide_later_items key
+            }
+        )
 
         seed = engine._parse_pm_seed(response_json, interview_id="test-1")
 

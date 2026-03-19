@@ -38,9 +38,7 @@ def _make_seed(
         pm_id=pm_id,
         product_name=product_name,
         goal="Build a great product",
-        user_stories=(
-            UserStory(persona="User", action="do stuff", benefit="save time"),
-        ),
+        user_stories=(UserStory(persona="User", action="do stuff", benefit="save time"),),
         constraints=("Timeline: 3 months",),
         success_criteria=("100 users",),
         deferred_items=("DB choice",),
@@ -105,11 +103,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -124,11 +124,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed, pm_path=pm_path)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -146,11 +148,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed, seed_path=seed_path)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -164,11 +168,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -182,11 +188,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         engine.load_state.assert_awaited_once_with("test-session-gen")
 
@@ -207,17 +215,20 @@ class TestHandleGenerate:
         }
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         # Manually save meta
-        _save_pm_meta.__wrapped__ if hasattr(_save_pm_meta, '__wrapped__') else None
+        _save_pm_meta.__wrapped__ if hasattr(_save_pm_meta, "__wrapped__") else None
         meta_path = tmp_path / "pm_meta_test-session-gen.json"
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         import json
+
         meta_path.write_text(json.dumps(meta_data), encoding="utf-8")
 
-        await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         # Verify engine.restore_meta was called with the loaded meta
         engine.restore_meta.assert_called_once_with(meta_data)
@@ -230,11 +241,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         engine.restore_meta.assert_not_called()
@@ -247,11 +260,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         engine.generate_pm_seed.assert_awaited_once_with(state)
 
@@ -263,11 +278,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         engine.save_pm_seed.assert_called_once_with(seed)
 
@@ -280,11 +297,13 @@ class TestHandleGenerate:
 
         cwd = str(tmp_path / "my_project")
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": cwd,
-        })
+        await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": cwd,
+            }
+        )
 
         expected_dir = Path(cwd) / ".ouroboros"
         engine.save_pm_document.assert_called_once_with(seed, output_dir=expected_dir)
@@ -297,11 +316,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         text = result.value.content[0].text
@@ -318,11 +339,13 @@ class TestHandleGenerate:
         )
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "nonexistent",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "nonexistent",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_err
 
@@ -334,17 +357,17 @@ class TestHandleGenerate:
         state = _make_state()
         engine = MagicMock(spec=PMInterviewEngine)
         engine.load_state = AsyncMock(return_value=Result.ok(state))
-        engine.generate_pm_seed = AsyncMock(
-            return_value=Result.err(ProviderError("LLM failed"))
-        )
+        engine.generate_pm_seed = AsyncMock(return_value=Result.err(ProviderError("LLM failed")))
         engine.restore_meta = MagicMock()
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_err
 
@@ -356,11 +379,13 @@ class TestHandleGenerate:
         engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result.is_ok
         assert result.value.is_error is False
@@ -376,16 +401,20 @@ class TestHandleGenerate:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result1 = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
-        result2 = await handler.handle({
-            "action": "generate",
-            "session_id": "test-session-gen",
-            "cwd": str(tmp_path),
-        })
+        result1 = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
+        result2 = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
 
         assert result1.is_ok
         assert result2.is_ok
@@ -397,9 +426,11 @@ class TestHandleGenerate:
         engine = MagicMock(spec=PMInterviewEngine)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle({
-            "action": "generate",
-        })
+        result = await handler.handle(
+            {
+                "action": "generate",
+            }
+        )
 
         # Without session_id, falls through to error
         assert result.is_err

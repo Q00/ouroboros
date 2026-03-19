@@ -150,9 +150,7 @@ class TestGeneratePrdMarkdown:
     def test_brownfield_repos_section(self):
         """Includes brownfield repo context when present."""
         seed = _make_seed(
-            brownfield_repos=(
-                {"path": "/code/myapp", "name": "MyApp", "desc": "Main app"},
-            ),
+            brownfield_repos=({"path": "/code/myapp", "name": "MyApp", "desc": "Main app"},),
         )
         md = generate_pm_markdown(seed)
         assert "## Existing Codebase Context" in md

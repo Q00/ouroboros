@@ -202,9 +202,7 @@ def setup_command(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
-    console.print(
-        "\n[bold cyan]Ouroboros Setup[/] — Brownfield Repository Scanner\n"
-    )
+    console.print("\n[bold cyan]Ouroboros Setup[/] — Brownfield Repository Scanner\n")
 
     try:
         asyncio.run(_run_full_setup())
@@ -234,8 +232,7 @@ async def _run_full_setup() -> None:
     current_default = next((r for r in repos if r.get("is_default")), None)
     if current_default:
         print_info(
-            f"Current default: [cyan]{current_default['name']}[/] "
-            f"({current_default['path']})"
+            f"Current default: [cyan]{current_default['name']}[/] ({current_default['path']})"
         )
         console.print()
 
@@ -245,10 +242,7 @@ async def _run_full_setup() -> None:
         with console.status("[cyan]Setting default...[/]", spinner="dots"):
             success = await _set_default_repo(selected["path"])
         if success:
-            print_success(
-                f"Default repo set to: [cyan]{selected['name']}[/] "
-                f"({selected['path']})"
-            )
+            print_success(f"Default repo set to: [cyan]{selected['name']}[/] ({selected['path']})")
         else:
             print_error(f"Failed to set default: {selected['path']}")
     else:
@@ -344,8 +338,6 @@ async def _run_set_default() -> None:
         success = await _set_default_repo(selected["path"])
 
     if success:
-        print_success(
-            f"Default set to: [cyan]{selected['name']}[/] ({selected['path']})"
-        )
+        print_success(f"Default set to: [cyan]{selected['name']}[/] ({selected['path']})")
     else:
         print_error(f"Failed to set default: {selected['path']}")

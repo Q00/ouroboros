@@ -44,7 +44,9 @@ def _make_adapter() -> MagicMock:
     return adapter
 
 
-def _make_engine(adapter: MagicMock | None = None, tmp_path: Path | None = None) -> PMInterviewEngine:
+def _make_engine(
+    adapter: MagicMock | None = None, tmp_path: Path | None = None
+) -> PMInterviewEngine:
     """Create a PMInterviewEngine with mocked dependencies."""
     if adapter is None:
         adapter = _make_adapter()
@@ -119,11 +121,13 @@ class TestPMInterviewWithDBBrownfield:
             ):
                 result = await engine.start_interview(
                     initial_context="Add user notifications",
-                    brownfield_repos=[{
-                        "path": "/home/user/my-project",
-                        "name": "my-project",
-                        "role": "primary",
-                    }],
+                    brownfield_repos=[
+                        {
+                            "path": "/home/user/my-project",
+                            "name": "my-project",
+                            "role": "primary",
+                        }
+                    ],
                 )
 
         assert result.is_ok
@@ -137,9 +141,7 @@ class TestPMInterviewWithDBBrownfield:
         assert "Add user notifications" in ctx
 
     @pytest.mark.asyncio
-    async def test_start_without_brownfield_repos_is_greenfield(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_start_without_brownfield_repos_is_greenfield(self, tmp_path: Path) -> None:
         """When no brownfield_repos are passed, interview is greenfield."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
@@ -154,9 +156,7 @@ class TestPMInterviewWithDBBrownfield:
         assert "Build a brand new app from scratch" in ctx
 
     @pytest.mark.asyncio
-    async def test_start_with_empty_brownfield_repos_is_greenfield(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_start_with_empty_brownfield_repos_is_greenfield(self, tmp_path: Path) -> None:
         """When brownfield_repos is an empty list, interview is greenfield."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
@@ -171,9 +171,7 @@ class TestPMInterviewWithDBBrownfield:
         assert "Existing Codebase Context" not in ctx
 
     @pytest.mark.asyncio
-    async def test_opening_and_start_with_db_brownfield_repos(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_opening_and_start_with_db_brownfield_repos(self, tmp_path: Path) -> None:
         """ask_opening_and_start forwards brownfield_repos and explores them."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
@@ -183,11 +181,13 @@ class TestPMInterviewWithDBBrownfield:
         ) as mock_explore:
             result = await engine.ask_opening_and_start(
                 user_response="Enhance existing project",
-                brownfield_repos=[{
-                    "path": "/home/user/project",
-                    "name": "project",
-                    "desc": "Main backend",
-                }],
+                brownfield_repos=[
+                    {
+                        "path": "/home/user/project",
+                        "name": "project",
+                        "desc": "Main backend",
+                    }
+                ],
             )
 
             assert result.is_ok
@@ -198,9 +198,7 @@ class TestExploreCodebasesWithDBRepos:
     """Test explore_codebases using DB-loaded brownfield repos."""
 
     @pytest.mark.asyncio
-    async def test_explore_uses_db_repos_when_none_passed(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_explore_uses_db_repos_when_none_passed(self, tmp_path: Path) -> None:
         """When repos=None, explore_codebases loads from DB via load_brownfield_repos."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
@@ -210,9 +208,7 @@ class TestExploreCodebasesWithDBRepos:
             {"path": "/home/user/repo-b", "name": "repo-b", "desc": "Repo B"},
         ]
 
-        with patch.object(
-            PMInterviewEngine, "load_brownfield_repos", return_value=db_repos
-        ):
+        with patch.object(PMInterviewEngine, "load_brownfield_repos", return_value=db_repos):
             with patch("ouroboros.bigbang.pm_interview.CodebaseExplorer") as MockExplorer:
                 mock_explorer = MagicMock()
                 mock_explorer.explore = AsyncMock(return_value=[])
@@ -228,25 +224,19 @@ class TestExploreCodebasesWithDBRepos:
                 assert call_args[1]["path"] == "/home/user/repo-b"
 
     @pytest.mark.asyncio
-    async def test_explore_returns_empty_when_db_has_no_repos(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_explore_returns_empty_when_db_has_no_repos(self, tmp_path: Path) -> None:
         """When DB has no repos, explore_codebases returns empty string."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
-        with patch.object(
-            PMInterviewEngine, "load_brownfield_repos", return_value=[]
-        ):
+        with patch.object(PMInterviewEngine, "load_brownfield_repos", return_value=[]):
             result = await engine.explore_codebases()  # No repos arg
 
             assert result == ""
             assert engine._explored is True
 
     @pytest.mark.asyncio
-    async def test_explore_caches_after_first_call(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_explore_caches_after_first_call(self, tmp_path: Path) -> None:
         """explore_codebases only scans once — second call returns cached result."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
@@ -290,9 +280,7 @@ class TestPMSeedIncludesDBBrownfieldRepos:
             "decide_later_items": [],
             "assumptions": ["users have internet"]
         }"""
-        adapter.complete = AsyncMock(
-            return_value=Result.ok(_mock_completion(extraction_response))
-        )
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion(extraction_response)))
 
         # Mock load_brownfield_repos to return DB repos
         db_repos = [
@@ -314,9 +302,7 @@ class TestPMSeedIncludesDBBrownfieldRepos:
             ],
         )
 
-        with patch.object(
-            PMInterviewEngine, "load_brownfield_repos", return_value=db_repos
-        ):
+        with patch.object(PMInterviewEngine, "load_brownfield_repos", return_value=db_repos):
             result = await engine.generate_pm_seed(state)
 
         assert result.is_ok
@@ -332,9 +318,7 @@ class TestBrownfieldContextInInterviewFlow:
     """Test the full interview flow with DB-backed brownfield context."""
 
     @pytest.mark.asyncio
-    async def test_brownfield_context_shared_with_classifier(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_brownfield_context_shared_with_classifier(self, tmp_path: Path) -> None:
         """Exploring DB brownfield repos shares context with the question classifier."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
@@ -350,20 +334,22 @@ class TestBrownfieldContextInInterviewFlow:
                 "ouroboros.bigbang.pm_interview.format_explore_results",
                 return_value=codebase_summary,
             ):
-                await engine.explore_codebases([{
-                    "path": "/home/user/my-app",
-                    "name": "my-app",
-                    "desc": "Web app",
-                }])
+                await engine.explore_codebases(
+                    [
+                        {
+                            "path": "/home/user/my-app",
+                            "name": "my-app",
+                            "desc": "Web app",
+                        }
+                    ]
+                )
 
         # Both engine and classifier should have the context
         assert engine.codebase_context == codebase_summary
         assert engine.classifier.codebase_context == codebase_summary
 
     @pytest.mark.asyncio
-    async def test_brownfield_context_included_in_extraction_prompt(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_brownfield_context_included_in_extraction_prompt(self, tmp_path: Path) -> None:
         """Brownfield codebase context is included in the PMSeed extraction prompt."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
@@ -386,17 +372,13 @@ class TestBrownfieldContextInInterviewFlow:
             ],
         )
 
-        prompt = engine._build_extraction_prompt(
-            engine._build_interview_context(state)
-        )
+        prompt = engine._build_extraction_prompt(engine._build_interview_context(state))
 
         assert "Brownfield codebase context:" in prompt
         assert "Django and Celery" in prompt
 
     @pytest.mark.asyncio
-    async def test_no_brownfield_context_omits_section_in_extraction(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_no_brownfield_context_omits_section_in_extraction(self, tmp_path: Path) -> None:
         """When no brownfield context, extraction prompt omits brownfield section."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
@@ -419,16 +401,12 @@ class TestBrownfieldContextInInterviewFlow:
             ],
         )
 
-        prompt = engine._build_extraction_prompt(
-            engine._build_interview_context(state)
-        )
+        prompt = engine._build_extraction_prompt(engine._build_interview_context(state))
 
         assert "Brownfield codebase context:" not in prompt
 
     @pytest.mark.asyncio
-    async def test_restore_meta_preserves_brownfield_context(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_restore_meta_preserves_brownfield_context(self, tmp_path: Path) -> None:
         """restore_meta restores codebase_context and syncs it with classifier."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)

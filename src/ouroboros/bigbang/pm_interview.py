@@ -256,10 +256,7 @@ class PMInterviewEngine:
             self._explored = True
             return ""
 
-        paths = [
-            {"path": r["path"], "role": r.get("role", "primary")}
-            for r in repos
-        ]
+        paths = [{"path": r["path"], "role": r.get("role", "primary")} for r in repos]
 
         try:
             explorer = CodebaseExplorer(
@@ -369,10 +366,7 @@ class PMInterviewEngine:
         pm_context = _PM_SYSTEM_PROMPT_PREFIX + initial_context
 
         if self.codebase_context:
-            pm_context += (
-                f"\n\n## Existing Codebase Context (BROWNFIELD)\n"
-                f"{self.codebase_context}"
-            )
+            pm_context += f"\n\n## Existing Codebase Context (BROWNFIELD)\n{self.codebase_context}"
 
         result = await self.inner.start_interview(
             initial_context=pm_context,
@@ -537,9 +531,7 @@ class PMInterviewEngine:
                 reframed_question=question[:100],
             )
 
-            return await self.inner.record_response(
-                state, bundled_response, bundled_question
-            )
+            return await self.inner.record_response(state, bundled_response, bundled_question)
 
         return await self.inner.record_response(state, user_response, question)
 
@@ -840,9 +832,7 @@ Include them in "deferred_items":
 """
 
         if self.decide_later_items:
-            decide_later_text = "\n".join(
-                f"- {item}" for item in self.decide_later_items
-            )
+            decide_later_text = "\n".join(f"- {item}" for item in self.decide_later_items)
             prompt += f"""
 
 The following questions were identified as premature or unknowable at this stage.
@@ -914,9 +904,7 @@ Brownfield codebase context:
                 all_decide_later.append(item)
 
         # Include brownfield repos
-        brownfield_repos = tuple(
-            dict(r) for r in self.load_brownfield_repos()
-        )
+        brownfield_repos = tuple(dict(r) for r in self.load_brownfield_repos())
 
         return PMSeed(
             product_name=data.get("product_name", ""),

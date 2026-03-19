@@ -157,14 +157,10 @@ class PMSeed:
             assumptions=tuple(data.get("assumptions", [])),
             interview_id=data.get("interview_id", ""),
             codebase_context=data.get("codebase_context", ""),
-            brownfield_repos=tuple(
-                dict(r) for r in data.get("brownfield_repos", [])
-            ),
+            brownfield_repos=tuple(dict(r) for r in data.get("brownfield_repos", [])),
             seed=seed,
             deferred_decisions=tuple(data.get("deferred_decisions", [])),
-            referenced_repos=tuple(
-                dict(r) for r in data.get("referenced_repos", [])
-            ),
+            referenced_repos=tuple(dict(r) for r in data.get("referenced_repos", [])),
             created_at=data.get("created_at", ""),
         )
 

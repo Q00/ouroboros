@@ -245,9 +245,7 @@ class TestPMSeedWithAllFields:
             pm_id="pm_seed_test123",
             product_name="My Product",
             goal="Deliver value",
-            user_stories=(
-                UserStory(persona="PM", action="create PMs", benefit="ship faster"),
-            ),
+            user_stories=(UserStory(persona="PM", action="create PMs", benefit="ship faster"),),
             constraints=("Budget < $10k",),
             success_criteria=("Users adopt",),
             deferred_items=("Phase 2 feature",),

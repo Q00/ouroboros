@@ -102,7 +102,9 @@ def generate_pm_markdown(seed: PMSeed) -> str:
         lines.append("## User Stories")
         lines.append("")
         for i, story in enumerate(seed.user_stories, 1):
-            lines.append(f"{i}. **As a** {story.persona}, **I want to** {story.action}, **so that** {story.benefit}.")
+            lines.append(
+                f"{i}. **As a** {story.persona}, **I want to** {story.action}, **so that** {story.benefit}."
+            )
         lines.append("")
 
     # Constraints
@@ -133,7 +135,9 @@ def generate_pm_markdown(seed: PMSeed) -> str:
     if seed.deferred_items:
         lines.append("## Deferred Items")
         lines.append("")
-        lines.append("The following items were identified during requirements gathering but deferred to later phases:")
+        lines.append(
+            "The following items were identified during requirements gathering but deferred to later phases:"
+        )
         lines.append("")
         for item in seed.deferred_items:
             lines.append(f"- {item}")
@@ -143,7 +147,9 @@ def generate_pm_markdown(seed: PMSeed) -> str:
     if seed.decide_later_items:
         lines.append("## Decide Later")
         lines.append("")
-        lines.append("The following questions were identified as premature or unknowable at this stage. They should be revisited when more context is available:")
+        lines.append(
+            "The following questions were identified as premature or unknowable at this stage. They should be revisited when more context is available:"
+        )
         lines.append("")
         for item in seed.decide_later_items:
             lines.append(f"- {item}")
@@ -264,10 +270,7 @@ class PMDocumentGenerator:
         """
         # Extract Q&A from interview state if not provided directly
         if qa_pairs is None and interview_state is not None:
-            qa_pairs = [
-                (r.question, r.user_response or "")
-                for r in interview_state.rounds
-            ]
+            qa_pairs = [(r.question, r.user_response or "") for r in interview_state.rounds]
 
         user_prompt = self._build_generation_prompt(seed, qa_pairs)
 
@@ -421,8 +424,7 @@ class PMDocumentGenerator:
             parts.append("**User Stories:**")
             for story in seed.user_stories:
                 parts.append(
-                    f"- As a {story.persona}, I want to {story.action}, "
-                    f"so that {story.benefit}."
+                    f"- As a {story.persona}, I want to {story.action}, so that {story.benefit}."
                 )
             parts.append("")
 
@@ -480,8 +482,7 @@ class PMDocumentGenerator:
                 parts.append("")
 
         parts.append(
-            "Generate a polished PM document from the above requirements "
-            "and interview transcript."
+            "Generate a polished PM document from the above requirements and interview transcript."
         )
 
         return "\n".join(parts)

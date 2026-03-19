@@ -98,11 +98,7 @@ def _make_adapter(content: str = _SAMPLE_PM_MD) -> MagicMock:
 def _make_failing_adapter() -> MagicMock:
     """Create a mock adapter that returns an error."""
     adapter = MagicMock()
-    adapter.complete = AsyncMock(
-        return_value=Result.err(
-            ProviderError("LLM service unavailable")
-        )
-    )
+    adapter.complete = AsyncMock(return_value=Result.err(ProviderError("LLM service unavailable")))
     return adapter
 
 
@@ -289,9 +285,7 @@ class TestPMDocumentGeneratorPrompt:
     def test_prompt_includes_brownfield_repos(self):
         """Prompt includes brownfield repo information."""
         seed = _make_seed(
-            brownfield_repos=(
-                {"path": "/code/myapp", "name": "MyApp", "desc": "Main app"},
-            ),
+            brownfield_repos=({"path": "/code/myapp", "name": "MyApp", "desc": "Main app"},),
         )
         prompt = PMDocumentGenerator._build_generation_prompt(seed)
 
@@ -330,8 +324,7 @@ class TestPMDocumentGeneratorPrompt:
         prompt = PMDocumentGenerator._build_generation_prompt(seed)
 
         assert prompt.strip().endswith(
-            "Generate a polished PM document from the above requirements "
-            "and interview transcript."
+            "Generate a polished PM document from the above requirements and interview transcript."
         )
 
 
@@ -499,9 +492,7 @@ class TestPMDocumentGeneratorMessages:
         adapter = _make_adapter()
         generator = PMDocumentGenerator(llm_adapter=adapter)
         seed = _make_seed(
-            brownfield_repos=(
-                {"path": "/repo", "name": "Repo", "desc": "Test"},
-            ),
+            brownfield_repos=({"path": "/repo", "name": "Repo", "desc": "Test"},),
             codebase_context="Python FastAPI project.",
         )
         qa = [("Q1", "A1")]

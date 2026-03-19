@@ -28,26 +28,41 @@ def _make_store_stub(
     store.get_default = AsyncMock(return_value=default)
     store.register = AsyncMock(
         side_effect=lambda path, name, desc=None, is_default=False: BrownfieldRepo(
-            path=path, name=name, desc=desc, is_default=is_default,
+            path=path,
+            name=name,
+            desc=desc,
+            is_default=is_default,
         )
     )
-    store.set_default = AsyncMock(side_effect=lambda path: next(
-        (BrownfieldRepo(path=r.path, name=r.name, desc=r.desc, is_default=True)
-         for r in all_repos if r.path == path),
-        None,
-    ))
-    store.update_is_default = AsyncMock(side_effect=lambda path, is_default=True: next(
-        (BrownfieldRepo(path=r.path, name=r.name, desc=r.desc, is_default=is_default)
-         for r in all_repos if r.path == path),
-        None,
-    ))
+    store.set_default = AsyncMock(
+        side_effect=lambda path: next(
+            (
+                BrownfieldRepo(path=r.path, name=r.name, desc=r.desc, is_default=True)
+                for r in all_repos
+                if r.path == path
+            ),
+            None,
+        )
+    )
+    store.update_is_default = AsyncMock(
+        side_effect=lambda path, is_default=True: next(
+            (
+                BrownfieldRepo(path=r.path, name=r.name, desc=r.desc, is_default=is_default)
+                for r in all_repos
+                if r.path == path
+            ),
+            None,
+        )
+    )
     store.initialize = AsyncMock()
     store.close = AsyncMock()
     return store
 
 
 _REPO_A = BrownfieldRepo(path="/home/user/repo-a", name="repo-a", desc="Project A", is_default=True)
-_REPO_B = BrownfieldRepo(path="/home/user/repo-b", name="repo-b", desc="Project B", is_default=False)
+_REPO_B = BrownfieldRepo(
+    path="/home/user/repo-b", name="repo-b", desc="Project B", is_default=False
+)
 
 
 # ── _detect_action tests ─────────────────────────────────────────
@@ -95,7 +110,16 @@ class TestBrownfieldHandlerDefinition:
         handler = BrownfieldHandler()
         defn = handler.definition
         param_names = {p.name for p in defn.parameters}
-        assert param_names == {"action", "path", "name", "desc", "default_only", "scan_root", "offset", "limit"}
+        assert param_names == {
+            "action",
+            "path",
+            "name",
+            "desc",
+            "default_only",
+            "scan_root",
+            "offset",
+            "limit",
+        }
 
     def test_input_schema_generation(self) -> None:
         """Verify to_input_schema produces valid JSON Schema."""
@@ -154,12 +178,14 @@ class TestBrownfieldHandlerDispatch:
         store = _make_store_stub()
         handler = BrownfieldHandler(_store=store)
 
-        result = await handler.handle({
-            "action": "register",
-            "path": "/home/user/new-repo",
-            "name": "new-repo",
-            "desc": "A new project",
-        })
+        result = await handler.handle(
+            {
+                "action": "register",
+                "path": "/home/user/new-repo",
+                "name": "new-repo",
+                "desc": "A new project",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -176,10 +202,12 @@ class TestBrownfieldHandlerDispatch:
         store = _make_store_stub()
         handler = BrownfieldHandler(_store=store)
 
-        result = await handler.handle({
-            "action": "register",
-            "path": "/home/user/my-project",
-        })
+        result = await handler.handle(
+            {
+                "action": "register",
+                "path": "/home/user/my-project",
+            }
+        )
 
         assert result.is_ok
         store.register.assert_called_once_with(
@@ -203,10 +231,12 @@ class TestBrownfieldHandlerDispatch:
         store = _make_store_stub(repos=[_REPO_A, _REPO_B], default=_REPO_A)
         handler = BrownfieldHandler(_store=store)
 
-        result = await handler.handle({
-            "action": "set_default",
-            "path": "/home/user/repo-b",
-        })
+        result = await handler.handle(
+            {
+                "action": "set_default",
+                "path": "/home/user/repo-b",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -228,10 +258,12 @@ class TestBrownfieldHandlerDispatch:
         store = _make_store_stub(repos=[])
         handler = BrownfieldHandler(_store=store)
 
-        result = await handler.handle({
-            "action": "set_default",
-            "path": "/nonexistent",
-        })
+        result = await handler.handle(
+            {
+                "action": "set_default",
+                "path": "/nonexistent",
+            }
+        )
 
         assert result.is_err
         assert "not found" in str(result.error).lower()
@@ -301,8 +333,12 @@ class TestBrownfieldHandlerDispatch:
 # ── Pagination tests ──────────────────────────────────────────────
 
 
-_REPO_C = BrownfieldRepo(path="/home/user/repo-c", name="repo-c", desc="Project C", is_default=False)
-_REPO_D = BrownfieldRepo(path="/home/user/repo-d", name="repo-d", desc="Project D", is_default=False)
+_REPO_C = BrownfieldRepo(
+    path="/home/user/repo-c", name="repo-c", desc="Project C", is_default=False
+)
+_REPO_D = BrownfieldRepo(
+    path="/home/user/repo-d", name="repo-d", desc="Project D", is_default=False
+)
 
 
 class TestBrownfieldHandlerPagination:

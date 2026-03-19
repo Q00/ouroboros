@@ -363,9 +363,7 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                result = await conn.execute(
-                    select(t).where(t.c.is_default.is_(True)).limit(1)
-                )
+                result = await conn.execute(select(t).where(t.c.is_default.is_(True)).limit(1))
                 row = result.mappings().first()
                 if row is None:
                     return None
@@ -409,9 +407,7 @@ class BrownfieldStore:
                     return None
 
                 # Fetch and return the updated row
-                result = await conn.execute(
-                    select(t).where(t.c.path == path)
-                )
+                result = await conn.execute(select(t).where(t.c.path == path))
                 row = result.mappings().first()
                 if row is None:
                     return None
@@ -441,8 +437,10 @@ class BrownfieldStore:
                 return BrownfieldRepo.from_row(dict(row)) if row else None
         except Exception as e:
             raise PersistenceError(
-                f"Failed to update is_default: {e}", operation="update",
-                table="brownfield_repos", details={"path": path},
+                f"Failed to update is_default: {e}",
+                operation="update",
+                table="brownfield_repos",
+                details={"path": path},
             ) from e
 
     async def update_desc(self, path: str, desc: str) -> BrownfieldRepo | None:
@@ -463,15 +461,11 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                result = await conn.execute(
-                    update(t).where(t.c.path == path).values(desc=desc)
-                )
+                result = await conn.execute(update(t).where(t.c.path == path).values(desc=desc))
                 if result.rowcount == 0:
                     return None
 
-                result = await conn.execute(
-                    select(t).where(t.c.path == path)
-                )
+                result = await conn.execute(select(t).where(t.c.path == path))
                 row = result.mappings().first()
                 if row is None:
                     return None
@@ -503,9 +497,7 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                result = await conn.execute(
-                    delete(t).where(t.c.path == path)
-                )
+                result = await conn.execute(delete(t).where(t.c.path == path))
                 return result.rowcount > 0
         except Exception as e:
             raise PersistenceError(

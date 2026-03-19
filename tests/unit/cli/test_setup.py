@@ -107,13 +107,16 @@ class TestScanAndRegisterRepos:
         mock_store.close = AsyncMock()
         mock_store.clear_all = AsyncMock(return_value=0)
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            new_callable=AsyncMock,
-            return_value=mock_repos,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ),
         ):
             result = await _scan_and_register_repos()
 
@@ -131,13 +134,16 @@ class TestScanAndRegisterRepos:
         mock_store.close = AsyncMock()
         mock_store.clear_all = AsyncMock(return_value=0)
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            new_callable=AsyncMock,
-            return_value=[],
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             result = await _scan_and_register_repos()
 
@@ -151,13 +157,16 @@ class TestScanAndRegisterRepos:
         mock_store.close = AsyncMock()
         mock_store.clear_all = AsyncMock(return_value=0)
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            new_callable=AsyncMock,
-            return_value=[],
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             await _scan_and_register_repos()
 
@@ -171,13 +180,16 @@ class TestScanAndRegisterRepos:
         mock_store.close = AsyncMock()
         mock_store.clear_all = AsyncMock(return_value=0)
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("scan failed"),
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("scan failed"),
+            ),
         ):
             with pytest.raises(RuntimeError, match="scan failed"):
                 await _scan_and_register_repos()
@@ -192,14 +204,17 @@ class TestScanAndRegisterRepos:
         mock_store.close = AsyncMock()
         mock_store.clear_all = AsyncMock(return_value=5)
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            new_callable=AsyncMock,
-            return_value=[],
-        ) as mock_scan:
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_scan,
+        ):
             await _scan_and_register_repos()
 
         # clear_all must be called before scan_and_register
@@ -214,20 +229,21 @@ class TestScanAndRegisterRepos:
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
-        mock_store.clear_all = AsyncMock(
-            side_effect=lambda: call_order.append("clear_all")
-        )
+        mock_store.clear_all = AsyncMock(side_effect=lambda: call_order.append("clear_all"))
 
         async def fake_scan(store):
             call_order.append("scan_and_register")
             return []
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            side_effect=fake_scan,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                side_effect=fake_scan,
+            ),
         ):
             await _scan_and_register_repos()
 
@@ -276,13 +292,16 @@ class TestSetDefaultRepo:
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.set_default_repo",
-            new_callable=AsyncMock,
-            return_value=mock_repo,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.set_default_repo",
+                new_callable=AsyncMock,
+                return_value=mock_repo,
+            ),
         ):
             result = await _set_default_repo("/a")
 
@@ -295,13 +314,16 @@ class TestSetDefaultRepo:
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.set_default_repo",
-            new_callable=AsyncMock,
-            return_value=None,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.set_default_repo",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             result = await _set_default_repo("/nonexistent")
 
@@ -324,21 +346,27 @@ class TestRunFullSetup:
             {"path": "/b", "name": "beta", "desc": "", "is_default": False},
         ]
 
-        with patch(
-            "ouroboros.cli.commands.setup._scan_and_register_repos",
-            new_callable=AsyncMock,
-            return_value=mock_repos_dicts,
-        ), patch(
-            "ouroboros.cli.commands.setup._display_repos_table",
-        ) as mock_display, patch(
-            "ouroboros.cli.commands.setup._prompt_repo_selection",
-            return_value=1,  # selects "beta"
-        ), patch(
-            "ouroboros.cli.commands.setup._set_default_repo",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as mock_set_default, patch(
-            "ouroboros.cli.commands.setup.console",
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._scan_and_register_repos",
+                new_callable=AsyncMock,
+                return_value=mock_repos_dicts,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._display_repos_table",
+            ) as mock_display,
+            patch(
+                "ouroboros.cli.commands.setup._prompt_repo_selection",
+                return_value=1,  # selects "beta"
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._set_default_repo",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_set_default,
+            patch(
+                "ouroboros.cli.commands.setup.console",
+            ),
         ):
             await _run_full_setup()
 
@@ -350,16 +378,21 @@ class TestRunFullSetup:
         """When scan finds no repos, setup exits early without selection."""
         from ouroboros.cli.commands.setup import _run_full_setup
 
-        with patch(
-            "ouroboros.cli.commands.setup._scan_and_register_repos",
-            new_callable=AsyncMock,
-            return_value=[],
-        ), patch(
-            "ouroboros.cli.commands.setup._display_repos_table",
-        ) as mock_display, patch(
-            "ouroboros.cli.commands.setup._prompt_repo_selection",
-        ) as mock_prompt, patch(
-            "ouroboros.cli.commands.setup.console",
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._scan_and_register_repos",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._display_repos_table",
+            ) as mock_display,
+            patch(
+                "ouroboros.cli.commands.setup._prompt_repo_selection",
+            ) as mock_prompt,
+            patch(
+                "ouroboros.cli.commands.setup.console",
+            ),
         ):
             await _run_full_setup()
 
@@ -375,20 +408,26 @@ class TestRunFullSetup:
             {"path": "/a", "name": "alpha", "desc": "", "is_default": False},
         ]
 
-        with patch(
-            "ouroboros.cli.commands.setup._scan_and_register_repos",
-            new_callable=AsyncMock,
-            return_value=mock_repos,
-        ), patch(
-            "ouroboros.cli.commands.setup._display_repos_table",
-        ), patch(
-            "ouroboros.cli.commands.setup._prompt_repo_selection",
-            return_value=None,  # user skipped
-        ), patch(
-            "ouroboros.cli.commands.setup._set_default_repo",
-            new_callable=AsyncMock,
-        ) as mock_set_default, patch(
-            "ouroboros.cli.commands.setup.console",
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._scan_and_register_repos",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._display_repos_table",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._prompt_repo_selection",
+                return_value=None,  # user skipped
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._set_default_repo",
+                new_callable=AsyncMock,
+            ) as mock_set_default,
+            patch(
+                "ouroboros.cli.commands.setup.console",
+            ),
         ):
             await _run_full_setup()
 
@@ -404,29 +443,34 @@ class TestRunFullSetup:
             {"path": "/b", "name": "beta", "desc": "", "is_default": False},
         ]
 
-        with patch(
-            "ouroboros.cli.commands.setup._scan_and_register_repos",
-            new_callable=AsyncMock,
-            return_value=mock_repos,
-        ), patch(
-            "ouroboros.cli.commands.setup._display_repos_table",
-        ), patch(
-            "ouroboros.cli.commands.setup._prompt_repo_selection",
-            return_value=None,
-        ), patch(
-            "ouroboros.cli.commands.setup._set_default_repo",
-            new_callable=AsyncMock,
-        ), patch(
-            "ouroboros.cli.commands.setup.console",
-        ), patch(
-            "ouroboros.cli.commands.setup.print_info",
-        ) as mock_info:
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._scan_and_register_repos",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._display_repos_table",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._prompt_repo_selection",
+                return_value=None,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._set_default_repo",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.console",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.print_info",
+            ) as mock_info,
+        ):
             await _run_full_setup()
 
         # Should display info about the current default
-        mock_info.assert_any_call(
-            "Current default: [cyan]alpha[/] (/a)"
-        )
+        mock_info.assert_any_call("Current default: [cyan]alpha[/] (/a)")
 
     @pytest.mark.asyncio
     async def test_full_setup_set_default_failure(self) -> None:
@@ -437,24 +481,31 @@ class TestRunFullSetup:
             {"path": "/a", "name": "alpha", "desc": "", "is_default": False},
         ]
 
-        with patch(
-            "ouroboros.cli.commands.setup._scan_and_register_repos",
-            new_callable=AsyncMock,
-            return_value=mock_repos,
-        ), patch(
-            "ouroboros.cli.commands.setup._display_repos_table",
-        ), patch(
-            "ouroboros.cli.commands.setup._prompt_repo_selection",
-            return_value=0,
-        ), patch(
-            "ouroboros.cli.commands.setup._set_default_repo",
-            new_callable=AsyncMock,
-            return_value=False,  # failure
-        ), patch(
-            "ouroboros.cli.commands.setup.console",
-        ), patch(
-            "ouroboros.cli.commands.setup.print_error",
-        ) as mock_error:
+        with (
+            patch(
+                "ouroboros.cli.commands.setup._scan_and_register_repos",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._display_repos_table",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._prompt_repo_selection",
+                return_value=0,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._set_default_repo",
+                new_callable=AsyncMock,
+                return_value=False,  # failure
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.console",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.print_error",
+            ) as mock_error,
+        ):
             await _run_full_setup()
 
         mock_error.assert_called_once_with("Failed to set default: /a")
@@ -476,26 +527,23 @@ class TestScanRegisterPipeline:
         call_order: list[str] = []
 
         mock_store = AsyncMock()
-        mock_store.initialize = AsyncMock(
-            side_effect=lambda: call_order.append("initialize")
-        )
-        mock_store.clear_all = AsyncMock(
-            side_effect=lambda: call_order.append("clear_all")
-        )
-        mock_store.close = AsyncMock(
-            side_effect=lambda: call_order.append("close")
-        )
+        mock_store.initialize = AsyncMock(side_effect=lambda: call_order.append("initialize"))
+        mock_store.clear_all = AsyncMock(side_effect=lambda: call_order.append("clear_all"))
+        mock_store.close = AsyncMock(side_effect=lambda: call_order.append("close"))
 
         async def fake_scan(store):
             call_order.append("scan_and_register")
             return []
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            side_effect=fake_scan,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                side_effect=fake_scan,
+            ),
         ):
             await _scan_and_register_repos()
 
@@ -516,12 +564,15 @@ class TestScanRegisterPipeline:
             captured_store = store
             return []
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            side_effect=capture_store,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                side_effect=capture_store,
+            ),
         ):
             await _scan_and_register_repos()
 
@@ -542,13 +593,16 @@ class TestScanRegisterPipeline:
             BrownfieldRepo(path="/home/user/lib", name="lib", desc=None, is_default=False),
         ]
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            new_callable=AsyncMock,
-            return_value=mock_repos,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ),
         ):
             result = await _scan_and_register_repos()
 
@@ -588,7 +642,9 @@ class TestScanRegisterPipeline:
 
         count = 50
         mock_repos = [
-            BrownfieldRepo(path=f"/home/user/repo-{i}", name=f"repo-{i}", desc="", is_default=(i == 0))
+            BrownfieldRepo(
+                path=f"/home/user/repo-{i}", name=f"repo-{i}", desc="", is_default=(i == 0)
+            )
             for i in range(count)
         ]
 
@@ -597,13 +653,16 @@ class TestScanRegisterPipeline:
         mock_store.close = AsyncMock()
         mock_store.clear_all = AsyncMock(return_value=0)
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.scan_and_register",
-            new_callable=AsyncMock,
-            return_value=mock_repos,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                return_value=mock_repos,
+            ),
         ):
             result = await _scan_and_register_repos()
 
@@ -626,9 +685,11 @@ class TestListReposExtended:
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
-        mock_store.list = AsyncMock(return_value=[
-            BrownfieldRepo(path="/a", name="a", desc=None, is_default=False),
-        ])
+        mock_store.list = AsyncMock(
+            return_value=[
+                BrownfieldRepo(path="/a", name="a", desc=None, is_default=False),
+            ]
+        )
 
         with patch(
             "ouroboros.cli.commands.setup.BrownfieldStore",
@@ -686,13 +747,16 @@ class TestSetDefaultRepoExtended:
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.set_default_repo",
-            new_callable=AsyncMock,
-            return_value=BrownfieldRepo(path="/a", name="a", is_default=True),
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.set_default_repo",
+                new_callable=AsyncMock,
+                return_value=BrownfieldRepo(path="/a", name="a", is_default=True),
+            ),
         ):
             await _set_default_repo("/a")
 
@@ -705,13 +769,16 @@ class TestSetDefaultRepoExtended:
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
-        ), patch(
-            "ouroboros.cli.commands.setup.set_default_repo",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("DB error"),
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.set_default_repo",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("DB error"),
+            ),
         ):
             with pytest.raises(RuntimeError, match="DB error"):
                 await _set_default_repo("/a")

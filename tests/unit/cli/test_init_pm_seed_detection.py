@@ -384,16 +384,19 @@ class TestPrdSeedConfirmationFlow:
         seeds_dir.mkdir()
         seed_path = seeds_dir / "pm_seed_abc.yaml"
         with open(seed_path, "w") as f:
-            yaml.dump({
-                "pm_id": "abc",
-                "product_name": "MyProduct",
-                "goal": "Do the thing",
-                "user_stories": [],
-                "constraints": [],
-                "success_criteria": [],
-                "deferred_items": [],
-                "decide_later_items": [],
-            }, f)
+            yaml.dump(
+                {
+                    "pm_id": "abc",
+                    "product_name": "MyProduct",
+                    "goal": "Do the thing",
+                    "user_stories": [],
+                    "constraints": [],
+                    "success_criteria": [],
+                    "deferred_items": [],
+                    "decide_later_items": [],
+                },
+                f,
+            )
 
         # Simulate: context already provided, user says yes to PM seed
         pm_seeds = _find_pm_seeds(seeds_dir)
@@ -429,16 +432,19 @@ class TestPrdSeedConfirmationFlow:
         seeds_dir.mkdir()
         seed_path = seeds_dir / "pm_seed_xyz.yaml"
         with open(seed_path, "w") as f:
-            yaml.dump({
-                "pm_id": "xyz",
-                "product_name": "NoContextApp",
-                "goal": "Build without context",
-                "user_stories": [],
-                "constraints": [],
-                "success_criteria": [],
-                "deferred_items": [],
-                "decide_later_items": [],
-            }, f)
+            yaml.dump(
+                {
+                    "pm_id": "xyz",
+                    "product_name": "NoContextApp",
+                    "goal": "Build without context",
+                    "user_stories": [],
+                    "constraints": [],
+                    "success_criteria": [],
+                    "deferred_items": [],
+                    "decide_later_items": [],
+                },
+                f,
+            )
 
         pm_seeds = _find_pm_seeds(seeds_dir)
 
@@ -472,11 +478,14 @@ class TestPrdSeedConfirmationFlow:
         for name in ["alpha", "beta", "gamma"]:
             p = seeds_dir / f"pm_seed_{name}.yaml"
             with open(p, "w") as f:
-                yaml.dump({
-                    "pm_id": name,
-                    "product_name": f"App-{name}",
-                    "goal": f"Goal for {name}",
-                }, f)
+                yaml.dump(
+                    {
+                        "pm_id": name,
+                        "product_name": f"App-{name}",
+                        "goal": f"Goal for {name}",
+                    },
+                    f,
+                )
 
         pm_seeds = _find_pm_seeds(seeds_dir)
         assert len(pm_seeds) == 3
@@ -493,11 +502,14 @@ class TestPrdSeedConfirmationFlow:
         seeds_dir.mkdir()
         seed_path = seeds_dir / "pm_seed_note.yaml"
         with open(seed_path, "w") as f:
-            yaml.dump({
-                "pm_id": "note",
-                "product_name": "NotifyProduct",
-                "goal": "Test notification display",
-            }, f)
+            yaml.dump(
+                {
+                    "pm_id": "note",
+                    "product_name": "NotifyProduct",
+                    "goal": "Test notification display",
+                },
+                f,
+            )
 
         # Should not raise
         _notify_pm_seed_detected([seed_path])

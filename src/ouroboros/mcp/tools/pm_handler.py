@@ -260,9 +260,7 @@ async def _check_completion(
         additional_context = ""
         if engine.decide_later_items:
             additional_context = "Decide-later items (intentional deferrals):\n"
-            additional_context += "\n".join(
-                f"- {item}" for item in engine.decide_later_items
-            )
+            additional_context += "\n".join(f"- {item}" for item in engine.decide_later_items)
 
         scorer = AmbiguityScorer(
             llm_adapter=engine.llm_adapter,
@@ -450,13 +448,20 @@ class PMInterviewHandler:
             # ── Step 2: repo selection (AC 4) ─────────────────────
             if action == "select_repos" and selected_repos is not None:
                 return await self._handle_select_repos(
-                    engine, selected_repos, session_id, initial_context, cwd,
+                    engine,
+                    selected_repos,
+                    session_id,
+                    initial_context,
+                    cwd,
                 )
 
             # ── Start new interview ────────────────────────────────
             if action == "start" and initial_context:
                 return await self._handle_start(
-                    engine, initial_context, cwd, selected_repos=selected_repos,
+                    engine,
+                    initial_context,
+                    cwd,
+                    selected_repos=selected_repos,
                 )
 
             # ── Resume with answer ─────────────────────────────────
@@ -529,9 +534,7 @@ class PMInterviewHandler:
             brownfield_repos=brownfield_repos,
         )
         if result.is_err:
-            return Result.err(
-                MCPToolError(str(result.error), tool_name="ouroboros_pm_interview")
-            )
+            return Result.err(MCPToolError(str(result.error), tool_name="ouroboros_pm_interview"))
 
         state = result.value
 
@@ -566,7 +569,10 @@ class PMInterviewHandler:
         # Persist
         await engine.save_state(state)
         _save_pm_meta(
-            state.interview_id, engine, cwd=cwd, data_dir=self.data_dir,
+            state.interview_id,
+            engine,
+            cwd=cwd,
+            data_dir=self.data_dir,
             status="interview_started",
         )
 
@@ -604,8 +610,7 @@ class PMInterviewHandler:
                     MCPContentItem(
                         type=ContentType.TEXT,
                         text=(
-                            f"PM interview started. Session ID: {state.interview_id}\n\n"
-                            f"{question}"
+                            f"PM interview started. Session ID: {state.interview_id}\n\n{question}"
                         ),
                     ),
                 ),
@@ -639,19 +644,26 @@ class PMInterviewHandler:
 
             if all_repos:
                 return await self._step_repo_select(
-                    initial_context, cwd, all_repos, session_id=session_id,
+                    initial_context,
+                    cwd,
+                    all_repos,
+                    session_id=session_id,
                 )
 
             # Scan found nothing → greenfield with note
             log.info("pm_handler.brownfield_no_repos_after_scan")
             return await self._start_greenfield_interview(
-                engine, initial_context, cwd,
+                engine,
+                initial_context,
+                cwd,
                 note="No GitHub repos found on this machine. Proceeding in greenfield mode.",
             )
 
         # Greenfield → start interview directly
         return await self._start_greenfield_interview(
-            engine, initial_context, cwd,
+            engine,
+            initial_context,
+            cwd,
         )
 
     async def _start_greenfield_interview(
@@ -669,9 +681,7 @@ class PMInterviewHandler:
             brownfield_repos=None,
         )
         if result.is_err:
-            return Result.err(
-                MCPToolError(str(result.error), tool_name="ouroboros_pm_interview")
-            )
+            return Result.err(MCPToolError(str(result.error), tool_name="ouroboros_pm_interview"))
 
         state = result.value
         deferred_before = len(engine.deferred_items)
@@ -686,13 +696,14 @@ class PMInterviewHandler:
         question = question_result.value
         diff = _compute_deferred_diff(engine, deferred_before, decide_later_before)
 
-        state.rounds.append(
-            InterviewRound(round_number=1, question=question, user_response=None)
-        )
+        state.rounds.append(InterviewRound(round_number=1, question=question, user_response=None))
         state.mark_updated()
         await engine.save_state(state)
         _save_pm_meta(
-            state.interview_id, engine, cwd=cwd, data_dir=self.data_dir,
+            state.interview_id,
+            engine,
+            cwd=cwd,
+            data_dir=self.data_dir,
             status="interview_started",
         )
 
@@ -757,8 +768,14 @@ class PMInterviewHandler:
                 "question": "Is this an addition to an existing codebase, or a brand-new project?",
                 "header": "Project type",
                 "options": [
-                    {"label": "Add to existing project", "description": "Brownfield — use registered repos as context"},
-                    {"label": "Start a new project", "description": "Greenfield — no existing codebase"},
+                    {
+                        "label": "Add to existing project",
+                        "description": "Brownfield — use registered repos as context",
+                    },
+                    {
+                        "label": "Start a new project",
+                        "description": "Greenfield — no existing codebase",
+                    },
                 ],
                 "multiSelect": False,
             },
@@ -867,7 +884,8 @@ class PMInterviewHandler:
             return []
 
     async def _resolve_repos_from_db(
-        self, paths: list[str],
+        self,
+        paths: list[str],
     ) -> list[BrownfieldRepo]:
         """Look up selected paths in the DB, returning only those that exist.
 
@@ -1063,18 +1081,14 @@ class PMInterviewHandler:
         repo_list_text = "\n".join(repo_lines)
 
         # Build default suggestion
-        default_numbers = [
-            str(i + 1) for i, r in enumerate(repo_list) if r.get("is_default")
-        ]
-        default_names = [
-            r["name"] for r in repo_list if r.get("is_default")
-        ]
+        default_numbers = [str(i + 1) for i, r in enumerate(repo_list) if r.get("is_default")]
+        default_names = [r["name"] for r in repo_list if r.get("is_default")]
         default_hint = (
             f"Current defaults: {', '.join(default_numbers)} ({', '.join(default_names)})"
             if default_numbers
             else "No defaults set"
         )
-        example = ', '.join(default_numbers[:3]) if default_numbers else '1,2,3'
+        example = ", ".join(default_numbers[:3]) if default_numbers else "1,2,3"
 
         content_text = (
             f"Found {len(repo_list)} repositories (★ = currently selected):\n\n"
@@ -1091,9 +1105,7 @@ class PMInterviewHandler:
 
         return Result.ok(
             MCPToolResult(
-                content=(
-                    MCPContentItem(type=ContentType.TEXT, text=content_text),
-                ),
+                content=(MCPContentItem(type=ContentType.TEXT, text=content_text),),
                 is_error=False,
                 meta=meta,
             )
@@ -1141,7 +1153,10 @@ class PMInterviewHandler:
         # Auto-start interview with the confirmed repos
         engine = self._get_engine()
         return await self._handle_start(
-            engine, initial_context, cwd, selected_repos=final_paths,
+            engine,
+            initial_context,
+            cwd,
+            selected_repos=final_paths,
         )
 
     async def _update_repo_defaults(
@@ -1171,9 +1186,7 @@ class PMInterviewHandler:
                 async with db_engine.begin() as conn:
                     if path_set:
                         await conn.execute(
-                            update(t)
-                            .where(t.c.path.in_(path_set))
-                            .values(is_default=is_default)
+                            update(t).where(t.c.path.in_(path_set)).values(is_default=is_default)
                         )
 
                 log.info(
@@ -1228,7 +1241,9 @@ class PMInterviewHandler:
             selected_paths = self._parse_repo_selection(answer, meta_data)
 
         return await self._step_confirm_repos(
-            initial_context, cwd, session_id=session_id,
+            initial_context,
+            cwd,
+            session_id=session_id,
             selected_paths=selected_paths,
         )
 
@@ -1256,7 +1271,10 @@ class PMInterviewHandler:
         # ── Backward-compat 1-step: both selected_repos + initial_context ──
         if initial_context:
             return await self._handle_start(
-                engine, initial_context, cwd, selected_repos=selected_repos,
+                engine,
+                initial_context,
+                cwd,
+                selected_repos=selected_repos,
             )
 
         # ── 2-step: recover initial_context from pm_meta ──────────────
@@ -1306,7 +1324,10 @@ class PMInterviewHandler:
         await self._sync_defaults_to_db(selected_repos)
 
         return await self._handle_start(
-            engine, saved_context, cwd, selected_repos=selected_repos,
+            engine,
+            saved_context,
+            cwd,
+            selected_repos=selected_repos,
         )
 
     async def _sync_defaults_to_db(self, selected_paths: list[str]) -> None:
@@ -1357,7 +1378,8 @@ class PMInterviewHandler:
                         except Exception as exc:
                             log.warning(
                                 "pm_handler.desc_generation_failed",
-                                path=repo.path, error=str(exc),
+                                path=repo.path,
+                                error=str(exc),
                             )
             finally:
                 await store.close()
@@ -1397,9 +1419,7 @@ class PMInterviewHandler:
             )
 
         state = load_result.value
-        first_question = (
-            state.rounds[0].question if state.rounds else "No question available."
-        )
+        first_question = state.rounds[0].question if state.rounds else "No question available."
 
         return Result.ok(
             MCPToolResult(
@@ -1407,8 +1427,7 @@ class PMInterviewHandler:
                     MCPContentItem(
                         type=ContentType.TEXT,
                         text=(
-                            f"PM interview started. Session ID: {session_id}\n\n"
-                            f"{first_question}"
+                            f"PM interview started. Session ID: {session_id}\n\n{first_question}"
                         ),
                     ),
                 ),
@@ -1555,9 +1574,7 @@ class PMInterviewHandler:
             )
             if decide_later_summary:
                 summary_text += f"\n{decide_later_summary}\n"
-            summary_text += (
-                f'\nGenerate PM with: action="generate", session_id="{session_id}"'
-            )
+            summary_text += f'\nGenerate PM with: action="generate", session_id="{session_id}"'
 
             response_meta = {
                 "session_id": session_id,
@@ -1615,9 +1632,7 @@ class PMInterviewHandler:
                         meta={"session_id": session_id, "recoverable": True},
                     )
                 )
-            return Result.err(
-                MCPToolError(error_msg, tool_name="ouroboros_pm_interview")
-            )
+            return Result.err(MCPToolError(error_msg, tool_name="ouroboros_pm_interview"))
 
         question = question_result.value
 
