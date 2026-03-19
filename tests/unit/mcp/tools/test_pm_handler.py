@@ -268,7 +268,7 @@ class TestPrdMetaFileLocation:
         meta = _load_pm_meta("sess-nested", data_dir=nested_dir)
         assert meta is not None
 
-    def test_meta_file_has_exactly_six_fields(self, tmp_path: Path) -> None:
+    def test_meta_file_has_exactly_seven_fields(self, tmp_path: Path) -> None:
         """pm_meta JSON contains exactly the 6 required fields."""
         engine = _make_engine_stub(deferred=["d1"], decide_later=["dl1"])
         engine.codebase_context = "ctx"
@@ -285,6 +285,7 @@ class TestPrdMetaFileLocation:
             "pending_reframe",
             "cwd",
             "brownfield_repos",
+            "classifications",
         }
         assert set(meta.keys()) == expected_keys
 
@@ -821,6 +822,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="direct-start-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -866,6 +868,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="bf-auto-sess", is_brownfield=True)
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -905,6 +908,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="gf-auto-sess", is_brownfield=False)
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -939,6 +943,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="brownfield-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -982,6 +987,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="greenfield-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1018,6 +1024,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="fallback-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1050,6 +1057,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="new-sess-42")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1079,6 +1087,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = "some context"
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="meta-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1110,6 +1119,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="diff-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1146,6 +1156,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         engine.ask_opening_and_start = AsyncMock(
             return_value=Result.err(MagicMock(__str__=lambda _s: "Validation failed"))
@@ -1171,6 +1182,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state()
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1198,6 +1210,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="default-cwd-sess")
         engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
@@ -1222,6 +1235,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="round-sess")
         state.rounds = []  # Start with no rounds
@@ -1289,6 +1303,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="q-meta-sess")
         state.is_brownfield = False
@@ -1320,6 +1335,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="bf-meta-sess")
         state.is_brownfield = True
@@ -1347,6 +1363,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="gf-meta-sess")
         state.is_brownfield = False
@@ -1374,6 +1391,7 @@ class TestHandleStartBrownfield:
         engine.decide_later_items = []
         engine.codebase_context = ""
         engine._reframe_map = {}
+        engine.classifications = []
 
         state = _make_state(interview_id="full-meta-sess")
         state.is_brownfield = False

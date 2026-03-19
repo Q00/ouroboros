@@ -656,6 +656,24 @@ class PMInterviewEngine:
         self.classifier.codebase_context = self.codebase_context
         # Restore brownfield repo selection
         self._selected_brownfield_repos = list(meta.get("brownfield_repos", []))
+        # Restore classification history (string values from ClassificationOutput)
+        saved_classifications = meta.get("classifications", [])
+        if saved_classifications and not self.classifications:
+            from ouroboros.bigbang.question_classifier import (
+                ClassificationOutput,
+                ClassificationResult,
+            )
+
+            for c_val in saved_classifications:
+                try:
+                    output_type = ClassificationOutput(c_val)
+                    self.classifications.append(
+                        ClassificationResult(
+                            question="", output_type=output_type, reasoning="restored"
+                        )
+                    )
+                except ValueError:
+                    pass
         # Restore the reframe map from pending_reframe if present
         pending = meta.get("pending_reframe")
         if pending and isinstance(pending, dict):

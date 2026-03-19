@@ -100,6 +100,9 @@ def _save_pm_meta(
             "pending_reframe": pending_reframe,
             "cwd": cwd,
             "brownfield_repos": list(getattr(engine, "_selected_brownfield_repos", [])),
+            "classifications": [
+                c.output_type.value for c in getattr(engine, "classifications", [])
+            ],
         }
     else:
         meta = {
@@ -109,6 +112,7 @@ def _save_pm_meta(
             "pending_reframe": None,
             "cwd": cwd,
             "brownfield_repos": [],
+            "classifications": [],
         }
 
     if status is not None:
