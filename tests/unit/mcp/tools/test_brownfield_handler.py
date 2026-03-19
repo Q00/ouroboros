@@ -81,8 +81,8 @@ class TestDetectAction:
     def test_path_with_name_implies_register(self) -> None:
         assert _detect_action({"path": "/some/path", "name": "repo"}) == "register"
 
-    def test_path_without_name_implies_set_default(self) -> None:
-        assert _detect_action({"path": "/some/path"}) == "set_default"
+    def test_path_without_name_implies_register(self) -> None:
+        assert _detect_action({"path": "/some/path"}) == "register"
 
     def test_is_default_implies_set_default(self) -> None:
         assert _detect_action({"is_default": True, "path": "/p"}) == "set_default"
@@ -319,16 +319,28 @@ class TestBrownfieldHandlerDispatch:
 
     @pytest.mark.asyncio
     async def test_auto_detect_set_default(self) -> None:
-        """Providing path without name auto-detects 'set_default'."""
+        """Providing path with is_default auto-detects 'set_default'."""
         repo = BrownfieldRepo(path="/home/user/my-repo", name="my-repo")
         store = _make_store_stub(repos=[repo])
+        handler = BrownfieldHandler(_store=store)
+
+        result = await handler.handle({"path": "/home/user/my-repo", "is_default": True})
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["action"] == "set_default"
+
+    @pytest.mark.asyncio
+    async def test_path_only_auto_detects_register(self) -> None:
+        """Providing path alone (no is_default) auto-detects 'register'."""
+        store = _make_store_stub(repos=[])
         handler = BrownfieldHandler(_store=store)
 
         result = await handler.handle({"path": "/home/user/my-repo"})
 
         assert result.is_ok
         meta = result.value.meta
-        assert meta["action"] == "set_default"
+        assert meta["action"] == "register"
 
     @pytest.mark.asyncio
     async def test_auto_detect_query(self) -> None:

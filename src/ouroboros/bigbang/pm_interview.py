@@ -365,8 +365,15 @@ class PMInterviewEngine:
         Returns:
             Result containing the new InterviewState or ValidationError.
         """
-        # Always reset brownfield repos for a fresh interview; set below if provided
+        # Always reset all PM state for a fresh interview
         self._selected_brownfield_repos = []
+        self.codebase_context = ""
+        self._explored = False
+        self.classifier.codebase_context = ""
+        self.deferred_items = []
+        self.decide_later_items = []
+        self.classifications = []
+        self._reframe_map = {}
 
         # Explore codebases if brownfield repos are provided
         if brownfield_repos:

@@ -562,7 +562,7 @@ class PMInterviewHandler:
         # Record unanswered round
         state.rounds.append(
             InterviewRound(
-                round_number=1,
+                round_number=state.current_round_number,
                 question=question,
                 user_response=None,
             )
@@ -629,8 +629,12 @@ class PMInterviewHandler:
     async def _query_default_repos(self) -> list[BrownfieldRepo]:
         """Query DB for is_default=true repos."""
         try:
-            all_repos = await self._query_all_repos()
-            return [r for r in all_repos if r.is_default]
+            store = BrownfieldStore()
+            await store.initialize()
+            try:
+                return list(await store.get_defaults())
+            finally:
+                await store.close()
         except Exception as exc:
             log.warning("pm_handler.query_defaults_failed", error=str(exc))
             return []

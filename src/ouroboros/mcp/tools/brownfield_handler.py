@@ -48,9 +48,8 @@ def _detect_action(arguments: dict[str, Any]) -> str:
     Detection rules (evaluated in order):
     1. If ``action`` is explicitly provided, return it as-is.
     2. If ``is_default`` is present → ``"set_default"``
-    3. If ``path`` is present with ``name`` → ``"register"``
-    4. If ``path`` is present without ``name`` → ``"set_default"``
-    5. Otherwise → ``"query"`` (safe default — read-only).
+    3. If ``path`` is present → ``"register"``
+    4. Otherwise → ``"query"`` (safe default — read-only).
     """
     explicit = arguments.get("action")
     if explicit:
@@ -60,9 +59,7 @@ def _detect_action(arguments: dict[str, Any]) -> str:
         return "set_default"
 
     if arguments.get("path"):
-        if arguments.get("name"):
-            return "register"
-        return "set_default"
+        return "register"
 
     return "query"
 
