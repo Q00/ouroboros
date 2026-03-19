@@ -61,36 +61,38 @@ class TestGetDefaultBrownfieldContext:
     """Test get_default_brownfield_context delegates to BrownfieldStore."""
 
     @pytest.mark.asyncio
-    async def test_returns_default_repo_when_exists(self) -> None:
-        """Returns the default BrownfieldRepo when one is set."""
-        expected = BrownfieldRepo(
-            path="/home/user/my-project",
-            name="my-project",
-            desc="A web application",
-            is_default=True,
-        )
+    async def test_returns_default_repos_when_exist(self) -> None:
+        """Returns list of default BrownfieldRepo instances."""
+        expected = [
+            BrownfieldRepo(
+                path="/home/user/my-project",
+                name="my-project",
+                desc="A web application",
+                is_default=True,
+            ),
+        ]
         store = AsyncMock(spec=BrownfieldStore)
-        store.get_default = AsyncMock(return_value=expected)
+        store.get_defaults = AsyncMock(return_value=expected)
 
         result = await get_default_brownfield_context(store)
 
-        assert result is not None
-        assert result.path == "/home/user/my-project"
-        assert result.name == "my-project"
-        assert result.desc == "A web application"
-        assert result.is_default is True
-        store.get_default.assert_called_once()
+        assert len(result) == 1
+        assert result[0].path == "/home/user/my-project"
+        assert result[0].name == "my-project"
+        assert result[0].desc == "A web application"
+        assert result[0].is_default is True
+        store.get_defaults.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_no_default(self) -> None:
-        """Returns None when no default repo is set."""
+    async def test_returns_empty_list_when_no_default(self) -> None:
+        """Returns empty list when no default repo is set."""
         store = AsyncMock(spec=BrownfieldStore)
-        store.get_default = AsyncMock(return_value=None)
+        store.get_defaults = AsyncMock(return_value=[])
 
         result = await get_default_brownfield_context(store)
 
-        assert result is None
-        store.get_default.assert_called_once()
+        assert result == []
+        store.get_defaults.assert_called_once()
 
 
 class TestPMInterviewWithDBBrownfield:

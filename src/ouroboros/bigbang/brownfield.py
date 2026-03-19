@@ -286,16 +286,18 @@ async def scan_and_register(
 
 async def get_default_brownfield_context(
     store: BrownfieldStore,
-) -> BrownfieldRepo | None:
-    """Get the default brownfield repo for PM interview context.
+) -> list[BrownfieldRepo]:
+    """Get the default brownfield repos for PM interview context.
+
+    Returns all repos marked as default to support multi-default.
 
     Args:
         store: Initialized BrownfieldStore.
 
     Returns:
-        The default BrownfieldRepo, or None if no default is set.
+        List of default BrownfieldRepo instances (may be empty).
     """
-    return await store.get_default()
+    return await store.get_defaults()
 
 
 # ── Register & set_default handlers ───────────────────────────────
@@ -370,10 +372,10 @@ async def set_default_repo(
     llm_adapter: LLMAdapter | None = None,
     model: str = _FRUGAL_MODEL,
 ) -> BrownfieldRepo | None:
-    """Set a registered repository as the default brownfield context.
+    """Set a registered repository as a default brownfield context.
 
-    Clears the default flag on all other repos and sets it on the
-    specified repo. The repo must already be registered.
+    Marks the specified repo as default WITHOUT clearing the default flag
+    on other repos, supporting multi-default scenarios.
 
     If the repo's ``desc`` is empty and an ``llm_adapter`` is provided,
     a one-line description is auto-generated from the repo's README/CLAUDE.md
@@ -388,7 +390,7 @@ async def set_default_repo(
     Returns:
         The updated BrownfieldRepo, or None if the path is not registered.
     """
-    repo = await store.set_single_default(path)
+    repo = await store.update_is_default(path, is_default=True)
 
     if repo is None:
         log.warning("brownfield.set_default_repo.not_found", path=path)

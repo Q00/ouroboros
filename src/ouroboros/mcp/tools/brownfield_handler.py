@@ -35,7 +35,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.persistence.brownfield import BrownfieldStore
+from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 
 log = structlog.get_logger()
 
@@ -380,7 +380,7 @@ class BrownfieldHandler:
                     )
                 )
             # Backward compat: "default" is the first; "defaults" is the full list
-            first_default = defaults[0]
+            first_default: BrownfieldRepo = defaults[0]
             defaults_data = [d.to_dict() for d in defaults]
             names = ", ".join(d.name for d in defaults)
             return Result.ok(
@@ -444,7 +444,7 @@ class BrownfieldHandler:
 
         repos_data = [r.to_dict() for r in repos]
         defaults_data = [d.to_dict() for d in defaults]
-        first_default = defaults[0] if defaults else None
+        first_default: BrownfieldRepo | None = defaults[0] if defaults else None
 
         return Result.ok(
             MCPToolResult(

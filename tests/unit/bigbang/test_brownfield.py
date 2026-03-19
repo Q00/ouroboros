@@ -657,7 +657,7 @@ class TestSetDefaultRepo:
     @pytest.mark.asyncio
     async def test_sets_default_successfully(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
-        store.set_single_default.return_value = BrownfieldRepo(
+        store.update_is_default.return_value = BrownfieldRepo(
             path="/home/user/repo-a", name="repo-a", is_default=True
         )
 
@@ -666,28 +666,28 @@ class TestSetDefaultRepo:
         assert repo is not None
         assert repo.path == "/home/user/repo-a"
         assert repo.is_default is True
-        store.set_single_default.assert_called_once_with("/home/user/repo-a")
+        store.update_is_default.assert_called_once_with("/home/user/repo-a", is_default=True)
 
     @pytest.mark.asyncio
     async def test_returns_none_for_unregistered_path(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
-        store.set_single_default.return_value = None
+        store.update_is_default.return_value = None
 
         repo = await set_default_repo(store=store, path="/nonexistent")
 
         assert repo is None
-        store.set_single_default.assert_called_once_with("/nonexistent")
+        store.update_is_default.assert_called_once_with("/nonexistent", is_default=True)
 
     @pytest.mark.asyncio
     async def test_delegates_to_store(self) -> None:
         store = AsyncMock(spec=BrownfieldStore)
         expected = BrownfieldRepo(path="/repo", name="repo", desc="Desc", is_default=True)
-        store.set_single_default.return_value = expected
+        store.update_is_default.return_value = expected
 
         result = await set_default_repo(store=store, path="/repo")
 
         assert result is expected
-        store.set_single_default.assert_called_once_with("/repo")
+        store.update_is_default.assert_called_once_with("/repo", is_default=True)
 
     @pytest.mark.asyncio
     async def test_generates_desc_when_empty(self, tmp_path: Path) -> None:
@@ -697,7 +697,7 @@ class TestSetDefaultRepo:
         (repo_dir / "README.md").write_text("# My Repo\nA great tool for devs")
 
         store = AsyncMock(spec=BrownfieldStore)
-        store.set_single_default.return_value = BrownfieldRepo(
+        store.update_is_default.return_value = BrownfieldRepo(
             path=str(repo_dir), name="my-repo", desc=None, is_default=True
         )
         updated_repo = BrownfieldRepo(
@@ -727,7 +727,7 @@ class TestSetDefaultRepo:
     async def test_skips_desc_generation_when_desc_exists(self) -> None:
         """set_default does NOT call LLM if desc already exists."""
         store = AsyncMock(spec=BrownfieldStore)
-        store.set_single_default.return_value = BrownfieldRepo(
+        store.update_is_default.return_value = BrownfieldRepo(
             path="/repo", name="repo", desc="Already has desc", is_default=True
         )
 
@@ -748,7 +748,7 @@ class TestSetDefaultRepo:
     async def test_skips_desc_generation_when_no_llm(self) -> None:
         """set_default does NOT generate desc without LLM adapter."""
         store = AsyncMock(spec=BrownfieldStore)
-        store.set_single_default.return_value = BrownfieldRepo(
+        store.update_is_default.return_value = BrownfieldRepo(
             path="/repo", name="repo", desc=None, is_default=True
         )
 
@@ -761,8 +761,8 @@ class TestSetDefaultRepo:
     async def test_unset_default_preserves_existing_desc(self) -> None:
         """When switching default, the previously-default repo keeps its desc."""
         store = AsyncMock(spec=BrownfieldStore)
-        # set_single_default returns the NEW default repo — its desc should be intact
-        store.set_single_default.return_value = BrownfieldRepo(
+        # update_is_default returns the NEW default repo — its desc should be intact
+        store.update_is_default.return_value = BrownfieldRepo(
             path="/repo-b", name="repo-b", desc="B description", is_default=True
         )
 
@@ -771,8 +771,8 @@ class TestSetDefaultRepo:
         assert result is not None
         assert result.desc == "B description"
         assert result.is_default is True
-        # set_single_default only changes is_default column, not desc
-        store.set_single_default.assert_called_once_with("/repo-b")
+        # update_is_default only changes is_default column, not desc
+        store.update_is_default.assert_called_once_with("/repo-b", is_default=True)
         # update_desc should NOT be called since desc is already present
         store.update_desc.assert_not_called()
 
@@ -787,7 +787,7 @@ class TestSetDefaultRepo:
             path=str(repo_dir), name="my-repo", desc=None, is_default=True
         )
         store = AsyncMock(spec=BrownfieldStore)
-        store.set_single_default.return_value = original_repo
+        store.update_is_default.return_value = original_repo
 
         mock_adapter = AsyncMock()
         mock_adapter.complete.side_effect = Exception("LLM down")
