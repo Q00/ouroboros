@@ -214,7 +214,9 @@ class BrownfieldStore:
         try:
             async with engine.begin() as conn:
                 # Check if repo already exists
-                existing = await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))
+                existing = await conn.execute(
+                    select(literal_column("rowid"), t).where(t.c.path == path)
+                )
                 row = existing.mappings().first()
 
                 if row is not None:
@@ -228,7 +230,13 @@ class BrownfieldStore:
 
                     # Return with preserved values
                     result_row = (
-                        (await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))).mappings().first()
+                        (
+                            await conn.execute(
+                                select(literal_column("rowid"), t).where(t.c.path == path)
+                            )
+                        )
+                        .mappings()
+                        .first()
                     )
                     return BrownfieldRepo.from_row(dict(result_row))  # type: ignore[arg-type]
 
@@ -382,7 +390,10 @@ class BrownfieldStore:
         try:
             async with engine.begin() as conn:
                 result = await conn.execute(
-                    select(literal_column("rowid"), t).where(t.c.is_default.is_(True)).order_by(t.c.path).limit(1)
+                    select(literal_column("rowid"), t)
+                    .where(t.c.is_default.is_(True))
+                    .order_by(t.c.path)
+                    .limit(1)
                 )
                 row = result.mappings().first()
                 if row is None:
@@ -414,7 +425,9 @@ class BrownfieldStore:
         try:
             async with engine.begin() as conn:
                 result = await conn.execute(
-                    select(literal_column("rowid"), t).where(t.c.is_default.is_(True)).order_by(t.c.path)
+                    select(literal_column("rowid"), t)
+                    .where(t.c.is_default.is_(True))
+                    .order_by(t.c.path)
                 )
                 rows = result.mappings().all()
                 return [BrownfieldRepo.from_row(dict(row)) for row in rows]
@@ -461,7 +474,9 @@ class BrownfieldStore:
                     return None
 
                 # Fetch and return the updated row
-                result = await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))
+                result = await conn.execute(
+                    select(literal_column("rowid"), t).where(t.c.path == path)
+                )
                 row = result.mappings().first()
                 if row is None:
                     return None
@@ -487,7 +502,11 @@ class BrownfieldStore:
                 )
                 if result.rowcount == 0:
                     return None
-                row = (await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))).mappings().first()
+                row = (
+                    (await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path)))
+                    .mappings()
+                    .first()
+                )
                 return BrownfieldRepo.from_row(dict(row)) if row else None
         except Exception as e:
             raise PersistenceError(
@@ -515,9 +534,7 @@ class BrownfieldStore:
                 if ids:
                     for rid in ids:
                         await conn.execute(
-                            update(t)
-                            .where(literal_column("rowid") == rid)
-                            .values(is_default=True)
+                            update(t).where(literal_column("rowid") == rid).values(is_default=True)
                         )
                 # Return new defaults
                 result = await conn.execute(
@@ -557,7 +574,9 @@ class BrownfieldStore:
                 if result.rowcount == 0:
                     return None
 
-                result = await conn.execute(select(literal_column("rowid"), t).where(t.c.path == path))
+                result = await conn.execute(
+                    select(literal_column("rowid"), t).where(t.c.path == path)
+                )
                 row = result.mappings().first()
                 if row is None:
                     return None

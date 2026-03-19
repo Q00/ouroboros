@@ -293,6 +293,7 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
         "pending_reframe": pending_reframe,
         "cwd": "",
         "brownfield_repos": list(engine._selected_brownfield_repos),
+        "classifications": [c.output_type.value for c in getattr(engine, "classifications", [])],
     }
 
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -660,16 +660,31 @@ class PMInterviewEngine:
         saved_classifications = meta.get("classifications", [])
         if saved_classifications and not self.classifications:
             from ouroboros.bigbang.question_classifier import (
-                ClassificationOutput,
                 ClassificationResult,
+                ClassifierOutputType,
+                QuestionCategory,
             )
+
+            # Map ClassifierOutputType values back to a minimal ClassificationResult
+            _OUTPUT_TO_CATEGORY = {
+                ClassifierOutputType.PASSTHROUGH: QuestionCategory.PLANNING,
+                ClassifierOutputType.REFRAMED: QuestionCategory.DEVELOPMENT,
+                ClassifierOutputType.DEFERRED: QuestionCategory.DEVELOPMENT,
+                ClassifierOutputType.DECIDE_LATER: QuestionCategory.DECIDE_LATER,
+            }
 
             for c_val in saved_classifications:
                 try:
-                    output_type = ClassificationOutput(c_val)
+                    output_type = ClassifierOutputType(c_val)
+                    category = _OUTPUT_TO_CATEGORY.get(output_type, QuestionCategory.PLANNING)
                     self.classifications.append(
                         ClassificationResult(
-                            question="", output_type=output_type, reasoning="restored"
+                            original_question="",
+                            category=category,
+                            reframed_question="",
+                            reasoning="restored",
+                            defer_to_dev=(output_type == ClassifierOutputType.DEFERRED),
+                            decide_later=(output_type == ClassifierOutputType.DECIDE_LATER),
                         )
                     )
                 except ValueError:

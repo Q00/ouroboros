@@ -331,16 +331,16 @@ async def _run_set_default() -> None:
     _display_repos_table(repos)
     console.print()
 
-    idx = _prompt_repo_selection(repos, "Select new default")
+    idx = _prompt_repo_selection(repos, "Select default repos")
     if idx is None:
         print_info("No changes made.")
         return
 
     selected = repos[idx]
-    with console.status("[cyan]Setting default...[/]", spinner="dots"):
+    with console.status("[cyan]Setting defaults...[/]", spinner="dots"):
         success = await _set_default_repo(selected["path"])
 
     if success:
-        print_success(f"Default repo added: [cyan]{selected['name']}[/] ({selected['path']})")
+        print_success(f"Default repos updated: [cyan]{selected['name']}[/] ({selected['path']})")
     else:
-        print_error(f"Failed to set default: {selected['path']}")
+        print_error(f"Failed to set defaults: {selected['path']}")
