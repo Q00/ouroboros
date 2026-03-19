@@ -394,23 +394,32 @@ That's fine — you can register repos later with:
 ```
 Skip the default selection prompt and proceed to Step 6.
 
-**Default repo selection:**
+**Default repo selection — IMMEDIATELY after showing the repo list:**
 
-After showing the repo list, ask which repos to use as default brownfield context for PM interviews.
+Right after displaying the numbered repo list above, ask for defaults in the SAME response. Do NOT do any other work between showing the list and asking.
 
-1. First, print the numbered repo list (same as above) so the user can see the numbers.
+Find current default repo numbers from the list (repos with `is_default=true` in DB). Use `AskUserQuestion` with exactly this format:
 
-2. Build the recommended option from already-default repos. Query DB for current `is_default=true` repos and get their numbers from the list.
+```json
+{
+  "questions": [{
+    "question": "Which repos to set as default for PM interviews? Enter numbers like '6, 18, 19'.",
+    "header": "Default Repos",
+    "options": [
+      {"label": "<default numbers> (Recommended)", "description": "<default repo names>"}
+    ],
+    "multiSelect": false
+  }]
+}
+```
 
-3. Use `AskUserQuestion` with exactly 2 options:
-   - Option 1: The current default repo numbers as recommended (e.g. "18, 19 (Recommended)"). If no defaults exist, use "none (Recommended)".
-   - The user can always "Type something" to enter custom numbers (e.g. "6, 18, 19, 25").
+Only ONE option: the current default numbers as recommended. The user can "Type something" (built-in) for custom numbers or "none".
 
-4. After the user responds:
-   - Call `ouroboros_brownfield(action="set_default", paths=[], is_default=false)` to clear ALL defaults
-   - Parse the user's answer (numbers like "6, 18, 19" → resolve to repo paths)
-   - For each selected repo, call `ouroboros_brownfield(action="set_default", path=<repo_path>, is_default=true)`
-   - This generates a one-line description from README/CLAUDE.md using the Frugal (Haiku) model for repos missing descriptions
+After the user responds:
+   - Clear ALL defaults in DB (set all `is_default=false`)
+   - Parse the response (numbers → repo paths from the numbered list)
+   - Set selected repos to `is_default=true` in DB
+   - If "none" → skip, no defaults
 
 **Celebration Checkpoint 5.5:**
 ```
