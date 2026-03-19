@@ -461,48 +461,6 @@ class PMInterviewHandler:
 
             # ── Resume with answer ─────────────────────────────────
             if action == "resume" and session_id:
-                # Check pm_meta for pending states (project type or repo selection)
-                meta_data = _load_pm_meta(session_id, data_dir=self.data_dir)
-                if meta_data:
-                    status = meta_data.get("status", "")
-
-                    # User answered brownfield/greenfield question
-                    if status == "awaiting_project_type" and answer:
-                        return await self._handle_project_type_answer(
-                            engine, session_id, answer, cwd, meta_data,
-                        )
-
-                    # User answered repo selection (legacy 1-step path)
-                    if status == "awaiting_repo_selection" and answer:
-                        selected = self._parse_repo_selection(answer, meta_data)
-                        if selected:
-                            return await self._handle_select_repos(
-                                engine, selected, session_id, None, cwd,
-                            )
-                        # Could not parse → re-send repo list
-                        recovered = await self._maybe_recover_awaiting_session(
-                            session_id, cwd,
-                        )
-                        if recovered is not None:
-                            return recovered
-
-                    # 2-sub-step flow: user answered "select repos" step
-                    if status == "awaiting_repo_select" and answer:
-                        return await self._handle_repo_select_answer(
-                            session_id, answer, cwd, meta_data,
-                        )
-
-                    # 2-sub-step flow: confirm_repos (auto-transitions, but
-                    # handle gracefully if somehow hit)
-                    if status == "confirm_repos":
-                        initial_ctx = meta_data.get("initial_context", "")
-                        if initial_ctx:
-                            return await self._step_confirm_repos(
-                                initial_ctx, cwd, session_id=session_id,
-                                selected_paths=meta_data.get("selected_paths", []),
-                            )
-
-
                 return await self._handle_answer(engine, session_id, answer, cwd)
 
             return Result.err(
@@ -533,53 +491,38 @@ class PMInterviewHandler:
         *,
         selected_repos: list[str] | None = None,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Start a new PM interview session (supports 2-step start).
+        """Start a new PM interview session.
 
-        2-step start pattern:
-            Step 1 — ``selected_repos`` absent:
-                Query DB for all repos.  If repos exist, return the list
-                and save ``pm_meta.status = "awaiting_repo_selection"``
-                without starting the actual interview engine.
+        Automatically loads is_default=true repos from DB as brownfield
+        context. No user selection needed — repo defaults are managed
+        via ``ooo setup``.
 
-            Step 2 — ``selected_repos`` present (+ ``initial_context``):
-                Start the interview with the selected repos as brownfield
-                context (all repos assigned ``role: main``).
-
-        Greenfield fast-path: if no repos in DB at step 1, skip straight
-        to the full interview start (no step 2 needed).
-
-        Backward compat: ``selected_repos`` with ``initial_context`` in
-        a single call behaves identically to the old 1-step flow.
+        If ``selected_repos`` is provided, uses those instead (backward compat).
         """
-        # ── Step-1: ask brownfield vs greenfield ────────────────
-        if selected_repos is None:
-            return self._step1_ask_project_type(initial_context, cwd)
-
-        # ── Full interview start (step-2 or greenfield) ───────────
+        # ── Load brownfield from DB defaults ────────────────────
         brownfield_repos = None
-        if selected_repos:
+        if selected_repos is not None:
+            # Backward compat: explicit selected_repos
             resolved = await self._resolve_repos_from_db(selected_repos)
-            if resolved:
-                brownfield_repos = [
-                    {
-                        "path": r.path,
-                        "name": r.name,
-                        "role": "main",
-                        **({"desc": r.desc} if r.desc else {}),
-                    }
-                    for r in resolved
-                ]
-                log.info(
-                    "pm_handler.start.selected_repos",
-                    count=len(resolved),
-                    paths=[r.path for r in resolved],
-                )
-            else:
-                # All selected paths missing from DB → auto-greenfield
-                log.info(
-                    "pm_handler.start.selected_repos_all_missing",
-                    requested=selected_repos,
-                )
+        else:
+            # Auto-load defaults from DB
+            resolved = await self._query_default_repos()
+
+        if resolved:
+            brownfield_repos = [
+                {
+                    "path": r.path,
+                    "name": r.name,
+                    "role": "main",
+                    **({"desc": r.desc} if r.desc else {}),
+                }
+                for r in resolved
+            ]
+            log.info(
+                "pm_handler.start.brownfield_repos",
+                count=len(resolved),
+                paths=[r.path for r in resolved],
+            )
 
         result = await engine.ask_opening_and_start(
             user_response=initial_context,
@@ -899,6 +842,15 @@ class PMInterviewHandler:
                 await store.close()
         except Exception as exc:
             log.warning("pm_handler.auto_scan_failed", error=str(exc))
+            return []
+
+    async def _query_default_repos(self) -> list[BrownfieldRepo]:
+        """Query DB for is_default=true repos."""
+        try:
+            all_repos = await self._query_all_repos()
+            return [r for r in all_repos if r.is_default]
+        except Exception as exc:
+            log.warning("pm_handler.query_defaults_failed", error=str(exc))
             return []
 
     async def _query_all_repos(self) -> list[BrownfieldRepo]:

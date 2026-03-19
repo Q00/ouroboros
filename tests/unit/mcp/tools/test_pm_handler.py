@@ -810,40 +810,40 @@ class TestHandleStartBrownfield:
     """Test brownfield detection in _handle_start — uses DB default repo."""
 
     @pytest.mark.asyncio
-    async def test_start_step1_returns_project_type_choice(self, tmp_path: Path) -> None:
-        """Step 1: start returns brownfield/greenfield choice (awaiting_project_type)."""
+    async def test_start_directly_starts_interview_with_defaults(self, tmp_path: Path) -> None:
+        """Start auto-loads default repos from DB and starts interview directly."""
         engine = MagicMock(spec=PMInterviewEngine)
+        engine.deferred_items = []
+        engine.decide_later_items = []
+        engine.codebase_context = ""
+        engine._reframe_map = {}
+
+        state = _make_state(interview_id="direct-start-sess")
+        engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("What features?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle({
-            "initial_context": "Build a task manager",
-            "cwd": str(tmp_path),
-        })
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = []
+            result = await handler.handle({
+                "initial_context": "Build a task manager",
+                "cwd": str(tmp_path),
+            })
 
         assert result.is_ok
         meta = result.value.meta
-        assert meta["status"] == "awaiting_project_type"
+        assert meta["status"] == "interview_started"
         assert meta["response_param"] == "answer"
         assert "session_id" in meta
-        auq = meta["ask_user_question"]
-        assert "existing codebase" in auq["question"] or "brand-new project" in auq["question"]
-        assert len(auq["options"]) == 2
-        assert auq["multiSelect"] is False
 
-        # Engine should NOT have been called — interview not started yet
-        engine.ask_opening_and_start.assert_not_called()
-
-        # pm_meta should be persisted with awaiting_project_type status
-        import json
-        meta_path = tmp_path / f"pm_meta_{meta['session_id']}.json"
-        assert meta_path.exists()
-        saved_meta = json.loads(meta_path.read_text())
-        assert saved_meta["status"] == "awaiting_project_type"
-        assert saved_meta["initial_context"] == "Build a task manager"
+        # Engine should have been called — interview started directly
+        engine.ask_opening_and_start.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_start_step2_brownfield_returns_repo_select_when_repos_exist(self, tmp_path: Path) -> None:
-        """Step 2 (brownfield answer): When DB has repos, return repo select list (ALL repos, defaults marked with ★)."""
+    async def test_start_auto_loads_default_repos_as_brownfield(self, tmp_path: Path) -> None:
+        """Start auto-loads is_default=true repos from DB as brownfield context."""
         from ouroboros.persistence.brownfield import BrownfieldRepo
 
         mock_repos = [
@@ -853,90 +853,71 @@ class TestHandleStartBrownfield:
                 desc="A cool project",
                 is_default=True,
             ),
-            BrownfieldRepo(
-                path="/home/user/other-repo",
-                name="other-repo",
-                desc="Another project",
-                is_default=False,
-            ),
         ]
 
         engine = MagicMock(spec=PMInterviewEngine)
+        engine.deferred_items = []
+        engine.decide_later_items = []
+        engine.codebase_context = ""
+        engine._reframe_map = {}
+
+        state = _make_state(interview_id="bf-auto-sess", is_brownfield=True)
+        engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("What features?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        # First, do step 1 to get session_id
-        step1_result = await handler.handle({
-            "initial_context": "Build a task manager",
-            "cwd": str(tmp_path),
-        })
-        session_id = step1_result.value.meta["session_id"]
-
-        # Step 2: answer "brownfield" → now goes to awaiting_repo_select (ALL repos)
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = mock_repos
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = mock_repos
 
             result = await handler.handle({
-                "session_id": session_id,
-                "answer": "brownfield",
+                "initial_context": "Build a task manager",
+                "cwd": str(tmp_path),
             })
 
         assert result.is_ok
         meta = result.value.meta
-        assert meta["status"] == "awaiting_repo_select"
-        # ALL repos shown in select step
-        assert meta["session_id"] == session_id
+        assert meta["status"] == "interview_started"
 
-        # Simple meta — no repos data, no ask_user_question (interview pattern)
-        assert meta["response_param"] == "answer"
-
-        # Human-readable content includes numbered repo list with ★ for defaults
-        content_text = result.value.content[0].text
-        assert "my-repo" in content_text
-        assert "other-repo" in content_text
-        assert "★" in content_text  # Default repo marked with star
-
-        # Engine should NOT have been called — interview not started yet
-        engine.ask_opening_and_start.assert_not_called()
+        # Verify brownfield_repos was passed to engine
+        call_kwargs = engine.ask_opening_and_start.call_args
+        brownfield_repos = call_kwargs.kwargs.get("brownfield_repos")
+        assert brownfield_repos is not None
+        assert len(brownfield_repos) == 1
+        assert brownfield_repos[0]["path"] == "/home/user/my-repo"
+        assert brownfield_repos[0]["name"] == "my-repo"
+        assert brownfield_repos[0]["role"] == "main"
 
     @pytest.mark.asyncio
-    async def test_start_step2_brownfield_content_text_no_desc_repo(self, tmp_path: Path) -> None:
-        """Step 2 (brownfield) content text handles repos without description gracefully."""
-        from ouroboros.persistence.brownfield import BrownfieldRepo
-
-        mock_repos = [
-            BrownfieldRepo(
-                path="/home/user/plain-repo",
-                name="plain-repo",
-                desc=None,
-                is_default=False,
-            ),
-        ]
-
+    async def test_start_no_default_repos_starts_greenfield(self, tmp_path: Path) -> None:
+        """When no default repos in DB, starts interview as greenfield."""
         engine = MagicMock(spec=PMInterviewEngine)
+        engine.deferred_items = []
+        engine.decide_later_items = []
+        engine.codebase_context = ""
+        engine._reframe_map = {}
+
+        state = _make_state(interview_id="gf-auto-sess", is_brownfield=False)
+        engine.ask_opening_and_start = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("What features?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        # Step 1: get session_id
-        step1_result = await handler.handle({
-            "initial_context": "Build something",
-            "cwd": str(tmp_path),
-        })
-        session_id = step1_result.value.meta["session_id"]
-
-        # Step 2: answer "brownfield"
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = mock_repos
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = []  # No defaults
 
             result = await handler.handle({
-                "session_id": session_id,
-                "answer": "brownfield",
+                "initial_context": "Build something",
+                "cwd": str(tmp_path),
             })
 
         assert result.is_ok
-        content_text = result.value.content[0].text
-        # Name present in numbered list
-        assert "plain-repo" in content_text
-        # Repo line itself should NOT have ★ (not default), but header has legend
-        assert "plain-repo ★" not in content_text
+        # Verify brownfield_repos was None (greenfield)
+        call_kwargs = engine.ask_opening_and_start.call_args
+        brownfield_repos = call_kwargs.kwargs.get("brownfield_repos")
+        assert brownfield_repos is None
 
     @pytest.mark.asyncio
     async def test_start_step2_with_selected_repos(self, tmp_path: Path) -> None:
@@ -978,8 +959,8 @@ class TestHandleStartBrownfield:
         assert brownfield_repos[0]["role"] == "main"
 
     @pytest.mark.asyncio
-    async def test_start_auto_greenfield_via_project_type(self, tmp_path: Path) -> None:
-        """Step 1 returns project type choice; answering greenfield starts interview."""
+    async def test_start_greenfield_when_no_selected_repos_and_no_defaults(self, tmp_path: Path) -> None:
+        """Start with no selected_repos and no DB defaults starts greenfield."""
         engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
@@ -993,22 +974,16 @@ class TestHandleStartBrownfield:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        # Step 1: get project type choice
-        step1_result = await handler.handle({
-            "initial_context": "Build a new app",
-            "cwd": str(tmp_path),
-        })
-        assert step1_result.is_ok
-        assert step1_result.value.meta["status"] == "awaiting_project_type"
-        session_id = step1_result.value.meta["session_id"]
-
-        # Step 2: answer "greenfield" → starts interview directly
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "greenfield",
-        })
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = []
+            result = await handler.handle({
+                "initial_context": "Build a new app",
+                "cwd": str(tmp_path),
+            })
 
         assert result.is_ok
+        meta = result.value.meta
+        assert meta["status"] == "interview_started"
 
         # Verify brownfield_repos was None (greenfield)
         call_kwargs = engine.ask_opening_and_start.call_args
@@ -1016,8 +991,8 @@ class TestHandleStartBrownfield:
         assert brownfield_repos is None
 
     @pytest.mark.asyncio
-    async def test_start_brownfield_graceful_on_db_error(self, tmp_path: Path) -> None:
-        """When DB access fails after brownfield answer, falls back to greenfield."""
+    async def test_start_graceful_on_db_error_falls_back_to_greenfield(self, tmp_path: Path) -> None:
+        """When DB default repo query returns empty, starts as greenfield."""
         engine = MagicMock(spec=PMInterviewEngine)
         engine.deferred_items = []
         engine.decide_later_items = []
@@ -1031,27 +1006,16 @@ class TestHandleStartBrownfield:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        # Step 1: get project type choice
-        step1_result = await handler.handle({
-            "initial_context": "Build something",
-            "cwd": str(tmp_path),
-        })
-        assert step1_result.is_ok
-        session_id = step1_result.value.meta["session_id"]
-
-        # Step 2: answer "brownfield" but DB fails and scan finds nothing → greenfield
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query, \
-             patch.object(handler, "_auto_scan_repos", new_callable=AsyncMock) as mock_scan:
-            mock_query.return_value = []  # DB error returns empty list
-            mock_scan.return_value = []   # Scan also finds nothing
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = []  # DB error / no defaults
             result = await handler.handle({
-                "session_id": session_id,
-                "answer": "brownfield",
+                "initial_context": "Build something",
+                "cwd": str(tmp_path),
             })
 
         assert result.is_ok
 
-        # Should gracefully fall back to no brownfield (DB error → empty repos → greenfield)
+        # Should gracefully fall back to greenfield (no brownfield repos)
         call_kwargs = engine.ask_opening_and_start.call_args
         brownfield_repos = call_kwargs.kwargs.get("brownfield_repos")
         assert brownfield_repos is None
@@ -1804,17 +1768,24 @@ class TestAutoDetectIntegration:
 
     @pytest.mark.asyncio
     async def test_start_without_action_param(self, engine, tmp_path):
-        """Calling with only initial_context (no action) triggers start (project type step)."""
+        """Calling with only initial_context (no action) triggers start directly."""
+        state = _make_state(interview_id="auto-start")
+        engine.ask_opening_and_start.return_value = Result.ok(state)
+        engine.ask_next_question.return_value = Result.ok("What features?")
+        engine.save_state.return_value = Result.ok(tmp_path / "state.json")
+
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        # No "action" key in arguments at all
-        result = await handler.handle({"initial_context": "Build a CRM"})
+
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = []
+            # No "action" key in arguments at all
+            result = await handler.handle({"initial_context": "Build a CRM"})
 
         assert result.is_ok
-        # New 3-step flow: step 1 returns project type choice
-        assert result.value.meta["status"] == "awaiting_project_type"
-        assert "ask_user_question" in result.value.meta
-        # Engine should NOT have been started yet
-        engine.ask_opening_and_start.assert_not_called()
+        # Start goes directly to interview_started (no project type step)
+        assert result.value.meta["status"] == "interview_started"
+        # Engine should have been started
+        engine.ask_opening_and_start.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_resume_without_action_param(self, engine, tmp_path):
@@ -2232,54 +2203,42 @@ class TestRestartRecovery:
         return PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
     @pytest.mark.asyncio
-    async def test_resume_awaiting_session_re_sends_repo_list(self, tmp_path: Path):
-        """Resume on an awaiting_repo_selection session with unparseable answer re-sends list."""
+    async def test_resume_interview_started_session_works(self, tmp_path: Path):
+        """Resume on an interview_started session processes answer normally."""
         session_id = "interview_20260319_140000"
 
-        # Save pm_meta as if step 1 completed before restart (includes repo_map/name_map)
         _save_pm_meta(
             session_id,
             engine=None,
             cwd="/project",
             data_dir=tmp_path,
-            status="awaiting_repo_selection",
-            extra={
-                "initial_context": "Build a task manager",
-                "repo_map": {"1": "/repos/my-app"},
-                "name_map": {"my-app": "/repos/my-app"},
-            },
+            status="interview_started",
         )
 
+        state = _make_state(interview_id=session_id, rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response=None),
+        ])
         engine = _make_engine_stub()
-
-        # Mock _query_all_repos to return repos (for re-send)
-        mock_repo = MagicMock()
-        mock_repo.path = "/repos/my-app"
-        mock_repo.name = "my-app"
-        mock_repo.desc = "Main app"
-        mock_repo.is_default = True
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        engine.record_response = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
+        engine.save_state = AsyncMock()
 
         handler = self._make_handler(engine, tmp_path)
 
-        # Send an unparseable answer to trigger re-send of repo list
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = [mock_repo]
-            result = await handler.handle({
-                "session_id": session_id,
-                "answer": "???invalid???",
-            })
+        result = await handler.handle({
+            "session_id": session_id,
+            "answer": "My answer",
+        })
 
         assert result.is_ok
         meta = result.value.meta
-        assert meta["status"] == "awaiting_repo_selection"
-        assert meta["session_id"] == session_id  # Reuses same session_id
-        assert meta["input_type"] == "freeText"
-        assert meta["response_param"] == "answer"
-        assert "options" not in meta
+        assert meta["session_id"] == session_id
+        engine.load_state.assert_called_once_with(session_id)
 
     @pytest.mark.asyncio
-    async def test_resume_awaiting_session_auto_greenfield_when_no_repos(self, tmp_path: Path):
-        """Resume on awaiting session with unparseable answer and no repos → re-asks project type."""
+    async def test_resume_session_continues_interview(self, tmp_path: Path):
+        """Resume on active session continues the interview loop."""
         session_id = "interview_20260319_140000"
 
         _save_pm_meta(
@@ -2287,31 +2246,29 @@ class TestRestartRecovery:
             engine=None,
             cwd="/project",
             data_dir=tmp_path,
-            status="awaiting_repo_selection",
-            extra={
-                "initial_context": "Build a task manager",
-                "repo_map": {},
-                "name_map": {},
-            },
+            status="interview_started",
         )
 
+        state = _make_state(interview_id=session_id, rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response=None),
+        ])
         engine = _make_engine_stub()
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        engine.record_response = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Follow-up question?"))
+        engine.save_state = AsyncMock()
 
         handler = self._make_handler(engine, tmp_path)
 
-        # Send an unparseable answer; no repos in DB → auto-greenfield (project type)
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = []  # No repos in DB
-            result = await handler.handle({
-                "session_id": session_id,
-                "answer": "???invalid???",
-            })
+        result = await handler.handle({
+            "session_id": session_id,
+            "answer": "Some answer",
+        })
 
         assert result.is_ok
         meta = result.value.meta
-        # Recovery with no repos goes back to project type selection
-        assert meta["status"] == "awaiting_project_type"
-        assert meta["response_param"] == "answer"
+        assert meta["question"] == "Follow-up question?"
+        assert meta["is_complete"] is False
 
     @pytest.mark.asyncio
     async def test_resume_active_session_not_intercepted(self, tmp_path: Path):
@@ -2371,36 +2328,27 @@ class TestRestartRecovery:
         engine.load_state.assert_called_once_with(session_id)
 
     @pytest.mark.asyncio
-    async def test_resume_awaiting_no_initial_context_error(self, tmp_path: Path):
-        """Awaiting session with no initial_context and no repos → error."""
+    async def test_resume_missing_state_returns_error(self, tmp_path: Path):
+        """Resume when engine can't load state returns error."""
         session_id = "interview_20260319_140000"
 
-        _save_pm_meta(
-            session_id,
-            engine=None,
-            cwd="/project",
-            data_dir=tmp_path,
-            status="awaiting_repo_selection",
-            extra={"repo_map": {}, "name_map": {}},  # No initial_context
+        engine = _make_engine_stub()
+        engine.load_state = AsyncMock(
+            return_value=Result.err(Exception("state not found"))
         )
 
-        engine = _make_engine_stub()
         handler = self._make_handler(engine, tmp_path)
 
-        # Send unparseable answer; no repos and no initial_context → error
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = []  # No repos → would need initial_context for greenfield
-            result = await handler.handle({
-                "session_id": session_id,
-                "answer": "???invalid???",
-            })
+        result = await handler.handle({
+            "session_id": session_id,
+            "answer": "My answer",
+        })
 
         assert result.is_err
-        assert "initial_context" in str(result.error)
 
     @pytest.mark.asyncio
-    async def test_resume_awaiting_preserves_session_id(self, tmp_path: Path):
-        """Recovery reuses the original session_id, not a new one."""
+    async def test_resume_preserves_session_id(self, tmp_path: Path):
+        """Resume reuses the original session_id."""
         session_id = "interview_20260319_140000"
 
         _save_pm_meta(
@@ -2408,38 +2356,27 @@ class TestRestartRecovery:
             engine=None,
             cwd="/project",
             data_dir=tmp_path,
-            status="awaiting_repo_selection",
-            extra={
-                "initial_context": "Build a task manager",
-                "repo_map": {"1": "/repos/my-app"},
-                "name_map": {"my-app": "/repos/my-app"},
-            },
+            status="interview_started",
         )
 
+        state = _make_state(interview_id=session_id, rounds=[
+            InterviewRound(round_number=1, question="Q1", user_response=None),
+        ])
         engine = _make_engine_stub()
-        mock_repo = MagicMock()
-        mock_repo.path = "/repos/my-app"
-        mock_repo.name = "my-app"
-        mock_repo.desc = None
-        mock_repo.is_default = False
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        engine.record_response = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next?"))
+        engine.save_state = AsyncMock()
 
         handler = self._make_handler(engine, tmp_path)
 
-        # Send unparseable answer to trigger re-send of repo list
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = [mock_repo]
-            result = await handler.handle({
-                "session_id": session_id,
-                "answer": "???invalid???",
-            })
+        result = await handler.handle({
+            "session_id": session_id,
+            "answer": "My answer",
+        })
 
         assert result.is_ok
-        # The session_id in meta must be the same as the original
         assert result.value.meta["session_id"] == session_id
-        # pm_meta on disk should also reflect the same session_id
-        meta = _load_pm_meta(session_id, tmp_path)
-        assert meta is not None
-        assert meta["status"] == "awaiting_repo_selection"
 
 
 # ── 2-step start orchestration flow tests ────────────────────────
@@ -2471,76 +2408,39 @@ class TestTwoStepStartOrchestrationFlow:
         return PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
     @pytest.mark.asyncio
-    async def test_full_3step_flow_brownfield(self, engine, tmp_path):
-        """Full flow: project_type → repo_add → repo_remove → confirm → interview → answer."""
+    async def test_simple_flow_start_answer_next(self, engine, tmp_path):
+        """Simple flow: start → first question → answer → next question."""
         from ouroboros.persistence.brownfield import BrownfieldRepo
 
         handler = self._make_handler(engine, tmp_path)
 
-        db_repos = [
+        default_repos = [
             BrownfieldRepo(path="/repos/frontend", name="frontend", desc="React app", is_default=True),
-            BrownfieldRepo(path="/repos/backend", name="backend", desc="API server", is_default=False),
         ]
 
-        # ── Step 1: initial_context → project type choice ──────────
-        step1_result = await handler.handle({
-            "initial_context": "Add a notification system",
-            "cwd": str(tmp_path),
-        })
-
-        assert step1_result.is_ok
-        step1_meta = step1_result.value.meta
-        assert step1_meta["status"] == "awaiting_project_type"
-        assert "ask_user_question" in step1_meta
-        session_id = step1_meta["session_id"]
-
-        # Engine should NOT have been started
-        engine.ask_opening_and_start.assert_not_called()
-
-        # ── Step 1b: user answers "brownfield" → repo SELECT list (ALL repos) ─────
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = db_repos
-            step1b_result = await handler.handle({
-                "session_id": session_id,
-                "answer": "brownfield",
-            })
-
-        assert step1b_result.is_ok
-        step1b_meta = step1b_result.value.meta
-        assert step1b_meta["status"] == "awaiting_repo_select"
-        # ALL repos shown with ★ for defaults
-
-        # Engine should still NOT have been started
-        engine.ask_opening_and_start.assert_not_called()
-
-        # ── Step 2: user selects both repos → confirm repos and auto-start interview ──
-        state = _make_state(interview_id=session_id, is_brownfield=True)
+        # ── Step 1: initial_context → interview starts directly ──
+        state = _make_state(interview_id="simple-flow-sess", is_brownfield=True)
         engine.ask_opening_and_start.return_value = Result.ok(state)
         engine.ask_next_question.return_value = Result.ok("What notifications do you need?")
         engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
-        updated_repos = [
-            BrownfieldRepo(path="/repos/frontend", name="frontend", desc="React app", is_default=True),
-            BrownfieldRepo(path="/repos/backend", name="backend", desc="API server", is_default=True),
-        ]
-        with patch.object(handler, "_sync_defaults_to_db", new_callable=AsyncMock), \
-             patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query, \
-             patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
-            mock_query.return_value = updated_repos
-            mock_resolve.return_value = updated_repos
-            step2_result = await handler.handle({
-                "session_id": session_id,
-                "answer": "1, 2",
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = default_repos
+            step1_result = await handler.handle({
+                "initial_context": "Add a notification system",
+                "cwd": str(tmp_path),
             })
 
-        assert step2_result.is_ok
-        step2_meta = step2_result.value.meta
-        assert step2_meta["status"] == "interview_started"
-        assert step2_meta["input_type"] == "freeText"
-        assert step2_meta["response_param"] == "answer"
-        assert step2_meta["question"] == "What notifications do you need?"
+        assert step1_result.is_ok
+        step1_meta = step1_result.value.meta
+        assert step1_meta["status"] == "interview_started"
+        assert step1_meta["question"] == "What notifications do you need?"
+        session_id = step1_meta["session_id"]
 
-        # ── Step 3: user answers first question ───────────────────
+        # Engine should have been started directly
+        engine.ask_opening_and_start.assert_called_once()
+
+        # ── Step 2: user answers first question ───────────────────
         state2 = _make_state(
             interview_id=session_id,
             rounds=[
@@ -2552,19 +2452,19 @@ class TestTwoStepStartOrchestrationFlow:
         engine.record_response.return_value = Result.ok(state2)
         engine.ask_next_question.return_value = Result.ok("Who should receive notifications?")
 
-        # Save pm_meta as engine would after step 2
+        # Save pm_meta as engine would after start
         _save_pm_meta(session_id, engine, cwd=str(tmp_path), data_dir=tmp_path, status="interview_started")
 
-        step3_result = await handler.handle({
+        step2_result = await handler.handle({
             "session_id": session_id,
             "answer": "Push notifications and emails",
         })
 
-        assert step3_result.is_ok
-        step3_meta = step3_result.value.meta
-        assert step3_meta["session_id"] == session_id
-        assert step3_meta["question"] == "Who should receive notifications?"
-        assert step3_meta["is_complete"] is False
+        assert step2_result.is_ok
+        step2_meta = step2_result.value.meta
+        assert step2_meta["session_id"] == session_id
+        assert step2_meta["question"] == "Who should receive notifications?"
+        assert step2_meta["is_complete"] is False
 
     @pytest.mark.asyncio
     async def test_2step_all_repos_selected_role_main(self, engine, tmp_path):
@@ -2645,8 +2545,8 @@ class TestTwoStepStartOrchestrationFlow:
         assert call_kwargs.kwargs.get("brownfield_repos") is None
 
     @pytest.mark.asyncio
-    async def test_greenfield_via_project_type_answer(self, engine, tmp_path):
-        """Answering greenfield at project type step starts interview directly."""
+    async def test_greenfield_start_no_defaults(self, engine, tmp_path):
+        """Start with no default repos starts greenfield interview directly."""
         handler = self._make_handler(engine, tmp_path)
 
         state = _make_state(interview_id="auto-gf-sess", is_brownfield=False)
@@ -2654,20 +2554,12 @@ class TestTwoStepStartOrchestrationFlow:
         engine.ask_next_question.return_value = Result.ok("What do you want to build?")
         engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
-        # Step 1: get project type choice
-        step1_result = await handler.handle({
-            "initial_context": "Brand new project",
-            "cwd": str(tmp_path),
-        })
-        assert step1_result.is_ok
-        assert step1_result.value.meta["status"] == "awaiting_project_type"
-        session_id = step1_result.value.meta["session_id"]
-
-        # Step 2: answer "greenfield" → starts interview directly
-        result = await handler.handle({
-            "session_id": session_id,
-            "answer": "greenfield",
-        })
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = []
+            result = await handler.handle({
+                "initial_context": "Brand new project",
+                "cwd": str(tmp_path),
+            })
 
         assert result.is_ok
         meta = result.value.meta
@@ -2713,82 +2605,31 @@ class TestTwoStepStartOrchestrationFlow:
         assert bf_repos[0]["role"] == "main"
 
     @pytest.mark.asyncio
-    async def test_step1_pm_meta_persists_initial_context_for_step2(self, engine, tmp_path):
-        """Step 1 saves initial_context in pm_meta; step 2 recovers it."""
-        from ouroboros.persistence.brownfield import BrownfieldRepo
-
+    async def test_start_pm_meta_persists_after_interview_start(self, engine, tmp_path):
+        """Start saves pm_meta with interview_started status."""
         handler = self._make_handler(engine, tmp_path)
 
-        db_repos = [BrownfieldRepo(path="/repo/x", name="x-app", is_default=False)]
-
-        # Step 1: project type choice
-        step1_result = await handler.handle({
-            "initial_context": "Migrate to microservices",
-            "cwd": str(tmp_path),
-        })
-
-        session_id = step1_result.value.meta["session_id"]
-
-        # Verify pm_meta on disk has the initial_context
-        import json
-        meta_file = tmp_path / f"pm_meta_{session_id}.json"
-        saved_meta = json.loads(meta_file.read_text())
-        assert saved_meta["status"] == "awaiting_project_type"
-        assert saved_meta["initial_context"] == "Migrate to microservices"
-
-        # Step 1b: answer "brownfield" → repo select list
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = db_repos
-            step1b_result = await handler.handle({
-                "session_id": session_id,
-                "answer": "brownfield",
-            })
-        assert step1b_result.is_ok
-        assert step1b_result.value.meta["status"] == "awaiting_repo_select"
-
-        # Verify initial_context persisted through to repo_select pm_meta
-        saved_meta2 = json.loads(meta_file.read_text())
-        assert saved_meta2["initial_context"] == "Migrate to microservices"
-
-        # Step 2: skip selection (none) → confirm_repos auto-starts interview (greenfield)
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = []  # No defaults after sync → greenfield
-            step2_result = await handler.handle({
-                "session_id": session_id,
-                "answer": "none",
-            })
-
-        # confirm_repos auto-starts interview (greenfield since no defaults)
-        assert step2_result.is_ok or step2_result.is_err  # May need engine setup
-
-        # Alternatively, test via the 1-step backward-compat path to verify
-        # initial_context recovery still works
-        state = _make_state(interview_id=session_id, is_brownfield=True)
+        state = _make_state(interview_id="persist-sess", is_brownfield=False)
         engine.ask_opening_and_start.return_value = Result.ok(state)
         engine.ask_next_question.return_value = Result.ok("Which services?")
         engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
-        # Re-save as awaiting_repo_selection for backward compat path test
-        _save_pm_meta(
-            session_id,
-            engine=None,
-            cwd=str(tmp_path),
-            data_dir=tmp_path,
-            status="awaiting_repo_selection",
-            extra={"initial_context": "Migrate to microservices"},
-        )
-
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
-            mock_resolve.return_value = [db_repos[0]]
-            step2_result = await handler.handle({
-                "selected_repos": ["/repo/x"],
-                "session_id": session_id,
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = []
+            result = await handler.handle({
+                "initial_context": "Migrate to microservices",
+                "cwd": str(tmp_path),
             })
 
-        assert step2_result.is_ok
-        # Verify initial_context was passed to engine
-        call_args = engine.ask_opening_and_start.call_args
-        assert call_args.kwargs.get("user_response") == "Migrate to microservices"
+        assert result.is_ok
+        session_id = result.value.meta["session_id"]
+
+        # Verify pm_meta on disk has interview_started status
+        import json
+        meta_file = tmp_path / f"pm_meta_{session_id}.json"
+        assert meta_file.exists()
+        saved_meta = json.loads(meta_file.read_text())
+        assert saved_meta["status"] == "interview_started"
 
     @pytest.mark.asyncio
     async def test_step2_session_id_reuse(self, engine, tmp_path):
@@ -2824,102 +2665,77 @@ class TestTwoStepStartOrchestrationFlow:
         assert result.value.meta["session_id"] == session_id
 
     @pytest.mark.asyncio
-    async def test_repo_options_default_flag_mapping(self, engine, tmp_path):
-        """Repo select step shows ALL repos with defaults marked."""
+    async def test_start_uses_default_repos_from_db(self, engine, tmp_path):
+        """Start auto-loads default repos from DB and passes them to engine."""
         from ouroboros.persistence.brownfield import BrownfieldRepo
 
         handler = self._make_handler(engine, tmp_path)
 
-        db_repos = [
+        default_repos = [
             BrownfieldRepo(path="/repos/default-repo", name="default-repo", is_default=True),
-            BrownfieldRepo(path="/repos/secondary", name="secondary", is_default=False),
             BrownfieldRepo(path="/repos/third", name="third", is_default=True),
         ]
 
-        # Step 1: project type choice
-        step1_result = await handler.handle({
-            "initial_context": "Some feature",
-            "cwd": str(tmp_path),
-        })
-        assert step1_result.is_ok
-        session_id = step1_result.value.meta["session_id"]
+        state = _make_state(interview_id="defaults-sess", is_brownfield=True)
+        engine.ask_opening_and_start.return_value = Result.ok(state)
+        engine.ask_next_question.return_value = Result.ok("Some feature question?")
+        engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
-        # Step 1b: answer "brownfield" → repo SELECT list (ALL repos)
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = db_repos
-
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = default_repos
             result = await handler.handle({
-                "session_id": session_id,
-                "answer": "brownfield",
+                "initial_context": "Some feature",
+                "cwd": str(tmp_path),
             })
 
         assert result.is_ok
         meta = result.value.meta
-        assert meta["status"] == "awaiting_repo_select"
-        # ALL repos shown in the select step
-        # Content text should mark defaults with ★
-        content_text = result.value.content[0].text
-        assert "★" in content_text
+        assert meta["status"] == "interview_started"
+
+        # Verify both default repos were passed to engine
+        call_kwargs = engine.ask_opening_and_start.call_args
+        brownfield_repos = call_kwargs.kwargs.get("brownfield_repos")
+        assert brownfield_repos is not None
+        assert len(brownfield_repos) == 2
+        assert brownfield_repos[0]["name"] == "default-repo"
+        assert brownfield_repos[1]["name"] == "third"
 
     @pytest.mark.asyncio
-    async def test_2step_flow_with_restart_recovery(self, engine, tmp_path):
-        """After step 1, server restarts, resume re-sends repo list."""
-        from ouroboros.persistence.brownfield import BrownfieldRepo
-
+    async def test_restart_recovery_resumes_active_interview(self, engine, tmp_path):
+        """After server restart, resume on interview_started session works normally."""
         handler = self._make_handler(engine, tmp_path)
 
-        # Simulate step 1 was completed before restart
         session_id = "interview_20260319_170000"
         _save_pm_meta(
             session_id,
             engine=None,
             cwd=str(tmp_path),
             data_dir=tmp_path,
-            status="awaiting_repo_selection",
-            extra={
-                "initial_context": "Add search feature",
-                "repo_map": {"1": "/repos/search-service"},
-                "name_map": {"search-service": "/repos/search-service"},
-            },
+            status="interview_started",
         )
 
-        # After restart, client sends resume with unparseable answer to trigger re-send
-        mock_repo = MagicMock()
-        mock_repo.path = "/repos/search-service"
-        mock_repo.name = "search-service"
-        mock_repo.desc = "Search indexer"
-        mock_repo.is_default = False
+        state = _make_state(
+            interview_id=session_id,
+            rounds=[
+                InterviewRound(round_number=1, question="What search features?", user_response=None),
+            ],
+            is_brownfield=True,
+        )
+        engine.load_state.return_value = Result.ok(state)
+        engine.record_response.return_value = Result.ok(state)
+        engine.ask_next_question.return_value = Result.ok("Who uses the search?")
+        engine.save_state.return_value = Result.ok(tmp_path / "state.json")
 
-        with patch.object(handler, "_query_all_repos", new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = [mock_repo]
-            result = await handler.handle({
-                "session_id": session_id,
-                "answer": "???invalid???",
-            })
+        result = await handler.handle({
+            "session_id": session_id,
+            "answer": "Full-text search and filters",
+        })
 
         assert result.is_ok
         meta = result.value.meta
-        assert meta["status"] == "awaiting_repo_selection"
-        assert meta["session_id"] == session_id  # Same session_id preserved
-        assert meta["input_type"] == "freeText"
-        assert meta["response_param"] == "answer"
-        assert "options" not in meta
-
-        # Now step 2: user selects the repo by name
-        state = _make_state(interview_id=session_id, is_brownfield=True)
-        engine.ask_opening_and_start.return_value = Result.ok(state)
-        engine.ask_next_question.return_value = Result.ok("What search features?")
-        engine.save_state.return_value = Result.ok(tmp_path / "state.json")
-
-        with patch.object(handler, "_resolve_repos_from_db", new_callable=AsyncMock) as mock_resolve:
-            mock_resolve.return_value = [BrownfieldRepo(path="/repos/search-service", name="search-service", desc="Search indexer")]
-            step2_result = await handler.handle({
-                "session_id": session_id,
-                "answer": "search-service",
-            })
-
-        assert step2_result.is_ok
-        assert step2_result.value.meta["status"] == "interview_started"
+        assert meta["session_id"] == session_id
+        assert meta["question"] == "Who uses the search?"
+        assert meta["is_complete"] is False
 
     @pytest.mark.asyncio
     async def test_step2_desc_optional_in_brownfield_repos(self, engine, tmp_path):
