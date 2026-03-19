@@ -318,7 +318,7 @@ class BrownfieldStore:
         *,
         offset: int = 0,
         limit: int | None = None,
-    ) -> list[BrownfieldRepo]:
+    ) -> Sequence[BrownfieldRepo]:
         """List registered brownfield repositories with optional pagination.
 
         Args:
@@ -516,7 +516,7 @@ class BrownfieldStore:
                 details={"path": path},
             ) from e
 
-    async def set_defaults_by_ids(self, ids: list[int]) -> list[BrownfieldRepo]:
+    async def set_defaults_by_ids(self, ids: Sequence[int]) -> Sequence[BrownfieldRepo]:
         """Replace all defaults with repos matching the given rowids.
 
         Clears all existing defaults, then sets is_default=True for the

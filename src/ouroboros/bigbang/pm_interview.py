@@ -35,6 +35,7 @@ from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
     ClassifierOutputType,
+    QuestionCategory,
     QuestionClassifier,
 )
 from ouroboros.core.errors import ProviderError, ValidationError
@@ -656,15 +657,9 @@ class PMInterviewEngine:
         self.classifier.codebase_context = self.codebase_context
         # Restore brownfield repo selection
         self._selected_brownfield_repos = list(meta.get("brownfield_repos", []))
-        # Restore classification history (string values from ClassificationOutput)
+        # Restore classification history
         saved_classifications = meta.get("classifications", [])
         if saved_classifications and not self.classifications:
-            from ouroboros.bigbang.question_classifier import (
-                ClassificationResult,
-                ClassifierOutputType,
-                QuestionCategory,
-            )
-
             # Map ClassifierOutputType values back to a minimal ClassificationResult
             _OUTPUT_TO_CATEGORY = {
                 ClassifierOutputType.PASSTHROUGH: QuestionCategory.PLANNING,
