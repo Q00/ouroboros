@@ -1130,7 +1130,6 @@ class PMInterviewHandler:
                 if r.desc:
                     label += f" — {r.desc}"
                 repo_lines.append(f"  {i}. {label}")
-            repo_list_text = "\n".join(repo_lines)
             log.info(
                 "pm_handler.step_confirm_repos",
                 session_id=session_id,

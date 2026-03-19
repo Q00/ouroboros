@@ -24,7 +24,6 @@ import structlog
 from ouroboros.bigbang.brownfield import (
     register_repo,
     scan_and_register,
-    set_default_repo,
 )
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
