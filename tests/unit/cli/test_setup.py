@@ -590,16 +590,22 @@ class TestScanRegisterPipeline:
         assert result[1]["is_default"] is False
 
     @pytest.mark.asyncio
-    async def test_store_closed_even_on_clear_all_error(self) -> None:
-        """Store is closed even if clear_all raises."""
+    async def test_store_closed_even_on_scan_error(self) -> None:
+        """Store is closed even if scan_and_register raises."""
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
-        mock_store.clear_all = AsyncMock(side_effect=RuntimeError("DB locked"))
 
-        with patch(
-            "ouroboros.cli.commands.setup.BrownfieldStore",
-            return_value=mock_store,
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("DB locked"),
+            ),
         ):
             with pytest.raises(RuntimeError, match="DB locked"):
                 await _scan_and_register_repos()

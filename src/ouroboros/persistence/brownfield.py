@@ -37,10 +37,16 @@ class BrownfieldRepo:
     def to_dict(self) -> dict[str, str]:
         """Serialize to a plain dict for API / template consumption.
 
-        Returns the same shape as the old ``BrownfieldEntry.to_dict()``:
-        ``{"path": ..., "name": ..., "desc": ...}``.
+        Returns the same shape as the old ``BrownfieldEntry.to_dict()``
+        plus ``is_default``:
+        ``{"path": ..., "name": ..., "desc": ..., "is_default": ...}``.
         """
-        return {"path": self.path, "name": self.name, "desc": self.desc or ""}
+        return {
+            "path": self.path,
+            "name": self.name,
+            "desc": self.desc or "",
+            "is_default": self.is_default,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BrownfieldRepo:

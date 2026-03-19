@@ -276,11 +276,20 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     meta_path = data_dir / f"pm_meta_{session_id}.json"
 
+    # Build pending_reframe from the engine's reframe map (mirrors MCP _save_pm_meta)
+    pending_reframe: dict[str, str] | None = None
+    if engine._reframe_map:
+        reframed = next(reversed(engine._reframe_map))
+        pending_reframe = {
+            "reframed": reframed,
+            "original": engine._reframe_map[reframed],
+        }
+
     meta = {
         "deferred_items": list(engine.deferred_items),
         "decide_later_items": list(engine.decide_later_items),
         "codebase_context": engine.codebase_context,
-        "pending_reframe": None,
+        "pending_reframe": pending_reframe,
         "cwd": "",
     }
 
@@ -375,6 +384,12 @@ async def _run_pm_interview(
 
         question = q_result.value
         console.print(f"\n[bold yellow]?[/] {question}\n")
+
+        # Persist state + meta AFTER displaying the question but BEFORE
+        # waiting for input so that an interruption preserves the pending
+        # question and --resume shows the same question.
+        await engine.save_state(state)
+        _save_cli_pm_meta(state.interview_id, engine)
 
         user_response = console.input("[bold green]> [/]")
 

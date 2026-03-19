@@ -115,8 +115,8 @@ def _prompt_repo_selection(
 async def _scan_and_register_repos() -> list[dict]:
     """Scan home directory and register repos in DB.
 
-    Clears the brownfield table before scanning so that stale entries
-    from previous runs are removed (setup re-run = fresh scan).
+    Uses upsert semantics so that manually-registered repos outside the
+    scan root are preserved across re-scans.
 
     Returns:
         List of repo dicts with path, name, desc, is_default.

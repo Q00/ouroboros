@@ -255,48 +255,33 @@ async def scan_and_register(
     Returns:
         List of all registered BrownfieldRepo instances.
     """
-    # Preserve existing defaults before re-scan
-    existing_defaults: set[str] = set()
-    existing_descs: dict[str, str] = {}
-    try:
-        old_repos = await store.list()
-        for r in old_repos:
-            if r.is_default:
-                existing_defaults.add(r.path)
-            if r.desc:
-                existing_descs[r.path] = r.desc
-    except Exception:
-        pass  # First run — no existing data
-
     scanned = scan_home_for_repos(root)
 
     if not scanned:
         log.info("brownfield.scan_and_register.no_repos")
         return await store.list()
 
-    # Clear and re-register
-    await store.clear_all()
-    inserted = await store.bulk_register(scanned)
-    log.info("brownfield.bulk_registered", count=inserted)
+    # Upsert scanned repos — register() does INSERT OR UPDATE for
+    # existing paths, preserving is_default and desc for repos already
+    # in the DB.  Manual entries outside the scan root are NOT deleted.
+    scanned_paths: set[str] = set()
+    for repo_dict in scanned:
+        path = repo_dict["path"]
+        name = repo_dict["name"]
+        scanned_paths.add(path)
+        await store.register(path=path, name=name)
 
-    # Restore previous defaults and descriptions
+    log.info("brownfield.upsert_registered", count=len(scanned_paths))
+
+    # If no repo has is_default=True yet, set the first scanned repo
     all_repos = await store.list()
-    restored_count = 0
-    for r in all_repos:
-        if r.path in existing_defaults:
-            await store.update_is_default(r.path, is_default=True)
-            restored_count += 1
-        if r.path in existing_descs:
-            await store.update_desc(r.path, existing_descs[r.path])
-
-    if restored_count > 0:
-        log.info("brownfield.defaults_restored", count=restored_count)
-    elif all_repos:
-        # No previous defaults — set first repo as default
+    has_default = any(r.is_default for r in all_repos)
+    if not has_default and all_repos:
         await store.update_is_default(all_repos[0].path, is_default=True)
         log.info("brownfield.default_set", path=all_repos[0].path)
+        all_repos = await store.list()
 
-    return await store.list()
+    return all_repos
 
 
 async def get_default_brownfield_context(

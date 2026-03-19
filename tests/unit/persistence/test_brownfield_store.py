@@ -263,11 +263,12 @@ class TestBrownfieldRepoDataclass:
     def test_to_dict(self) -> None:
         repo = BrownfieldRepo(path="/a", name="a", desc="A project", is_default=True)
         d = repo.to_dict()
-        assert d == {"path": "/a", "name": "a", "desc": "A project"}
+        assert d == {"path": "/a", "name": "a", "desc": "A project", "is_default": True}
 
     def test_to_dict_none_desc(self) -> None:
         repo = BrownfieldRepo(path="/a", name="a")
         assert repo.to_dict()["desc"] == ""
+        assert repo.to_dict()["is_default"] is False
 
     def test_from_dict(self) -> None:
         repo = BrownfieldRepo.from_dict({"path": "/a", "name": "a", "desc": "A project"})

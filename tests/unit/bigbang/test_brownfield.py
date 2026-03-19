@@ -39,7 +39,7 @@ class TestBrownfieldEntry:
     def test_to_dict(self) -> None:
         entry = BrownfieldEntry(path="/repo", name="proj", desc="desc")
         d = entry.to_dict()
-        assert d == {"path": "/repo", "name": "proj", "desc": "desc"}
+        assert d == {"path": "/repo", "name": "proj", "desc": "desc", "is_default": False}
 
     def test_from_dict_valid(self) -> None:
         data = {"path": "/repo", "name": "proj", "desc": "hello"}
@@ -365,7 +365,7 @@ class TestScanAndRegister:
     """Tests for the high-level scan_and_register orchestration."""
 
     @pytest.mark.asyncio
-    async def test_bulk_registers_found_repos(self, tmp_path: Path) -> None:
+    async def test_upsert_registers_found_repos(self, tmp_path: Path) -> None:
         # Create a GitHub repo
         repo = tmp_path / "my-repo"
         repo.mkdir()
@@ -383,29 +383,26 @@ class TestScanAndRegister:
             capture_output=True,
         )
 
-        # Set up store mock
+        resolved = str(repo.resolve())
+
+        # Set up store mock — register returns the repo, list returns it
         store = AsyncMock(spec=BrownfieldStore)
-        store.get_default.return_value = None
-        store.bulk_register.return_value = 1
-        store.list.return_value = [BrownfieldRepo(path=str(repo.resolve()), name="my-repo")]
-        store.set_default.return_value = BrownfieldRepo(
-            path=str(repo.resolve()), name="my-repo", is_default=True
-        )
+        store.register.return_value = BrownfieldRepo(path=resolved, name="my-repo")
+        store.list.return_value = [BrownfieldRepo(path=resolved, name="my-repo")]
 
         result = await scan_and_register(store, root=tmp_path)
 
         assert len(result) == 1
-        # Should use bulk_register, not individual register
-        store.bulk_register.assert_called_once()
-        call_args = store.bulk_register.call_args[0][0]
-        assert len(call_args) == 1
-        assert call_args[0]["name"] == "my-repo"
+        # Should use individual register (upsert), not bulk_register
+        store.register.assert_called_once_with(path=resolved, name="my-repo")
+        # clear_all should NOT be called (upsert preserves manual entries)
+        store.clear_all.assert_not_called()
         # Should set default since none existed
         store.update_is_default.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_bulk_register_no_llm_during_scan(self, tmp_path: Path) -> None:
-        """scan_and_register does NOT call LLM — desc is always empty string."""
+    async def test_no_llm_during_scan(self, tmp_path: Path) -> None:
+        """scan_and_register does NOT call LLM — desc generation is deferred."""
         repo = tmp_path / "proj"
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
@@ -415,24 +412,22 @@ class TestScanAndRegister:
         )
         (repo / "README.md").write_text("# Great Project\nDoes great things")
 
+        resolved = str(repo.resolve())
         mock_adapter = AsyncMock()
 
         store = AsyncMock(spec=BrownfieldStore)
-        store.get_default.return_value = BrownfieldRepo(
-            path=str(repo.resolve()), name="proj", is_default=True
-        )
-        store.bulk_register.return_value = 1
-        store.list.return_value = [BrownfieldRepo(path=str(repo.resolve()), name="proj")]
+        store.register.return_value = BrownfieldRepo(path=resolved, name="proj", is_default=True)
+        store.list.return_value = [BrownfieldRepo(path=resolved, name="proj", is_default=True)]
 
         await scan_and_register(store, llm_adapter=mock_adapter, root=tmp_path)
 
         # LLM should NOT be called during scan — desc generation is deferred
         mock_adapter.complete.assert_not_called()
-        # bulk_register should be called instead of individual register
-        store.bulk_register.assert_called_once()
+        # Should use individual register (upsert)
+        store.register.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_restores_existing_defaults_after_rescan(self, tmp_path: Path) -> None:
+    async def test_preserves_existing_defaults_after_rescan(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
@@ -441,16 +436,23 @@ class TestScanAndRegister:
             capture_output=True,
         )
 
+        resolved = str(repo.resolve())
         store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(path=resolved, name="repo")
+        # Existing default repo is preserved (not deleted by upsert approach)
         existing_default = BrownfieldRepo(path="/some/other", name="other", is_default=True)
-        store.get_default.return_value = existing_default
-        store.bulk_register.return_value = 1
-        store.list.return_value = [existing_default]
+        store.list.return_value = [
+            existing_default,
+            BrownfieldRepo(path=resolved, name="repo"),
+        ]
 
         await scan_and_register(store, root=tmp_path)
 
-        # Should restore the existing default after re-scan
-        store.update_is_default.assert_called_with("/some/other", is_default=True)
+        # clear_all should NOT be called — manual entries preserved
+        store.clear_all.assert_not_called()
+        # Existing default is preserved, so update_is_default should NOT be called
+        # (there's already a default)
+        store.update_is_default.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_repos_found(self, tmp_path: Path) -> None:
@@ -460,11 +462,11 @@ class TestScanAndRegister:
         result = await scan_and_register(store, root=tmp_path)
 
         assert result == []
-        store.bulk_register.assert_not_called()
+        store.register.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_bulk_register_multiple_repos(self, tmp_path: Path) -> None:
-        """scan_and_register bulk-inserts all scanned repos at once."""
+    async def test_upsert_registers_multiple_repos(self, tmp_path: Path) -> None:
+        """scan_and_register upserts all scanned repos individually."""
         for name in ["alpha", "beta"]:
             repo = tmp_path / name
             repo.mkdir()
@@ -482,24 +484,23 @@ class TestScanAndRegister:
                 capture_output=True,
             )
 
+        alpha_path = str((tmp_path / "alpha").resolve())
+        beta_path = str((tmp_path / "beta").resolve())
+
         store = AsyncMock(spec=BrownfieldStore)
-        store.get_default.return_value = None
-        store.bulk_register.return_value = 2
+        store.register.return_value = BrownfieldRepo(path=alpha_path, name="alpha")
         store.list.return_value = [
-            BrownfieldRepo(path=str((tmp_path / "alpha").resolve()), name="alpha"),
-            BrownfieldRepo(path=str((tmp_path / "beta").resolve()), name="beta"),
+            BrownfieldRepo(path=alpha_path, name="alpha"),
+            BrownfieldRepo(path=beta_path, name="beta"),
         ]
-        store.set_default.return_value = BrownfieldRepo(
-            path=str((tmp_path / "alpha").resolve()), name="alpha", is_default=True
-        )
 
         result = await scan_and_register(store, root=tmp_path)
 
         assert len(result) == 2
-        # Should be a single bulk call, not multiple individual calls
-        store.bulk_register.assert_called_once()
-        call_args = store.bulk_register.call_args[0][0]
-        assert len(call_args) == 2
+        # Should call register individually for each repo (upsert)
+        assert store.register.call_count == 2
+        # clear_all should NOT be called
+        store.clear_all.assert_not_called()
 
 
 # ── register_repo ─────────────────────────────────────────────────
@@ -923,25 +924,19 @@ class TestScanAndRegisterMocked:
     """
 
     @pytest.mark.asyncio
-    async def test_mocked_scan_calls_bulk_register(self) -> None:
-        """scan_and_register delegates scanned repos to store.bulk_register."""
+    async def test_mocked_scan_calls_register_per_repo(self) -> None:
+        """scan_and_register upserts each scanned repo via store.register."""
         fake_repos = [
             {"path": "/home/user/alpha", "name": "alpha"},
             {"path": "/home/user/beta", "name": "beta"},
         ]
 
         store = AsyncMock(spec=BrownfieldStore)
-        store.get_default.return_value = None
-        store.bulk_register.return_value = 2
+        store.register.return_value = BrownfieldRepo(path="/home/user/alpha", name="alpha")
         store.list.return_value = [
             BrownfieldRepo(path="/home/user/alpha", name="alpha"),
             BrownfieldRepo(path="/home/user/beta", name="beta"),
         ]
-        store.set_default.return_value = BrownfieldRepo(
-            path="/home/user/alpha",
-            name="alpha",
-            is_default=True,
-        )
 
         with patch(
             "ouroboros.bigbang.brownfield.scan_home_for_repos",
@@ -950,7 +945,8 @@ class TestScanAndRegisterMocked:
             result = await scan_and_register(store, root=Path("/fake"))
 
         assert len(result) == 2
-        store.bulk_register.assert_called_once_with(fake_repos)
+        assert store.register.call_count == 2
+        store.clear_all.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_mocked_scan_sets_first_as_default(self) -> None:
@@ -958,8 +954,7 @@ class TestScanAndRegisterMocked:
         fake_repos = [{"path": "/a", "name": "a"}]
 
         store = AsyncMock(spec=BrownfieldStore)
-        store.get_default.return_value = None
-        store.bulk_register.return_value = 1
+        store.register.return_value = BrownfieldRepo(path="/a", name="a")
         store.list.return_value = [
             BrownfieldRepo(path="/a", name="a"),
         ]
@@ -978,8 +973,8 @@ class TestScanAndRegisterMocked:
         store.update_is_default.assert_called_once_with("/a", is_default=True)
 
     @pytest.mark.asyncio
-    async def test_mocked_scan_restores_existing_default(self) -> None:
-        """When default already exists, scan_and_register restores it after re-scan."""
+    async def test_mocked_scan_preserves_existing_default(self) -> None:
+        """When default already exists, scan_and_register does not override it."""
         fake_repos = [{"path": "/new", "name": "new"}]
         existing_default = BrownfieldRepo(
             path="/old",
@@ -988,9 +983,9 @@ class TestScanAndRegisterMocked:
         )
 
         store = AsyncMock(spec=BrownfieldStore)
-        store.get_default.return_value = existing_default
-        store.bulk_register.return_value = 1
-        store.list.return_value = [existing_default]
+        store.register.return_value = BrownfieldRepo(path="/new", name="new")
+        # list returns the existing default + newly scanned repo
+        store.list.return_value = [existing_default, BrownfieldRepo(path="/new", name="new")]
 
         with patch(
             "ouroboros.bigbang.brownfield.scan_home_for_repos",
@@ -998,7 +993,8 @@ class TestScanAndRegisterMocked:
         ):
             await scan_and_register(store, root=Path("/fake"))
 
-        store.update_is_default.assert_called_with("/old", is_default=True)
+        # Existing default is preserved via upsert — no update_is_default needed
+        store.update_is_default.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_mocked_scan_empty_returns_store_list(self) -> None:
