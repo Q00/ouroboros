@@ -260,10 +260,18 @@ class BrownfieldHandler:
         repos_data = [r.to_dict() for r in repos]
         defaults = await store.get_defaults()
 
-        summary = f"Scan complete. {len(repos)} repositories registered."
+        # Build pre-formatted numbered list so the LLM can display it directly
+        lines = [f"Scan complete. {len(repos)} repositories registered.", ""]
+        for i, r in enumerate(repos, 1):
+            marker = " [default]" if r.is_default else ""
+            lines.append(f"  {i:>2}. {r.name:<28} ~/{r.name}{marker}")
+        lines.append("")
         if defaults:
-            names = ", ".join(f"{d.name} ({d.path})" for d in defaults)
-            summary += f"\nDefaults: {names}"
+            names = ", ".join(d.name for d in defaults)
+            lines.append(f"Current defaults: {names}")
+        else:
+            lines.append("No defaults set.")
+        summary = "\n".join(lines)
 
         log.info(
             "brownfield_handler.scan_complete",

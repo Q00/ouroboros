@@ -369,40 +369,15 @@ This may take a moment...
    ```
    This scans `~/` for GitHub repos and registers them in DB. Existing defaults are preserved.
 
-**Display discovered repos:**
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Found 12 GitHub Repositories
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+The scan response `text` already contains a pre-formatted numbered list with `[default]` markers. **Do NOT make any additional MCP calls to list or query repos.**
 
-  1. ouroboros          ~/ouroboros
-  2. my-webapp          ~/projects/my-webapp
-  3. dotfiles           ~/dotfiles
-  4. awesome-tool       ~/work/awesome-tool
-  ...
+**Display the scan response text directly** — copy the full numbered list from the scan response `text` into your output as-is. Do not reformat, summarize, or truncate it. The user needs to see all repo numbers to pick defaults.
 
-These repos are now registered in Ouroboros.
-When you start a interview, Ouroboros can use
-your existing codebase as brownfield context.
-```
+**If no repos found**, skip the default selection prompt and proceed to Step 6.
 
-**If no repos found:**
-```
-No GitHub repositories found in your home directory.
-That's fine — you can register repos later with:
-  ooo brownfield scan
-```
-Skip the default selection prompt and proceed to Step 6.
+**Default repo selection — IMMEDIATELY after showing the list:**
 
-**Default repo selection — IMMEDIATELY after showing the repo list:**
-
-Right after displaying the numbered repo list above, query current defaults via MCP:
-```
-Tool: ouroboros_brownfield
-Arguments: { "action": "query", "is_default": true }
-```
-
-Use the returned default repo paths to find their numbers in the displayed list. Then use `AskUserQuestion`:
+Use `AskUserQuestion` with the current default numbers from the scan response:
 
 ```json
 {
@@ -410,14 +385,14 @@ Use the returned default repo paths to find their numbers in the displayed list.
     "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
     "header": "Default Repos",
     "options": [
-      {"label": "<default numbers> (Recommended)", "description": "<default repo names>"}
+      {"label": "<current default numbers> (Recommended)", "description": "<current default names>"}
     ],
     "multiSelect": false
   }]
 }
 ```
 
-Only ONE option: the current default numbers as recommended. The user can "Type something" (built-in) for custom numbers or "none".
+Only ONE option: the current defaults as recommended. The user can "Type something" for custom numbers or "none".
 
 After the user responds, use the `ouroboros_brownfield` MCP tool (already loaded above):
 
