@@ -16,7 +16,7 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 ## Prerequisites
 
 - **Codex CLI** installed and on your `PATH` (see [install steps](#installing-codex-cli) below)
-- An **OpenAI API key** with access to GPT-5.4 (set `OPENAI_API_KEY`)
+- An **OpenAI API key** with access to GPT-5.4 (set `OPENAI_API_KEY`). See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
 - **Python >= 3.12**
 
 ## Installing Codex CLI
