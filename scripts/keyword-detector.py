@@ -17,7 +17,8 @@ from pathlib import Path
 import sys
 
 # Skills that work without MCP setup (bypass the setup gate)
-SETUP_BYPASS_SKILLS = ["/ouroboros:setup", "/ouroboros:help"]
+# qa has a built-in fallback that adopts the qa-judge agent directly
+SETUP_BYPASS_SKILLS = ["/ouroboros:setup", "/ouroboros:help", "/ouroboros:qa"]
 
 # Keyword → skill mapping
 # "ooo <cmd>" prefix always works; natural language keywords also supported

@@ -10,8 +10,9 @@ Standalone quality assessment for any artifact — code, documents, API response
 ## Usage
 
 ```
-/ouroboros:qa [file_path | artifact_text]
-/ouroboros:qa                              # evaluate recent execution output
+ooo qa [file_path | artifact_text]
+ooo qa                                     # evaluate recent execution output
+/ouroboros:qa [file_path | artifact_text]   # plugin mode
 ```
 
 **Trigger keywords:** "ooo qa", "qa check", "quality check"
