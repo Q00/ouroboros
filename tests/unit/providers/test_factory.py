@@ -34,10 +34,15 @@ class TestResolveLLMBackend:
         assert resolve_llm_backend("codex") == "codex"
         assert resolve_llm_backend("codex_cli") == "codex"
 
-    def test_resolves_opencode_aliases(self) -> None:
-        """OpenCode aliases normalize to opencode."""
-        assert resolve_llm_backend("opencode") == "opencode"
-        assert resolve_llm_backend("opencode_cli") == "opencode"
+    def test_rejects_opencode_at_boundary(self) -> None:
+        """OpenCode is rejected at resolve time since it is not yet shipped."""
+        with pytest.raises(ValueError, match="not yet available"):
+            resolve_llm_backend("opencode")
+
+    def test_rejects_opencode_cli_alias_at_boundary(self) -> None:
+        """OpenCode CLI alias is also rejected at resolve time."""
+        with pytest.raises(ValueError, match="not yet available"):
+            resolve_llm_backend("opencode_cli")
 
     def test_falls_back_to_configured_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Configured backend is used when no explicit backend is provided."""
@@ -190,9 +195,7 @@ class TestResolveLLMPermissionMode:
             == "bypassPermissions"
         )
 
-    def test_interview_mode_escalates_to_bypass_for_opencode(self) -> None:
-        """Interview needs bypassPermissions for OpenCode — read-only sandbox blocks LLM output."""
-        assert (
+    def test_interview_mode_rejects_opencode(self) -> None:
+        """OpenCode is rejected at resolve time, even for interview use case."""
+        with pytest.raises(ValueError, match="not yet available"):
             resolve_llm_permission_mode(backend="opencode", use_case="interview")
-            == "bypassPermissions"
-        )

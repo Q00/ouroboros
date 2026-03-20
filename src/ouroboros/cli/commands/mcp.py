@@ -29,7 +29,6 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
-    OPENCODE = "opencode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -38,7 +37,6 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
-    OPENCODE = "opencode"
 
 
 def _write_pid_file() -> bool:
@@ -248,7 +246,7 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
+            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
             case_sensitive=False,
         ),
     ] = None,
@@ -258,7 +256,7 @@ def serve(
             "--llm-backend",
             help=(
                 "LLM backend for interview/seed/evaluation tools "
-                "(claude_code, litellm, codex, or opencode)."
+                "(claude_code, litellm, or codex)."
             ),
             case_sensitive=False,
         ),
@@ -289,8 +287,6 @@ def serve(
         # Use Codex CLI for LLM-only tools as well
         ouroboros mcp serve --runtime codex --llm-backend codex
 
-        # Use OpenCode for orchestrator and LLM-backed tools
-        ouroboros mcp serve --runtime opencode --llm-backend opencode
     """
     # Guard: prevent recursive MCP server spawning.
     # When ouroboros spawns a runtime (Codex/Claude/OpenCode), the child process
@@ -338,7 +334,7 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
+            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
             case_sensitive=False,
         ),
     ] = None,
@@ -348,7 +344,7 @@ def info(
             "--llm-backend",
             help=(
                 "LLM backend for interview/seed/evaluation tools "
-                "(claude_code, litellm, codex, or opencode)."
+                "(claude_code, litellm, or codex)."
             ),
             case_sensitive=False,
         ),
