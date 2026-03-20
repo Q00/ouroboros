@@ -9,9 +9,11 @@ gap_type_migration_completed: "2026-03-15"
 claim_id_schema_added: "2026-03-15"
 fnd_migration_completed: "2026-03-15"
 status: legacy-frozen
-successor_registry: docs/entity-registry.yaml
-successor_spec: docs/entity-registry-spec.yaml
-migration_guide: docs/entity-registry-migration-guide.md
+# NOTE: The following successor files are planned but not yet created.
+# This registry is frozen — do not add new findings here.
+# successor_registry: docs/entity-registry.yaml
+# successor_spec: docs/entity-registry-spec.yaml
+# migration_guide: docs/entity-registry-migration-guide.md
 description: >-
   LEGACY ARCHIVE (schema v1.5, frozen 2026-03-15): All 50 FIND-NNN entries in
   this file have been migrated to FND-NNN records in docs/entity-registry.yaml
@@ -105,11 +107,9 @@ stats:
 >
 > **Schema version:** 1.5 | **Last updated:** 2026-03-15 (Sub-AC 3 of AC 1: multi-entity migration; schema 1.4→1.5)
 >
-> **⚠️ LEGACY ARCHIVE:** This file is frozen as of 2026-03-15. All 50 FIND-NNN entries have
-> been migrated to FND-NNN records in [`docs/entity-registry.yaml`](../entity-registry.yaml)
-> with `record_type: finding`. Do NOT add new findings here.
-> New findings → [`docs/entity-registry.yaml`](../entity-registry.yaml).
-> Migration details → [`docs/entity-registry-migration-guide.md`](../entity-registry-migration-guide.md).
+> **⚠️ LEGACY ARCHIVE:** This file is frozen as of 2026-03-15.
+> A multi-entity registry migration was planned but the successor files have not yet been created.
+> Do NOT add new findings here. Track issues via GitHub Issues instead.
 >
 > **Backward-compat rule:** All entries in this file implicitly carry `record_type: finding`
 > (docs/entity-registry-migration-guide.md Rule 1). FIND-NNN IDs map 1:1 to FND-NNN in
@@ -123,12 +123,9 @@ stats:
 
 ## Schema Reference
 
-> **v1.5 NOTE:** In the new multi-entity registry (`docs/entity-registry.yaml`), these
-> FIND-NNN fields map to FND-NNN fields as follows: `id`→`finding_id`/`legacy_id`;
-> `claim_id`→`legacy_claim_ref`+`implicated_claim_ids[0]`; `claim`→claim record;
-> `resolution_ref`→`correction`; `code_deps`→claim record. A new `record_type: finding`
-> discriminator field is added (implicit for all entries in this legacy file).
-> Full field mapping: `docs/entity-registry-migration-guide.md`.
+> **v1.5 NOTE:** A multi-entity registry migration was planned (FIND-NNN → FND-NNN).
+> The successor files have not yet been created. This schema reference remains for
+> historical context only.
 
 Each finding record carries these **ten** fields (v1.5 adds `record_type`):
 

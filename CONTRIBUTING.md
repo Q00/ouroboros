@@ -531,8 +531,8 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `codex_cli_runtime.py` (`CodexCliRuntime`) | `docs/runtime-guides/codex.md` — permission modes, `--runtime codex` behavior |
 | `opencode_runtime.py` (`OpenCodeRuntime`) | `docs/runtime-capability-matrix.md` — mark `[Not yet available]` until `NotImplementedError` is removed; `docs/runtime-guides/` — create guide only when fully shipped |
 | `runner.py` (`OrchestratorRunner`) | `docs/architecture.md` — orchestration lifecycle; `docs/getting-started.md` — session ID output, resume flow |
-| `parallel_executor.py` | `docs/cli-reference.md` — `--sequential` flag behavior; `docs/api/parallel-execution.md` |
-| `coordinator.py` (`LevelCoordinator`) | `docs/architecture.md` — inter-level conflict resolution; `docs/api/parallel-execution.md` — coordinator review gate |
+| `parallel_executor.py` | `docs/cli-reference.md` — `--sequential` flag behavior; `docs/architecture.md` — parallel execution strategy |
+| `coordinator.py` (`LevelCoordinator`) | `docs/architecture.md` — inter-level conflict resolution and coordinator review gate |
 | `session.py` | `docs/cli-reference.md` — session ID format, resume semantics |
 | `workflow_state.py` | `docs/architecture.md` — AC state machine, `ActivityType` values; `docs/guides/tui-usage.md` — if activity display changes |
 | `dependency_analyzer.py` | `docs/architecture.md` — dependency level computation description |
