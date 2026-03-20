@@ -294,7 +294,7 @@ class TestPMSeedIncludesDBBrownfieldRepos:
         state = InterviewState(
             interview_id="test-seed-gen",
             initial_context="Build a task manager on top of existing-app",
-            status=InterviewStatus.IN_PROGRESS,
+            status=InterviewStatus.COMPLETED,
             rounds=[
                 InterviewRound(
                     round_number=1,
@@ -364,7 +364,7 @@ class TestBrownfieldContextInInterviewFlow:
         state = InterviewState(
             interview_id="test-extraction",
             initial_context="Add new feature",
-            status=InterviewStatus.IN_PROGRESS,
+            status=InterviewStatus.COMPLETED,
             rounds=[
                 InterviewRound(
                     round_number=1,
@@ -393,7 +393,7 @@ class TestBrownfieldContextInInterviewFlow:
         state = InterviewState(
             interview_id="test-greenfield",
             initial_context="Build new app",
-            status=InterviewStatus.IN_PROGRESS,
+            status=InterviewStatus.COMPLETED,
             rounds=[
                 InterviewRound(
                     round_number=1,

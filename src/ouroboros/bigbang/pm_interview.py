@@ -381,14 +381,20 @@ class PMInterviewEngine:
             self._selected_brownfield_repos = list(brownfield_repos)
             await self.explore_codebases(brownfield_repos)
 
-        # Prepend PM context to the initial context
-        pm_context = _PM_SYSTEM_PROMPT_PREFIX + initial_context
+        # Store the raw user context for extraction; PM steering goes
+        # only into the interview system prompt, not into persisted state.
+        user_context = initial_context
 
         if self.codebase_context:
-            pm_context += f"\n\n## Existing Codebase Context (BROWNFIELD)\n{self.codebase_context}"
+            user_context += f"\n\n## Existing Codebase Context (BROWNFIELD)\n{self.codebase_context}"
+
+        # Keep PM steering prefix in memory for interview rounds but
+        # do NOT persist it as initial_context so extraction sees only
+        # user-provided content.
+        self._pm_steering = _PM_SYSTEM_PROMPT_PREFIX
 
         result = await self.inner.start_interview(
-            initial_context=pm_context,
+            initial_context=user_context,
             interview_id=interview_id,
         )
 
@@ -868,6 +874,14 @@ class PMInterviewEngine:
                 ValidationError(
                     "Cannot generate PM seed from empty interview",
                     field="rounds",
+                )
+            )
+
+        if not state.is_complete:
+            return Result.err(
+                ValidationError(
+                    "Cannot generate PM seed from incomplete interview — complete the interview first",
+                    field="is_complete",
                 )
             )
 

@@ -226,17 +226,21 @@ class TestStartInterview:
         assert state.status == InterviewStatus.IN_PROGRESS
 
     @pytest.mark.asyncio
-    async def test_start_prepends_pm_context(self, tmp_path: Path) -> None:
-        """start_interview prepends PM system prompt to initial context."""
+    async def test_start_stores_user_context_without_pm_steering(self, tmp_path: Path) -> None:
+        """start_interview persists only user context, not PM steering prefix."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
         result = await engine.start_interview("Build a task manager")
 
         state = result.value
-        # The inner state's initial_context should contain the PM prefix
-        assert "Product Requirements" in state.initial_context
+        # Persisted initial_context should contain user input only
         assert "Build a task manager" in state.initial_context
+        # PM steering prefix should NOT leak into persisted state
+        assert "Product Requirements" not in state.initial_context
+        # Engine holds steering separately
+        assert hasattr(engine, "_pm_steering")
+        assert "Product Requirements" in engine._pm_steering
 
     @pytest.mark.asyncio
     async def test_start_merges_codebase_context_and_user_answer(self, tmp_path: Path) -> None:
@@ -274,8 +278,8 @@ class TestStartInterview:
 
         # User answer must be present
         assert "Add a notifications feature for users" in ctx
-        # PM system prompt prefix must be present
-        assert "Product Requirements" in ctx
+        # PM steering prefix should NOT be in persisted state
+        assert "Product Requirements" not in ctx
         # Codebase exploration context must be present
         assert "Existing Codebase Context (BROWNFIELD)" in ctx
         assert "Python project using FastAPI" in ctx
@@ -923,6 +927,7 @@ class TestPMSeedGeneration:
         state = InterviewState(
             interview_id="test_001",
             initial_context="Build a task manager",
+            status=InterviewStatus.COMPLETED,
             rounds=[
                 InterviewRound(
                     round_number=1,
@@ -967,6 +972,7 @@ class TestPMSeedGeneration:
         state = InterviewState(
             interview_id="test_001",
             initial_context="Build a task manager",
+            status=InterviewStatus.COMPLETED,
             rounds=[
                 InterviewRound(round_number=1, question="Q?", user_response="A"),
             ],

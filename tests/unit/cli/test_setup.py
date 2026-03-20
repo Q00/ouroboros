@@ -442,7 +442,7 @@ class TestRunFullSetup:
             await _run_full_setup()
 
         # Should display info about the current default
-        mock_info.assert_any_call("Current defaults: [cyan]alpha[/] (/a)")
+        mock_info.assert_any_call("Current defaults: [cyan]alpha[/]")
 
     @pytest.mark.asyncio
     async def test_full_setup_set_default_failure(self) -> None:
@@ -480,7 +480,7 @@ class TestRunFullSetup:
         ):
             await _run_full_setup()
 
-        mock_error.assert_called_once_with("Failed to set default: /a")
+        mock_error.assert_called_once_with("Failed to update default: /a")
 
 
 # ── Scan-Register pipeline tests ──────────────────────────────────

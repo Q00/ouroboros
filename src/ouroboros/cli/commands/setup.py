@@ -227,27 +227,26 @@ async def _run_full_setup() -> None:
     _display_repos_table(repos)
     console.print()
 
-    # Step 3: Select default
-    current_default = next((r for r in repos if r.get("is_default")), None)
-    if current_default:
-        print_info(
-            f"Current defaults: [cyan]{current_default['name']}[/] ({current_default['path']})"
-        )
+    # Step 3: Select defaults (multi-default — each toggle adds/removes)
+    current_defaults = [r for r in repos if r.get("is_default")]
+    if current_defaults:
+        names = ", ".join(r["name"] for r in current_defaults)
+        print_info(f"Current defaults: [cyan]{names}[/]")
         console.print()
 
     idx = _prompt_repo_selection(
-        repos, "Select default repo (multiple defaults supported via MCP setup)"
+        repos, "Toggle default repo (re-run to add/remove more, or skip to keep current)"
     )
     if idx is not None:
         selected = repos[idx]
-        with console.status("[cyan]Setting default...[/]", spinner="dots"):
+        with console.status("[cyan]Updating defaults...[/]", spinner="dots"):
             success = await _set_default_repo(selected["path"])
         if success:
             print_success(
-                f"Default repos updated: [cyan]{selected['name']}[/] ({selected['path']})"
+                f"Default toggled: [cyan]{selected['name']}[/] ({selected['path']})"
             )
         else:
-            print_error(f"Failed to set default: {selected['path']}")
+            print_error(f"Failed to update default: {selected['path']}")
     else:
         print_info("Skipped default selection.")
 

@@ -421,12 +421,21 @@ async def _run_pm_interview(
         console.print(f"\n[bold yellow]{decide_later_summary}[/]\n")
 
     # Generate PM seed and document
-    if state.rounds:
+    if state.rounds and state.is_complete:
         console.print("\n[bold cyan]Generating PM...[/]\n")
         seed_result = await engine.generate_pm_seed(state)
         if seed_result.is_ok:
             seed = seed_result.value
             seed_path = engine.save_pm_seed(seed)
             print_success(f"PM seed saved: {seed_path}")
+
+            # Save human-readable pm.md alongside the seed
+            from ouroboros.bigbang.pm_document import save_pm_document
+
+            pm_dir = Path.cwd() / ".ouroboros"
+            pm_path = save_pm_document(seed, output_dir=pm_dir)
+            print_success(f"PM document saved: {pm_path}")
         else:
             print_error(f"Failed to generate PM: {seed_result.error}")
+    elif state.rounds and not state.is_complete:
+        print_info("Interview not complete — skipping PM generation.")
