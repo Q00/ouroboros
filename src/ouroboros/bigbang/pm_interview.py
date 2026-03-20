@@ -386,7 +386,9 @@ class PMInterviewEngine:
         user_context = initial_context
 
         if self.codebase_context:
-            user_context += f"\n\n## Existing Codebase Context (BROWNFIELD)\n{self.codebase_context}"
+            user_context += (
+                f"\n\n## Existing Codebase Context (BROWNFIELD)\n{self.codebase_context}"
+            )
 
         # Keep PM steering prefix in memory for interview rounds but
         # do NOT persist it as initial_context so extraction sees only

@@ -242,9 +242,7 @@ async def _run_full_setup() -> None:
         with console.status("[cyan]Updating defaults...[/]", spinner="dots"):
             success = await _set_default_repo(selected["path"])
         if success:
-            print_success(
-                f"Default toggled: [cyan]{selected['name']}[/] ({selected['path']})"
-            )
+            print_success(f"Default toggled: [cyan]{selected['name']}[/] ({selected['path']})")
         else:
             print_error(f"Failed to update default: {selected['path']}")
     else:
