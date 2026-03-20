@@ -395,15 +395,8 @@ class PMInterviewEngine:
         # user-provided content.
         self._pm_steering = _PM_SYSTEM_PROMPT_PREFIX
 
-        # Inject PM steering into the inner engine's system prompt builder
-        # so live interview questions are PM-scoped, not generic Socratic.
-        original_build = self.inner._build_system_prompt
-
-        def _pm_build_system_prompt(state: InterviewState) -> str:
-            base = original_build(state)
-            return self._pm_steering + "\n\n" + base
-
-        self.inner._build_system_prompt = _pm_build_system_prompt  # type: ignore[assignment]
+        # Install PM-scoped system prompt wrapper
+        self._install_pm_steering()
 
         result = await self.inner.start_interview(
             initial_context=user_context,
@@ -425,6 +418,26 @@ class PMInterviewEngine:
             )
 
         return result
+
+    def _install_pm_steering(self) -> None:
+        """Install PM steering into the inner engine's system prompt builder.
+
+        Idempotent — if already installed, replaces previous wrapper to prevent
+        stacking across multiple start/resume calls on the same engine instance.
+        """
+        self._pm_steering = getattr(self, "_pm_steering", _PM_SYSTEM_PROMPT_PREFIX)
+
+        # Store the original (unwrapped) build method on first install
+        if not hasattr(self, "_original_build_system_prompt"):
+            self._original_build_system_prompt = self.inner._build_system_prompt
+
+        original_build = self._original_build_system_prompt
+
+        def _pm_build_system_prompt(state: InterviewState) -> str:
+            base = original_build(state)
+            return self._pm_steering + "\n\n" + base
+
+        self.inner._build_system_prompt = _pm_build_system_prompt  # type: ignore[assignment]
 
     async def ask_next_question(
         self,
@@ -675,16 +688,19 @@ class PMInterviewEngine:
                   Expected keys: ``deferred_items``, ``decide_later_items``,
                   ``codebase_context``, ``pending_reframe``.
         """
+        # Full state reset — clear all session-scoped fields before restoring
         self.deferred_items = list(meta.get("deferred_items", []))
         self.decide_later_items = list(meta.get("decide_later_items", []))
         self.codebase_context = meta.get("codebase_context", "") or ""
+        self.classifications = []  # Reset before restoring
+        self._reframe_map = {}  # Reset before restoring
         # Sync classifier so brownfield context is available for classification
         self.classifier.codebase_context = self.codebase_context
         # Restore brownfield repo selection
         self._selected_brownfield_repos = list(meta.get("brownfield_repos", []))
         # Restore classification history
         saved_classifications = meta.get("classifications", [])
-        if saved_classifications and not self.classifications:
+        if saved_classifications:
             # Map ClassifierOutputType values back to a minimal ClassificationResult
             _OUTPUT_TO_CATEGORY = {
                 ClassifierOutputType.PASSTHROUGH: QuestionCategory.PLANNING,
@@ -713,6 +729,9 @@ class PMInterviewEngine:
         pending = meta.get("pending_reframe")
         if pending and isinstance(pending, dict):
             self._reframe_map[pending["reframed"]] = pending["original"]
+
+        # Reinstall PM steering wrapper for resumed sessions
+        self._install_pm_steering()
 
     # ──────────────────────────────────────────────────────────────
     # Public accessors for handler delegation
