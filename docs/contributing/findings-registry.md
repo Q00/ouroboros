@@ -81,8 +81,8 @@ affects:
   - docs/config-inventory.md
 stats:
   total_findings: 50
-  open: 5
-  resolved: 45
+  open: 2
+  resolved: 48
   by_severity:
     critical: 4
     high: 26
@@ -197,9 +197,9 @@ other value.  *(Field was named `gap_type_qualifier` in schema v1.2; renamed to
 |----------|-------|----------|------|
 | critical | 4 | 4 | 0 |
 | high | 26 | 24 | 2 |
-| medium | 20 | 17 | 3 |
+| medium | 20 | 20 | 0 |
 | low | 0 | 0 | 0 |
-| **Total** | **50** | **45** | **5** |
+| **Total** | **50** | **48** | **2** |
 
 > **Note (AC-06 severity audit, 2026-03-15):** 11 findings reclassified upward and 4 reclassified
 > from `low` to `medium` to align with the CONTRIBUTING.md severity rubric. `low` is now 0 — all

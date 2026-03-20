@@ -86,7 +86,7 @@ ooo interview "I want to build a task management CLI"
 
 > `claude plugin ...` commands run in your terminal. `ooo` commands are Claude Code skills -- they only work inside an active Claude Code session (start one with `claude`).
 
-See the [Claude Code runtime guide](./docs/runtime-guides/claude-code.md) for full details.
+See the [Claude Code runtime guide](./docs/runtime-guides/claude-code.md) for backend configuration and CLI options.
 
 </details>
 
