@@ -541,23 +541,10 @@ class TestCreateOuroborosServer:
         assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
         assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 1
 
-    def test_opencode_llm_backend_is_forwarded_through_shared_factories(self) -> None:
-        """OpenCode selections should stay on the shared provider/runtime factory path."""
-        with (
-            patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
-            patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
-        ):
-            mock_create_llm_adapter.return_value = MagicMock()
-            mock_create_runtime.return_value = MagicMock()
-
+    def test_opencode_backend_is_rejected_at_server_creation(self) -> None:
+        """OpenCode is not yet available — server creation should raise early."""
+        with pytest.raises(ValueError, match="not yet available"):
             create_ouroboros_server(runtime_backend="opencode", llm_backend="opencode")
-
-        mock_create_llm_adapter.assert_called_once()
-        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "opencode"
-        assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 1
-        mock_create_runtime.assert_called_once()
-        assert mock_create_runtime.call_args.kwargs["backend"] == "opencode"
-        assert mock_create_runtime.call_args.kwargs["llm_backend"] == "opencode"
 
 
 class TestMCPServerAdapterConcurrency:
