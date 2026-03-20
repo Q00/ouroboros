@@ -411,9 +411,16 @@ class PMInterviewEngine:
         )
 
         if result.is_ok:
+            # Mark brownfield state on the returned InterviewState
+            state = result.value
+            if brownfield_repos:
+                state.is_brownfield = True
+                state.codebase_context = self.codebase_context
+                state.codebase_paths = [r["path"] for r in brownfield_repos if "path" in r]
+                state.explore_completed = True
             log.info(
                 "pm.interview_started",
-                interview_id=result.value.interview_id,
+                interview_id=state.interview_id,
                 has_brownfield=bool(self.codebase_context),
             )
 

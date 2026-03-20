@@ -406,18 +406,19 @@ class TestBrownfieldStoreBulkRegister:
         assert await store.count() == 0
 
     @pytest.mark.asyncio
-    async def test_bulk_register_replaces_existing(self, store: BrownfieldStore) -> None:
-        """bulk_register uses INSERT OR REPLACE — existing rows are updated."""
+    async def test_bulk_register_preserves_existing_metadata(self, store: BrownfieldStore) -> None:
+        """bulk_register skips existing repos to preserve desc/is_default."""
         await store.register("/home/user/proj", "proj", desc="Old desc", is_default=True)
 
-        # Bulk register the same path
-        await store.bulk_register([{"path": "/home/user/proj", "name": "proj-renamed"}])
+        # Bulk register the same path — should be skipped
+        count = await store.bulk_register([{"path": "/home/user/proj", "name": "proj-renamed"}])
 
+        assert count == 0  # Nothing new registered
         result = await store.list()
         assert len(result) == 1
-        assert result[0].name == "proj-renamed"
-        assert result[0].desc == ""  # Replaced with empty
-        assert result[0].is_default is False  # Replaced with false
+        assert result[0].name == "proj"  # Original name preserved
+        assert result[0].desc == "Old desc"  # Metadata preserved
+        assert result[0].is_default is True  # Default preserved
 
     @pytest.mark.asyncio
     async def test_bulk_register_preserves_other_repos(self, store: BrownfieldStore) -> None:

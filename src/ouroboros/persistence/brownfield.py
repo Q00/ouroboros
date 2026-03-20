@@ -171,6 +171,11 @@ class BrownfieldStore:
         async with self._engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
 
+        # Apply any pending migrations for schema evolution
+        from ouroboros.persistence.migrations.runner import run_migrations
+
+        await run_migrations(self._engine)
+
     def _ensure_initialized(self, operation: str) -> AsyncEngine:
         """Check that the store is initialized and return the engine.
 
@@ -288,22 +293,25 @@ class BrownfieldStore:
         t = brownfield_repos_table
 
         try:
+            registered = 0
             async with engine.begin() as conn:
-                rows = [
-                    {
-                        "path": r["path"],
-                        "name": r["name"],
-                        "desc": "",
-                        "is_default": False,
-                        "registered_at": datetime.now(UTC),
-                    }
-                    for r in repos
-                ]
-                await conn.execute(
-                    t.insert().prefix_with("OR REPLACE"),
-                    rows,
-                )
-            return len(repos)
+                for r in repos:
+                    # Check if already exists — preserve metadata
+                    existing = await conn.execute(select(t).where(t.c.path == r["path"]))
+                    if existing.first() is not None:
+                        # Already registered — skip to preserve desc/is_default
+                        continue
+                    await conn.execute(
+                        t.insert().values(
+                            path=r["path"],
+                            name=r["name"],
+                            desc="",
+                            is_default=False,
+                            registered_at=datetime.now(UTC),
+                        )
+                    )
+                    registered += 1
+            return registered
         except PersistenceError:
             raise
         except Exception as e:
@@ -527,7 +535,20 @@ class BrownfieldStore:
         t = brownfield_repos_table
         try:
             async with engine.begin() as conn:
-                # Clear all defaults
+                # Validate all requested rowids exist BEFORE mutating state
+                if ids:
+                    for rid in ids:
+                        check = await conn.execute(
+                            select(t.c.path).where(literal_column("rowid") == rid)
+                        )
+                        if check.first() is None:
+                            raise PersistenceError(
+                                f"Rowid {rid} does not exist in brownfield_repos",
+                                operation="set_defaults",
+                                table="brownfield_repos",
+                                details={"invalid_rowid": rid},
+                            )
+                # Clear all defaults (only after validation passes)
                 await conn.execute(
                     update(t).where(t.c.is_default.is_(True)).values(is_default=False)
                 )
