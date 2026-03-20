@@ -379,75 +379,32 @@ class TestExecuteSeedHandler:
         assert result.value.meta["runtime_backend"] in ("claude", "codex")
         assert result.value.meta["resume_requested"] is False
 
-    async def test_handle_launches_background_execution_with_opencode_runtime(self) -> None:
-        """OpenCode selections should launch the existing orchestrator pipeline in background."""
+    async def test_handle_rejects_opencode_runtime_at_boundary(self) -> None:
+        """OpenCode is not yet available — handler should surface a clear error."""
         handler = ExecuteSeedHandler(
             agent_runtime_backend="opencode",
             llm_backend="opencode",
         )
-        mock_runtime = MagicMock()
-        mock_runtime._runtime_backend = "opencode"
-        mock_event_store = AsyncMock()
-        mock_event_store.initialize = AsyncMock()
-        mock_exec_result = MagicMock(
-            success=True,
-            session_id="sess-opencode",
-            execution_id="exec-opencode",
-            messages_processed=6,
-            duration_seconds=1.4,
-            final_message="[TASK_COMPLETE]",
-            summary={},
-        )
-        mock_runner = MagicMock()
-        prepared_tracker = SessionTracker.create(
-            "exec-opencode",
-            "test-seed-123",
-            session_id="sess-opencode",
-        )
-        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
-        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(mock_exec_result))
-        mock_runner.resume_session = AsyncMock()
 
-        with (
-            patch(
-                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
-                return_value=mock_runtime,
-            ) as mock_create_runtime,
-            patch(
-                "ouroboros.mcp.tools.execution_handlers.EventStore",
-                return_value=mock_event_store,
-            ),
-            patch(
-                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
-                return_value=mock_runner,
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+            side_effect=ValueError(
+                "OpenCode runtime is not yet available. Supported backends: claude, codex"
             ),
         ):
             result = await handler.handle({"seed_content": VALID_SEED_YAML, "skip_qa": True})
-            background_tasks = tuple(handler._background_tasks)
-            await asyncio.gather(*background_tasks)
 
-        assert result.is_ok
-        assert "Runtime Backend: opencode" in result.value.text_content
-        assert result.value.meta["runtime_backend"] == "opencode"
-        assert result.value.meta["llm_backend"] == "opencode"
-        assert result.value.meta["resume_requested"] is False
-        assert result.value.meta["session_id"] == "sess-opencode"
-        assert result.value.meta["execution_id"] == "exec-opencode"
-        assert mock_create_runtime.call_args.kwargs["backend"] == "opencode"
-        assert mock_create_runtime.call_args.kwargs["llm_backend"] == "opencode"
-        mock_runner.prepare_session.assert_awaited_once()
-        mock_runner.execute_precreated_session.assert_awaited_once()
-        assert mock_runner.execute_precreated_session.await_args.kwargs["parallel"] is True
-        mock_runner.resume_session.assert_not_awaited()
+        assert result.is_err
+        assert "not yet available" in result.error.message
 
     async def test_handle_launches_background_resume_for_existing_session(self) -> None:
         """Resuming through MCP should reuse the current orchestrator resume path."""
         handler = ExecuteSeedHandler(
-            agent_runtime_backend="opencode",
-            llm_backend="opencode",
+            agent_runtime_backend="codex",
+            llm_backend="codex",
         )
         mock_runtime = MagicMock()
-        mock_runtime._runtime_backend = "opencode"
+        mock_runtime._runtime_backend = "codex"
         mock_event_store = AsyncMock()
         mock_event_store.initialize = AsyncMock()
         mock_exec_result = MagicMock(
@@ -499,7 +456,7 @@ class TestExecuteSeedHandler:
 
         assert result.is_ok
         assert result.value.meta["resume_requested"] is True
-        assert result.value.meta["runtime_backend"] == "opencode"
+        assert result.value.meta["runtime_backend"] == "codex"
         assert result.value.meta["session_id"] == "sess-resume"
         assert result.value.meta["execution_id"] == "exec-resume"
         mock_runner.resume_session.assert_awaited_once()
