@@ -383,6 +383,7 @@ class PMInterviewEngine:
 
         # Store the raw user context for extraction; PM steering goes
         # only into the interview system prompt, not into persisted state.
+        self._initial_context = initial_context
         user_context = initial_context
 
         if self.codebase_context:
@@ -1078,12 +1079,9 @@ Include them as original question text in "decide_later_items":
 {decide_later_text}
 """
 
-        if self.codebase_context:
-            prompt += f"""
-
-Brownfield codebase context:
-{self.codebase_context[:2000]}
-"""
+        # Note: brownfield codebase context is already included in
+        # initial_context (via _build_interview_context), so we don't
+        # duplicate it here.
 
         return prompt
 

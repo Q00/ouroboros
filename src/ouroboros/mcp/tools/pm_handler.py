@@ -93,6 +93,7 @@ def _save_pm_meta(
             "classifications": [
                 c.output_type.value for c in getattr(engine, "classifications", [])
             ],
+            "initial_context": getattr(engine, "_initial_context", ""),
         }
     else:
         meta = {
@@ -766,6 +767,13 @@ class PMInterviewHandler:
             )
 
         # Record answer if provided
+        if answer and not state.rounds:
+            return Result.err(
+                MCPToolError(
+                    "Cannot record answer: no questions have been asked yet.",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
         if answer and state.rounds:
             last_question = state.rounds[-1].question
             if state.rounds[-1].user_response is None:

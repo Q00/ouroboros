@@ -266,11 +266,16 @@ async def scan_and_register(
     # Upsert scanned repos — register() does INSERT OR UPDATE for
     # existing paths, preserving is_default and desc for repos already
     # in the DB.  Manual entries outside the scan root are NOT deleted.
+    # Preserve user-curated names for existing repos by checking first.
+    existing_repos = {r.path: r for r in await store.list()}
     scanned_paths: set[str] = set()
     for repo_dict in scanned:
         path = repo_dict["path"]
         name = repo_dict["name"]
         scanned_paths.add(path)
+        if path in existing_repos and existing_repos[path].name:
+            # Preserve existing name; register() will still upsert desc/default
+            name = existing_repos[path].name
         await store.register(path=path, name=name)
 
     log.info("brownfield.upsert_registered", count=len(scanned_paths))

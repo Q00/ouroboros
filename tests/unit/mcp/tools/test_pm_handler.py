@@ -266,8 +266,8 @@ class TestPrdMetaFileLocation:
         meta = _load_pm_meta("sess-nested", data_dir=nested_dir)
         assert meta is not None
 
-    def test_meta_file_has_exactly_seven_fields(self, tmp_path: Path) -> None:
-        """pm_meta JSON contains exactly the 6 required fields."""
+    def test_meta_file_has_expected_fields(self, tmp_path: Path) -> None:
+        """pm_meta JSON contains all required fields."""
         engine = _make_engine_stub(deferred=["d1"], decide_later=["dl1"])
         engine.codebase_context = "ctx"
         engine._reframe_map = {"simple": "complex"}
@@ -284,6 +284,7 @@ class TestPrdMetaFileLocation:
             "cwd",
             "brownfield_repos",
             "classifications",
+            "initial_context",
         }
         assert set(meta.keys()) == expected_keys
 

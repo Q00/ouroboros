@@ -352,7 +352,7 @@ class TestBrownfieldContextInInterviewFlow:
 
     @pytest.mark.asyncio
     async def test_brownfield_context_included_in_extraction_prompt(self, tmp_path: Path) -> None:
-        """Brownfield codebase context is included in the PMSeed extraction prompt."""
+        """Brownfield codebase context is included in extraction via initial_context."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
@@ -361,9 +361,10 @@ class TestBrownfieldContextInInterviewFlow:
 
         from ouroboros.bigbang.interview import InterviewRound, InterviewState
 
+        # Brownfield context is now in initial_context (set during start_interview)
         state = InterviewState(
             interview_id="test-extraction",
-            initial_context="Add new feature",
+            initial_context="Add new feature\n\n## Existing Codebase Context (BROWNFIELD)\nPython project using Django and Celery",
             status=InterviewStatus.COMPLETED,
             rounds=[
                 InterviewRound(
@@ -376,7 +377,6 @@ class TestBrownfieldContextInInterviewFlow:
 
         prompt = engine._build_extraction_prompt(engine._build_interview_context(state))
 
-        assert "Brownfield codebase context:" in prompt
         assert "Django and Celery" in prompt
 
     @pytest.mark.asyncio

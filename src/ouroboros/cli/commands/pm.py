@@ -338,6 +338,11 @@ async def _run_pm_interview(
                 engine.restore_meta(meta)
             except (json.JSONDecodeError, OSError):
                 print_warning("Could not load PM metadata; continuing without it.")
+                # Still install PM steering even without full meta
+                engine._install_pm_steering()
+        else:
+            # No pm_meta file — still install PM steering for resumed session
+            engine._install_pm_steering()
 
         print_success(f"Resumed session: {resume_id}")
     else:
