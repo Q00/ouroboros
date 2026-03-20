@@ -41,12 +41,21 @@ jobs:
         run: |
           uv publish --dry-run dist/*
 
+      - name: Detect pre-release
+        id: prerelease
+        run: |
+          if [[ "${{ github.ref_name }}" =~ (a|alpha|b|beta|rc|dev) ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease == 'true' }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
