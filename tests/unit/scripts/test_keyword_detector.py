@@ -31,6 +31,16 @@ class TestDetectKeywords:
         assert result["detected"] is True
         assert result["suggested_skill"] == "/ouroboros:welcome"
 
+    def test_qa_check_trigger(self):
+        result = detect_keywords("qa check this code")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:qa"
+
+    def test_quality_check_trigger(self):
+        result = detect_keywords("quality check please")
+        assert result["detected"] is True
+        assert result["suggested_skill"] == "/ouroboros:qa"
+
     def test_no_match(self):
         result = detect_keywords("hello world")
         assert result["detected"] is False

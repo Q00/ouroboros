@@ -106,7 +106,7 @@ For iterative usage, track the `qa_session_id` and `iteration_history` from the 
 
 If the MCP server is not available, adopt the `ouroboros:qa-judge` agent role directly:
 
-1. Read the agent definition from `agents/qa-judge.md`
+1. Read the agent definition from the project root: `<project-root>/agents/qa-judge.md`
 2. Follow the QA Judge framework to manually evaluate the artifact
 3. Output the verdict in the standard format:
 
