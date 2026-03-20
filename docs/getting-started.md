@@ -233,7 +233,7 @@ ooo status            # Check drift and session state
 ooo evolve            # Start evolutionary refinement loop
 ```
 
-> **CLI equivalent:** `ouroboros run --resume <session_id>` to resume, `ouroboros run --debug` for verbose output.
+> **CLI equivalent:** `ouroboros run seed.yaml --resume <session_id>` to resume, `ouroboros run seed.yaml --debug` for verbose output.
 
 ---
 
@@ -333,7 +333,7 @@ ooo unstuck
 
 From terminal:
 ```bash
-ouroboros run --resume <session_id>
+ouroboros run seed.yaml --resume <session_id>
 ouroboros cancel execution <session_id>
 ```
 
@@ -346,7 +346,7 @@ ouroboros cancel execution <session_id>
 | API errors | Check `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` |
 | TUI blank | `export TERM=xterm-256color` |
 | High costs | Reduce seed scope or use a lower model tier |
-| Execution stuck | `ooo unstuck` or `ouroboros run --resume <id>` |
+| Execution stuck | `ooo unstuck` or `ouroboros run seed.yaml --resume <id>` |
 
 ---
 

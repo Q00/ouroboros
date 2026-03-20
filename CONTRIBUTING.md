@@ -456,7 +456,7 @@ Flags covered: `--resume`, `--state-dir`, `--orchestrator`, `--runtime`, `--llm-
 
 **Must update:**
 - `docs/cli-reference.md` — `init` command section (flags, examples)
-- `docs/guides/cli-usage.md` — interview workflow description
+- `docs/getting-started.md` — interview workflow description
 - `docs/getting-started.md` — introductory `ooo init` / `ouroboros init` examples
 - `docs/getting-started.md` — onboarding flow
 
@@ -469,7 +469,7 @@ Flags covered: `--orchestrator/--no-orchestrator`, `--resume`, `--mcp-config`, `
 
 **Must update:**
 - `docs/cli-reference.md` — `run` command section (flags, examples, defaults)
-- `docs/guides/cli-usage.md` — execution workflow description
+- `docs/getting-started.md` — execution workflow description
 - `docs/getting-started.md` — `ooo run` / `ouroboros run` examples
 
 **Also check:**
@@ -484,7 +484,7 @@ Subcommands: `show`, `init`, `set`, `validate`
 
 **Must update:**
 - `docs/cli-reference.md` — `config` command section
-- `docs/guides/cli-usage.md` — configuration management section
+- `docs/getting-started.md` — configuration management section
 
 #### `status.py` — `ouroboros status`
 
@@ -530,7 +530,7 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `adapter.py` (`ClaudeAgentAdapter`) | `docs/runtime-guides/claude-code.md` — permission modes, session flow |
 | `codex_cli_runtime.py` (`CodexCliRuntime`) | `docs/runtime-guides/codex.md` — permission modes, `--runtime codex` behavior |
 | `opencode_runtime.py` (`OpenCodeRuntime`) | `docs/runtime-capability-matrix.md` — mark `[Not yet available]` until `NotImplementedError` is removed; `docs/runtime-guides/` — create guide only when fully shipped |
-| `runner.py` (`OrchestratorRunner`) | `docs/architecture.md` — orchestration lifecycle; `docs/guides/cli-usage.md` — session ID output, resume flow |
+| `runner.py` (`OrchestratorRunner`) | `docs/architecture.md` — orchestration lifecycle; `docs/getting-started.md` — session ID output, resume flow |
 | `parallel_executor.py` | `docs/cli-reference.md` — `--sequential` flag behavior; `docs/api/parallel-execution.md` |
 | `coordinator.py` (`LevelCoordinator`) | `docs/architecture.md` — inter-level conflict resolution; `docs/api/parallel-execution.md` — coordinator review gate |
 | `session.py` | `docs/cli-reference.md` — session ID format, resume semantics |
@@ -622,7 +622,7 @@ Changes under `skills/` (YAML skill definitions used by Claude and Codex) or `sr
 When adding a **new CLI command or flag**, use this checklist before submitting a PR:
 
 - [ ] `docs/cli-reference.md` updated with the new command/flag, its type, default, and at least one example
-- [ ] `docs/guides/cli-usage.md` updated if the flag changes workflow behavior
+- [ ] `docs/getting-started.md` updated if the flag changes workflow behavior
 - [ ] `docs/getting-started.md` reviewed — update if a common flow is affected
 - [ ] `README.md` reviewed — update the quick-start snippet if the new command changes day-1 usage
 - [ ] If the feature is a placeholder/stub: docs must include `> **Note**: This feature is not yet implemented.`
