@@ -255,8 +255,7 @@ def serve(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools "
-                "(claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
             ),
             case_sensitive=False,
         ),
@@ -343,8 +342,7 @@ def info(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools "
-                "(claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
             ),
             case_sensitive=False,
         ),

@@ -31,10 +31,7 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
     if candidate in _CODEX_BACKENDS:
         return "codex"
     if candidate in _OPENCODE_BACKENDS:
-        msg = (
-            "OpenCode runtime is not yet available. "
-            "Supported backends: claude, codex"
-        )
+        msg = "OpenCode runtime is not yet available. Supported backends: claude, codex"
         raise ValueError(msg)
 
     msg = f"Unsupported orchestrator runtime backend: {candidate}"
