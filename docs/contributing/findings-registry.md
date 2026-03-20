@@ -206,7 +206,7 @@ other value.  *(Field was named `gap_type_qualifier` in schema v1.2; renamed to
 > findings at or above `medium`. The `medium open` count corrects a pre-existing table error (was
 > stated as 1; actual count was 2 before FIND-050 moved from `low` to `medium`).
 
-Open findings: [FIND-018](#find-018) *(high)*, [FIND-019](#find-019) *(high)*, [FIND-044](#find-044) *(medium)*, [FIND-045](#find-045) *(medium)*, [FIND-050](#find-050) *(medium)*
+Open findings: [FIND-018](#find-018) *(high)*, [FIND-019](#find-019) *(high)*, [FIND-045](#find-045) *(medium)*, [FIND-050](#find-050) *(medium)*
 
 ---
 
@@ -951,7 +951,7 @@ findings:
       is uv run ouroboros status execution <session_id> (singular).
     severity: medium
     gap_type: wrong-value
-    status: open
+    status: resolved
     affected_documents:
       - docs/runtime-guides/codex.md
     code_deps:
@@ -1120,7 +1120,7 @@ findings:
 | FIND-041 | medium | missing-content | resolved | `codex.md` mapping table missing `ooo ralph`, `ooo tutorial`, `ooo welcome` | `docs/runtime-guides/codex.md` |
 | FIND-042 | medium | wrong-value | resolved | `docs/README.md` PyPI link pointed to wrong package name | `docs/README.md` |
 | FIND-043 | medium | staleness | resolved | `common-workflows.md` MCP path stale (`~/.config/claude/config.json`) | `docs/guides/common-workflows.md` |
-| **FIND-044** | **medium** | **wrong-value** | **open** | `ooo status` CLI equivalent in `codex.md` uses `executions` (list) not `execution <id>` | `docs/runtime-guides/codex.md` |
+| FIND-044 | medium | wrong-value | resolved | `ooo status` CLI equivalent in `codex.md` uses `executions` (list) not `execution <id>` | `docs/runtime-guides/codex.md` |
 | **FIND-045** | **medium** | **missing-content** | **open** | Runtime guides lack cross-link to `credentials.yaml` schema | `docs/runtime-guides/claude-code.md`, `docs/runtime-guides/codex.md` |
 | FIND-046 | **high** | wrong-value | resolved | `OUROBOROS_LOG_LEVEL` in `cli-usage.md` CI/CD example; does not exist — silently no effect | `docs/guides/cli-usage.md` |
 | FIND-047 | **medium** | missing-content | resolved | `init list --state-dir` option absent from `cli-reference.md` (present in `cli-usage.md`) | `docs/cli-reference.md` |
@@ -1157,19 +1157,11 @@ orchestrator CLI path. Fix is the same as FIND-018.
 
 ---
 
-### FIND-044 — `ooo status` CLI equivalent wrong in `codex.md` (medium)
+### FIND-044 — `ooo status` CLI equivalent wrong in `codex.md` (medium) — RESOLVED
 
-`codex.md` maps `ooo status` to `uv run ouroboros status executions` (plural — lists
-all executions). The skill's primary operation is inspecting a specific session, for
-which the correct CLI equivalent is `uv run ouroboros status execution <session_id>`
-(singular). Additionally, the drift-measurement capability (`ouroboros_measure_drift`)
-has no CLI equivalent at all; neither the list nor single-session CLI subcommands implement it.
-
-**Recommended fix:** Update the codex.md row to:
-
-```
-| `ooo status` | Not yet | `uv run ouroboros status execution <session_id>` — or `uv run ouroboros status executions` to list all. Note: drift-measurement via ouroboros_measure_drift has no CLI equivalent. |
-```
+**Fixed in:** `docs/fix-audit-findings` branch. Updated `codex.md:96` to show both
+`ouroboros status executions` (list all) and `ouroboros status execution <id>` (details),
+with note that drift-measurement is MCP-only.
 
 ---
 
