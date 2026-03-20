@@ -30,7 +30,7 @@ For natural-language requests, map to the corresponding MCP tool:
 
 ## Setup & Update
 
-- `ooo setup` → install or refresh Ouroboros Codex and MCP artifacts
-- `ooo update` → upgrade Ouroboros and refresh installed Codex artifacts
+- `ooo setup` → write Ouroboros config (`~/.ouroboros/config.yaml`) and register the MCP server
+- `ooo update` → upgrade Ouroboros to the latest PyPI version
 
 If the request is clearly unrelated to Ouroboros, handle it normally.
