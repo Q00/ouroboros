@@ -113,7 +113,7 @@ ooo interview "I want to build a task management CLI"
 
 > `claude plugin ...` commands run in your terminal. `ooo` commands are Claude Code skills -- they only work inside an active Claude Code session (start one with `claude`).
 
-See the [Claude Code runtime guide](./docs/runtime-guides/claude-code.md) for full details.
+See the [Claude Code runtime guide](./docs/runtime-guides/claude-code.md) for backend configuration and CLI options.
 
 </details>
 
@@ -144,13 +144,14 @@ See the [Codex CLI runtime guide](./docs/runtime-guides/codex.md) for full detai
 <details>
 <summary><strong>Alternative: Standalone (pip)</strong></summary>
 
-**Step 1 -- Install**
+**One-liner (recommended):**
 ```bash
-pip install ouroboros-ai              # Base engine (see extras below)
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 ```
 
-**Step 2 -- Set up your project**
+**Or manual install:**
 ```bash
+pip install ouroboros-ai              # Base engine (see extras below)
 ouroboros setup                       # Auto-detects available runtimes
 ```
 
@@ -289,7 +290,8 @@ Inside Claude Code sessions, use `ooo <cmd>` skills. From the terminal, use the 
 | `ooo evaluate` | *(via MCP)* | 3-stage verification gate |
 | `ooo evolve` | *(via MCP)* | Evolutionary loop until ontology converges |
 | `ooo unstuck` | *(via MCP)* | 5 lateral thinking personas when you are stuck |
-| `ooo status` | `ouroboros status` | Drift detection + session tracking |
+| `ooo status` | `ouroboros status executions` / `ouroboros status execution <id>` | Session tracking + (MCP-only) drift detection |
+| `ooo cancel` | `ouroboros cancel execution [<id>\|--all]` | Cancel stuck or orphaned executions |
 | `ooo ralph` | *(via MCP)* | Persistent loop until verified |
 | `ooo tutorial` | *(interactive)* | Interactive hands-on learning |
 | `ooo help` | `ouroboros --help` | Full reference |

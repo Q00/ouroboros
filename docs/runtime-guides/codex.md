@@ -16,7 +16,7 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 ## Prerequisites
 
 - **Codex CLI** installed and on your `PATH` (see [install steps](#installing-codex-cli) below)
-- An **OpenAI API key** with access to GPT-5.4 (set `OPENAI_API_KEY`)
+- An **OpenAI API key** with access to GPT-5.4 (set `OPENAI_API_KEY`). See [`credentials.yaml`](../config-reference.md#credentialsyaml) for file-based key management
 - **Python >= 3.12**
 
 ## Installing Codex CLI
@@ -93,7 +93,7 @@ The table below maps all 14 `ooo` skills from the registry to their CLI equivale
 | `ooo interview` | **Not yet** — Codex skill artifacts not installed | `uv run ouroboros init start --llm-backend codex "your idea"` |
 | `ooo seed` | **Not yet** | *(no standalone CLI equivalent — `ooo seed` takes a `session_id` from a prior `ooo interview` run; from the terminal, both steps are bundled: `ouroboros init start` automatically offers seed generation at the end of the interview)* |
 | `ooo run` | **Not yet** | `uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_{id}.yaml` |
-| `ooo status` | **Not yet** | `uv run ouroboros status execution <session_id>` — or `uv run ouroboros status executions` to list all sessions *(note: neither CLI subcommand currently implements the drift-measurement that `ooo status` provides via MCP)* |
+| `ooo status` | **Not yet** | `ouroboros status executions` (list all) or `ouroboros status execution <id>` (show details) — neither implements drift-measurement via MCP |
 | `ooo evaluate` | **Not yet** | *(not exposed as an `ouroboros` CLI command)* |
 | `ooo evolve` | **Not yet** | *(not exposed as an `ouroboros` CLI command)* |
 | `ooo ralph` | **Not yet** | *(not exposed as an `ouroboros` CLI command — drives a persistent execute-verify loop via background MCP job tools: `ouroboros_start_evolve_step`, `ouroboros_job_wait`, `ouroboros_job_result`)* |
