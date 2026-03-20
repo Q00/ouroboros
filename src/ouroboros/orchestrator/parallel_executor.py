@@ -1550,10 +1550,7 @@ class ParallelACExecutor:
                                 ac_index=ac_idx,
                                 ac_content=seed.acceptance_criteria[ac_idx],
                                 success=False,
-                                error=(
-                                    f"Stalled (no activity for "
-                                    f"{STALL_TIMEOUT_SECONDS:.0f}s)"
-                                ),
+                                error=(f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)"),
                                 retry_attempt=ac_retry_attempts[ac_idx],
                                 outcome=ACExecutionOutcome.FAILED,
                             )
@@ -1677,7 +1674,6 @@ class ParallelACExecutor:
 
                     level_contexts.append(level_ctx)
                 stage_results.append(stage_result)
-
 
                 # RC3: Save checkpoint after each level completion
                 if self._checkpoint_store:
@@ -2778,7 +2774,6 @@ When complete, explicitly state: [TASK_COMPLETE]
                     if message.is_final:
                         final_message = message.content
                         success = not message.is_error
-
 
             # Check if stall was detected (CancelScope ate the Cancelled)
             if stall_scope.cancelled_caught:
