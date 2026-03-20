@@ -571,10 +571,12 @@ class BrownfieldHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         """Replace all defaults using a comma-separated list of repo IDs."""
         indices_str = arguments.get("indices", "")
-        if not indices_str:
+
+        # Empty string means "clear all defaults" (documented as indices="" for "none")
+        if indices_str is None:
             return Result.err(
                 MCPToolError(
-                    "'indices' is required for 'set_defaults' action (e.g. '6,18,19')",
+                    "'indices' is required for 'set_defaults' action (e.g. '6,18,19' or '' to clear all)",
                     tool_name=_TOOL_NAME,
                 )
             )

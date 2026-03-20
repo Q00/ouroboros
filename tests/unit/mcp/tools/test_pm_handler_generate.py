@@ -112,8 +112,8 @@ class TestHandleGenerate:
         assert meta["session_id"] == "test-session-gen"
 
     @pytest.mark.asyncio
-    async def test_generate_does_not_return_pm_path_in_meta(self, tmp_path: Path) -> None:
-        """Generate meta does not contain pm_path (no pm.md generation)."""
+    async def test_generate_returns_pm_path_in_meta(self, tmp_path: Path) -> None:
+        """Generate meta contains pm_path pointing to saved pm.md."""
         seed = _make_seed()
         state = _make_state()
         engine = _make_engine_for_generate(state, seed)
@@ -129,8 +129,10 @@ class TestHandleGenerate:
 
         assert result.is_ok
         meta = result.value.meta
-        assert "pm_path" not in meta
-        assert "doc_path" not in meta
+        assert "pm_path" in meta
+        pm_path = Path(meta["pm_path"])
+        assert pm_path.exists()
+        assert pm_path.name == "pm.md"
 
     @pytest.mark.asyncio
     async def test_generate_returns_seed_path_in_meta(self, tmp_path: Path) -> None:
@@ -155,7 +157,7 @@ class TestHandleGenerate:
 
     @pytest.mark.asyncio
     async def test_generate_meta_has_exactly_two_keys(self, tmp_path: Path) -> None:
-        """Generate meta contains exactly session_id, seed_path."""
+        """Generate meta contains session_id, seed_path, and pm_path."""
         seed = _make_seed()
         state = _make_state()
         engine = _make_engine_for_generate(state, seed)
@@ -171,7 +173,7 @@ class TestHandleGenerate:
 
         assert result.is_ok
         meta = result.value.meta
-        assert set(meta.keys()) == {"session_id", "seed_path"}
+        assert set(meta.keys()) == {"session_id", "seed_path", "pm_path"}
 
     @pytest.mark.asyncio
     async def test_generate_loads_interview_state(self, tmp_path: Path) -> None:

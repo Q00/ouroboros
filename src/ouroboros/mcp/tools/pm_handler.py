@@ -30,6 +30,7 @@ from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
 )
+from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -969,6 +970,10 @@ class PMInterviewHandler:
         # Save seed to ~/.ouroboros/seeds/ (idempotent — overwrites on retry)
         seed_path = engine.save_pm_seed(seed)
 
+        # Save human-readable pm.md to {cwd}/.ouroboros/
+        pm_dir = Path(cwd) / ".ouroboros"
+        pm_path = save_pm_document(seed, output_dir=pm_dir)
+
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -976,7 +981,8 @@ class PMInterviewHandler:
                         type=ContentType.TEXT,
                         text=(
                             f"PM seed generated: {seed.product_name}\n"
-                            f"Seed: {seed_path}\n\n"
+                            f"Seed: {seed_path}\n"
+                            f"PM document: {pm_path}\n\n"
                             f"Deferred items: {len(seed.deferred_items)}\n"
                             f"Decide-later items: {len(seed.decide_later_items)}"
                         ),
@@ -986,6 +992,7 @@ class PMInterviewHandler:
                 meta={
                     "session_id": session_id,
                     "seed_path": str(seed_path),
+                    "pm_path": str(pm_path),
                 },
             )
         )
