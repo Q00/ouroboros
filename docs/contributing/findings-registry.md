@@ -15,12 +15,10 @@ status: legacy-frozen
 # successor_spec: docs/entity-registry-spec.yaml
 # migration_guide: docs/entity-registry-migration-guide.md
 description: >-
-  LEGACY ARCHIVE (schema v1.5, frozen 2026-03-15): All 50 FIND-NNN entries in
-  this file have been migrated to FND-NNN records in docs/entity-registry.yaml
-  (record_type: finding). This file is preserved for backward-compatibility and
-  historical reference. Do NOT add new findings here; use docs/entity-registry.yaml
-  instead. All entries implicitly carry record_type: finding per the multi-entity
-  registry backward-compat contract (docs/entity-registry-migration-guide.md Rule 1).
+  LEGACY ARCHIVE (schema v1.5, frozen 2026-03-15): This findings registry is
+  frozen. A multi-entity registry migration was planned but successor files have
+  not yet been created. Do NOT add new findings here; track issues via GitHub
+  Issues instead. This file is preserved for historical reference.
   Original description: Canonical, deduplicated registry of every documentation
   finding produced by all previous-generation static audits. Each entry carries
   a normalized id, a concise claim statement, severity, gap_type (and optional
@@ -28,16 +26,10 @@ description: >-
   to the fix or recommendation.
 schema_changelog:
   "1.5": >-
-    2026-03-15 (Sub-AC 3 of AC 1): FREEZE migration. All 50 FIND-NNN entries
-    migrated to FND-NNN records in docs/entity-registry.yaml with record_type:
-    finding discriminator. New fields in FND-NNN schema: correction (replaces
-    resolution_ref prose), implicated_claim_ids (list; promotes single claim_id
-    to multi-claim forward-compat), legacy_id (FIND-NNN preserved for
-    backward-compat). This file is now a legacy-frozen archive; the authoritative
-    finding registry is docs/entity-registry.yaml. All FIND-NNN entries implicitly
-    have record_type: finding per entity-registry-migration-guide.md Rule 1.
-    Schema bumped 1.4→1.5; no entries modified (backward-compatible).
-    Multi-entity spec: docs/entity-registry-spec.yaml v1.0.
+    2026-03-15 (Sub-AC 3 of AC 1): FREEZE. This file is now a legacy-frozen
+    archive. A multi-entity registry migration (FIND-NNN → FND-NNN) was planned
+    but successor files were not created. Schema bumped 1.4→1.5; no entries
+    modified (backward-compatible).
   "1.4": >-
     2026-03-15 (Sub-AC 2-1): Added claim_id (format: CLM-NNN, pattern ^CLM-[0-9]{3,}$)
     as a required field on every finding entry, making claims independently referenceable
@@ -111,9 +103,9 @@ stats:
 > A multi-entity registry migration was planned but the successor files have not yet been created.
 > Do NOT add new findings here. Track issues via GitHub Issues instead.
 >
-> **Backward-compat rule:** All entries in this file implicitly carry `record_type: finding`
-> (docs/entity-registry-migration-guide.md Rule 1). FIND-NNN IDs map 1:1 to FND-NNN in
-> `entity-registry.yaml` (same numeric suffix; `legacy_id` field preserved).
+> **Note:** All entries in this file implicitly carry `record_type: finding`.
+> FIND-NNN IDs were intended to map 1:1 to FND-NNN in a planned entity registry
+> (not yet created).
 >
 > **Source audits merged:** CLI command audit · Config doc audit ·
 > Cross-document contradiction scan · Skill-CLI mapping audit ·
@@ -131,7 +123,7 @@ Each finding record carries these **ten** fields (v1.5 adds `record_type`):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `record_type` | `finding` | *(v1.5, implicit for all entries in this file)* Multi-entity discriminator. All FIND-NNN entries in this legacy file are implicitly `record_type: finding`. Explicit in `docs/entity-registry.yaml` FND-NNN records. |
+| `record_type` | `finding` | *(v1.5, implicit for all entries in this file)* Multi-entity discriminator. All FIND-NNN entries in this legacy file are implicitly `record_type: finding`. |
 | `id` | `FIND-NNN` | Normalized, stable finding identifier |
 | `claim_id` | `CLM-NNN` | *(v1.4, required)* Stable claim identifier — independently referenceable entity separate from the finding ID. Format: `CLM-NNN` (three or more digits, zero-padded). Allows claim cross-referencing without coupling to the finding sequence. |
 | `claim` | string | Concise statement of the erroneous or missing claim |
