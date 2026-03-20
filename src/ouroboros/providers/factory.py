@@ -8,18 +8,21 @@ from typing import Literal
 
 from ouroboros.config import (
     get_codex_cli_path,
+    get_gemini_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
 )
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
+from ouroboros.providers.gemini_cli_adapter import GeminiCliLLMAdapter
 
 # TODO: uncomment when OpenCode adapter is shipped
 # from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
 _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
+_GEMINI_BACKENDS = {"gemini", "gemini_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _LITELLM_BACKENDS = {"litellm", "openai", "openrouter"}
 _LLM_USE_CASES = frozenset({"default", "interview"})
@@ -32,10 +35,12 @@ def resolve_llm_backend(backend: str | None = None) -> str:
         return "claude_code"
     if candidate in _CODEX_BACKENDS:
         return "codex"
+    if candidate in _GEMINI_BACKENDS:
+        return "gemini"
     if candidate in _OPENCODE_BACKENDS:
         msg = (
             "OpenCode LLM adapter is not yet available. "
-            "Supported backends: claude_code, codex, litellm"
+            "Supported backends: claude_code, codex, gemini, litellm"
         )
         raise ValueError(msg)
     if candidate in _LITELLM_BACKENDS:
@@ -60,7 +65,7 @@ def resolve_llm_permission_mode(
         raise ValueError(msg)
 
     resolved = resolve_llm_backend(backend)
-    if use_case == "interview" and resolved in ("claude_code", "codex"):
+    if use_case == "interview" and resolved in ("claude_code", "codex", "gemini"):
         # Interview uses LLM to generate questions — no file writes, but
         # codex read-only sandbox blocks LLM output entirely. Must bypass.
         return "bypassPermissions"
@@ -85,6 +90,11 @@ def create_llm_adapter(
 ) -> LLMAdapter:
     """Create an LLM adapter from config or explicit options."""
     resolved_backend = resolve_llm_backend(backend)
+
+    # Interview always uses Claude regardless of configured backend.
+    if use_case == "interview":
+        resolved_backend = "claude_code"
+
     resolved_permission_mode = resolve_llm_permission_mode(
         backend=resolved_backend,
         permission_mode=permission_mode,
@@ -101,6 +111,17 @@ def create_llm_adapter(
     if resolved_backend == "codex":
         return CodexCliLLMAdapter(
             cli_path=cli_path or get_codex_cli_path(),
+            cwd=cwd,
+            permission_mode=resolved_permission_mode,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            on_message=on_message,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    if resolved_backend == "gemini":
+        return GeminiCliLLMAdapter(
+            cli_path=cli_path or get_gemini_cli_path(),
             cwd=cwd,
             permission_mode=resolved_permission_mode,
             allowed_tools=allowed_tools,
