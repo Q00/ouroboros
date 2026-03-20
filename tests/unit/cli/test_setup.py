@@ -255,14 +255,16 @@ class TestSetDefaultRepo:
 
     @pytest.mark.asyncio
     async def test_set_default_success(self) -> None:
-        """Returns True when set_default_repo succeeds."""
+        """Returns True when toggling a non-default repo to default."""
         from ouroboros.persistence.brownfield import BrownfieldRepo
 
-        mock_repo = BrownfieldRepo(path="/a", name="a", is_default=True)
+        mock_repo = BrownfieldRepo(path="/a", name="a", is_default=False)
+        mock_repo_updated = BrownfieldRepo(path="/a", name="a", is_default=True)
 
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
+        mock_store.list_repos = AsyncMock(return_value=[mock_repo])
 
         with (
             patch(
@@ -272,7 +274,7 @@ class TestSetDefaultRepo:
             patch(
                 "ouroboros.cli.commands.setup.set_default_repo",
                 new_callable=AsyncMock,
-                return_value=mock_repo,
+                return_value=mock_repo_updated,
             ),
         ):
             result = await _set_default_repo("/a")
@@ -280,11 +282,35 @@ class TestSetDefaultRepo:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_toggle_removes_existing_default(self) -> None:
+        """Returns True when toggling a default repo to non-default."""
+        from ouroboros.persistence.brownfield import BrownfieldRepo
+
+        mock_repo = BrownfieldRepo(path="/a", name="a", is_default=True)
+        mock_repo_updated = BrownfieldRepo(path="/a", name="a", is_default=False)
+
+        mock_store = AsyncMock()
+        mock_store.initialize = AsyncMock()
+        mock_store.close = AsyncMock()
+        mock_store.list_repos = AsyncMock(return_value=[mock_repo])
+        mock_store.update_is_default = AsyncMock(return_value=mock_repo_updated)
+
+        with patch(
+            "ouroboros.cli.commands.setup.BrownfieldStore",
+            return_value=mock_store,
+        ):
+            result = await _set_default_repo("/a")
+
+        assert result is True
+        mock_store.update_is_default.assert_awaited_once_with("/a", is_default=False)
+
+    @pytest.mark.asyncio
     async def test_set_default_not_found(self) -> None:
         """Returns False when path is not registered."""
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
+        mock_store.list_repos = AsyncMock(return_value=[])
 
         with (
             patch(
@@ -741,21 +767,15 @@ class TestSetDefaultRepoExtended:
 
     @pytest.mark.asyncio
     async def test_set_default_store_closed_on_error(self) -> None:
-        """Store is closed even when set_default_repo raises."""
+        """Store is closed even when list_repos raises."""
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
+        mock_store.list_repos = AsyncMock(side_effect=RuntimeError("DB error"))
 
-        with (
-            patch(
-                "ouroboros.cli.commands.setup.BrownfieldStore",
-                return_value=mock_store,
-            ),
-            patch(
-                "ouroboros.cli.commands.setup.set_default_repo",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("DB error"),
-            ),
+        with patch(
+            "ouroboros.cli.commands.setup.BrownfieldStore",
+            return_value=mock_store,
         ):
             with pytest.raises(RuntimeError, match="DB error"):
                 await _set_default_repo("/a")

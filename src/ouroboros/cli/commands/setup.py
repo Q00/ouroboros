@@ -162,7 +162,10 @@ async def _list_repos() -> list[dict]:
 
 
 async def _set_default_repo(path: str) -> bool:
-    """Set a repo as default in DB.
+    """Toggle a repo's default status in DB.
+
+    If the repo is currently a default, removes it.
+    If not, adds it as a default.
 
     Args:
         path: Absolute path of the repo.
@@ -173,7 +176,16 @@ async def _set_default_repo(path: str) -> bool:
     store = BrownfieldStore()
     try:
         await store.initialize()
-        result = await set_default_repo(store, path)
+        repos = await store.list_repos()
+        current = next((r for r in repos if r.path == path), None)
+        if current is None:
+            return False
+        if current.is_default:
+            # Remove from defaults
+            result = await store.update_is_default(path, is_default=False)
+        else:
+            # Add as default
+            result = await set_default_repo(store, path)
         return result is not None
     finally:
         await store.close()
