@@ -46,16 +46,13 @@ pip install ouroboros-ai
 # Set up
 ouroboros setup
 
-# Interview -- generates a seed spec automatically
-ouroboros interview "Build a task management CLI"
-
-# Execute
-ouroboros run
+# Run a seed spec
+ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
 ```
 
-That's it. `ouroboros interview` runs the Socratic interview and auto-generates a seed spec. `ouroboros run` picks up the latest seed automatically.
+> **Note:** The standalone CLI does not include an `interview` command. To generate a seed via Socratic interview, use `ooo interview` inside a Claude Code session, or use the MCP tools (`ouroboros_interview`). Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
 
-> **Tip:** To run a specific seed (e.g. one you edited by hand), pass the path explicitly: `ouroboros run ~/.ouroboros/seeds/seed_<id>.yaml`. See the [Seed Authoring Guide](guides/seed-authoring.md) for advanced seed customization.
+> **Tip:** `ouroboros run` requires a path to a seed YAML file as a positional argument (e.g., `ouroboros run ~/.ouroboros/seeds/seed_<id>.yaml`).
 
 ---
 
@@ -172,7 +169,7 @@ Inside a Claude Code session:
 ooo interview "I want to build a personal finance tracker"
 ```
 
-> **CLI equivalent:** `ouroboros interview "I want to build a personal finance tracker"`
+> **CLI note:** The standalone CLI does not have an `interview` command. Use `ooo interview` inside Claude Code, or use MCP tools to run interviews.
 
 The Socratic Interviewer asks clarifying questions:
 - "What platforms do you want to track?" (Bank accounts, credit cards, investments)
@@ -205,7 +202,7 @@ metadata:
 ooo run
 ```
 
-> **CLI equivalent:** `ouroboros run` (auto-picks the latest seed, or pass a path explicitly: `ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml`)
+> **CLI equivalent:** `ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml` (requires the seed file path as a positional argument)
 
 Ouroboros decomposes the seed into tasks via the Double Diamond (Discover -> Define -> Design -> Deliver) and executes them through your configured runtime backend.
 
@@ -263,7 +260,7 @@ ooo interview "Add real-time notifications to the chat app"
 ooo run
 ```
 
-> **Terminal users:** Replace `ooo interview "..."` with `ouroboros interview "..."` and `ooo run` with `ouroboros run`.
+> **Terminal users:** The standalone CLI does not have an `interview` command. Generate seeds via `ooo interview` in Claude Code or via MCP tools, then run with `ouroboros run <seed_file>`.
 
 ---
 
@@ -366,7 +363,7 @@ ouroboros cancel execution <session_id>
 3. **Specify integrations** -- APIs, databases, third-party services
 
 ### For Successful Execution
-1. **Validate first** -- `ouroboros run --dry-run` checks YAML and schema before executing
+1. **Validate first** -- `ouroboros run seed.yaml --dry-run` checks YAML and schema before executing
 2. **Monitor with the TUI** -- run `ouroboros monitor` in a separate terminal during long workflows
 3. **Keep QA enabled** -- post-execution QA runs automatically unless you pass `--no-qa`
 
