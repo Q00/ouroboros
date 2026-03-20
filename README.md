@@ -215,7 +215,7 @@ run        ->  Executed via Double Diamond decomposition
 evaluate   ->  3-stage verification: Mechanical -> Semantic -> Consensus
 ```
 
-> Use `ooo <cmd>` inside Claude Code / Codex sessions, or `ouroboros init`, `ouroboros run workflow`, etc. from the terminal.
+> Use `ooo <cmd>` inside Claude Code sessions, or `ouroboros init`, `ouroboros run workflow`, etc. from the terminal. Codex users should use the terminal CLI commands (`ooo` shortcuts are not yet available in Codex).
 
 The serpent completed one loop. Each loop, it knows more than the last.
 
