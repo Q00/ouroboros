@@ -19,7 +19,6 @@ import yaml
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
-    SOFT_LIMIT_WARNING_THRESHOLD,
     InterviewEngine,
     InterviewState,
     InterviewStatus,
@@ -243,13 +242,6 @@ async def _run_interview_loop(
 
         # Tiered confirmation logic
         if current_round >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-            # Show warning for rounds beyond soft limit
-            if current_round >= SOFT_LIMIT_WARNING_THRESHOLD:
-                print_warning(
-                    f"Round {current_round}: Diminishing returns expected. "
-                    "Consider generating Seed to check ambiguity score."
-                )
-
             should_continue = Confirm.ask(
                 "Continue with more questions?",
                 default=True,

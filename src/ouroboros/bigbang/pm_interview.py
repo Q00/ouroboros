@@ -5,7 +5,6 @@ Adds PM-specific behavior on top of the existing InterviewEngine:
 - Reframing technical questions for PM audience
 - Deferred item tracking for dev-only questions
 - PMSeed generation from completed interview
-- PM document generation (pm.md)
 - Brownfield repo management via ~/.ouroboros/ouroboros.db
 - CodebaseExplorer scan-once semantics (shared context)
 
@@ -23,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-import yaml
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
 from ouroboros.bigbang.brownfield import (
@@ -35,7 +33,6 @@ from ouroboros.bigbang.interview import (
     InterviewEngine,
     InterviewState,
 )
-from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
@@ -53,10 +50,6 @@ from ouroboros.providers.base import (
 )
 
 log = structlog.get_logger()
-
-# Hard cap on interview rounds.  The ambiguity scorer should trigger
-# completion well before this, but this prevents runaway loops.
-MAX_PM_INTERVIEW_ROUNDS = 20
 
 _SEED_DIR = Path.home() / ".ouroboros" / "seeds"
 _PM_SYSTEM_PROMPT_PREFIX = """\
@@ -125,7 +118,6 @@ class PMInterviewEngine:
     - Question classification via QuestionClassifier
     - Deferred item tracking (dev-only questions)
     - PMSeed extraction from completed interviews
-    - PM document generation (pm.md)
     - Brownfield repo registration (~/.ouroboros/ouroboros.db)
     - Scan-once codebase context sharing
 
@@ -155,7 +147,6 @@ class PMInterviewEngine:
 
         pm_seed = await engine.generate_pm_seed(state)
         engine.save_pm_seed(pm_seed)
-        engine.save_pm_document(pm_seed)
     """
 
     inner: InterviewEngine
@@ -764,22 +755,18 @@ class PMInterviewEngine:
     async def check_completion(
         self,
         state: InterviewState,
-        max_rounds: int = MAX_PM_INTERVIEW_ROUNDS,
     ) -> dict[str, Any] | None:
-        """Check whether the interview should complete based on ambiguity or rounds.
+        """Check whether the interview should complete based on ambiguity.
 
-        Completion is determined by two signals (no user "done" signal):
+        Completion is determined by ambiguity score only (user controls when
+        to stop, consistent with the regular interview engine):
 
-        1. **Ambiguity score** -- after at least ``MIN_ROUNDS_BEFORE_EARLY_EXIT``
-           answered rounds, the scorer evaluates requirement clarity.  If the score
-           is <= threshold (0.2) the interview is ready for PM generation.
-
-        2. **Max-rounds safety cap** -- after *max_rounds* rounds the interview is
-           force-completed to prevent runaway loops.
+        After at least ``MIN_ROUNDS_BEFORE_EARLY_EXIT`` answered rounds, the
+        scorer evaluates requirement clarity.  If the score is <= threshold
+        (0.2) the interview is ready for PM generation.
 
         Args:
             state: Current interview state.
-            max_rounds: Maximum allowed answered rounds before forced completion.
 
         Returns:
             Dict with completion metadata if the interview should end,
@@ -787,20 +774,6 @@ class PMInterviewEngine:
         """
         # Count only answered rounds (exclude the pending unanswered round)
         answered_rounds = sum(1 for r in state.rounds if r.user_response is not None)
-
-        # ── Max-rounds hard cap ────────────────────────────────────────
-        if answered_rounds >= max_rounds:
-            log.info(
-                "pm.completion.max_rounds",
-                session_id=state.interview_id,
-                rounds=answered_rounds,
-            )
-            return {
-                "interview_complete": True,
-                "completion_reason": "max_rounds",
-                "rounds_completed": answered_rounds,
-                "ambiguity_score": None,
-            }
 
         # ── Ambiguity check (only after minimum rounds) ────────────────
         if answered_rounds < MIN_ROUNDS_BEFORE_EARLY_EXIT:
@@ -945,31 +918,30 @@ class PMInterviewEngine:
         seed: PMSeed,
         output_dir: Path | None = None,
     ) -> Path:
-        """Save PMSeed to YAML file.
+        """Save PMSeed to JSON file.
 
-        Saves to ~/.ouroboros/seeds/pm_seed_{id}.yaml.
+        Saves to ~/.ouroboros/seeds/pm_seed_{id}.json.
 
         Args:
             seed: The PMSeed to save.
             output_dir: Custom output directory (defaults to ~/.ouroboros/seeds/).
 
         Returns:
-            Path to the saved YAML file.
+            Path to the saved JSON file.
         """
         if output_dir is None:
             output_dir = _SEED_DIR
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{seed.pm_id}.yaml"
+        filename = f"{seed.pm_id}.json"
         filepath = output_dir / filename
 
-        yaml_content = yaml.dump(
+        json_content = json.dumps(
             seed.to_dict(),
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
+            ensure_ascii=False,
+            indent=2,
         )
-        filepath.write_text(yaml_content, encoding="utf-8")
+        filepath.write_text(json_content, encoding="utf-8")
 
         log.info(
             "pm.seed_saved",
@@ -978,27 +950,6 @@ class PMInterviewEngine:
         )
 
         return filepath
-
-    def save_pm_document(
-        self,
-        seed: PMSeed,
-        output_dir: str | Path | None = None,
-        *,
-        output_path: str | Path | None = None,
-    ) -> Path:
-        """Generate and save PM document (pm.md).
-
-        Args:
-            seed: The PMSeed to generate document from.
-            output_dir: Directory to save in. Defaults to .ouroboros/.
-                Ignored when *output_path* is provided.
-            output_path: Full file path (directory + filename) for the PM
-                document. When given, *output_dir* is ignored.
-
-        Returns:
-            Path to the saved pm.md.
-        """
-        return save_pm_document(seed, output_dir, output_path=output_path)
 
     # ──────────────────────────────────────────────────────────────
     # Dev interview handoff

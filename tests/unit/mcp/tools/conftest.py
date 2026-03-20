@@ -38,8 +38,6 @@ def make_pm_engine_mock(**kwargs) -> PMInterviewEngine:
     engine.get_pending_reframe = lambda: PMInterviewEngine.get_pending_reframe(engine)
     engine.get_last_classification = lambda: PMInterviewEngine.get_last_classification(engine)
     engine.restore_meta = lambda meta: PMInterviewEngine.restore_meta(engine, meta)
-    engine.check_completion = lambda state, max_rounds=20: PMInterviewEngine.check_completion(
-        engine, state, max_rounds=max_rounds
-    )
+    engine.check_completion = lambda state: PMInterviewEngine.check_completion(engine, state)
 
     return engine

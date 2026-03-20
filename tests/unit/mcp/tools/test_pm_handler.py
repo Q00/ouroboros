@@ -13,7 +13,6 @@ from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.pm_handler import (
     _DATA_DIR,
-    MAX_PM_INTERVIEW_ROUNDS,
     PMInterviewHandler,
     _check_completion,
     _compute_deferred_diff,
@@ -479,19 +478,6 @@ class TestCheckCompletion:
 
         result = await _check_completion(state, engine)
         assert result is None
-
-    @pytest.mark.asyncio
-    async def test_max_rounds_triggers_completion(self) -> None:
-        """Hitting MAX_PM_INTERVIEW_ROUNDS triggers forced completion."""
-        state = _make_state(rounds=_make_answered_rounds(MAX_PM_INTERVIEW_ROUNDS))
-        engine = _make_engine_stub()
-
-        result = await _check_completion(state, engine)
-
-        assert result is not None
-        assert result["interview_complete"] is True
-        assert result["completion_reason"] == "max_rounds"
-        assert result["rounds_completed"] == MAX_PM_INTERVIEW_ROUNDS
 
     @pytest.mark.asyncio
     async def test_ambiguity_resolved_triggers_completion(self) -> None:
@@ -1492,13 +1478,22 @@ class TestResumeMetaFields:
 
         state = _make_state(
             interview_id="resume-complete",
-            rounds=_make_answered_rounds(MAX_PM_INTERVIEW_ROUNDS),
+            rounds=_make_answered_rounds(5),
         )
 
         engine.load_state = AsyncMock(return_value=Result.ok(state))
         engine.record_response = AsyncMock(return_value=Result.ok(state))
         engine.complete_interview = AsyncMock(return_value=Result.ok(state))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+        # Mock ambiguity-based completion so the test doesn't need llm_adapter
+        engine.check_completion = AsyncMock(
+            return_value={
+                "interview_complete": True,
+                "completion_reason": "ambiguity_resolved",
+                "rounds_completed": 5,
+                "ambiguity_score": 0.15,
+            }
+        )
 
         _save_pm_meta("resume-complete", engine, cwd="/tmp", data_dir=tmp_path)
 

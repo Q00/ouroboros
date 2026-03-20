@@ -72,4 +72,4 @@ Arguments:
   action: "generate"
 ```
 
-Show: "Your PM has been generated! 📍 Next: `ooo interview`"
+Show: "Your PM seed has been saved as `pm_seed_{id}.json`! 📍 Next: `ooo interview`"

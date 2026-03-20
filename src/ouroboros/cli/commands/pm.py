@@ -47,14 +47,6 @@ def pm_command(
             help="LLM model to use for the PM interview.",
         ),
     ] = "anthropic/claude-sonnet-4-20250514",
-    output: Annotated[
-        Path | None,
-        typer.Option(
-            "--output",
-            "-o",
-            help="Output path for the generated PM document.",
-        ),
-    ] = None,
     debug: Annotated[
         bool,
         typer.Option(
@@ -69,18 +61,15 @@ def pm_command(
     define product requirements. Questions are automatically classified
     as planning (PM-answerable) or development (deferred to dev interview).
 
-    The output is a PMSeed YAML file and a human-readable pm.md document.
+    The output is a PMSeed JSON file saved to ~/.ouroboros/seeds/.
 
     [bold]Examples:[/]
 
         ouroboros pm                        Start new PM interview
         ouroboros pm --resume abc123        Resume session
-        ouroboros pm --output ./my-pm.md   Custom output path
     """
     if ctx.invoked_subcommand is not None:
         return
-
-    output_path = output or Path(".ouroboros/pm.md")
 
     console.print("\n[bold cyan]Ouroboros PM Generator[/] - Product Requirements Document\n")
 
@@ -89,7 +78,7 @@ def pm_command(
     else:
         print_info("Starting new PM interview session...")
 
-    console.print(f"  Model: [dim]{model}[/]\n  Output: [dim]{output_path}[/]\n")
+    console.print(f"  Model: [dim]{model}[/]\n")
 
     # PMInterviewEngine integration point — the sibling agent is building
     # PMInterviewEngine which will be wired in here.
@@ -98,7 +87,6 @@ def pm_command(
             _run_pm_interview(
                 resume_id=resume,
                 model=model,
-                output_path=output_path,
                 debug=debug,
             )
         )
@@ -127,7 +115,7 @@ def _load_brownfield_from_db() -> list[dict[str, str]]:
 def _check_existing_pm_seeds() -> bool:
     """Check for existing PM seeds and prompt for overwrite confirmation.
 
-    Scans ``~/.ouroboros/seeds/`` for any ``pm_seed_*.yaml`` files.
+    Scans ``~/.ouroboros/seeds/`` for any ``pm_seed_*.json`` files.
     If found, displays the existing seeds and asks the user whether to
     overwrite or abort.
 
@@ -140,7 +128,7 @@ def _check_existing_pm_seeds() -> bool:
     if not seeds_dir.is_dir():
         return True
 
-    existing = sorted(seeds_dir.glob("pm_seed_*.yaml"))
+    existing = sorted(seeds_dir.glob("pm_seed_*.json"))
 
     if not existing:
         return True
@@ -302,7 +290,6 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
 async def _run_pm_interview(
     resume_id: str | None,
     model: str,
-    output_path: Path,
     debug: bool,  # noqa: ARG001
 ) -> None:
     """Run the PM interview loop.
@@ -313,7 +300,6 @@ async def _run_pm_interview(
     Args:
         resume_id: Optional session ID to resume.
         model: LLM model identifier.
-        output_path: Path for the generated PM document.
         debug: Enable debug output.
     """
     from ouroboros.bigbang.pm_interview import PMInterviewEngine
@@ -441,8 +427,6 @@ async def _run_pm_interview(
         if seed_result.is_ok:
             seed = seed_result.value
             seed_path = engine.save_pm_seed(seed)
-            doc_path = engine.save_pm_document(seed, output_path=output_path)
             print_success(f"PM seed saved: {seed_path}")
-            print_success(f"PM document saved: {doc_path}")
         else:
             print_error(f"Failed to generate PM: {seed_result.error}")

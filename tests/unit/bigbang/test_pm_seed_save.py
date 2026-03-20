@@ -1,16 +1,16 @@
-"""Tests for PM Seed YAML persistence (AC 13).
+"""Tests for PM Seed JSON persistence.
 
-Verifies that PMSeed is saved as YAML at ~/.ouroboros/seeds/pm_seed_{id}.yaml
+Verifies that PMSeed is saved as JSON at ~/.ouroboros/seeds/pm_seed_{id}.json
 with correct naming, content roundtrip, and directory creation.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import yaml
 
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
@@ -58,17 +58,17 @@ def _make_seed(pm_id: str = "pm_seed_abc123def456") -> PMSeed:
     )
 
 
-class TestPMSeedSaveYAML:
-    """PM Seed saved as YAML at ~/.ouroboros/seeds/pm_seed_{id}.yaml."""
+class TestPMSeedSaveJSON:
+    """PM Seed saved as JSON at ~/.ouroboros/seeds/pm_seed_{id}.json."""
 
     def test_filename_matches_pm_id(self, tmp_path: Path) -> None:
-        """Saved file is named {pm_id}.yaml."""
+        """Saved file is named {pm_id}.json."""
         engine = _make_engine(tmp_path)
         seed = _make_seed(pm_id="pm_seed_abc123def456")
 
         filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
-        assert filepath.name == "pm_seed_abc123def456.yaml"
+        assert filepath.name == "pm_seed_abc123def456.json"
 
     def test_file_saved_in_seeds_directory(self, tmp_path: Path) -> None:
         """File is saved inside the specified seeds directory."""
@@ -116,23 +116,23 @@ class TestPMSeedSaveYAML:
         assert filepath.parent == expected_dir
         assert filepath.exists()
 
-    def test_yaml_content_is_valid(self, tmp_path: Path) -> None:
-        """Saved file contains valid YAML."""
+    def test_json_content_is_valid(self, tmp_path: Path) -> None:
+        """Saved file contains valid JSON."""
         engine = _make_engine(tmp_path)
         seed = _make_seed()
 
         filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
-        loaded = yaml.safe_load(filepath.read_text(encoding="utf-8"))
+        loaded = json.loads(filepath.read_text(encoding="utf-8"))
         assert isinstance(loaded, dict)
 
-    def test_yaml_contains_all_fields(self, tmp_path: Path) -> None:
-        """Saved YAML contains all PMSeed fields."""
+    def test_json_contains_all_fields(self, tmp_path: Path) -> None:
+        """Saved JSON contains all PMSeed fields."""
         engine = _make_engine(tmp_path)
         seed = _make_seed()
 
         filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
-        loaded = yaml.safe_load(filepath.read_text(encoding="utf-8"))
+        loaded = json.loads(filepath.read_text(encoding="utf-8"))
 
         assert loaded["pm_id"] == "pm_seed_abc123def456"
         assert loaded["product_name"] == "TaskFlow"
@@ -153,13 +153,13 @@ class TestPMSeedSaveYAML:
         ]
         assert "created_at" in loaded
 
-    def test_yaml_roundtrip_produces_equal_seed(self, tmp_path: Path) -> None:
-        """PMSeed survives YAML save → load roundtrip."""
+    def test_json_roundtrip_produces_equal_seed(self, tmp_path: Path) -> None:
+        """PMSeed survives JSON save -> load roundtrip."""
         engine = _make_engine(tmp_path)
         seed = _make_seed()
 
         filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
-        loaded_data = yaml.safe_load(filepath.read_text(encoding="utf-8"))
+        loaded_data = json.loads(filepath.read_text(encoding="utf-8"))
         restored = PMSeed.from_dict(loaded_data)
 
         assert restored.pm_id == seed.pm_id
@@ -192,7 +192,7 @@ class TestPMSeedSaveYAML:
         assert len(ids) == 10
 
     def test_saved_filename_uses_pm_id_as_stem(self, tmp_path: Path) -> None:
-        """The YAML filename stem matches pm_id exactly."""
+        """The JSON filename stem matches pm_id exactly."""
         engine = _make_engine(tmp_path)
         custom_id = "pm_seed_custom12345"
         seed = _make_seed(pm_id=custom_id)
@@ -200,7 +200,7 @@ class TestPMSeedSaveYAML:
         filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
         assert filepath.stem == custom_id
-        assert filepath.suffix == ".yaml"
+        assert filepath.suffix == ".json"
 
     def test_overwrite_existing_file(self, tmp_path: Path) -> None:
         """Saving with same pm_id overwrites the existing file."""
@@ -213,7 +213,7 @@ class TestPMSeedSaveYAML:
         engine.save_pm_seed(seed_v1, output_dir=seeds_dir)
         filepath = engine.save_pm_seed(seed_v2, output_dir=seeds_dir)
 
-        loaded = yaml.safe_load(filepath.read_text(encoding="utf-8"))
+        loaded = json.loads(filepath.read_text(encoding="utf-8"))
         assert loaded["product_name"] == "V2"
 
     def test_multiple_seeds_coexist(self, tmp_path: Path) -> None:
@@ -232,8 +232,8 @@ class TestPMSeedSaveYAML:
         assert path_a != path_b
 
         # Both can be loaded independently
-        data_a = yaml.safe_load(path_a.read_text())
-        data_b = yaml.safe_load(path_b.read_text())
+        data_a = json.loads(path_a.read_text())
+        data_b = json.loads(path_b.read_text())
         assert data_a["pm_id"] == "pm_seed_aaa111"
         assert data_b["pm_id"] == "pm_seed_bbb222"
 
@@ -247,17 +247,17 @@ class TestPMSeedSaveYAML:
         assert isinstance(result, Path)
 
     def test_utf8_encoding(self, tmp_path: Path) -> None:
-        """YAML file is saved with UTF-8 encoding, supporting unicode."""
+        """JSON file is saved with UTF-8 encoding, supporting unicode."""
         engine = _make_engine(tmp_path)
         seed = PMSeed(
             pm_id="pm_seed_unicode",
-            product_name="Ünïcödé Prödüct",
-            goal="Support für internationale Märkte",
+            product_name="Unicod\u00e9 Pr\u00f6d\u00fcct",
+            goal="Support f\u00fcr internationale M\u00e4rkte",
         )
 
         filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
         content = filepath.read_text(encoding="utf-8")
-        loaded = yaml.safe_load(content)
+        loaded = json.loads(content)
 
-        assert loaded["product_name"] == "Ünïcödé Prödüct"
-        assert loaded["goal"] == "Support für internationale Märkte"
+        assert loaded["product_name"] == "Unicod\u00e9 Pr\u00f6d\u00fcct"
+        assert loaded["goal"] == "Support f\u00fcr internationale M\u00e4rkte"

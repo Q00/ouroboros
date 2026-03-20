@@ -13,7 +13,7 @@ returned in the response metadata.
 
 Interview completion is determined **solely** by the engine — either by
 ambiguity scoring (score ≤ 0.2 means requirements are clear enough) or by
-reaching the maximum round limit.  There is no user "done" signal.
+ambiguity scoring.  User controls when to stop.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ log = structlog.get_logger()
 
 # Hard cap on interview rounds in MCP mode.  The engine's ambiguity scorer
 # should trigger completion well before this, but this prevents runaway loops.
-MAX_PM_INTERVIEW_ROUNDS = 20
+
 
 _DATA_DIR = Path.home() / ".ouroboros" / "data"
 
@@ -205,7 +205,7 @@ async def _check_completion(
     Returns a dict with completion metadata if the interview should end,
     or ``None`` if the interview should continue.
     """
-    return await engine.check_completion(state, max_rounds=MAX_PM_INTERVIEW_ROUNDS)
+    return await engine.check_completion(state)
 
 
 @dataclass
@@ -215,15 +215,14 @@ class PMInterviewHandler:
     Manages PM-focused interviews with question classification,
     deferred item tracking, and per-call diff computation.
 
-    Interview completion is determined solely by the engine's ambiguity
-    scorer (score ≤ 0.2) or max-rounds cap — there is no user "done"
-    signal.
+    Interview completion is determined by the engine's ambiguity
+    scorer (score ≤ 0.2).  User controls when to stop.
 
     The handler wraps PMInterviewEngine and adds:
     - Flat MCP parameter interface (session_id, action, answer, cwd, initial_context)
     - pm_meta_{session_id}.json persistence for PM-specific state
     - Deferred/decide-later diff computation per ask_next_question call
-    - Automatic completion detection via ambiguity scoring and max-rounds
+    - Automatic completion detection via ambiguity scoring
     """
 
     pm_engine: PMInterviewEngine | None = field(default=None, repr=False)
@@ -713,9 +712,9 @@ class PMInterviewHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         """Resume session, record an answer, check completion, then ask next question.
 
-        Completion is determined solely by the engine — either the ambiguity
-        score drops below the threshold (requirements are clear) or the
-        max-rounds cap is reached.  There is no user "done" signal.
+        Completion is determined by the engine's ambiguity score dropping
+        below the threshold (requirements are clear).  User controls when
+        to stop.
         """
         # Load interview state
         load_result = await engine.load_state(session_id)
@@ -783,8 +782,8 @@ class PMInterviewHandler:
             state.clear_stored_ambiguity()
 
         # ── Completion check (AC 12) ─────────────────────────────
-        # No user "done" signal — completion is determined solely by
-        # engine ambiguity scoring and max-rounds cap.
+        # Completion is determined by engine ambiguity scoring.
+        # User controls when to stop.
         completion = await _check_completion(state, engine)
         if completion is not None:
             # Mark interview as complete
@@ -970,10 +969,6 @@ class PMInterviewHandler:
         # Save seed to ~/.ouroboros/seeds/ (idempotent — overwrites on retry)
         seed_path = engine.save_pm_seed(seed)
 
-        # Save pm.md to {cwd}/.ouroboros/
-        pm_output_dir = Path(cwd) / ".ouroboros"
-        pm_path = engine.save_pm_document(seed, output_dir=pm_output_dir)
-
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -981,8 +976,7 @@ class PMInterviewHandler:
                         type=ContentType.TEXT,
                         text=(
                             f"PM seed generated: {seed.product_name}\n"
-                            f"Seed: {seed_path}\n"
-                            f"Document: {pm_path}\n\n"
+                            f"Seed: {seed_path}\n\n"
                             f"Deferred items: {len(seed.deferred_items)}\n"
                             f"Decide-later items: {len(seed.decide_later_items)}"
                         ),
@@ -991,7 +985,6 @@ class PMInterviewHandler:
                 is_error=False,
                 meta={
                     "session_id": session_id,
-                    "pm_path": str(pm_path),
                     "seed_path": str(seed_path),
                 },
             )

@@ -30,7 +30,6 @@ log = structlog.get_logger()
 
 # Interview round constants
 MIN_ROUNDS_BEFORE_EARLY_EXIT = 3  # Must complete at least 3 rounds
-SOFT_LIMIT_WARNING_THRESHOLD = 15  # Warn about diminishing returns after this
 DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 
 # Legacy alias for backward compatibility

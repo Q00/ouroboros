@@ -1013,9 +1013,9 @@ class TestSavePMSeed:
         filepath = engine.save_pm_seed(seed, output_dir=tmp_path / "seeds")
 
         assert filepath.exists()
-        assert filepath.suffix == ".yaml"
+        assert filepath.suffix == ".json"
 
-        loaded = yaml.safe_load(filepath.read_text())
+        loaded = json.loads(filepath.read_text())
         assert loaded["product_name"] == "TaskFlow"
         assert loaded["goal"] == "Task management for small teams"
         assert len(loaded["user_stories"]) == 1
