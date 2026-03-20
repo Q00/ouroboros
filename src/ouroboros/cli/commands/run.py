@@ -50,7 +50,6 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
-    OPENCODE = "opencode"
 
 
 def _derive_quality_bar(seed: "Seed") -> str:
@@ -347,7 +346,7 @@ def workflow(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator mode (claude, codex, or opencode).",
+            help="Agent runtime backend for orchestrator mode (claude or codex).",
             case_sensitive=False,
         ),
     ] = None,
@@ -387,9 +386,6 @@ def workflow(
 
         # Use Codex CLI runtime
         ouroboros run seed.yaml --runtime codex
-
-        # Use OpenCode runtime
-        ouroboros run seed.yaml --runtime opencode
 
         # Debug output
         ouroboros run seed.yaml --debug

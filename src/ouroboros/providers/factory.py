@@ -33,7 +33,11 @@ def resolve_llm_backend(backend: str | None = None) -> str:
     if candidate in _CODEX_BACKENDS:
         return "codex"
     if candidate in _OPENCODE_BACKENDS:
-        return "opencode"
+        msg = (
+            "OpenCode LLM adapter is not yet available. "
+            "Supported backends: claude_code, codex, litellm"
+        )
+        raise ValueError(msg)
     if candidate in _LITELLM_BACKENDS:
         return "litellm"
 
@@ -56,7 +60,7 @@ def resolve_llm_permission_mode(
         raise ValueError(msg)
 
     resolved = resolve_llm_backend(backend)
-    if use_case == "interview" and resolved in ("claude_code", "codex", "opencode"):
+    if use_case == "interview" and resolved in ("claude_code", "codex"):
         # Interview uses LLM to generate questions — no file writes, but
         # codex read-only sandbox blocks LLM output entirely. Must bypass.
         return "bypassPermissions"
@@ -105,13 +109,7 @@ def create_llm_adapter(
             timeout=timeout,
             max_retries=max_retries,
         )
-    if resolved_backend == "opencode":
-        msg = (
-            "OpenCode LLM adapter is not yet available. "
-            "Supported backends: claude_code, codex, litellm"
-        )
-        raise NotImplementedError(msg)
-
+    # opencode is rejected at resolve time; this is a defensive fallback
     from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
     return LiteLLMAdapter(
