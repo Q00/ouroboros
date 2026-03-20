@@ -9,16 +9,16 @@ gap_type_migration_completed: "2026-03-15"
 claim_id_schema_added: "2026-03-15"
 fnd_migration_completed: "2026-03-15"
 status: legacy-frozen
-successor_registry: docs/entity-registry.yaml
-successor_spec: docs/entity-registry-spec.yaml
-migration_guide: docs/entity-registry-migration-guide.md
+# NOTE: The following successor files are planned but not yet created.
+# This registry is frozen — do not add new findings here.
+# successor_registry: docs/entity-registry.yaml
+# successor_spec: docs/entity-registry-spec.yaml
+# migration_guide: docs/entity-registry-migration-guide.md
 description: >-
-  LEGACY ARCHIVE (schema v1.5, frozen 2026-03-15): All 50 FIND-NNN entries in
-  this file have been migrated to FND-NNN records in docs/entity-registry.yaml
-  (record_type: finding). This file is preserved for backward-compatibility and
-  historical reference. Do NOT add new findings here; use docs/entity-registry.yaml
-  instead. All entries implicitly carry record_type: finding per the multi-entity
-  registry backward-compat contract (docs/entity-registry-migration-guide.md Rule 1).
+  LEGACY ARCHIVE (schema v1.5, frozen 2026-03-15): This findings registry is
+  frozen. A multi-entity registry migration was planned but successor files have
+  not yet been created. Do NOT add new findings here; track issues via GitHub
+  Issues instead. This file is preserved for historical reference.
   Original description: Canonical, deduplicated registry of every documentation
   finding produced by all previous-generation static audits. Each entry carries
   a normalized id, a concise claim statement, severity, gap_type (and optional
@@ -26,16 +26,10 @@ description: >-
   to the fix or recommendation.
 schema_changelog:
   "1.5": >-
-    2026-03-15 (Sub-AC 3 of AC 1): FREEZE migration. All 50 FIND-NNN entries
-    migrated to FND-NNN records in docs/entity-registry.yaml with record_type:
-    finding discriminator. New fields in FND-NNN schema: correction (replaces
-    resolution_ref prose), implicated_claim_ids (list; promotes single claim_id
-    to multi-claim forward-compat), legacy_id (FIND-NNN preserved for
-    backward-compat). This file is now a legacy-frozen archive; the authoritative
-    finding registry is docs/entity-registry.yaml. All FIND-NNN entries implicitly
-    have record_type: finding per entity-registry-migration-guide.md Rule 1.
-    Schema bumped 1.4→1.5; no entries modified (backward-compatible).
-    Multi-entity spec: docs/entity-registry-spec.yaml v1.0.
+    2026-03-15 (Sub-AC 3 of AC 1): FREEZE. This file is now a legacy-frozen
+    archive. A multi-entity registry migration (FIND-NNN → FND-NNN) was planned
+    but successor files were not created. Schema bumped 1.4→1.5; no entries
+    modified (backward-compatible).
   "1.4": >-
     2026-03-15 (Sub-AC 2-1): Added claim_id (format: CLM-NNN, pattern ^CLM-[0-9]{3,}$)
     as a required field on every finding entry, making claims independently referenceable
@@ -87,8 +81,8 @@ affects:
   - docs/config-inventory.md
 stats:
   total_findings: 50
-  open: 5
-  resolved: 45
+  open: 2
+  resolved: 48
   by_severity:
     critical: 4
     high: 26
@@ -105,15 +99,13 @@ stats:
 >
 > **Schema version:** 1.5 | **Last updated:** 2026-03-15 (Sub-AC 3 of AC 1: multi-entity migration; schema 1.4→1.5)
 >
-> **⚠️ LEGACY ARCHIVE:** This file is frozen as of 2026-03-15. All 50 FIND-NNN entries have
-> been migrated to FND-NNN records in [`docs/entity-registry.yaml`](../entity-registry.yaml)
-> with `record_type: finding`. Do NOT add new findings here.
-> New findings → [`docs/entity-registry.yaml`](../entity-registry.yaml).
-> Migration details → [`docs/entity-registry-migration-guide.md`](../entity-registry-migration-guide.md).
+> **⚠️ LEGACY ARCHIVE:** This file is frozen as of 2026-03-15.
+> A multi-entity registry migration was planned but the successor files have not yet been created.
+> Do NOT add new findings here. Track issues via GitHub Issues instead.
 >
-> **Backward-compat rule:** All entries in this file implicitly carry `record_type: finding`
-> (docs/entity-registry-migration-guide.md Rule 1). FIND-NNN IDs map 1:1 to FND-NNN in
-> `entity-registry.yaml` (same numeric suffix; `legacy_id` field preserved).
+> **Note:** All entries in this file implicitly carry `record_type: finding`.
+> FIND-NNN IDs were intended to map 1:1 to FND-NNN in a planned entity registry
+> (not yet created).
 >
 > **Source audits merged:** CLI command audit · Config doc audit ·
 > Cross-document contradiction scan · Skill-CLI mapping audit ·
@@ -123,18 +115,15 @@ stats:
 
 ## Schema Reference
 
-> **v1.5 NOTE:** In the new multi-entity registry (`docs/entity-registry.yaml`), these
-> FIND-NNN fields map to FND-NNN fields as follows: `id`→`finding_id`/`legacy_id`;
-> `claim_id`→`legacy_claim_ref`+`implicated_claim_ids[0]`; `claim`→claim record;
-> `resolution_ref`→`correction`; `code_deps`→claim record. A new `record_type: finding`
-> discriminator field is added (implicit for all entries in this legacy file).
-> Full field mapping: `docs/entity-registry-migration-guide.md`.
+> **v1.5 NOTE:** A multi-entity registry migration was planned (FIND-NNN → FND-NNN).
+> The successor files have not yet been created. This schema reference remains for
+> historical context only.
 
 Each finding record carries these **ten** fields (v1.5 adds `record_type`):
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `record_type` | `finding` | *(v1.5, implicit for all entries in this file)* Multi-entity discriminator. All FIND-NNN entries in this legacy file are implicitly `record_type: finding`. Explicit in `docs/entity-registry.yaml` FND-NNN records. |
+| `record_type` | `finding` | *(v1.5, implicit for all entries in this file)* Multi-entity discriminator. All FIND-NNN entries in this legacy file are implicitly `record_type: finding`. |
 | `id` | `FIND-NNN` | Normalized, stable finding identifier |
 | `claim_id` | `CLM-NNN` | *(v1.4, required)* Stable claim identifier — independently referenceable entity separate from the finding ID. Format: `CLM-NNN` (three or more digits, zero-padded). Allows claim cross-referencing without coupling to the finding sequence. |
 | `claim` | string | Concise statement of the erroneous or missing claim |
@@ -208,16 +197,16 @@ other value.  *(Field was named `gap_type_qualifier` in schema v1.2; renamed to
 |----------|-------|----------|------|
 | critical | 4 | 4 | 0 |
 | high | 26 | 24 | 2 |
-| medium | 20 | 17 | 3 |
+| medium | 20 | 20 | 0 |
 | low | 0 | 0 | 0 |
-| **Total** | **50** | **45** | **5** |
+| **Total** | **50** | **48** | **2** |
 
 > **Note (AC-06 severity audit, 2026-03-15):** 11 findings reclassified upward and 4 reclassified
 > from `low` to `medium` to align with the CONTRIBUTING.md severity rubric. `low` is now 0 — all
 > findings at or above `medium`. The `medium open` count corrects a pre-existing table error (was
 > stated as 1; actual count was 2 before FIND-050 moved from `low` to `medium`).
 
-Open findings: [FIND-018](#find-018) *(high)*, [FIND-019](#find-019) *(high)*, [FIND-044](#find-044) *(medium)*, [FIND-045](#find-045) *(medium)*, [FIND-050](#find-050) *(medium)*
+Open findings: [FIND-018](#find-018) *(high)*, [FIND-019](#find-019) *(high)*
 
 ---
 
@@ -962,7 +951,7 @@ findings:
       is uv run ouroboros status execution <session_id> (singular).
     severity: medium
     gap_type: wrong-value
-    status: open
+    status: resolved
     affected_documents:
       - docs/runtime-guides/codex.md
     code_deps:
@@ -982,7 +971,7 @@ findings:
       runtime guides to configure credentials.
     severity: medium
     gap_type: missing-content
-    status: open
+    status: resolved
     affected_documents:
       - docs/runtime-guides/claude-code.md
       - docs/runtime-guides/codex.md
@@ -1071,7 +1060,7 @@ findings:
       plugin update step.
     severity: medium
     gap_type: misleading
-    status: open
+    status: resolved
     affected_documents:
       - docs/runtime-guides/codex.md
     code_deps:
@@ -1131,13 +1120,13 @@ findings:
 | FIND-041 | medium | missing-content | resolved | `codex.md` mapping table missing `ooo ralph`, `ooo tutorial`, `ooo welcome` | `docs/runtime-guides/codex.md` |
 | FIND-042 | medium | wrong-value | resolved | `docs/README.md` PyPI link pointed to wrong package name | `docs/README.md` |
 | FIND-043 | medium | staleness | resolved | `common-workflows.md` MCP path stale (`~/.config/claude/config.json`) | `docs/guides/common-workflows.md` |
-| **FIND-044** | **medium** | **wrong-value** | **open** | `ooo status` CLI equivalent in `codex.md` uses `executions` (list) not `execution <id>` | `docs/runtime-guides/codex.md` |
-| **FIND-045** | **medium** | **missing-content** | **open** | Runtime guides lack cross-link to `credentials.yaml` schema | `docs/runtime-guides/claude-code.md`, `docs/runtime-guides/codex.md` |
+| FIND-044 | medium | wrong-value | resolved | `ooo status` CLI equivalent in `codex.md` uses `executions` (list) not `execution <id>` | `docs/runtime-guides/codex.md` |
+| FIND-045 | medium | missing-content | resolved | Runtime guides lack cross-link to `credentials.yaml` schema | `docs/runtime-guides/claude-code.md`, `docs/runtime-guides/codex.md` |
 | FIND-046 | **high** | wrong-value | resolved | `OUROBOROS_LOG_LEVEL` in `cli-usage.md` CI/CD example; does not exist — silently no effect | `docs/guides/cli-usage.md` |
 | FIND-047 | **medium** | missing-content | resolved | `init list --state-dir` option absent from `cli-reference.md` (present in `cli-usage.md`) | `docs/cli-reference.md` |
 | FIND-048 | **medium** | missing-content | resolved | `mcp serve` orphaned-session auto-cancel at startup not documented | `docs/cli-reference.md`, `docs/guides/cli-usage.md` |
 | FIND-049 | **medium** | missing-content | resolved | `ouroboros tui` bare invocation launches monitor; not documented | `docs/cli-reference.md`, `docs/guides/cli-usage.md` |
-| **FIND-050** | **medium** | **misleading** | **open** | `ooo update` CLI equivalent in `codex.md` omits version-check wrapper | `docs/runtime-guides/codex.md` |
+| FIND-050 | medium | misleading | resolved | `ooo update` CLI equivalent in `codex.md` omits version-check wrapper | `docs/runtime-guides/codex.md` |
 
 ---
 
@@ -1168,44 +1157,25 @@ orchestrator CLI path. Fix is the same as FIND-018.
 
 ---
 
-### FIND-044 — `ooo status` CLI equivalent wrong in `codex.md` (medium)
+### FIND-044 — `ooo status` CLI equivalent wrong in `codex.md` (medium) — RESOLVED
 
-`codex.md` maps `ooo status` to `uv run ouroboros status executions` (plural — lists
-all executions). The skill's primary operation is inspecting a specific session, for
-which the correct CLI equivalent is `uv run ouroboros status execution <session_id>`
-(singular). Additionally, the drift-measurement capability (`ouroboros_measure_drift`)
-has no CLI equivalent at all; neither the list nor single-session CLI subcommands implement it.
-
-**Recommended fix:** Update the codex.md row to:
-
-```
-| `ooo status` | Not yet | `uv run ouroboros status execution <session_id>` — or `uv run ouroboros status executions` to list all. Note: drift-measurement via ouroboros_measure_drift has no CLI equivalent. |
-```
+**Fixed in:** `docs/fix-audit-findings` branch. Updated `codex.md:96` to show both
+`ouroboros status executions` (list all) and `ouroboros status execution <id>` (details),
+with note that drift-measurement is MCP-only.
 
 ---
 
-### FIND-045 — Runtime guides lack `credentials.yaml` cross-link (medium)
+### FIND-045 — Runtime guides lack `credentials.yaml` cross-link (medium) — RESOLVED
 
-`docs/runtime-guides/claude-code.md` and `docs/runtime-guides/codex.md` both describe
-API key requirements in their Prerequisites sections but neither links to the
-`credentials.yaml` schema in `docs/config-reference.md`.
-
-**Recommended fix:** Add to each runtime guide's credentials/API key section:
-
-> For the full `credentials.yaml` schema and all supported keys, see
-> [Config Reference — Credentials](../config-reference.md#credentials).
+**Fixed in:** `docs/fix-audit-findings` branch. Added `credentials.yaml` cross-links
+to both `claude-code.md` and `codex.md` prerequisites sections.
 
 ---
 
-### FIND-050 — `ooo update` CLI equivalent understates skill behavior (low)
+### FIND-050 — `ooo update` CLI equivalent understates skill behavior (low) — RESOLVED
 
-`codex.md` maps `ooo update` to `pip install --upgrade ouroboros-ai`, which performs
-the upgrade correctly but omits the version-check wrapper the skill provides (check
-current version → query PyPI for latest → prompt user → upgrade → optional Claude Code
-plugin update → verify).
-
-**Recommended fix:** Add a parenthetical clarification noting the CLI upgrades directly
-without the version-check flow.
+**Already fixed:** `codex.md:104` already includes parenthetical clarification:
+"(upgrades directly; the skill also checks current vs. latest version before upgrading — the CLI skips that check)".
 
 ---
 

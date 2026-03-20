@@ -54,7 +54,7 @@ When using the `--orchestrator` CLI flag, Claude Code is the default runtime bac
                         +------------------+
 ```
 
-The orchestrator uses `claude-agent-sdk` which connects directly to your authenticated Claude Code session. No API key required.
+The orchestrator uses `claude-agent-sdk` which connects directly to your authenticated Claude Code session. No API key required. For LiteLLM consensus models, see [`credentials.yaml`](../config-reference.md#credentialsyaml).
 
 > For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 

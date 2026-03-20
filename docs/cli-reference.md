@@ -478,7 +478,7 @@ ouroboros tui [monitor] [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--db-path PATH` | Path to the Ouroboros database file (default: `~/.ouroboros/ouroboros.db`) |
-| `--backend TEXT` | TUI backend to use: `textual` (default) or `slt` (native Rust) |
+| `--backend TEXT` | TUI backend to use: `python` (Textual, default) or `slt` (native Rust binary) |
 
 **Examples:**
 

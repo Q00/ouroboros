@@ -50,7 +50,7 @@ ouroboros setup
 ouroboros run ~/.ouroboros/seeds/seed_abc123.yaml
 ```
 
-> **Note:** The standalone CLI does not include an `interview` command. To generate a seed via Socratic interview, use `ooo interview` inside a Claude Code session, or use the MCP tools (`ouroboros_interview`). Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
+> **Note:** The standalone CLI interview is invoked via `ouroboros init start "your context"` (not `ooo interview`, which is Claude Code-specific). The interview flow is identical across both tools. Power users can also author seed YAML files directly — see the [Seed Authoring Guide](guides/seed-authoring.md).
 
 > **Tip:** `ouroboros run` requires a path to a seed YAML file as a positional argument (e.g., `ouroboros run ~/.ouroboros/seeds/seed_<id>.yaml`).
 
@@ -275,7 +275,7 @@ Ouroboros delegates code execution to a pluggable runtime backend. Two ship out 
 | **Skill shortcuts** | `ooo` inside Claude Code | Use `ouroboros` CLI |
 | **Config value** | `claude` | `codex` |
 
-Both backends run the same workflow engine -- seeds, interviews, evaluations, and the TUI work identically.
+Both backends run the same core workflow engine (seed execution, TUI). However, user-facing commands differ: Claude Code offers `ooo` skill shortcuts and the full MCP tool suite (evaluate, evolve, unstuck, ralph), while Codex CLI uses `ouroboros` command equivalents — some advanced operations are MCP/Claude-only.
 
 For backend-specific configuration:
 - [Claude Code runtime guide](runtime-guides/claude-code.md)
