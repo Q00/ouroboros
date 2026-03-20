@@ -1706,9 +1706,13 @@ class EvaluateHandler:
         # Stage 3 results
         if result.stage3_result:
             s3 = result.stage3_result
+            if s3.is_single_model:
+                header = "Stage 3: Multi-Perspective Consensus (single-model)"
+            else:
+                header = "Stage 3: Multi-Model Consensus"
             lines.extend(
                 [
-                    "Stage 3: Multi-Model Consensus",
+                    header,
                     "-" * 40,
                     f"Status: {'APPROVED' if s3.approved else 'REJECTED'}",
                     f"Majority Ratio: {s3.majority_ratio:.1%}",
@@ -1718,11 +1722,19 @@ class EvaluateHandler:
             )
             for vote in s3.votes:
                 decision = "APPROVE" if vote.approved else "REJECT"
-                lines.append(f"  [{decision}] {vote.model} (confidence: {vote.confidence:.2f})")
+                role_suffix = f" [{vote.role}]" if vote.role else ""
+                lines.append(
+                    f"  [{decision}] {vote.model}{role_suffix} (confidence: {vote.confidence:.2f})"
+                )
             if s3.disagreements:
                 lines.append("Disagreements:")
                 for d in s3.disagreements:
                     lines.append(f"  - {d[:100]}...")
+            if s3.is_single_model:
+                lines.append(
+                    "Note: Same model with different evaluation perspectives. "
+                    "Configure OPENROUTER_API_KEY for true multi-model consensus."
+                )
             lines.append("")
 
         # Failure reason

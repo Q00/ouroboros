@@ -169,6 +169,7 @@ class ConsensusResult:
     votes: tuple[Vote, ...]
     majority_ratio: float
     disagreements: tuple[str, ...] = ()
+    is_single_model: bool = False
 
     @property
     def approving_votes(self) -> int:
