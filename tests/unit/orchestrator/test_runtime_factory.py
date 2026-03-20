@@ -28,13 +28,19 @@ class TestResolveAgentRuntimeBackend:
         """Falls back to config/env helper when no explicit backend is provided."""
         with patch(
             "ouroboros.orchestrator.runtime_factory.get_agent_runtime_backend",
-            return_value="opencode",
+            return_value="codex",
         ):
-            assert resolve_agent_runtime_backend() == "opencode"
+            assert resolve_agent_runtime_backend() == "codex"
 
-    def test_resolve_explicit_opencode_alias(self) -> None:
-        """Normalizes the opencode_cli alias to opencode."""
-        assert resolve_agent_runtime_backend("opencode_cli") == "opencode"
+    def test_resolve_rejects_opencode_at_boundary(self) -> None:
+        """OpenCode is rejected at resolve time since it is not yet shipped."""
+        with pytest.raises(ValueError, match="not yet available"):
+            resolve_agent_runtime_backend("opencode")
+
+    def test_resolve_rejects_opencode_cli_alias_at_boundary(self) -> None:
+        """OpenCode CLI alias is also rejected at resolve time."""
+        with pytest.raises(ValueError, match="not yet available"):
+            resolve_agent_runtime_backend("opencode_cli")
 
     def test_resolve_rejects_unknown_backend(self) -> None:
         """Raises for unsupported backends."""
