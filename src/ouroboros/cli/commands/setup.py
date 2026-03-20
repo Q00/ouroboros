@@ -91,7 +91,7 @@ def _prompt_repo_selection(
     """
     raw = Prompt.ask(
         f"[yellow]{prompt_text}[/] (1-{len(repos)}, or 'skip' to skip)",
-        default="1",
+        default="skip",
     )
 
     stripped = raw.strip().lower()

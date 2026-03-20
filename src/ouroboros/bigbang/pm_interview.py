@@ -395,6 +395,16 @@ class PMInterviewEngine:
         # user-provided content.
         self._pm_steering = _PM_SYSTEM_PROMPT_PREFIX
 
+        # Inject PM steering into the inner engine's system prompt builder
+        # so live interview questions are PM-scoped, not generic Socratic.
+        original_build = self.inner._build_system_prompt
+
+        def _pm_build_system_prompt(state: InterviewState) -> str:
+            base = original_build(state)
+            return self._pm_steering + "\n\n" + base
+
+        self.inner._build_system_prompt = _pm_build_system_prompt  # type: ignore[assignment]
+
         result = await self.inner.start_interview(
             initial_context=user_context,
             interview_id=interview_id,
@@ -1109,6 +1119,7 @@ Brownfield codebase context:
         brownfield_repos = tuple(dict(r) for r in self._selected_brownfield_repos)
 
         return PMSeed(
+            pm_id=f"pm_seed_{interview_id}",
             product_name=data.get("product_name", ""),
             goal=data.get("goal", ""),
             user_stories=stories,

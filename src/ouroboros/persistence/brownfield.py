@@ -194,7 +194,8 @@ class BrownfieldStore:
         """Register a brownfield repository.
 
         If a repo with the same path already exists, it is updated (upsert).
-        If is_default is True, all other repos are set to non-default first.
+        If is_default is True, the target repo is marked as default WITHOUT
+        clearing other defaults (multi-default is supported).
 
         Args:
             path: Absolute filesystem path to the repository.
