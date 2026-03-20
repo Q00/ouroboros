@@ -545,18 +545,23 @@ class BrownfieldHandler:
             name=repo.name,
         )
 
+        action_text = "Default set" if is_default else "Default removed"
+        # Fetch all current defaults for accurate reporting
+        all_defaults = await store.get_defaults()
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=f"Default set to: {repo.name} ({repo.path})",
+                        text=f"{action_text}: {repo.name} ({repo.path})",
                     ),
                 ),
                 is_error=False,
                 meta={
                     "action": "set_default",
-                    "default": repo.to_dict(),
+                    "is_default": is_default,
+                    "repo": repo.to_dict(),
+                    "defaults": [d.to_dict() for d in all_defaults],
                 },
             )
         )

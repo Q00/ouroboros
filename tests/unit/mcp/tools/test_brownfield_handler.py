@@ -252,7 +252,7 @@ class TestBrownfieldHandlerDispatch:
         assert result.is_ok
         meta = result.value.meta
         assert meta["action"] == "set_default"
-        assert meta["default"]["name"] == "repo-b"
+        assert meta["repo"]["name"] == "repo-b"
 
     @pytest.mark.asyncio
     async def test_set_default_requires_path(self) -> None:

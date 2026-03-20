@@ -406,7 +406,7 @@ class PMInterviewEngine:
         if result.is_ok:
             # Mark brownfield state on the returned InterviewState
             state = result.value
-            if brownfield_repos:
+            if brownfield_repos and self.codebase_context:
                 state.is_brownfield = True
                 state.codebase_context = self.codebase_context
                 state.codebase_paths = [r["path"] for r in brownfield_repos if "path" in r]
