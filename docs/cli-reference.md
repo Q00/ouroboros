@@ -95,7 +95,7 @@ ouroboros setup --non-interactive
 - For Codex CLI: sets `orchestrator.codex_cli_path` in config
 - For Codex CLI: does **not** currently install global `~/.codex/` rules or skills
 
-> **`opencode` caveat:** `setup` detects the `opencode` binary in PATH but cannot configure it — if `opencode` is your only installed runtime, `setup` exits with `Error: Unsupported runtime: opencode`. To use `opencode`, set `orchestrator.runtime_backend: opencode` manually in `~/.ouroboros/config.yaml`.
+> **`opencode` caveat:** `setup` detects the `opencode` binary in PATH but cannot configure it — if `opencode` is your only installed runtime, `setup` exits with `Error: Unsupported runtime: opencode`. The `opencode` runtime backend is **not yet implemented** (`runtime_factory.py` raises `NotImplementedError`). It is planned for a future release.
 
 ---
 
