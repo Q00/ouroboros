@@ -5,7 +5,7 @@ doc_metadata:
 
 # Seed Authoring Guide (Advanced)
 
-> **Prerequisites:** This is an advanced guide for manually authoring or customizing seeds. If you're new to Ouroboros, start with the [Getting Started guide](../getting-started.md) -- the recommended flow auto-generates a seed from the interview step (`ooo interview` / `ouroboros interview`), and most users never need to write one by hand.
+> **Prerequisites:** This is an advanced guide for manually authoring or customizing seeds. If you're new to Ouroboros, start with the [Getting Started guide](../getting-started.md) -- the recommended flow auto-generates a seed from the interview step (`ooo interview` in Claude Code, or `ouroboros init start` from the terminal), and most users never need to write one by hand.
 
 The Seed is Ouroboros's immutable specification -- a "constitution" that drives execution, evaluation, and drift control. This guide covers the YAML structure, field semantics, and best practices for writing effective seeds.
 
@@ -372,7 +372,7 @@ The following checks are enforced by Pydantic schema validation when the seed is
 
 The seed creation workflow has three phases where failures can occur:
 
-1. **Interview phase** (`ooo interview` / `ouroboros interview`) — LLM generates clarifying questions
+1. **Interview phase** (`ooo interview` / `ouroboros init start`) — LLM generates clarifying questions
 2. **Ambiguity scoring phase** — LLM scores the collected answers
 3. **Seed generation & save phase** — LLM extracts requirements and writes the YAML file
 
@@ -397,7 +397,7 @@ export OPENAI_API_KEY="sk-..."
 # To avoid needing an API key, use Claude Code (Max Plan):
 ooo interview "Build a REST API"
 # or standalone:
-ouroboros interview start --orchestrator "Build a REST API"
+ouroboros init start --orchestrator "Build a REST API"
 ```
 
 #### LLM rate-limit or transient API error during questioning
@@ -437,8 +437,7 @@ Interview interrupted. Progress has been saved.
 
 The session can be resumed:
 ```bash
-ouroboros interview list                                    # find the session ID
-ouroboros interview start --resume interview_20260125_120000      # resume it
+ouroboros init start --resume interview_20260125_120000      # resume a saved session
 ```
 
 Exit code is `0` (not an error).
@@ -454,7 +453,7 @@ Interview failed: EOF when reading a line
 
 **Behavior:** The outer error handler catches `EOFError` as a generic exception, prints the error, and exits with code `1`. Progress up to the last completed round is saved (state is persisted after each recorded response).
 
-**Fix:** Run `ouroboros interview` in an interactive terminal. If you must automate input, pipe the full conversation and ensure the stream stays open until the interview completes.
+**Fix:** Run `ouroboros init start` in an interactive terminal. If you must automate input, pipe the full conversation and ensure the stream stays open until the interview completes.
 
 #### Input context too long
 
@@ -503,7 +502,7 @@ Error: Response cannot be empty. Please try again.
 Error: Failed to load interview: Interview not found: interview_bad_id
 ```
 
-**Fix:** Run `ouroboros interview list` to see valid session IDs.
+**Fix:** Check `~/.ouroboros/states/` for valid session directories.
 
 #### Resume with corrupt or unreadable state file
 
@@ -534,7 +533,7 @@ Error: Failed to calculate ambiguity: Failed to parse scoring response after 10 
 
 **Fix:** Check API key validity and quota, then re-run the seed generation by selecting "Proceed to generate Seed specification?" at the post-interview prompt:
 ```bash
-ouroboros interview start --resume interview_20260125_120000
+ouroboros init start --resume interview_20260125_120000
 ```
 The interview session is already complete; you can proceed directly to seed generation.
 
@@ -580,7 +579,7 @@ Error: Failed to generate Seed: <provider error message, e.g. "Rate limit exceed
 
 **Fix:** Check your API key and quota, then resume:
 ```bash
-ouroboros interview start --resume interview_20260125_120000
+ouroboros init start --resume interview_20260125_120000
 ```
 
 #### LLM API response parse failure during requirement extraction
@@ -594,7 +593,7 @@ Error: Failed to generate Seed: Failed to parse extraction response after 2 atte
 
 **Fix:** Resume the session and try again:
 ```bash
-ouroboros interview start --resume interview_20260125_120000
+ouroboros init start --resume interview_20260125_120000
 ```
 If the model consistently fails to extract a `goal` or `ontology_name`, add more specific answers in additional interview rounds before attempting generation.
 
@@ -623,7 +622,7 @@ chmod 755 ~/.ouroboros/seeds
 
 Then resume and re-trigger seed generation:
 ```bash
-ouroboros interview start --resume interview_20260125_120000
+ouroboros init start --resume interview_20260125_120000
 ```
 
 #### Seed save failure — disk full
@@ -647,7 +646,7 @@ Error: Invalid value for '--state-dir': Path '...' does not exist.
 **Fix:** Create the directory first:
 ```bash
 mkdir -p /path/to/custom/states
-ouroboros interview start --state-dir /path/to/custom/states "Build a REST API"
+ouroboros init start --state-dir /path/to/custom/states "Build a REST API"
 ```
 
 ---
@@ -724,7 +723,7 @@ Warning: --runtime only affects the workflow execution step when --orchestrator 
 
 **Fix:** Add `--orchestrator` if you want to use the specified runtime backend for the post-generation workflow step:
 ```bash
-ouroboros interview start --orchestrator --runtime codex "Build a REST API"
+ouroboros init start --orchestrator --runtime codex "Build a REST API"
 ```
 
 ---
@@ -734,7 +733,7 @@ ouroboros interview start --orchestrator --runtime codex "Build a REST API"
 Enable verbose output during the interview and seed generation phases with `--debug`:
 
 ```bash
-ouroboros interview start --debug "Build a REST API"
+ouroboros init start --debug "Build a REST API"
 ```
 
 With `--debug` active, the console shows:
