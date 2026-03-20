@@ -237,7 +237,7 @@ Convergence is reached when ontology similarity >= 0.95 -- when the system has q
 
 ### Ralph: The Loop That Never Stops
 
-`ouroboros ralph` (or `ooo ralph` in Claude Code) runs the evolutionary loop persistently -- across session boundaries -- until convergence is reached. Each step is **stateless**: the EventStore reconstructs the full lineage, so even if your machine restarts, the serpent picks up where it left off.
+`ooo ralph` (Claude Code skill) runs the evolutionary loop persistently -- across session boundaries -- until convergence is reached. Each step is **stateless**: the EventStore reconstructs the full lineage, so even if your machine restarts, the serpent picks up where it left off.
 
 ```
 Ralph Cycle 1: evolve_step(lineage, seed) -> Gen 1 -> action=CONTINUE

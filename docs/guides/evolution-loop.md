@@ -76,7 +76,7 @@ Gen 3: {Task, Priority, Status, DueDate}     → similarity 1.00 → CONVERGED
 
 ## Ralph: The Persistent Loop
 
-`ooo ralph` (Claude Code) or `ouroboros ralph` (CLI) runs the evolutionary loop persistently -- across session boundaries -- until convergence. Each step is **stateless**: the EventStore reconstructs the full lineage, so even if your machine restarts, the serpent picks up where it left off.
+`ooo ralph` (Claude Code skill) runs the evolutionary loop persistently -- across session boundaries -- until convergence. Each step is **stateless**: the EventStore reconstructs the full lineage, so even if your machine restarts, the serpent picks up where it left off.
 
 ```
 Ralph Cycle 1: evolve_step(lineage, seed) → Gen 1 → action=CONTINUE
@@ -88,7 +88,7 @@ Ralph Cycle 3: evolve_step(lineage)       → Gen 3 → action=CONVERGED
 
 ### Ralph vs Evolve
 
-| | `ooo evolve` / `ouroboros evolve` | `ooo ralph` |
+| | `ooo evolve` | `ooo ralph` |
 |---|---|---|
 | **Scope** | Single evolution step | Loop until convergence |
 | **Session** | Within current session | Survives session restarts |
