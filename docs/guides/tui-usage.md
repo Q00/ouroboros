@@ -118,7 +118,7 @@ Browse and select from available sessions. Useful when multiple workflows have b
 
 ## Lineage Screen (Key: `e`)
 
-View evolutionary lineage across generations when using `ouroboros evolve`. Shows how seeds evolved and converged over multiple iterations.
+View evolutionary lineage across generations when using evolutionary loops (`ooo evolve`). Shows how seeds evolved and converged over multiple iterations.
 
 ## Keyboard Shortcuts
 
