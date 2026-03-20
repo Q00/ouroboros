@@ -721,6 +721,7 @@ class CodexCliLLMAdapter:
                     )
                 )
 
+            content = self._restore_schema_transforms(content, map_paths)
             content = self._truncate_if_oversized(content, normalized_model or "default")
 
             return Result.ok(

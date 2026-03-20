@@ -31,7 +31,11 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
     if candidate in _CODEX_BACKENDS:
         return "codex"
     if candidate in _OPENCODE_BACKENDS:
-        return "opencode"
+        msg = (
+            "OpenCode runtime is not yet available. "
+            "Supported backends: claude, codex"
+        )
+        raise ValueError(msg)
 
     msg = f"Unsupported orchestrator runtime backend: {candidate}"
     raise ValueError(msg)
@@ -77,10 +81,7 @@ def create_agent_runtime(
             **runtime_kwargs,
         )
 
-    if resolved_backend == "opencode":
-        msg = "OpenCode runtime is not yet available. Supported backends: claude, codex"
-        raise NotImplementedError(msg)
-
+    # opencode is rejected at resolve time; this is a defensive fallback
     msg = f"Unsupported orchestrator runtime backend: {resolved_backend}"
     raise ValueError(msg)
 

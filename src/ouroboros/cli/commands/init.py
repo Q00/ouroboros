@@ -45,7 +45,6 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
-    OPENCODE = "opencode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -54,7 +53,6 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
-    OPENCODE = "opencode"
 
 
 class _DefaultStartGroup(typer.core.TyperGroup):
@@ -555,7 +553,7 @@ def start(
             "--runtime",
             help=(
                 "Agent runtime backend for the workflow execution step after seed generation "
-                "(claude, codex, or opencode)."
+                "(claude or codex)."
             ),
             case_sensitive=False,
         ),
@@ -566,7 +564,7 @@ def start(
             "--llm-backend",
             help=(
                 "LLM backend for interview, ambiguity scoring, and seed generation "
-                "(claude_code, litellm, codex, or opencode)."
+                "(claude_code, litellm, or codex)."
             ),
             case_sensitive=False,
         ),
@@ -593,8 +591,6 @@ def start(
         ouroboros init start --orchestrator --runtime codex "Build a REST API"
 
         ouroboros init start --llm-backend codex "Build a REST API"
-
-        ouroboros init start --orchestrator --runtime opencode --llm-backend opencode "Build a REST API"
 
         ouroboros init start --resume interview_20260116_120000
 
