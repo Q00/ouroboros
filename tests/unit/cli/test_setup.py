@@ -264,7 +264,7 @@ class TestSetDefaultRepo:
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
-        mock_store.list_repos = AsyncMock(return_value=[mock_repo])
+        mock_store.list = AsyncMock(return_value=[mock_repo])
 
         with (
             patch(
@@ -292,7 +292,7 @@ class TestSetDefaultRepo:
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
-        mock_store.list_repos = AsyncMock(return_value=[mock_repo])
+        mock_store.list = AsyncMock(return_value=[mock_repo])
         mock_store.update_is_default = AsyncMock(return_value=mock_repo_updated)
 
         with patch(
@@ -310,7 +310,7 @@ class TestSetDefaultRepo:
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
-        mock_store.list_repos = AsyncMock(return_value=[])
+        mock_store.list = AsyncMock(return_value=[])
 
         with (
             patch(
@@ -771,7 +771,7 @@ class TestSetDefaultRepoExtended:
         mock_store = AsyncMock()
         mock_store.initialize = AsyncMock()
         mock_store.close = AsyncMock()
-        mock_store.list_repos = AsyncMock(side_effect=RuntimeError("DB error"))
+        mock_store.list = AsyncMock(side_effect=RuntimeError("DB error"))
 
         with patch(
             "ouroboros.cli.commands.setup.BrownfieldStore",

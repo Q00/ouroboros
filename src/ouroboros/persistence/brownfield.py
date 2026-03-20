@@ -471,7 +471,11 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                # Clear all defaults
+                # Validate the target path exists BEFORE clearing defaults
+                check = await conn.execute(select(t.c.path).where(t.c.path == path))
+                if check.first() is None:
+                    return None
+                # Clear all defaults (only after validation)
                 await conn.execute(
                     update(t).where(t.c.is_default.is_(True)).values(is_default=False)
                 )
@@ -479,8 +483,6 @@ class BrownfieldStore:
                 result = await conn.execute(
                     update(t).where(t.c.path == path).values(is_default=True)
                 )
-                if result.rowcount == 0:
-                    return None
 
                 # Fetch and return the updated row
                 result = await conn.execute(

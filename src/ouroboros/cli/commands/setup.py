@@ -176,7 +176,7 @@ async def _set_default_repo(path: str) -> bool:
     store = BrownfieldStore()
     try:
         await store.initialize()
-        repos = await store.list_repos()
+        repos = await store.list()
         current = next((r for r in repos if r.path == path), None)
         if current is None:
             return False

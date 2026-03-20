@@ -1175,7 +1175,7 @@ class TestUserSelectionSimulation:
 
         # Step 3: Set default (toggle: /b is not default, so it gets added)
         mock_result = BrownfieldRepo(path="/b", name="beta", is_default=True)
-        mock_store.list_repos = AsyncMock(return_value=mock_repos)
+        mock_store.list = AsyncMock(return_value=mock_repos)
         with (
             patch(
                 "ouroboros.cli.commands.setup.BrownfieldStore",

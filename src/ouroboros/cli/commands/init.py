@@ -515,13 +515,14 @@ def _find_pm_seeds(seeds_dir: Path | None = None) -> list[Path]:
         seeds_dir: Directory to scan. Defaults to ~/.ouroboros/seeds/.
 
     Returns:
-        List of paths to pm_seed YAML files, sorted by modification time (newest first).
+        List of paths to pm_seed files (JSON or YAML), sorted by modification time (newest first).
     """
     seeds_dir = seeds_dir or Path.home() / ".ouroboros" / "seeds"
     if not seeds_dir.is_dir():
         return []
+    # Support both JSON (new) and YAML (legacy) PM seed formats
     pm_seeds = sorted(
-        seeds_dir.glob("pm_seed_*.yaml"),
+        list(seeds_dir.glob("pm_seed_*.json")) + list(seeds_dir.glob("pm_seed_*.yaml")),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
