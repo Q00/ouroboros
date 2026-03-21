@@ -320,6 +320,35 @@ class TestCompletedGenerationFiltering:
 
         assert criteria._count_evolved_generations(lineage) == 1
 
+    def test_evaluate_max_generations_ignores_pending(self) -> None:
+        """max_generations should only count completed generations."""
+        # 29 completed + 1 pending = 30 total, but only 29 completed
+        completed_gens = [_generation(i, SCHEMA_A) for i in range(1, 30)]
+        pending = _generation(30, SCHEMA_B, phase=GenerationPhase.WONDERING)
+        lineage = _lineage_with_generations(*completed_gens, pending)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            max_generations=30,
+        )
+        signal = criteria.evaluate(lineage, None)
+        # Should NOT hit max_generations because only 29 are completed
+        assert "Max generations" not in signal.reason
+
+    def test_evaluate_min_generations_ignores_pending(self) -> None:
+        """min_generations guard should only count completed generations."""
+        lineage = _lineage_with_generations(
+            _generation(1, SCHEMA_A),
+            _generation(2, SCHEMA_B, phase=GenerationPhase.WONDERING),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+        )
+        signal = criteria.evaluate(lineage, None)
+        assert "Below minimum" in signal.reason
+        assert "1/2" in signal.reason  # Only 1 completed out of 2 required
+
 
 # -- Feature 2: Convergence Gating via Evaluation --
 
