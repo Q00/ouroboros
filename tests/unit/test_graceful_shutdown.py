@@ -13,10 +13,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ouroboros.core.lineage import GenerationPhase, LineageStatus
+from ouroboros.core.lineage import GenerationPhase
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_interrupted
-from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig, GenerationResult
+from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
 from ouroboros.evolution.projector import LineageProjector
 
 LINEAGE_ID = "lin_shutdown_test"
@@ -43,7 +43,9 @@ class TestInterruptedEvent:
 
     def test_event_with_partial_state(self) -> None:
         event = lineage_generation_interrupted(
-            LINEAGE_ID, 2, "reflecting",
+            LINEAGE_ID,
+            2,
+            "reflecting",
             partial_state={"wonder_questions": ["q1", "q2"]},
         )
         assert event.data["partial_state"]["wonder_questions"] == ["q1", "q2"]
@@ -61,19 +63,36 @@ class TestProjectorInterrupted:
         projector = LineageProjector()
         events = [
             _make_event("lineage.created", {"goal": "test"}),
-            _make_event("lineage.generation.started", {
-                "generation_number": 1, "phase": "executing", "seed_id": "s1",
-            }),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 1, "seed_id": "s1",
-                "ontology_snapshot": {"name": "O1", "description": "d", "fields": []},
-            }),
-            _make_event("lineage.generation.started", {
-                "generation_number": 2, "phase": "wondering",
-            }),
-            _make_event("lineage.generation.interrupted", {
-                "generation_number": 2, "last_completed_phase": "wondering",
-            }),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 1,
+                    "phase": "executing",
+                    "seed_id": "s1",
+                },
+            ),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 1,
+                    "seed_id": "s1",
+                    "ontology_snapshot": {"name": "O1", "description": "d", "fields": []},
+                },
+            ),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 2,
+                    "phase": "wondering",
+                },
+            ),
+            _make_event(
+                "lineage.generation.interrupted",
+                {
+                    "generation_number": 2,
+                    "last_completed_phase": "wondering",
+                },
+            ),
         ]
         lineage = projector.project(events)
         assert lineage is not None
@@ -85,18 +104,33 @@ class TestProjectorInterrupted:
         projector = LineageProjector()
         events = [
             _make_event("lineage.created", {"goal": "test"}),
-            _make_event("lineage.generation.started", {
-                "generation_number": 1, "phase": "executing",
-            }),
-            _make_event("lineage.generation.completed", {
-                "generation_number": 1,
-            }),
-            _make_event("lineage.generation.started", {
-                "generation_number": 2, "phase": "wondering",
-            }),
-            _make_event("lineage.generation.interrupted", {
-                "generation_number": 2, "last_completed_phase": "reflecting",
-            }),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 1,
+                    "phase": "executing",
+                },
+            ),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 1,
+                },
+            ),
+            _make_event(
+                "lineage.generation.started",
+                {
+                    "generation_number": 2,
+                    "phase": "wondering",
+                },
+            ),
+            _make_event(
+                "lineage.generation.interrupted",
+                {
+                    "generation_number": 2,
+                    "last_completed_phase": "reflecting",
+                },
+            ),
         ]
         gen, phase = projector.find_resume_point(events)
         assert gen == 2

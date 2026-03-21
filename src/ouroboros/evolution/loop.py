@@ -179,7 +179,7 @@ class EvolutionaryLoop:
         """Replace SIGINT handler with graceful shutdown flag."""
         self._shutdown_requested = False
 
-        def _handle_sigint(signum: int, frame: Any) -> None:
+        def _handle_sigint(signum: int, frame: Any) -> None:  # noqa: ARG001
             if self._shutdown_requested:
                 # Second Ctrl+C: force exit
                 logger.warning("evolution.force_shutdown")
@@ -190,8 +190,11 @@ class EvolutionaryLoop:
         try:
             self._original_sigint_handler = signal.getsignal(signal.SIGINT)
             signal.signal(signal.SIGINT, _handle_sigint)
-        except (ValueError, OSError):
-            # Can't set signal handler (not on main thread, etc.)
+        except (ValueError, OSError) as exc:
+            logger.warning(
+                "evolution.sigint_handler_unavailable",
+                extra={"reason": str(exc)},
+            )
             self._original_sigint_handler = None
 
     def _uninstall_sigint_handler(self) -> None:
@@ -199,8 +202,11 @@ class EvolutionaryLoop:
         if self._original_sigint_handler is not None:
             try:
                 signal.signal(signal.SIGINT, self._original_sigint_handler)
-            except (ValueError, OSError):
-                pass
+            except (ValueError, OSError) as exc:
+                logger.warning(
+                    "evolution.sigint_handler_restore_failed",
+                    extra={"reason": str(exc)},
+                )
             self._original_sigint_handler = None
 
     def set_project_dir(self, project_dir: str | None) -> Token[str | None]:
@@ -244,11 +250,12 @@ class EvolutionaryLoop:
         self._install_sigint_handler()
         generation_results: list[GenerationResult] = []
         current_seed = initial_seed
-        generation_number = 0
 
         try:
             return await self._run_loop(
-                lineage, current_seed, generation_results,
+                lineage,
+                current_seed,
+                generation_results,
             )
         finally:
             self._uninstall_sigint_handler()
@@ -425,8 +432,10 @@ class EvolutionaryLoop:
             current_seed = result.seed
 
         # Best-so-far recovery: if no generations completed, report error
+        # But allow interrupted results through (they enable resume)
         completed_results = [r for r in generation_results if r.phase == GenerationPhase.COMPLETED]
-        if not completed_results and not generation_results:
+        has_interrupted = any(r.phase == GenerationPhase.INTERRUPTED for r in generation_results)
+        if not completed_results and not has_interrupted:
             return Result.err(OuroborosError("No generations completed before failure"))
 
         # Partial results available — return best-so-far (lineage stays ACTIVE for resume)
@@ -806,13 +815,15 @@ class EvolutionaryLoop:
 
         # Build partial state from whatever we have so far
         partial_state: dict[str, Any] = {}
-        if wonder_output:
-            partial_state["wonder_questions"] = list(wonder_output.questions)
-        if reflect_output and reflect_output.ontology_mutations:
-            partial_state["mutation_count"] = len(reflect_output.ontology_mutations)
-        if execution_output:
-            # Truncate to avoid oversized events
-            partial_state["execution_output"] = execution_output[:10_000]
+        try:
+            if wonder_output:
+                partial_state["wonder_questions"] = list(wonder_output.questions)
+            if reflect_output and reflect_output.ontology_mutations:
+                partial_state["mutation_count"] = len(reflect_output.ontology_mutations)
+            if execution_output:
+                partial_state["execution_output"] = execution_output[:10_000]
+        except Exception:
+            logger.warning("evolution.generation.partial_state_build_failed", exc_info=True)
 
         try:
             await self.event_store.append(
@@ -824,7 +835,15 @@ class EvolutionaryLoop:
                 )
             )
         except Exception:
-            pass  # Best-effort
+            logger.error(
+                "evolution.generation.interrupted_event_failed",
+                extra={
+                    "lineage_id": lineage_id,
+                    "generation": generation_number,
+                    "last_completed_phase": last_completed_phase,
+                },
+                exc_info=True,
+            )
 
         return GenerationResult(
             generation_number=generation_number,
@@ -913,8 +932,11 @@ class EvolutionaryLoop:
 
             # Check for graceful shutdown after Wonder phase
             interrupted = await self._check_shutdown(
-                lineage.lineage_id, generation_number, "wondering",
-                current_seed, wonder_output=wonder_output,
+                lineage.lineage_id,
+                generation_number,
+                "wondering",
+                current_seed,
+                wonder_output=wonder_output,
             )
             if interrupted:
                 return Result.ok(interrupted)
@@ -1039,8 +1061,12 @@ class EvolutionaryLoop:
         else:
             pre_exec_phase = "started"
         interrupted = await self._check_shutdown(
-            lineage.lineage_id, generation_number, pre_exec_phase,
-            current_seed, wonder_output=wonder_output, reflect_output=reflect_output,
+            lineage.lineage_id,
+            generation_number,
+            pre_exec_phase,
+            current_seed,
+            wonder_output=wonder_output,
+            reflect_output=reflect_output,
         )
         if interrupted:
             return Result.ok(interrupted)
@@ -1136,8 +1162,12 @@ class EvolutionaryLoop:
 
         # Check for graceful shutdown after executing
         interrupted = await self._check_shutdown(
-            lineage.lineage_id, generation_number, "executing",
-            current_seed, wonder_output=wonder_output, reflect_output=reflect_output,
+            lineage.lineage_id,
+            generation_number,
+            "executing",
+            current_seed,
+            wonder_output=wonder_output,
+            reflect_output=reflect_output,
             execution_output=execution_output,
         )
         if interrupted:
