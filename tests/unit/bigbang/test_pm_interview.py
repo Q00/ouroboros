@@ -183,8 +183,12 @@ class TestOpeningQuestion:
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
+        async def _fake_explore(repos: list[dict[str, str]]) -> str:
+            engine.codebase_context = "Python project"
+            return "Python project"
+
         with patch.object(
-            engine, "explore_codebases", new_callable=AsyncMock, return_value=""
+            engine, "explore_codebases", new_callable=AsyncMock, side_effect=_fake_explore,
         ) as mock_explore:
             result = await engine.ask_opening_and_start(
                 user_response="Build a feature on top of existing code",
@@ -192,6 +196,9 @@ class TestOpeningQuestion:
             )
 
             assert result.is_ok
+            state = result.value
+            assert state.is_brownfield is True
+            assert state.codebase_paths == [{"path": "/code/proj", "role": "primary"}]
             mock_explore.assert_called_once()
 
     @pytest.mark.asyncio
