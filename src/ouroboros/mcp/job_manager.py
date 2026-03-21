@@ -154,6 +154,9 @@ class JobManager:
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
                 terminal_type = "mcp.job.cancelled"
                 terminal_status = JobStatus.CANCELLED
+            elif getattr(result, "meta", {}).get("action") == "interrupted":
+                terminal_type = "mcp.job.failed"
+                terminal_status = JobStatus.FAILED
             await self._append_event(
                 terminal_type,
                 job_id,
@@ -161,7 +164,9 @@ class JobManager:
                     "status": terminal_status.value,
                     "message": "Job complete"
                     if terminal_status == JobStatus.COMPLETED
-                    else "Job cancelled",
+                    else "Job cancelled"
+                    if terminal_status == JobStatus.CANCELLED
+                    else "Job interrupted",
                     "result_text": getattr(result, "text_content", str(result))[:20_000],
                     "result_meta": _safe_meta(getattr(result, "meta", {})),
                     "is_error": bool(getattr(result, "is_error", False)),
@@ -276,6 +281,10 @@ class JobManager:
                     return f"Generation {gen} completed"
                 if latest.type == "lineage.generation.failed":
                     return f"Generation {gen} failed | {phase}"
+                if latest.type == "lineage.generation.interrupted":
+                    gen = data.get("generation_number", "?")
+                    last_phase = data.get("last_completed_phase", "unknown")
+                    return f"Generation {gen} interrupted (last phase: {last_phase})"
                 if latest.type in {
                     "lineage.converged",
                     "lineage.stagnated",

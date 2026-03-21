@@ -110,18 +110,24 @@ def lineage_generation_failed(
 def lineage_generation_interrupted(
     lineage_id: str,
     generation_number: int,
-    last_completed_phase: str,
+    last_completed_phase: str | None = None,
     partial_state: dict | None = None,
 ) -> BaseEvent:
     """Create event when a generation is gracefully interrupted by SIGINT.
 
     Distinct from 'failed' — carries partial results and the last phase
     that completed successfully, enabling phase-level resume.
+
+    Args:
+        last_completed_phase: Must be a valid GenerationPhase value
+            (wondering, reflecting, seeding, executing) or None if
+            no phase completed before interruption.
     """
     data: dict = {
         "generation_number": generation_number,
-        "last_completed_phase": last_completed_phase,
     }
+    if last_completed_phase is not None:
+        data["last_completed_phase"] = last_completed_phase
     if partial_state:
         data["partial_state"] = partial_state
     return BaseEvent(

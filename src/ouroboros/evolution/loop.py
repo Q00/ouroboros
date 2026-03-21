@@ -292,6 +292,9 @@ class EvolutionaryLoop:
                     timeout=loop_timeout,
                 )
             except TimeoutError:
+                # Note: asyncio.wait_for cancels the task first, so
+                # _run_generation's CancelledError handler already emitted
+                # a generation.failed event. We only log here — no duplicate emit.
                 logger.error(
                     "evolution.generation.timeout",
                     extra={
@@ -299,14 +302,6 @@ class EvolutionaryLoop:
                         "generation": generation_number,
                         "timeout": self.config.generation_timeout_seconds,
                     },
-                )
-                await self.event_store.append(
-                    lineage_generation_failed(
-                        lineage.lineage_id,
-                        generation_number,
-                        "executing",
-                        f"Generation timed out after {self.config.generation_timeout_seconds}s",
-                    )
                 )
                 break
 
@@ -532,6 +527,16 @@ class EvolutionaryLoop:
                     None,
                 )
                 if last_completed is None:
+                    has_interrupted = any(
+                        g.phase == GenerationPhase.INTERRUPTED for g in lineage.generations
+                    )
+                    if has_interrupted:
+                        return Result.err(
+                            OuroborosError(
+                                "Lineage was interrupted before any generation completed. "
+                                "Re-provide initial_seed to resume."
+                            )
+                        )
                     return Result.err(
                         OuroborosError("Events exist but no completed generations found")
                     )
@@ -790,7 +795,7 @@ class EvolutionaryLoop:
         self,
         lineage_id: str,
         generation_number: int,
-        last_completed_phase: str,
+        last_completed_phase: str | None,
         current_seed: Seed,
         wonder_output: WonderOutput | None = None,
         reflect_output: ReflectOutput | None = None,
@@ -934,7 +939,7 @@ class EvolutionaryLoop:
             interrupted = await self._check_shutdown(
                 lineage.lineage_id,
                 generation_number,
-                "wondering",
+                GenerationPhase.WONDERING.value,
                 current_seed,
                 wonder_output=wonder_output,
             )
@@ -1005,7 +1010,7 @@ class EvolutionaryLoop:
                 interrupted = await self._check_shutdown(
                     lineage.lineage_id,
                     generation_number,
-                    "reflecting",
+                    GenerationPhase.REFLECTING.value,
                     current_seed,
                     wonder_output=wonder_output,
                     reflect_output=reflect_output,
@@ -1067,11 +1072,11 @@ class EvolutionaryLoop:
         # - wonder_output set but no reflect → only wondering completed
         # - neither → Gen 1 or no prior phases ran
         if reflect_output is not None:
-            pre_exec_phase = "seeding"
+            pre_exec_phase = GenerationPhase.SEEDING.value
         elif wonder_output is not None:
-            pre_exec_phase = "wondering"
+            pre_exec_phase = GenerationPhase.WONDERING.value
         else:
-            pre_exec_phase = "started"
+            pre_exec_phase = None  # Gen 1: no phase completed yet
         interrupted = await self._check_shutdown(
             lineage.lineage_id,
             generation_number,
@@ -1176,7 +1181,7 @@ class EvolutionaryLoop:
         interrupted = await self._check_shutdown(
             lineage.lineage_id,
             generation_number,
-            "executing",
+            GenerationPhase.EXECUTING.value,
             current_seed,
             wonder_output=wonder_output,
             reflect_output=reflect_output,
