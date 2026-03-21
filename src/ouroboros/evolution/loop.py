@@ -108,6 +108,7 @@ class StepAction(StrEnum):
     STAGNATED = "stagnated"
     EXHAUSTED = "exhausted"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,7 +635,7 @@ class EvolutionaryLoop:
                     generation_result=result,
                     convergence_signal=signal,
                     lineage=lineage,
-                    action=StepAction.FAILED,
+                    action=StepAction.INTERRUPTED,
                     next_generation=generation_number,
                 )
             )
@@ -784,6 +785,7 @@ class EvolutionaryLoop:
         current_seed: Seed,
         wonder_output: WonderOutput | None = None,
         reflect_output: ReflectOutput | None = None,
+        execution_output: str | None = None,
     ) -> GenerationResult | None:
         """Check if graceful shutdown was requested.
 
@@ -808,6 +810,9 @@ class EvolutionaryLoop:
             partial_state["wonder_questions"] = list(wonder_output.questions)
         if reflect_output and reflect_output.ontology_mutations:
             partial_state["mutation_count"] = len(reflect_output.ontology_mutations)
+        if execution_output:
+            # Truncate to avoid oversized events
+            partial_state["execution_output"] = execution_output[:10_000]
 
         try:
             await self.event_store.append(
@@ -826,6 +831,7 @@ class EvolutionaryLoop:
             seed=current_seed,
             wonder_output=wonder_output,
             reflect_output=reflect_output,
+            execution_output=execution_output,
             phase=GenerationPhase.INTERRUPTED,
             success=False,
         )
@@ -1022,8 +1028,16 @@ class EvolutionaryLoop:
             )
 
         # Check for graceful shutdown before executing.
-        # For Gen 1 there is no wonder/reflect/seed, so the last phase is "started".
-        pre_exec_phase = "seeding" if generation_number > 1 and wonder_output else "started"
+        # Derive the actual last completed phase from what ran:
+        # - reflect_output set → seeding completed
+        # - wonder_output set but no reflect → only wondering completed
+        # - neither → Gen 1 or no prior phases ran
+        if reflect_output is not None:
+            pre_exec_phase = "seeding"
+        elif wonder_output is not None:
+            pre_exec_phase = "wondering"
+        else:
+            pre_exec_phase = "started"
         interrupted = await self._check_shutdown(
             lineage.lineage_id, generation_number, pre_exec_phase,
             current_seed, wonder_output=wonder_output, reflect_output=reflect_output,
@@ -1124,6 +1138,7 @@ class EvolutionaryLoop:
         interrupted = await self._check_shutdown(
             lineage.lineage_id, generation_number, "executing",
             current_seed, wonder_output=wonder_output, reflect_output=reflect_output,
+            execution_output=execution_output,
         )
         if interrupted:
             return Result.ok(interrupted)
