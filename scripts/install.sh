@@ -6,7 +6,7 @@ set -euo pipefail
 
 # TODO: Remove version pin when 0.26.0 stable is released
 PACKAGE_NAME="ouroboros-ai"
-VERSION="==0.26.0b2"
+VERSION="==0.26.0b3"
 MIN_PYTHON="3.12"
 
 echo "╭──────────────────────────────────────╮"
