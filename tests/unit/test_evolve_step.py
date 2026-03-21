@@ -180,7 +180,8 @@ class TestStepTypes:
         assert StepAction.STAGNATED == "stagnated"
         assert StepAction.EXHAUSTED == "exhausted"
         assert StepAction.FAILED == "failed"
-        assert len(StepAction) == 5
+        assert StepAction.INTERRUPTED == "interrupted"
+        assert len(StepAction) == 6
 
     def test_step_result_is_frozen(self) -> None:
         """StepResult is frozen dataclass."""
