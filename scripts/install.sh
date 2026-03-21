@@ -1,9 +1,12 @@
 #!/bin/bash
 # Ouroboros installer — auto-detects runtime and installs accordingly.
-# Usage: curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
+# TODO: Change URL back to main branch when 0.26.0 is officially released
 set -euo pipefail
 
-PACKAGE="ouroboros-ai"
+# TODO: Remove version pin when 0.26.0 stable is released
+PACKAGE_NAME="ouroboros-ai"
+VERSION="==0.26.0b1"
 MIN_PYTHON="3.12"
 
 echo "╭──────────────────────────────────────╮"
@@ -46,9 +49,9 @@ fi
 if [ -z "$RUNTIME" ]; then
   echo
   echo "No runtime CLI detected. Which runtime will you use?"
-  echo "  [1] Codex   (pip install $PACKAGE)"
-  echo "  [2] Claude  (pip install $PACKAGE[claude])"
-  echo "  [3] All     (pip install $PACKAGE[all])"
+  echo "  [1] Codex   (pip install ${PACKAGE_NAME}${VERSION})"
+  echo "  [2] Claude  (pip install ${PACKAGE_NAME}[claude]${VERSION})"
+  echo "  [3] All     (pip install ${PACKAGE_NAME}[all]${VERSION})"
   read -rp "Select [1]: " choice
   case "${choice:-1}" in
     2) EXTRAS="[claude]"; RUNTIME="claude" ;;
@@ -57,20 +60,21 @@ if [ -z "$RUNTIME" ]; then
   esac
 fi
 
+# Build PEP 508 install specifier: name[extras]==version
+INSTALL_SPEC="${PACKAGE_NAME}${EXTRAS}${VERSION}"
+
 echo
+echo "Installing ${INSTALL_SPEC} ..."
 
-# 3. Install
-INSTALL_CMD=""
+# 3. Install (or upgrade if already installed)
 if command -v pipx &>/dev/null; then
-  INSTALL_CMD="pipx install"
+  pipx install "$INSTALL_SPEC" 2>/dev/null \
+    || pipx upgrade "$INSTALL_SPEC"
 elif command -v uv &>/dev/null; then
-  INSTALL_CMD="uv tool install"
+  uv tool install --upgrade "$INSTALL_SPEC"
 else
-  INSTALL_CMD="$PYTHON -m pip install --user"
+  $PYTHON -m pip install --user --upgrade "$INSTALL_SPEC"
 fi
-
-echo "Installing ${PACKAGE}${EXTRAS} ..."
-$INSTALL_CMD "${PACKAGE}${EXTRAS}"
 
 # 4. Setup
 if [ -n "$RUNTIME" ]; then
