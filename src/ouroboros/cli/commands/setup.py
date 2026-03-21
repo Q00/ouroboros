@@ -1,14 +1,14 @@
 """Setup command for Ouroboros brownfield repository management.
 
 Scans the home directory for git repositories with GitHub origins,
-registers them in the brownfield DB, and allows the user to select
-a default repository for PM interview context.
+registers them in the brownfield DB, and allows the user to toggle
+default repositories for PM interview context (multi-default supported).
 
 Usage:
-    ouroboros setup              Scan, register, and select default repo
+    ouroboros setup              Scan, register, and toggle default repos
     ouroboros setup scan         Re-scan home directory for repos
     ouroboros setup list         List registered brownfield repos
-    ouroboros setup default      Change default brownfield repo
+    ouroboros setup default      Toggle default brownfield repos
 """
 
 from __future__ import annotations
@@ -78,9 +78,9 @@ def _display_repos_table(
 
 def _prompt_repo_selection(
     repos: list[dict],
-    prompt_text: str = "Select default repo",
+    prompt_text: str = "Toggle default repo",
 ) -> int | None:
-    """Prompt the user to select a single repo by number.
+    """Prompt the user to select a repo to toggle as default.
 
     Args:
         repos: List of repo dicts.
@@ -316,9 +316,9 @@ def list_command() -> None:
 
 @app.command()
 def default() -> None:
-    """Change the default brownfield repo for PM interviews.
+    """Toggle default brownfield repos for PM interviews.
 
-    Displays all registered repos and lets you pick a new default.
+    Displays all registered repos and lets you toggle defaults (multi-default supported).
     """
     console.print("\n[bold cyan]Set Default Brownfield Repos[/]\n")
 

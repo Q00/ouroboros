@@ -408,7 +408,13 @@ async def _run_pm_interview(
         # Allow early exit
         if user_response.strip().lower() in ("done", "exit", "quit", "/done"):
             print_info("Finishing interview...")
+            # Remove the synthetic unanswered round before completing
+            # so extraction never sees a question the user didn't answer.
+            if state.rounds and state.rounds[-1].user_response is None:
+                state.rounds.pop()
             await engine.complete_interview(state)
+            await engine.save_state(state)
+            _save_cli_pm_meta(state.interview_id, engine)
             break
 
         # Pop the unanswered round before recording so record_response
@@ -425,8 +431,9 @@ async def _run_pm_interview(
     if decide_later_summary:
         console.print(f"\n[bold yellow]{decide_later_summary}[/]\n")
 
-    # Generate PM seed and document
-    if state.rounds and state.is_complete:
+    # Generate PM seed and document — only if there are actual answered rounds
+    answered_rounds = [r for r in state.rounds if r.user_response is not None]
+    if answered_rounds and state.is_complete:
         console.print("\n[bold cyan]Generating PM...[/]\n")
         seed_result = await engine.generate_pm_seed(state)
         if seed_result.is_ok:
