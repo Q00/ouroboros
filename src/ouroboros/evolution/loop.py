@@ -424,14 +424,16 @@ class EvolutionaryLoop:
             current_seed = result.seed
 
         # Best-so-far recovery: if no generations completed, report error
-        if not generation_results:
+        completed_results = [r for r in generation_results if r.phase == GenerationPhase.COMPLETED]
+        if not completed_results and not generation_results:
             return Result.err(OuroborosError("No generations completed before failure"))
 
         # Partial results available — return best-so-far (lineage stays ACTIVE for resume)
+        # total_generations counts only completed generations to avoid overstating progress
         return Result.ok(
             EvolutionaryResult(
                 lineage=lineage,
-                total_generations=len(generation_results),
+                total_generations=len(completed_results),
                 converged=lineage.status == LineageStatus.CONVERGED,
                 final_seed=current_seed,
                 generation_results=tuple(generation_results),
@@ -751,11 +753,11 @@ class EvolutionaryLoop:
                 parallel=parallel,
             )
         except asyncio.CancelledError:
-            # MCP transport disconnect or task cancellation.
-            # Emit interrupted (not failed) so resume can pick up from the
-            # last completed phase instead of redoing the entire generation.
+            # MCP transport disconnect, timeout, or external task cancellation.
+            # Use 'failed' (not 'interrupted') to avoid conflicting with the
+            # graceful SIGINT shutdown path which emits 'interrupted'.
             logger.warning(
-                "evolution.generation.interrupted",
+                "evolution.generation.cancelled",
                 extra={
                     "lineage_id": lineage.lineage_id,
                     "generation": generation_number,
@@ -763,10 +765,11 @@ class EvolutionaryLoop:
             )
             try:
                 await self.event_store.append(
-                    lineage_generation_interrupted(
+                    lineage_generation_failed(
                         lineage.lineage_id,
                         generation_number,
-                        last_completed_phase="cancelled",
+                        "cancelled",
+                        "Generation cancelled (MCP transport disconnect or task cancellation)",
                     )
                 )
             except Exception:
@@ -1018,9 +1021,11 @@ class EvolutionaryLoop:
                 )
             )
 
-        # Check for graceful shutdown before executing
+        # Check for graceful shutdown before executing.
+        # For Gen 1 there is no wonder/reflect/seed, so the last phase is "started".
+        pre_exec_phase = "seeding" if generation_number > 1 and wonder_output else "started"
         interrupted = await self._check_shutdown(
-            lineage.lineage_id, generation_number, "seeding",
+            lineage.lineage_id, generation_number, pre_exec_phase,
             current_seed, wonder_output=wonder_output, reflect_output=reflect_output,
         )
         if interrupted:
