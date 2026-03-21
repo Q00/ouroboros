@@ -8,6 +8,7 @@ import pytest
 
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCliRuntime
 
 # TODO: uncomment when OpenCode runtime is shipped
 # from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
@@ -23,6 +24,15 @@ class TestResolveAgentRuntimeBackend:
     def test_resolve_explicit_codex_alias(self) -> None:
         """Normalizes the codex_cli alias to codex."""
         assert resolve_agent_runtime_backend("codex_cli") == "codex"
+
+    def test_resolve_explicit_gemini_alias(self) -> None:
+        """Normalizes the gemini_cli alias to gemini."""
+        assert resolve_agent_runtime_backend("gemini_cli") == "gemini"
+
+    def test_resolves_gemini_aliases(self) -> None:
+        """Gemini aliases normalize to gemini."""
+        assert resolve_agent_runtime_backend("gemini") == "gemini"
+        assert resolve_agent_runtime_backend("gemini_cli") == "gemini"
 
     def test_resolve_uses_config_helper(self) -> None:
         """Falls back to config/env helper when no explicit backend is provided."""
@@ -83,6 +93,33 @@ class TestCreateAgentRuntime:
         assert runtime._skill_dispatcher is mock_dispatcher
         assert mock_create_dispatcher.call_args.kwargs["cwd"] == "/tmp/project"
         assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "codex"
+
+    def test_create_gemini_runtime_uses_configured_cli_path(self) -> None:
+        """Creates Gemini runtime with the configured CLI path."""
+        mock_dispatcher = object()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_gemini_cli_path",
+                return_value="/tmp/gemini",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=mock_dispatcher,
+            ) as mock_create_dispatcher,
+        ):
+            runtime = create_agent_runtime(
+                backend="gemini",
+                permission_mode="acceptEdits",
+                cwd="/tmp/project",
+            )
+
+        assert isinstance(runtime, GeminiCliRuntime)
+        assert runtime._cli_path == "/tmp/gemini"
+        assert runtime._cwd == "/tmp/project"
+        assert runtime._skill_dispatcher is mock_dispatcher
+        assert mock_create_dispatcher.call_args.kwargs["cwd"] == "/tmp/project"
+        assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "gemini"
 
     def test_create_claude_runtime_uses_factory_cwd_and_cli_path(self) -> None:
         """Claude runtime receives the same construction options as other backends."""
@@ -207,3 +244,36 @@ class TestCreateAgentRuntime:
 
         assert isinstance(runtime, CodexCliRuntime)
         assert runtime._llm_backend == "opencode"
+
+    def test_create_gemini_runtime_uses_configured_permission_mode(self) -> None:
+        """Gemini runtime factory uses config/env permission defaults when omitted."""
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_agent_permission_mode",
+                return_value="acceptEdits",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=object(),
+            ),
+        ):
+            runtime = create_agent_runtime(backend="gemini")
+
+        assert isinstance(runtime, GeminiCliRuntime)
+        assert runtime._permission_mode == "acceptEdits"
+
+    def test_default_backend_is_codex(self) -> None:
+        """Default runtime backend should be codex when no config exists."""
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_agent_runtime_backend",
+                return_value="codex",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=object(),
+            ),
+        ):
+            runtime = create_agent_runtime()
+
+        assert isinstance(runtime, CodexCliRuntime)

@@ -114,7 +114,9 @@ class LLMConfig(BaseModel, frozen=True):
         context_compression_model: Default model for workflow context compression
     """
 
-    backend: Literal["claude", "claude_code", "litellm", "codex", "opencode"] = "claude_code"
+    backend: Literal["claude", "claude_code", "litellm", "codex", "gemini", "opencode"] = (
+        "claude_code"
+    )
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     qa_model: str = "claude-sonnet-4-20250514"
@@ -281,6 +283,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         runtime_backend: Agent runtime backend to use for orchestrator execution.
         permission_mode: Default permission mode for local agent runtimes.
         opencode_permission_mode: Default permission mode for OpenCode agent runtimes.
+        gemini_permission_mode: Default permission mode for Gemini agent runtimes.
         cli_path: Path to Claude CLI binary. Supports:
             - Absolute path: /path/to/my-claude-wrapper
             - ~ expansion: ~/.my-claude-wrapper/bin/my-claude-wrapper
@@ -289,6 +292,10 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - Absolute path: /path/to/codex
             - ~ expansion: ~/.local/bin/codex
             - None: Resolve from PATH at runtime
+        gemini_cli_path: Path to Gemini CLI binary. Supports:
+            - Absolute path: /path/to/gemini
+            - ~ expansion: ~/.local/bin/gemini
+            - None: Resolve from PATH at runtime
         opencode_cli_path: Path to OpenCode CLI binary. Supports:
             - Absolute path: /path/to/opencode
             - ~ expansion: ~/.local/bin/opencode
@@ -296,17 +303,19 @@ class OrchestratorConfig(BaseModel, frozen=True):
         default_max_turns: Default max turns for agent execution
     """
 
-    runtime_backend: Literal["claude", "codex", "opencode"] = "claude"
+    runtime_backend: Literal["claude", "codex", "gemini", "opencode"] = "codex"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = (
         "bypassPermissions"
     )
+    gemini_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     cli_path: str | None = None
     codex_cli_path: str | None = None
+    gemini_cli_path: str | None = None
     opencode_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
 
-    @field_validator("cli_path", "codex_cli_path", "opencode_cli_path")
+    @field_validator("cli_path", "codex_cli_path", "gemini_cli_path", "opencode_cli_path")
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:
         """Expand ~ in cli_path."""

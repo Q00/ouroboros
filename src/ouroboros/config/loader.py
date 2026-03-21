@@ -55,8 +55,11 @@ from ouroboros.config.models import (  # noqa: E402
 )
 from ouroboros.core.errors import ConfigError  # noqa: E402
 
-_CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
+_CODEX_LLM_BACKENDS = frozenset(
+    {"codex", "codex_cli", "gemini", "gemini_cli", "opencode", "opencode_cli"}
+)
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
+_GEMINI_BACKENDS = frozenset({"gemini", "gemini_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
@@ -365,7 +368,7 @@ def get_agent_runtime_backend() -> str:
     Priority:
         1. OUROBOROS_AGENT_RUNTIME environment variable
         2. config.yaml orchestrator.runtime_backend
-        3. "claude"
+        3. "codex"
 
     Returns:
         Normalized runtime backend name.
@@ -378,12 +381,17 @@ def get_agent_runtime_backend() -> str:
         config = load_config()
         return config.orchestrator.runtime_backend
     except ConfigError:
-        return "claude"
+        return "codex"
 
 
 def _uses_opencode_backend(backend: str | None) -> bool:
     """Return True when a backend name resolves to an OpenCode runtime."""
     return (backend or "").strip().lower() in _OPENCODE_BACKENDS
+
+
+def _uses_gemini_backend(backend: str | None) -> bool:
+    """Return True when a backend name resolves to a Gemini runtime."""
+    return (backend or "").strip().lower() in _GEMINI_BACKENDS
 
 
 def get_agent_permission_mode(backend: str | None = None) -> str:
@@ -392,9 +400,11 @@ def get_agent_permission_mode(backend: str | None = None) -> str:
     Priority:
         1. OUROBOROS_AGENT_PERMISSION_MODE environment variable
         2. OUROBOROS_OPENCODE_PERMISSION_MODE for OpenCode runtimes
-        3. config.yaml orchestrator.opencode_permission_mode for OpenCode runtimes
-        4. config.yaml orchestrator.permission_mode
-        5. backend default ("bypassPermissions" for OpenCode, otherwise "acceptEdits")
+        3. OUROBOROS_GEMINI_PERMISSION_MODE for Gemini runtimes
+        4. config.yaml orchestrator.opencode_permission_mode for OpenCode runtimes
+        5. config.yaml orchestrator.gemini_permission_mode for Gemini runtimes
+        6. config.yaml orchestrator.permission_mode
+        7. backend default ("bypassPermissions" for OpenCode, otherwise "acceptEdits")
     """
     env_mode = os.environ.get("OUROBOROS_AGENT_PERMISSION_MODE", "").strip()
     if env_mode:
@@ -405,10 +415,17 @@ def get_agent_permission_mode(backend: str | None = None) -> str:
         if opencode_env_mode:
             return opencode_env_mode
 
+    if _uses_gemini_backend(backend):
+        gemini_env_mode = os.environ.get("OUROBOROS_GEMINI_PERMISSION_MODE", "").strip()
+        if gemini_env_mode:
+            return gemini_env_mode
+
     try:
         config = load_config()
         if _uses_opencode_backend(backend):
             return config.orchestrator.opencode_permission_mode
+        if _uses_gemini_backend(backend):
+            return config.orchestrator.gemini_permission_mode
         return config.orchestrator.permission_mode
     except ConfigError:
         return "bypassPermissions" if _uses_opencode_backend(backend) else "acceptEdits"
@@ -458,6 +475,31 @@ def get_opencode_cli_path() -> str | None:
         config = load_config()
         if config.orchestrator.opencode_cli_path:
             return config.orchestrator.opencode_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_gemini_cli_path() -> str | None:
+    """Get Gemini CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_GEMINI_CLI_PATH environment variable
+        2. config.yaml orchestrator.gemini_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to Gemini CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_GEMINI_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.gemini_cli_path:
+            return config.orchestrator.gemini_cli_path
     except ConfigError:
         pass
 

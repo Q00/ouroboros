@@ -1,6 +1,6 @@
 <!--
 doc_metadata:
-  runtime_scope: [local, claude, codex]
+  runtime_scope: [local, claude, codex, gemini]
 -->
 
 # Configuration Reference
@@ -53,22 +53,26 @@ Controls how Ouroboros launches and communicates with the agent runtime backend.
 
 ```yaml
 orchestrator:
-  runtime_backend: claude       # "claude" | "codex" | "opencode" (opencode: not yet implemented)
+  runtime_backend: codex        # "claude" | "codex" | "gemini" | "opencode" (opencode: not yet implemented)
   permission_mode: acceptEdits  # "default" | "acceptEdits" | "bypassPermissions"
+  gemini_permission_mode: acceptEdits
   opencode_permission_mode: bypassPermissions
   cli_path: null                # Path to Claude CLI binary; null = use SDK default
   codex_cli_path: null          # Path to Codex CLI binary; null = resolve from PATH
+  gemini_cli_path: null         # Path to Gemini CLI binary; null = resolve from PATH
   opencode_cli_path: null       # Path to OpenCode CLI binary; null = resolve from PATH
   default_max_turns: 10
 ```
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `runtime_backend` | `"claude"` \| `"codex"` \| `"opencode"` | `"claude"` | The agent runtime backend used for workflow execution. Overridable via `OUROBOROS_AGENT_RUNTIME`. |
+| `runtime_backend` | `"claude"` \| `"codex"` \| `"gemini"` \| `"opencode"` | `"codex"` | The agent runtime backend used for workflow execution. Overridable via `OUROBOROS_AGENT_RUNTIME`. |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for Claude and Codex runtimes. Overridable via `OUROBOROS_AGENT_PERMISSION_MODE`. |
+| `gemini_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode when using the Gemini runtime. Overridable via `OUROBOROS_GEMINI_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"bypassPermissions"` | Permission mode when using the OpenCode runtime. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `cli_path` | `string \| null` | `null` | Absolute path to the Claude CLI binary (`~` is expanded). When `null`, the SDK-bundled CLI is used. Overridable via `OUROBOROS_CLI_PATH`. |
 | `codex_cli_path` | `string \| null` | `null` | Absolute path to the Codex CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_CODEX_CLI_PATH`. |
+| `gemini_cli_path` | `string \| null` | `null` | Absolute path to the Gemini CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_GEMINI_CLI_PATH`. |
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `default_max_turns` | `int >= 1` | `10` | Default maximum number of turns per agent execution task. |
 
@@ -93,7 +97,7 @@ llm:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"opencode"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. |
+| `backend` | `"claude"` \| `"claude_code"` \| `"litellm"` \| `"codex"` \| `"gemini"` \| `"opencode"` | `"claude_code"` | Default backend for LLM-only flows. Overridable via `OUROBOROS_LLM_BACKEND`. |
 | `permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"default"` | Permission mode for non-OpenCode LLM flows. Overridable via `OUROBOROS_LLM_PERMISSION_MODE`. |
 | `opencode_permission_mode` | `"default"` \| `"acceptEdits"` \| `"bypassPermissions"` | `"acceptEdits"` | Permission mode for OpenCode-backed LLM flows. Overridable via `OUROBOROS_OPENCODE_PERMISSION_MODE`. |
 | `qa_model` | `string` | `"claude-sonnet-4-20250514"` | Model used for post-execution QA verdict generation. Overridable via `OUROBOROS_QA_MODEL`. |
@@ -399,11 +403,13 @@ All environment variables have higher priority than the corresponding `config.ya
 
 | Variable | Overrides | Description |
 |----------|-----------|-------------|
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Active runtime backend (`claude`, `codex`, `opencode`). |
-| `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for non-OpenCode runtimes. |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Active runtime backend (`claude`, `codex`, `gemini`, `opencode`). |
+| `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for non-OpenCode/Gemini runtimes. |
+| `OUROBOROS_GEMINI_PERMISSION_MODE` | `orchestrator.gemini_permission_mode` | Permission mode when using Gemini runtime. |
 | `OUROBOROS_OPENCODE_PERMISSION_MODE` | `orchestrator.opencode_permission_mode` | Permission mode when using OpenCode runtime. |
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary. |
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary. |
+| `OUROBOROS_GEMINI_CLI_PATH` | `orchestrator.gemini_cli_path` | Path to the Gemini CLI binary. |
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary. |
 
 ### LLM Flow

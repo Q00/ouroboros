@@ -47,6 +47,7 @@ from ouroboros.orchestrator.coordinator import (
     FileConflict,
     LevelCoordinator,
 )
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCliRuntime
 
 # TODO: uncomment when OpenCode runtime is shipped
 # from ouroboros.orchestrator.opencode_runtime import (
@@ -155,6 +156,7 @@ __all__ = [
     "ClaudeAgentAdapter",
     "ClaudeCodeRuntime",
     "CodexCliRuntime",
+    "GeminiCliRuntime",
     # "OpenCodeRuntime",  # TODO: uncomment when shipped
     # "OpenCodeRuntimeAdapter",  # TODO: uncomment when shipped
     "DEFAULT_TOOLS",

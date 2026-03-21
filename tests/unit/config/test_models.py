@@ -439,19 +439,32 @@ class TestOrchestratorConfig:
     """Test OrchestratorConfig runtime settings."""
 
     def test_orchestrator_config_defaults(self) -> None:
-        """Defaults to the Claude runtime."""
+        """Defaults to the Codex runtime."""
         config = OrchestratorConfig()
-        assert config.runtime_backend == "claude"
+        assert config.runtime_backend == "codex"
         assert config.permission_mode == "acceptEdits"
         assert config.opencode_permission_mode == "bypassPermissions"
+        assert config.gemini_permission_mode == "acceptEdits"
         assert config.codex_cli_path is None
+        assert config.gemini_cli_path is None
         assert config.opencode_cli_path is None
+
+    def test_orchestrator_config_accepts_gemini_backend(self) -> None:
+        """Accepts gemini as a valid runtime backend."""
+        config = OrchestratorConfig(runtime_backend="gemini")
+        assert config.runtime_backend == "gemini"
 
     def test_orchestrator_config_expands_codex_cli_path(self) -> None:
         """Expands ~ in codex_cli_path."""
         config = OrchestratorConfig(runtime_backend="codex", codex_cli_path="~/bin/codex")
         assert config.runtime_backend == "codex"
         assert "~" not in config.codex_cli_path
+
+    def test_orchestrator_config_expands_gemini_cli_path(self) -> None:
+        """Expands ~ in gemini_cli_path."""
+        config = OrchestratorConfig(runtime_backend="gemini", gemini_cli_path="~/bin/gemini")
+        assert config.runtime_backend == "gemini"
+        assert "~" not in config.gemini_cli_path
 
     def test_orchestrator_config_expands_opencode_cli_path(self) -> None:
         """Expands ~ in opencode_cli_path."""

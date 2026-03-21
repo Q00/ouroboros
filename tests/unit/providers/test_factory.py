@@ -12,6 +12,7 @@ from ouroboros.providers.factory import (
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
+from ouroboros.providers.gemini_cli_adapter import GeminiCliLLMAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
 
@@ -33,6 +34,11 @@ class TestResolveLLMBackend:
         """Codex aliases normalize to codex."""
         assert resolve_llm_backend("codex") == "codex"
         assert resolve_llm_backend("codex_cli") == "codex"
+
+    def test_resolves_gemini_aliases(self) -> None:
+        """Gemini aliases normalize to gemini."""
+        assert resolve_llm_backend("gemini") == "gemini"
+        assert resolve_llm_backend("gemini_cli") == "gemini"
 
     def test_rejects_opencode_at_boundary(self) -> None:
         """OpenCode is rejected at resolve time since it is not yet shipped."""
@@ -85,6 +91,25 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, CodexCliLLMAdapter)
         assert adapter._cli_path == "/tmp/codex"
 
+    def test_creates_gemini_adapter(self) -> None:
+        """Gemini backend returns GeminiCliLLMAdapter."""
+        adapter = create_llm_adapter(backend="gemini", cwd="/tmp/project")
+        assert isinstance(adapter, GeminiCliLLMAdapter)
+        assert adapter._cwd == "/tmp/project"
+
+    def test_creates_gemini_adapter_uses_configured_cli_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gemini factory consumes the shared CLI path helper when no explicit path is passed."""
+        monkeypatch.setattr(
+            "ouroboros.providers.factory.get_gemini_cli_path", lambda: "/tmp/gemini"
+        )
+
+        adapter = create_llm_adapter(backend="gemini", cwd="/tmp/project")
+
+        assert isinstance(adapter, GeminiCliLLMAdapter)
+        assert adapter._cli_path == "/tmp/gemini"
+
     @pytest.mark.skip(reason="OpenCode adapter not yet shipped")
     def test_creates_opencode_adapter(self) -> None:
         """OpenCode backend returns OpenCodeLLMAdapter."""
@@ -127,8 +152,16 @@ class TestCreateLLMAdapter:
         assert adapter._allowed_tools == ["Read"]
         assert adapter._max_turns == 2
 
-    def test_forwards_interview_options_to_codex_adapter(self) -> None:
-        """Codex backend receives interview/debug options through the factory."""
+    def test_interview_always_uses_claude_regardless_of_configured_backend(self) -> None:
+        """Interview must always use Claude, even when Gemini/Codex is the default."""
+        for backend in ("gemini", "codex", "codex_cli", "gemini_cli"):
+            adapter = create_llm_adapter(backend=backend, use_case="interview")
+            assert isinstance(adapter, ClaudeCodeAdapter), (
+                f"Interview with backend={backend!r} should return ClaudeCodeAdapter"
+            )
+
+    def test_forwards_interview_options_to_claude_adapter_when_codex_backend(self) -> None:
+        """Interview with codex backend should forward options to Claude adapter."""
         callback_calls: list[tuple[str, str]] = []
 
         def callback(message_type: str, content: str) -> None:
@@ -143,9 +176,7 @@ class TestCreateLLMAdapter:
             on_message=callback,
         )
 
-        assert isinstance(adapter, CodexCliLLMAdapter)
-        assert adapter._allowed_tools == ["Read", "Grep"]
-        assert adapter._max_turns == 5
+        assert isinstance(adapter, ClaudeCodeAdapter)
         assert adapter._on_message is callback
 
     def test_uses_configured_permission_mode_when_omitted(
@@ -192,6 +223,13 @@ class TestResolveLLMPermissionMode:
         """Interview needs bypassPermissions for Codex — read-only sandbox blocks LLM output."""
         assert (
             resolve_llm_permission_mode(backend="codex", use_case="interview")
+            == "bypassPermissions"
+        )
+
+    def test_interview_mode_escalates_to_bypass_for_gemini(self) -> None:
+        """Interview needs bypassPermissions for Gemini — sandbox blocks LLM output."""
+        assert (
+            resolve_llm_permission_mode(backend="gemini", use_case="interview")
             == "bypassPermissions"
         )
 
