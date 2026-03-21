@@ -984,6 +984,7 @@ class PMInterviewHandler:
             timestamp = session_id.replace("interview_", "", 1)
         else:
             from datetime import UTC, datetime
+
             timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         pm_filename = f"prd_{timestamp}.md"
         pm_path = save_pm_document(seed, output_path=Path(cwd) / pm_filename)

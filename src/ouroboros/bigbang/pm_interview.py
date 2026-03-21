@@ -410,7 +410,9 @@ class PMInterviewEngine:
             if brownfield_repos and self.codebase_context:
                 state.is_brownfield = True
                 state.codebase_context = self.codebase_context
-                state.codebase_paths = [{"path": r["path"], "role": "primary"} for r in brownfield_repos if "path" in r]
+                state.codebase_paths = [
+                    {"path": r["path"], "role": "primary"} for r in brownfield_repos if "path" in r
+                ]
                 state.explore_completed = True
             log.info(
                 "pm.interview_started",

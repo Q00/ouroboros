@@ -188,7 +188,10 @@ class TestOpeningQuestion:
             return "Python project"
 
         with patch.object(
-            engine, "explore_codebases", new_callable=AsyncMock, side_effect=_fake_explore,
+            engine,
+            "explore_codebases",
+            new_callable=AsyncMock,
+            side_effect=_fake_explore,
         ) as mock_explore:
             result = await engine.ask_opening_and_start(
                 user_response="Build a feature on top of existing code",
