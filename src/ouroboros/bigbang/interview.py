@@ -701,8 +701,16 @@ class InterviewEngine:
 
         return "\n".join(sections)
 
+    # Agent SDK CLI can return empty responses when the combined prompt
+    # (system_prompt + conversation history) exceeds an internal threshold.
+    # Cap each user response to keep the total prompt within safe limits.
+    _MAX_USER_RESPONSE_CHARS = 800
+
     def _build_conversation_history(self, state: InterviewState) -> list[Message]:
         """Build conversation history from completed rounds.
+
+        Long user responses are truncated to prevent Agent SDK CLI from
+        returning empty responses due to prompt size.
 
         Args:
             state: Current interview state.
@@ -715,7 +723,10 @@ class InterviewEngine:
         for round_data in state.rounds:
             messages.append(Message(role=MessageRole.ASSISTANT, content=round_data.question))
             if round_data.user_response:
-                messages.append(Message(role=MessageRole.USER, content=round_data.user_response))
+                response = round_data.user_response
+                if len(response) > self._MAX_USER_RESPONSE_CHARS:
+                    response = response[: self._MAX_USER_RESPONSE_CHARS] + "..."
+                messages.append(Message(role=MessageRole.USER, content=response))
 
         return messages
 
