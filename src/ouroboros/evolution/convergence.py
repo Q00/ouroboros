@@ -12,7 +12,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ouroboros.core.lineage import EvaluationSummary, OntologyDelta, OntologyLineage
+from ouroboros.core.lineage import (
+    EvaluationSummary,
+    GenerationPhase,
+    GenerationRecord,
+    OntologyDelta,
+    OntologyLineage,
+)
 from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.evolution.wonder import WonderOutput
 
@@ -225,13 +231,18 @@ class ConvergenceCriteria:
             generation=current_gen,
         )
 
+    def _completed_generations(self, lineage: OntologyLineage) -> tuple[GenerationRecord, ...]:
+        """Return only completed generations for convergence calculations."""
+        return tuple(g for g in lineage.generations if g.phase == GenerationPhase.COMPLETED)
+
     def _latest_similarity(self, lineage: OntologyLineage) -> float:
-        """Compute similarity between the last two generations."""
-        if len(lineage.generations) < 2:
+        """Compute similarity between the last two completed generations."""
+        gens = self._completed_generations(lineage)
+        if len(gens) < 2:
             return 0.0
 
-        prev = lineage.generations[-2].ontology_snapshot
-        curr = lineage.generations[-1].ontology_snapshot
+        prev = gens[-2].ontology_snapshot
+        curr = gens[-1].ontology_snapshot
         delta = OntologyDelta.compute(prev, curr)
         return delta.similarity
 
@@ -244,7 +255,7 @@ class ConvergenceCriteria:
         conservatively preserved a well-performing ontology, or because
         Wonder/Reflect encountered errors preventing mutation.
         """
-        gens = lineage.generations
+        gens = self._completed_generations(lineage)
         if len(gens) < 2:
             return 0
 
@@ -291,7 +302,7 @@ class ConvergenceCriteria:
 
     def _check_stagnation(self, lineage: OntologyLineage) -> bool:
         """Check if ontology has been unchanged for stagnation_window gens."""
-        gens = lineage.generations
+        gens = self._completed_generations(lineage)
         if len(gens) < self.stagnation_window:
             return False
 
@@ -308,7 +319,7 @@ class ConvergenceCriteria:
 
     def _check_oscillation(self, lineage: OntologyLineage) -> bool:
         """Detect oscillation: N~N-2 AND N-1~N-3 (full period-2 verification)."""
-        gens = lineage.generations
+        gens = self._completed_generations(lineage)
 
         # Period-2 full check: A→B→A→B — verify BOTH half-periods
         if len(gens) >= 4:
