@@ -981,7 +981,11 @@ class PMInterviewHandler:
         # Save human-readable prd_{session_id}.md to cwd (idempotent for retries)
         # Derive a stable filename from session_id so repeated calls overwrite
         # the same file regardless of whether the ID follows the interview_ convention.
-        safe_id = session_id.replace("interview_", "", 1) if session_id.startswith("interview_") else session_id
+        safe_id = (
+            session_id.replace("interview_", "", 1)
+            if session_id.startswith("interview_")
+            else session_id
+        )
         pm_filename = f"prd_{safe_id}.md"
         pm_path = save_pm_document(seed, output_path=Path(cwd) / pm_filename)
 
