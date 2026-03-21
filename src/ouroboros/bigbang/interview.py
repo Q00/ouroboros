@@ -589,7 +589,19 @@ class InterviewEngine:
 
         perspective_panel = self._build_perspective_panel_prompt(state)
 
-        return f"{dynamic_header}\n{base_prompt}\n\n{perspective_panel}"
+        full_prompt = f"{dynamic_header}\n{base_prompt}\n\n{perspective_panel}"
+
+        # Cap total system prompt to prevent Agent SDK CLI empty responses.
+        # The bundled CLI can fail silently when the prompt exceeds ~5,000 chars.
+        _MAX_SYSTEM_PROMPT_CHARS = 4800
+        if len(full_prompt) > _MAX_SYSTEM_PROMPT_CHARS:
+            # Keep the dynamic header (has initial_context + codebase) and trim base_prompt
+            trimmed_base = base_prompt[
+                : _MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - len(perspective_panel) - 20
+            ]
+            full_prompt = f"{dynamic_header}\n{trimmed_base}...\n\n{perspective_panel}"
+
+        return full_prompt
 
     def _build_ambiguity_snapshot_prompt(self, state: InterviewState) -> str:
         """Build prompt context from the latest ambiguity snapshot."""
