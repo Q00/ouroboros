@@ -35,6 +35,21 @@ from ouroboros.mcp.types import (
 
 log = structlog.get_logger(__name__)
 
+VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "sse"})
+
+
+def validate_transport(transport: str) -> str:
+    """Normalize and validate a transport string.
+
+    Returns the lowercased transport if valid, raises ValueError otherwise.
+    """
+    transport = transport.lower()
+    if transport not in VALID_TRANSPORTS:
+        msg = f"Invalid transport {transport!r}. Must be one of: {', '.join(sorted(VALID_TRANSPORTS))}"
+        raise ValueError(msg)
+    return transport
+
+
 # Map MCPToolParameter types to Python annotations for FastMCP schema inference.
 _TOOL_TYPE_MAP: dict[ToolInputType, type] = {
     ToolInputType.STRING: str,
@@ -403,8 +418,6 @@ class MCPServerAdapter:
                 )
             )
 
-    _VALID_TRANSPORTS = {"stdio", "sse"}
-
     async def serve(
         self,
         transport: str = "stdio",
@@ -421,10 +434,7 @@ class MCPServerAdapter:
             host: Host to bind to (SSE only). Defaults to "localhost".
             port: Port to bind to (SSE only). Defaults to 8080.
         """
-        transport = transport.lower()
-        if transport not in self._VALID_TRANSPORTS:
-            msg = f"Invalid transport {transport!r}. Must be one of: {', '.join(sorted(self._VALID_TRANSPORTS))}"
-            raise ValueError(msg)
+        transport = validate_transport(transport)
 
         try:
             from mcp.server.fastmcp import FastMCP

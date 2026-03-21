@@ -101,9 +101,16 @@ async def _run_mcp_server(
         transport: Transport type (stdio or sse).
         db_path: Optional path to EventStore database.
     """
-    from ouroboros.mcp.server.adapter import create_ouroboros_server
+    from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
+
+    # Validate transport early, before any expensive startup work
+    try:
+        transport = validate_transport(transport)
+    except ValueError:
+        print_error(f"Invalid transport {transport!r}. Must be 'stdio' or 'sse'.")
+        raise typer.Exit(code=1)
 
     # Create EventStore with custom path if provided
     if db_path:
@@ -137,8 +144,6 @@ async def _run_mcp_server(
 
     tool_count = len(server.info.tools)
 
-    transport = transport.lower()
-
     if transport == "stdio":
         # In stdio mode, stdout is the JSON-RPC channel.
         # All human-readable output must go to stderr.
@@ -146,14 +151,11 @@ async def _run_mcp_server(
         _stderr_console.print(f"[blue]Registered {tool_count} tools[/blue]")
         _stderr_console.print("[blue]Reading from stdin, writing to stdout[/blue]")
         _stderr_console.print("[blue]Press Ctrl+C to stop[/blue]")
-    elif transport == "sse":
+    else:
         print_success(f"MCP Server starting on {transport}...")
         print_info(f"Registered {tool_count} tools")
         print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
-    else:
-        print_error(f"Invalid transport {transport!r}. Must be 'stdio' or 'sse'.")
-        raise typer.Exit(code=1)
 
     # Manage PID file for stale instance detection
     if _check_stale_instance():

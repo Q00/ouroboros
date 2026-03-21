@@ -4,12 +4,16 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import pytest
+
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
 from ouroboros.mcp.server.adapter import (
+    VALID_TRANSPORTS,
     MCPServerAdapter,
     _project_dir_from_artifact,
     _project_dir_from_seed,
+    validate_transport,
 )
 from ouroboros.mcp.types import (
     ContentType,
@@ -247,3 +251,102 @@ class TestMCPServerAdapterInfo:
         tool_names = {t.name for t in info.tools}
         assert "tool1" in tool_names
         assert "tool2" in tool_names
+
+
+# ── Transport validation ────────────────────────────────────────────
+
+
+class TestValidateTransport:
+    """Tests for validate_transport()."""
+
+    def test_valid_lowercase(self):
+        assert validate_transport("stdio") == "stdio"
+        assert validate_transport("sse") == "sse"
+
+    def test_case_insensitive(self):
+        assert validate_transport("SSE") == "sse"
+        assert validate_transport("Stdio") == "stdio"
+        assert validate_transport("sSe") == "sse"
+
+    def test_invalid_raises(self):
+        with pytest.raises(ValueError, match="Invalid transport"):
+            validate_transport("http")
+
+    def test_empty_raises(self):
+        with pytest.raises(ValueError, match="Invalid transport"):
+            validate_transport("")
+
+    def test_valid_transports_constant(self):
+        assert "stdio" in VALID_TRANSPORTS
+        assert "sse" in VALID_TRANSPORTS
+
+
+class TestServeTransport:
+    """Tests for MCPServerAdapter.serve() transport handling."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_transport_raises(self):
+        adapter = MCPServerAdapter()
+        with pytest.raises(ValueError, match="Invalid transport"):
+            await adapter.serve(transport="bogus")
+
+    @pytest.mark.asyncio
+    async def test_sse_passes_host_port_to_fastmcp(self):
+        """Verify host/port are forwarded to FastMCP constructor."""
+        from unittest.mock import MagicMock, patch
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.tool = MagicMock(return_value=lambda f: f)
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_sse_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        adapter = MCPServerAdapter()
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            await adapter.serve(transport="sse", host="0.0.0.0", port=9000)
+
+        mock_fastmcp_cls.assert_called_once()
+        call_kwargs = mock_fastmcp_cls.call_args
+        assert call_kwargs.kwargs["host"] == "0.0.0.0"
+        assert call_kwargs.kwargs["port"] == 9000
+
+    @pytest.mark.asyncio
+    async def test_sse_ephemeral_port_zero(self):
+        """port=0 must reach FastMCP without being rewritten."""
+        from unittest.mock import MagicMock, patch
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.tool = MagicMock(return_value=lambda f: f)
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_sse_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        adapter = MCPServerAdapter()
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            await adapter.serve(transport="sse", host="localhost", port=0)
+
+        assert mock_fastmcp_cls.call_args.kwargs["port"] == 0
