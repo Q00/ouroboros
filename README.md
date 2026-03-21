@@ -122,7 +122,7 @@ See the [Claude Code runtime guide](./docs/runtime-guides/claude-code.md) for ba
 
 **Step 1 -- Install Ouroboros and Codex CLI**
 ```bash
-pip install ouroboros-ai && npm install -g @openai/codex
+pip install ouroboros-ai==0.26.0b1 && npm install -g @openai/codex
 ```
 
 **Step 2 -- Set up your project**
