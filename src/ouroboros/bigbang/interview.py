@@ -567,10 +567,14 @@ class InterviewEngine:
         if web_search_hint:
             base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
 
-        # Inject codebase context for brownfield projects
+        # Inject codebase context for brownfield projects (truncate to prevent
+        # Agent SDK CLI empty responses from oversized system prompts)
         if state.is_brownfield and state.codebase_context:
+            codebase_ctx = state.codebase_context[:1200] + (
+                "..." if len(state.codebase_context) > 1200 else ""
+            )
             dynamic_header += (
-                f"\n\n## Existing Codebase Context\n{state.codebase_context}"
+                f"\n\n## Existing Codebase Context\n{codebase_ctx}"
                 "\n\nCRITICAL: You have codebase context. Ask CONFIRMATION questions "
                 "citing specific files/patterns."
                 '\n- GOOD: "I see Express.js with JWT middleware in src/auth/. '
