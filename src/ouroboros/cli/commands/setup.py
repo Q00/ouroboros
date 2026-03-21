@@ -32,6 +32,25 @@ def _detect_runtimes() -> dict[str, str | None]:
     return runtimes
 
 
+def _install_codex_artifacts() -> None:
+    """Install packaged Ouroboros rules and skills into ~/.codex/."""
+    from ouroboros.codex import install_codex_rules, install_codex_skills
+
+    codex_dir = Path.home() / ".codex"
+
+    try:
+        rules_path = install_codex_rules(codex_dir=codex_dir, prune=True)
+        print_success(f"Installed Codex rules → {rules_path}")
+    except FileNotFoundError:
+        print_error("Could not locate packaged Codex rules.")
+
+    try:
+        skill_paths = install_codex_skills(codex_dir=codex_dir, prune=True)
+        print_success(f"Installed {len(skill_paths)} Codex skills → {codex_dir / 'skills'}")
+    except FileNotFoundError:
+        print_error("Could not locate packaged Codex skills.")
+
+
 def _setup_codex(codex_path: str) -> None:
     """Configure Ouroboros for the Codex runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
@@ -58,6 +77,9 @@ def _setup_codex(codex_path: str) -> None:
 
     print_success(f"Configured Codex runtime (CLI: {codex_path})")
     print_info(f"Config saved to: {config_path}")
+
+    # Install Codex-native rules and skills into ~/.codex/
+    _install_codex_artifacts()
 
     # Also register MCP server for Codex users who also have Claude Code
     mcp_config_path = Path.home() / ".claude" / "mcp.json"
