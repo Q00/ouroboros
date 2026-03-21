@@ -120,22 +120,16 @@ See the [Claude Code runtime guide](./docs/runtime-guides/claude-code.md) for ba
 <details>
 <summary><strong>Codex CLI</strong></summary>
 
-**Step 1 -- Install Ouroboros and Codex CLI**
 ```bash
-pip install ouroboros-ai==0.26.0b1 && npm install -g @openai/codex
+npm install -g @openai/codex      # Codex CLI (if not installed)
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
 ```
 
-**Step 2 -- Set up your project**
-```bash
-ouroboros setup                    # Auto-detects Codex CLI
-```
+Installs Ouroboros, registers Codex skills/rules and MCP server in one step.
 
-**Step 3 -- Start building**
 ```bash
 ouroboros init start "I want to build a task management CLI"
 ```
-
-> Configure the runtime backend explicitly if needed: set `orchestrator.runtime_backend: codex` in `ouroboros.yaml`.
 
 See the [Codex CLI runtime guide](./docs/runtime-guides/codex.md) for full details.
 
@@ -217,7 +211,7 @@ run        ->  Executed via Double Diamond decomposition
 evaluate   ->  3-stage verification: Mechanical -> Semantic -> Consensus
 ```
 
-> Use `ooo <cmd>` inside Claude Code sessions, or `ouroboros init start`, `ouroboros run seed.yaml`, etc. from the terminal. Codex users should use the terminal CLI commands (`ooo` shortcuts are not yet available in Codex).
+> Use `ooo <cmd>` inside Claude Code or Codex CLI sessions, or `ouroboros init start`, `ouroboros run seed.yaml`, etc. from the terminal.
 
 The serpent completed one loop. Each loop, it knows more than the last.
 
