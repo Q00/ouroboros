@@ -146,12 +146,13 @@ See the [Codex CLI runtime guide](./docs/runtime-guides/codex.md) for full detai
 
 **One-liner (recommended):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
+# TODO: Change URL to main branch when 0.26.0 stable is released
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
 ```
 
 **Or manual install:**
 ```bash
-pip install ouroboros-ai              # Base engine (see extras below)
+pip install ouroboros-ai==0.26.0b3    # Beta: Claude + Codex support
 ouroboros setup                       # Auto-detects available runtimes
 ```
 
