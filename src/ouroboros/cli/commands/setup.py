@@ -32,6 +32,46 @@ def _detect_runtimes() -> dict[str, str | None]:
     return runtimes
 
 
+_CODEX_MCP_SECTION = """\
+
+[mcp_servers.ouroboros]
+command = "uvx"
+args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
+tool_timeout_sec = 600
+
+[mcp_servers.ouroboros.env]
+OUROBOROS_AGENT_RUNTIME = "codex"
+OUROBOROS_LLM_BACKEND = "codex"
+"""
+
+
+def _register_codex_mcp_server() -> None:
+    """Register Ouroboros MCP server in ~/.codex/config.toml."""
+    import tomllib
+
+    codex_config = Path.home() / ".codex" / "config.toml"
+    codex_config.parent.mkdir(parents=True, exist_ok=True)
+
+    if codex_config.exists():
+        raw = codex_config.read_text(encoding="utf-8")
+        try:
+            parsed = tomllib.loads(raw)
+        except tomllib.TOMLDecodeError:
+            print_error(f"Could not parse {codex_config} — skipping MCP registration.")
+            return
+
+        if "ouroboros" in parsed.get("mcp_servers", {}):
+            print_info("Codex MCP server already registered.")
+            return
+
+        # Append section to existing file
+        codex_config.write_text(raw.rstrip("\n") + "\n" + _CODEX_MCP_SECTION, encoding="utf-8")
+    else:
+        codex_config.write_text(_CODEX_MCP_SECTION.lstrip("\n"), encoding="utf-8")
+
+    print_success(f"Registered Ouroboros MCP server in {codex_config}")
+
+
 def _install_codex_artifacts() -> None:
     """Install packaged Ouroboros rules and skills into ~/.codex/."""
     from ouroboros.codex import install_codex_rules, install_codex_skills
@@ -81,6 +121,9 @@ def _setup_codex(codex_path: str) -> None:
     # Install Codex-native rules and skills into ~/.codex/
     _install_codex_artifacts()
 
+    # Register MCP server in Codex config (~/.codex/config.toml)
+    _register_codex_mcp_server()
+
     # Also register MCP server for Codex users who also have Claude Code
     mcp_config_path = Path.home() / ".claude" / "mcp.json"
     if mcp_config_path.exists() or (Path.home() / ".claude").is_dir():
@@ -103,7 +146,7 @@ def _setup_codex(codex_path: str) -> None:
         with mcp_config_path.open("w") as f:
             json.dump(mcp_data, f, indent=2)
 
-        print_info("Updated MCP server config with timeout.")
+        print_info("Updated Claude MCP server config with timeout.")
 
 
 def _setup_claude(claude_path: str) -> None:
