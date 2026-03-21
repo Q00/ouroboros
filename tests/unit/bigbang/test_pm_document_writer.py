@@ -92,19 +92,14 @@ class TestGeneratePrdMarkdown:
         assert "## Assumptions" in md
         assert "- Team has access to cloud infra" in md
 
-    def test_includes_deferred_items(self):
-        """Generated markdown includes deferred items."""
-        seed = _make_seed()
-        md = generate_pm_markdown(seed)
-        assert "## Deferred Items" in md
-        assert "- API rate limiting" in md
-
-    def test_includes_decide_later_items(self):
-        """Generated markdown includes decide-later items."""
+    def test_includes_decide_later_merged(self):
+        """Generated markdown merges deferred and decide-later items into Decide Later."""
         seed = _make_seed()
         md = generate_pm_markdown(seed)
         assert "## Decide Later" in md
+        assert "- API rate limiting" in md
         assert "- Which database to use?" in md
+        assert "## Deferred Items" not in md
 
     def test_includes_interview_id_footer(self):
         """Generated markdown has footer with interview ID."""
@@ -158,12 +153,11 @@ class TestGeneratePrdMarkdown:
         assert "`/code/myapp`" in md
         assert "Main app" in md
 
-    def test_codebase_context_subsection(self):
-        """Includes codebase analysis when present."""
+    def test_codebase_context_excluded(self):
+        """Codebase analysis is excluded from PM document."""
         seed = _make_seed(codebase_context="Python FastAPI with PostgreSQL.")
         md = generate_pm_markdown(seed)
-        assert "### Codebase Analysis" in md
-        assert "Python FastAPI with PostgreSQL." in md
+        assert "### Codebase Analysis" not in md
 
     def test_multiple_user_stories_numbered(self):
         """Multiple user stories are numbered sequentially."""
@@ -281,7 +275,6 @@ class TestSavePrdDocument:
         assert "## Constraints" in content
         assert "## Success Criteria" in content
         assert "## Assumptions" in content
-        assert "## Deferred Items" in content
         assert "## Decide Later" in content
 
     def test_minimal_seed_produces_valid_file(self, tmp_path: Path):

@@ -293,12 +293,13 @@ class TestPMDocumentGeneratorPrompt:
         assert "/code/myapp" in prompt
         assert "Main app" in prompt
 
-    def test_prompt_includes_codebase_context(self):
-        """Prompt includes codebase analysis context."""
+    def test_prompt_excludes_codebase_context(self):
+        """Prompt excludes codebase analysis (technical detail not for PMs)."""
         seed = _make_seed(codebase_context="Uses FastAPI with PostgreSQL backend.")
         prompt = PMDocumentGenerator._build_generation_prompt(seed)
 
-        assert "Uses FastAPI with PostgreSQL backend." in prompt
+        assert "Codebase Analysis" not in prompt
+        assert "Uses FastAPI with PostgreSQL backend." not in prompt
 
     def test_prompt_handles_empty_seed(self):
         """Prompt handles a minimal seed with empty fields gracefully."""
@@ -506,4 +507,5 @@ class TestPMDocumentGeneratorMessages:
         assert "Full Interview Transcript" in user_msg
         assert "Q1" in user_msg
         assert "Repo" in user_msg
-        assert "Python FastAPI project." in user_msg
+        # Codebase analysis is excluded from PM prompts
+        assert "Python FastAPI project." not in user_msg

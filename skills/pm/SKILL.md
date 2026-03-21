@@ -70,6 +70,25 @@ Tool: ouroboros_pm_interview
 Arguments:
   session_id: <session_id>
   action: "generate"
+  cwd: <current working directory>
 ```
 
-Show: "Your PM seed has been saved as `pm_seed_{id}.json`! 📍 Next: `ooo interview`"
+### Step 5: Copy to Clipboard
+
+After generation, read the pm.md file from `meta.pm_path` and copy its contents to the clipboard:
+
+```bash
+cat <meta.pm_path> | pbcopy
+```
+
+### Step 6: Show Result & Next Step
+
+Show the following to the user:
+
+```
+PM document saved: <meta.pm_path>
+(Clipboard에 복사되었습니다)
+
+Next step:
+  ooo interview <meta.pm_path>
+```

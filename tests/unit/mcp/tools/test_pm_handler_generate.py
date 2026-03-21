@@ -132,7 +132,8 @@ class TestHandleGenerate:
         assert "pm_path" in meta
         pm_path = Path(meta["pm_path"])
         assert pm_path.exists()
-        assert pm_path.name == "pm.md"
+        assert pm_path.name.startswith("prd_")
+        assert pm_path.name.endswith(".md")
 
     @pytest.mark.asyncio
     async def test_generate_returns_seed_path_in_meta(self, tmp_path: Path) -> None:
@@ -173,7 +174,7 @@ class TestHandleGenerate:
 
         assert result.is_ok
         meta = result.value.meta
-        assert set(meta.keys()) == {"session_id", "seed_path", "pm_path"}
+        assert set(meta.keys()) == {"session_id", "seed_path", "pm_path", "next_step"}
 
     @pytest.mark.asyncio
     async def test_generate_loads_interview_state(self, tmp_path: Path) -> None:

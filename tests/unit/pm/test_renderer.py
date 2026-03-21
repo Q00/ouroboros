@@ -294,10 +294,10 @@ class TestTemplatePMGeneration:
         assert "1000+ concurrent users" in md
         assert "## Success Criteria" in md
         assert "P95 latency" in md
-        assert "## Deferred Items" in md
-        assert "Offline mode" in md
         assert "## Decide Later" in md
+        assert "Offline mode" in md
         assert "Which charting library" in md
+        assert "## Deferred Items" not in md
 
     def test_generates_markdown_for_minimal_seed(self):
         """Handles a minimal seed with only defaults."""

@@ -949,7 +949,7 @@ class PMInterviewHandler:
 
         Loads InterviewState and pm_meta, restores engine via restore_meta(),
         runs generate_pm_seed, saves PM seed to ~/.ouroboros/seeds/ and
-        pm.md to {cwd}/.ouroboros/.  Idempotent — overwrites on retry with
+        prd_{timestamp}.md to {cwd}/.  Idempotent — overwrites on retry with
         the same session_id.
         """
         load_result = await engine.load_state(session_id)
@@ -978,9 +978,15 @@ class PMInterviewHandler:
         # Save seed to ~/.ouroboros/seeds/ (idempotent — overwrites on retry)
         seed_path = engine.save_pm_seed(seed)
 
-        # Save human-readable pm.md to {cwd}/.ouroboros/
-        pm_dir = Path(cwd) / ".ouroboros"
-        pm_path = save_pm_document(seed, output_dir=pm_dir)
+        # Save human-readable prd_{timestamp}.md to cwd
+        # interview_id is like "interview_20260321_110732" → extract timestamp
+        if session_id.startswith("interview_"):
+            timestamp = session_id.replace("interview_", "", 1)
+        else:
+            from datetime import UTC, datetime
+            timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        pm_filename = f"prd_{timestamp}.md"
+        pm_path = save_pm_document(seed, output_path=Path(cwd) / pm_filename)
 
         return Result.ok(
             MCPToolResult(
@@ -991,8 +997,7 @@ class PMInterviewHandler:
                             f"PM seed generated: {seed.product_name}\n"
                             f"Seed: {seed_path}\n"
                             f"PM document: {pm_path}\n\n"
-                            f"Deferred items: {len(seed.deferred_items)}\n"
-                            f"Decide-later items: {len(seed.decide_later_items)}"
+                            f"Decide-later items: {len(seed.deferred_items) + len(seed.decide_later_items)}"
                         ),
                     ),
                 ),
@@ -1001,6 +1006,7 @@ class PMInterviewHandler:
                     "session_id": session_id,
                     "seed_path": str(seed_path),
                     "pm_path": str(pm_path),
+                    "next_step": f"ooo interview {pm_path}",
                 },
             )
         )

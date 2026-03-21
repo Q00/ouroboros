@@ -334,7 +334,7 @@ class TestDecideLaterInPMDocument:
         md = generate_pm_markdown(seed)
 
         assert "## Decide Later" in md
-        assert "premature or unknowable" in md
+        assert "deferred or identified as premature" in md
         assert "- What caching strategy should we use?" in md
         assert "- How should we handle data migration?" in md
 
@@ -348,8 +348,8 @@ class TestDecideLaterInPMDocument:
         md = generate_pm_markdown(seed)
         assert "## Decide Later" not in md
 
-    def test_pm_document_has_both_deferred_and_decide_later(self):
-        """PM document shows both Deferred Items and Decide Later sections."""
+    def test_pm_document_merges_deferred_and_decide_later(self):
+        """PM document merges deferred and decide-later into single Decide Later section."""
         seed = PMSeed(
             product_name="Test Product",
             goal="Test goal",
@@ -358,15 +358,10 @@ class TestDecideLaterInPMDocument:
         )
         md = generate_pm_markdown(seed)
 
-        assert "## Deferred Items" in md
-        assert "- Which ORM to use?" in md
         assert "## Decide Later" in md
+        assert "- Which ORM to use?" in md
         assert "- What rate limiting strategy?" in md
-
-        # Decide Later section should appear after Deferred Items
-        deferred_pos = md.index("## Deferred Items")
-        decide_later_pos = md.index("## Decide Later")
-        assert decide_later_pos > deferred_pos
+        assert "## Deferred Items" not in md
 
 
 class TestDecideLaterExtractionFlow:

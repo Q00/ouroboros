@@ -52,12 +52,11 @@ The PM MUST include the following sections (in order):
 technical limitations)
 5. **Success Criteria** — numbered measurable success criteria
 6. **Assumptions** — bullet list of assumptions made during requirements gathering
-7. **Deferred Items** — items explicitly deferred to later phases \
-(include context on why deferred)
-8. **Decide Later** — questions that are premature or unknowable at this stage
-9. **Existing Codebase Context** — if brownfield repos are referenced
+7. **Decide Later** — merged list of deferred items and premature/unknowable questions \
+(include context on why deferred or why premature)
 
 Omit any section that has no content (except Goal which should always appear).
+Do NOT include a "Codebase Analysis" section — that is technical detail not relevant for PMs.
 
 Guidelines:
 - Write for a PM audience — avoid technical jargon unless necessary
@@ -131,27 +130,17 @@ def generate_pm_markdown(seed: PMSeed) -> str:
             lines.append(f"- {assumption}")
         lines.append("")
 
-    # Deferred Items
-    if seed.deferred_items:
-        lines.append("## Deferred Items")
-        lines.append("")
-        lines.append(
-            "The following items were identified during requirements gathering but deferred to later phases:"
-        )
-        lines.append("")
-        for item in seed.deferred_items:
-            lines.append(f"- {item}")
-        lines.append("")
-
-    # Decide-Later Items
-    if seed.decide_later_items:
+    # Decide Later (merged: deferred + decide-later)
+    all_decide_later = list(seed.deferred_items or []) + list(seed.decide_later_items or [])
+    if all_decide_later:
         lines.append("## Decide Later")
         lines.append("")
         lines.append(
-            "The following questions were identified as premature or unknowable at this stage. They should be revisited when more context is available:"
+            "The following items were deferred or identified as premature at this stage. "
+            "They should be revisited when more context is available:"
         )
         lines.append("")
-        for item in seed.decide_later_items:
+        for item in all_decide_later:
             lines.append(f"- {item}")
         lines.append("")
 
@@ -166,12 +155,6 @@ def generate_pm_markdown(seed: PMSeed) -> str:
             lines.append(f"- **{name}** (`{path}`)")
             if desc:
                 lines.append(f"  {desc}")
-        lines.append("")
-
-    if seed.codebase_context:
-        lines.append("### Codebase Analysis")
-        lines.append("")
-        lines.append(seed.codebase_context)
         lines.append("")
 
     # Footer
@@ -456,16 +439,11 @@ class PMDocumentGenerator:
                 parts.append(f"- {a}")
             parts.append("")
 
-        if seed.deferred_items:
-            parts.append("**Deferred Items:**")
-            for d in seed.deferred_items:
-                parts.append(f"- {d}")
-            parts.append("")
-
-        if seed.decide_later_items:
-            parts.append("**Decide Later Items:**")
-            for dl in seed.decide_later_items:
-                parts.append(f"- {dl}")
+        all_decide_later = list(seed.deferred_items or []) + list(seed.decide_later_items or [])
+        if all_decide_later:
+            parts.append("**Decide Later:**")
+            for item in all_decide_later:
+                parts.append(f"- {item}")
             parts.append("")
 
         if seed.brownfield_repos:
@@ -475,11 +453,6 @@ class PMDocumentGenerator:
                 path = repo.get("path", "")
                 desc = repo.get("desc", "")
                 parts.append(f"- {name} ({path}){f' — {desc}' if desc else ''}")
-            parts.append("")
-
-        if seed.codebase_context:
-            parts.append("**Codebase Analysis:**")
-            parts.append(seed.codebase_context[:3000])
             parts.append("")
 
         # Q&A transcript
