@@ -783,7 +783,7 @@ class EvolutionaryLoop:
                     )
                 )
             except Exception:
-                pass  # Best-effort: event store may also be shutting down
+                logger.warning("evolution.generation.cancelled_event_failed", exc_info=True)
             raise
 
     async def _check_shutdown(
@@ -1000,6 +1000,18 @@ class EvolutionaryLoop:
                             "wonder_question_count": len(wonder_output.questions),
                         },
                     )
+
+                # Check for graceful shutdown after Reflect phase
+                interrupted = await self._check_shutdown(
+                    lineage.lineage_id,
+                    generation_number,
+                    "reflecting",
+                    current_seed,
+                    wonder_output=wonder_output,
+                    reflect_output=reflect_output,
+                )
+                if interrupted:
+                    return Result.ok(interrupted)
 
                 # Phase transition: reflecting → seeding
                 await self.event_store.append(
