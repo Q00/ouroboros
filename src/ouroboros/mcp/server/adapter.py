@@ -425,8 +425,15 @@ class MCPServerAdapter:
             msg = "mcp package not installed. Install with: pip install mcp"
             raise ImportError(msg) from e
 
-        # Create FastMCP server
-        self._mcp_server = FastMCP(self._name)
+        # Create FastMCP server with SSE settings if applicable
+        if transport == "sse":
+            self._mcp_server = FastMCP(
+                self._name,
+                host=host or "127.0.0.1",
+                port=port or 8100,
+            )
+        else:
+            self._mcp_server = FastMCP(self._name)
 
         # Register tools with FastMCP
         for _name, handler in self._tool_handlers.items():
@@ -489,7 +496,7 @@ class MCPServerAdapter:
 
         # Run the server with the appropriate transport
         if transport == "sse":
-            await self._mcp_server.run_sse_async(host=host, port=port)
+            await self._mcp_server.run_sse_async()
         else:
             await self._mcp_server.run_stdio_async()
 
