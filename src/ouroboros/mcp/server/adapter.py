@@ -403,6 +403,8 @@ class MCPServerAdapter:
                 )
             )
 
+    _VALID_TRANSPORTS = {"stdio", "sse"}
+
     async def serve(
         self,
         transport: str = "stdio",
@@ -415,22 +417,28 @@ class MCPServerAdapter:
         Uses the MCP SDK's FastMCP server implementation.
 
         Args:
-            transport: Transport type - "stdio" or "sse".
-            host: Host to bind to (SSE only).
-            port: Port to bind to (SSE only).
+            transport: Transport type - "stdio" or "sse" (case-insensitive).
+            host: Host to bind to (SSE only). Defaults to "localhost".
+            port: Port to bind to (SSE only). Defaults to 8080.
         """
+        transport = transport.lower()
+        if transport not in self._VALID_TRANSPORTS:
+            msg = f"Invalid transport {transport!r}. Must be one of: {', '.join(sorted(self._VALID_TRANSPORTS))}"
+            raise ValueError(msg)
+
         try:
             from mcp.server.fastmcp import FastMCP
         except ImportError as e:
             msg = "mcp package not installed. Install with: pip install mcp"
             raise ImportError(msg) from e
 
-        # Create FastMCP server with SSE settings if applicable
+        # Pass host/port at construction time — FastMCP reads these from
+        # its internal settings, so run_sse_async() alone won't pick them up.
         if transport == "sse":
             self._mcp_server = FastMCP(
                 self._name,
-                host=host or "127.0.0.1",
-                port=port or 8100,
+                host=host,
+                port=port,
             )
         else:
             self._mcp_server = FastMCP(self._name)

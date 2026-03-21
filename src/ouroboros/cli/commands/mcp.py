@@ -137,6 +137,8 @@ async def _run_mcp_server(
 
     tool_count = len(server.info.tools)
 
+    transport = transport.lower()
+
     if transport == "stdio":
         # In stdio mode, stdout is the JSON-RPC channel.
         # All human-readable output must go to stderr.
@@ -144,11 +146,14 @@ async def _run_mcp_server(
         _stderr_console.print(f"[blue]Registered {tool_count} tools[/blue]")
         _stderr_console.print("[blue]Reading from stdin, writing to stdout[/blue]")
         _stderr_console.print("[blue]Press Ctrl+C to stop[/blue]")
-    else:
+    elif transport == "sse":
         print_success(f"MCP Server starting on {transport}...")
         print_info(f"Registered {tool_count} tools")
         print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
+    else:
+        print_error(f"Invalid transport {transport!r}. Must be 'stdio' or 'sse'.")
+        raise typer.Exit(code=1)
 
     # Manage PID file for stale instance detection
     if _check_stale_instance():
