@@ -53,6 +53,27 @@ def _lineage_with_schemas(*schemas: OntologySchema) -> OntologyLineage:
     )
 
 
+def _generation(
+    number: int,
+    schema: OntologySchema,
+    phase: GenerationPhase = GenerationPhase.COMPLETED,
+) -> GenerationRecord:
+    return GenerationRecord(
+        generation_number=number,
+        seed_id=f"seed_{number}",
+        ontology_snapshot=schema,
+        phase=phase,
+    )
+
+
+def _lineage_with_generations(*generations: GenerationRecord) -> OntologyLineage:
+    return OntologyLineage(
+        lineage_id="test_lin",
+        goal="test goal",
+        generations=tuple(generations),
+    )
+
+
 # -- Feature 1: Oscillation Detection --
 
 
@@ -249,6 +270,55 @@ class TestOscillationLoopRouting:
         result = await loop.evolve_step("lin_osc")
         assert result.is_ok
         assert result.value.action == StepAction.STAGNATED
+
+
+class TestCompletedGenerationFiltering:
+    """Regression guards for interrupted generations with pending ontologies."""
+
+    def test_latest_similarity_ignores_pending_tail(self) -> None:
+        lineage = _lineage_with_generations(
+            _generation(1, SCHEMA_B),
+            _generation(2, SCHEMA_A),
+            _generation(3, SCHEMA_C, phase=GenerationPhase.WONDERING),
+        )
+        criteria = ConvergenceCriteria(convergence_threshold=0.95, min_generations=2)
+
+        assert criteria._latest_similarity(lineage) == pytest.approx(0.0)
+
+    def test_stagnation_ignores_pending_tail(self) -> None:
+        lineage = _lineage_with_generations(
+            _generation(1, SCHEMA_A),
+            _generation(2, SCHEMA_A),
+            _generation(3, SCHEMA_B, phase=GenerationPhase.WONDERING),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            stagnation_window=2,
+        )
+
+        assert criteria._check_stagnation(lineage) is True
+
+    def test_oscillation_ignores_pending_tail(self) -> None:
+        lineage = _lineage_with_generations(
+            _generation(1, SCHEMA_A),
+            _generation(2, SCHEMA_B),
+            _generation(3, SCHEMA_A),
+            _generation(4, SCHEMA_C, phase=GenerationPhase.WONDERING),
+        )
+        criteria = ConvergenceCriteria(convergence_threshold=0.95, min_generations=2)
+
+        assert criteria._check_oscillation(lineage) is True
+
+    def test_evolution_count_ignores_pending_tail(self) -> None:
+        lineage = _lineage_with_generations(
+            _generation(1, SCHEMA_A),
+            _generation(2, SCHEMA_B),
+            _generation(3, SCHEMA_C, phase=GenerationPhase.WONDERING),
+        )
+        criteria = ConvergenceCriteria(convergence_threshold=0.95, min_generations=2)
+
+        assert criteria._count_evolved_generations(lineage) == 1
 
 
 # -- Feature 2: Convergence Gating via Evaluation --
