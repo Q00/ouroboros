@@ -99,8 +99,9 @@ class MechanicalResult:
 class SemanticResult:
     """Result of Stage 2 semantic evaluation.
 
-    Uses LLM to evaluate AC compliance, goal alignment, and drift.
-    Uncertainty score determines if Stage 3 consensus is needed.
+    Uses LLM to evaluate AC compliance, goal alignment, drift, and
+    reward-hacking risk.  Uncertainty score determines if Stage 3
+    consensus is needed.
 
     Attributes:
         score: Overall evaluation score (0.0-1.0)
@@ -109,6 +110,9 @@ class SemanticResult:
         drift_score: Deviation from seed intent (0.0-1.0, lower is better)
         uncertainty: Model uncertainty about evaluation (0.0-1.0)
         reasoning: Explanation of the evaluation
+        reward_hacking_risk: Suspicion that the artifact games the
+            evaluator rather than solving the real task (0.0-1.0).
+            Distinct from drift_score.
     """
 
     score: float
@@ -117,10 +121,17 @@ class SemanticResult:
     drift_score: float
     uncertainty: float
     reasoning: str
+    reward_hacking_risk: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate score ranges."""
-        for attr in ("score", "goal_alignment", "drift_score", "uncertainty"):
+        for attr in (
+            "score",
+            "goal_alignment",
+            "drift_score",
+            "uncertainty",
+            "reward_hacking_risk",
+        ):
             value = getattr(self, attr)
             if not 0.0 <= value <= 1.0:
                 msg = f"{attr} must be between 0.0 and 1.0, got {value}"
