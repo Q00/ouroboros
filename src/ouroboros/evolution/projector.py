@@ -133,6 +133,23 @@ class LineageProjector:
                         failure_error=error_msg,
                     )
 
+            elif event.type == "lineage.generation.interrupted":
+                data = event.data
+                gen_num = data["generation_number"]
+                if gen_num in generations:
+                    old = generations[gen_num]
+                    generations[gen_num] = old.model_copy(
+                        update={"phase": GenerationPhase.INTERRUPTED}
+                    )
+                else:
+                    generations[gen_num] = GenerationRecord(
+                        generation_number=gen_num,
+                        seed_id="",
+                        ontology_snapshot=_PENDING_ONTOLOGY,
+                        phase=GenerationPhase.INTERRUPTED,
+                        created_at=event.timestamp,
+                    )
+
             elif event.type == "lineage.converged":
                 if lineage is not None:
                     lineage = lineage.with_status(LineageStatus.CONVERGED)
@@ -220,5 +237,11 @@ class LineageProjector:
                 if gen >= last_gen:
                     last_gen = gen
                     last_phase = GenerationPhase.FAILED
+
+            elif event.type == "lineage.generation.interrupted":
+                gen = event.data.get("generation_number", 0)
+                if gen >= last_gen:
+                    last_gen = gen
+                    last_phase = GenerationPhase.INTERRUPTED
 
         return last_gen, last_phase

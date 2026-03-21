@@ -107,6 +107,31 @@ def lineage_generation_failed(
     )
 
 
+def lineage_generation_interrupted(
+    lineage_id: str,
+    generation_number: int,
+    last_completed_phase: str,
+    partial_state: dict | None = None,
+) -> BaseEvent:
+    """Create event when a generation is gracefully interrupted by SIGINT.
+
+    Distinct from 'failed' — carries partial results and the last phase
+    that completed successfully, enabling phase-level resume.
+    """
+    data: dict = {
+        "generation_number": generation_number,
+        "last_completed_phase": last_completed_phase,
+    }
+    if partial_state:
+        data["partial_state"] = partial_state
+    return BaseEvent(
+        type="lineage.generation.interrupted",
+        aggregate_type="lineage",
+        aggregate_id=lineage_id,
+        data=data,
+    )
+
+
 def lineage_ontology_evolved(
     lineage_id: str,
     generation_number: int,

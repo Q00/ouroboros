@@ -40,6 +40,7 @@ class GenerationPhase(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 class MutationAction(StrEnum):
