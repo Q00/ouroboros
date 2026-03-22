@@ -49,13 +49,51 @@ from ouroboros.observability.drift import (
     DRIFT_THRESHOLD,
     DriftMeasurement,
 )
-from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
+from ouroboros.orchestrator.adapter import (
+    DELEGATED_PARENT_CWD_ARG,
+    DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
+    DELEGATED_PARENT_PERMISSION_MODE_ARG,
+    DELEGATED_PARENT_SESSION_ID_ARG,
+    DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
+    ClaudeAgentAdapter,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 
 log = structlog.get_logger(__name__)
+
+
+def _extract_inherited_runtime_handle(arguments: dict[str, Any]) -> RuntimeHandle | None:
+    """Build a forkable parent runtime handle from internal delegated tool arguments."""
+    session_id = arguments.get(DELEGATED_PARENT_SESSION_ID_ARG)
+    if not isinstance(session_id, str) or not session_id:
+        return None
+
+    transcript_path = arguments.get(DELEGATED_PARENT_TRANSCRIPT_PATH_ARG)
+    cwd = arguments.get(DELEGATED_PARENT_CWD_ARG)
+    permission_mode = arguments.get(DELEGATED_PARENT_PERMISSION_MODE_ARG)
+
+    return RuntimeHandle(
+        backend="claude",
+        native_session_id=session_id,
+        transcript_path=transcript_path if isinstance(transcript_path, str) else None,
+        cwd=cwd if isinstance(cwd, str) else None,
+        approval_mode=permission_mode if isinstance(permission_mode, str) else None,
+        metadata={"fork_session": True},
+    )
+
+
+def _extract_inherited_effective_tools(arguments: dict[str, Any]) -> list[str] | None:
+    """Extract the parent effective tool set from internal delegated tool arguments."""
+    tools = arguments.get(DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG)
+    if not isinstance(tools, list):
+        return None
+
+    inherited_tools = [tool for tool in tools if isinstance(tool, str) and tool]
+    return inherited_tools or None
 
 
 @dataclass
@@ -147,6 +185,12 @@ class ExecuteSeedHandler:
         new_session_id = session_id_override
         model_tier = arguments.get("model_tier", "medium")
         max_iterations = arguments.get("max_iterations", 10)
+        inherited_runtime_handle = (
+            None if session_id else _extract_inherited_runtime_handle(arguments)
+        )
+        inherited_effective_tools = (
+            None if session_id else _extract_inherited_effective_tools(arguments)
+        )
 
         log.info(
             "mcp.tool.execute_seed",
@@ -191,6 +235,8 @@ class ExecuteSeedHandler:
                 console=console,
                 debug=False,
                 enable_decomposition=True,
+                inherited_runtime_handle=inherited_runtime_handle,
+                inherited_tools=inherited_effective_tools,
             )
 
             # Execute or resume session

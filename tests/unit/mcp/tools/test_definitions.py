@@ -27,6 +27,34 @@ from ouroboros.mcp.tools.definitions import (
     StartExecuteSeedHandler,
 )
 from ouroboros.mcp.types import ToolInputType
+from ouroboros.orchestrator.adapter import (
+    DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
+    DELEGATED_PARENT_SESSION_ID_ARG,
+)
+from ouroboros.orchestrator.runner import OrchestratorResult
+
+VALID_SEED_YAML = """
+goal: Test task
+constraints:
+  - Python 3.14+
+acceptance_criteria:
+  - Task completes successfully
+ontology_schema:
+  name: TestOntology
+  description: Test ontology
+  fields:
+    - name: test_field
+      field_type: string
+      description: A test field
+evaluation_principles: []
+exit_conditions: []
+metadata:
+  seed_id: test-seed-123
+  version: "1.0.0"
+  created_at: "2024-01-01T00:00:00Z"
+  ambiguity_score: 0.1
+  interview_id: null
+"""
 
 
 class TestExecuteSeedHandler:
@@ -59,6 +87,14 @@ class TestExecuteSeedHandler:
         assert "model_tier" in param_names
         assert "max_iterations" in param_names
 
+    def test_definition_excludes_internal_delegation_parameters(self) -> None:
+        """Internal parent-session propagation must not change the public tool schema."""
+        handler = ExecuteSeedHandler()
+        param_names = {p.name for p in handler.definition.parameters}
+
+        assert DELEGATED_PARENT_SESSION_ID_ARG not in param_names
+        assert DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG not in param_names
+
     async def test_handle_requires_seed_content(self) -> None:
         """handle returns error when seed_content is missing."""
         handler = ExecuteSeedHandler()
@@ -70,31 +106,9 @@ class TestExecuteSeedHandler:
     async def test_handle_success(self) -> None:
         """handle returns success with valid YAML seed input."""
         handler = ExecuteSeedHandler()
-        valid_seed_yaml = """
-goal: Test task
-constraints:
-  - Python 3.14+
-acceptance_criteria:
-  - Task completes successfully
-ontology_schema:
-  name: TestOntology
-  description: Test ontology
-  fields:
-    - name: test_field
-      field_type: string
-      description: A test field
-evaluation_principles: []
-exit_conditions: []
-metadata:
-  seed_id: test-seed-123
-  version: "1.0.0"
-  created_at: "2024-01-01T00:00:00Z"
-  ambiguity_score: 0.1
-  interview_id: null
-"""
         result = await handler.handle(
             {
-                "seed_content": valid_seed_yaml,
+                "seed_content": VALID_SEED_YAML,
                 "model_tier": "medium",
             }
         )
@@ -106,6 +120,54 @@ metadata:
             or "execution" in str(result.error).lower()
             or "orchestrator" in str(result.error).lower()
         )
+
+    async def test_handle_passes_inherited_parent_context_to_runner(self) -> None:
+        """New delegated executions should receive inherited runtime and effective tools."""
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_runner = MagicMock()
+        mock_runner.execute_seed = AsyncMock(
+            return_value=Result.ok(
+                OrchestratorResult(
+                    success=True,
+                    session_id="orch_child",
+                    execution_id="exec_child",
+                    final_message="Done",
+                )
+            )
+        )
+
+        with (
+            patch("ouroboros.mcp.tools.definitions.EventStore", return_value=mock_event_store),
+            patch("ouroboros.mcp.tools.definitions.ClaudeAgentAdapter"),
+            patch(
+                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                return_value=mock_runner,
+            ) as runner_cls,
+        ):
+            handler = ExecuteSeedHandler()
+            result = await handler.handle(
+                {
+                    "seed_content": VALID_SEED_YAML,
+                    DELEGATED_PARENT_SESSION_ID_ARG: "sess_parent",
+                    "model_tier": "medium",
+                    "skip_qa": True,
+                    DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG: [
+                        "Read",
+                        "mcp__chrome-devtools__click",
+                    ],
+                },
+                execution_id="exec_child",
+                session_id_override="orch_child",
+            )
+
+        assert result.is_ok
+        runner_kwargs = runner_cls.call_args.kwargs
+        inherited_handle = runner_kwargs["inherited_runtime_handle"]
+        assert inherited_handle is not None
+        assert inherited_handle.native_session_id == "sess_parent"
+        assert inherited_handle.metadata["fork_session"] is True
+        assert runner_kwargs["inherited_tools"] == ["Read", "mcp__chrome-devtools__click"]
 
 
 class TestSessionStatusHandler:

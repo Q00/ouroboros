@@ -9,10 +9,17 @@ import pytest
 
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
+    DELEGATED_EXECUTE_SEED_TOOL_MATCHER,
+    DELEGATED_PARENT_CWD_ARG,
+    DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
+    DELEGATED_PARENT_PERMISSION_MODE_ARG,
+    DELEGATED_PARENT_SESSION_ID_ARG,
+    DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
     AgentMessage,
     ClaudeAgentAdapter,
     RuntimeHandle,
     TaskResult,
+    _build_delegated_tool_context_update,
 )
 
 
@@ -223,6 +230,45 @@ class TestClaudeAgentAdapter:
         assert "sess_abc123" in result.content
         assert result.data["session_id"] == "sess_abc123"
 
+    def test_build_delegated_tool_context_update_for_execute_seed(self) -> None:
+        """Delegated execute-seed tool calls receive internal parent runtime metadata."""
+        update = _build_delegated_tool_context_update(
+            {
+                "tool_name": "mcp__plugin_ouroboros_ouroboros__ouroboros_execute_seed",
+                "tool_input": {"seed_content": "goal: test"},
+                "session_id": "sess_parent",
+                "transcript_path": "/tmp/parent.jsonl",
+                "cwd": "/tmp/project",
+                "permission_mode": "acceptEdits",
+            },
+            ["Read", "mcp__chrome-devtools__click"],
+        )
+
+        assert update is not None
+        updated_input = update["updatedInput"]
+        assert updated_input["seed_content"] == "goal: test"
+        assert updated_input[DELEGATED_PARENT_SESSION_ID_ARG] == "sess_parent"
+        assert updated_input[DELEGATED_PARENT_TRANSCRIPT_PATH_ARG] == "/tmp/parent.jsonl"
+        assert updated_input[DELEGATED_PARENT_CWD_ARG] == "/tmp/project"
+        assert updated_input[DELEGATED_PARENT_PERMISSION_MODE_ARG] == "acceptEdits"
+        assert updated_input[DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG] == [
+            "Read",
+            "mcp__chrome-devtools__click",
+        ]
+
+    def test_build_delegated_tool_context_update_ignores_other_tools(self) -> None:
+        """Only delegated execute-seed tool calls should be rewritten."""
+        update = _build_delegated_tool_context_update(
+            {
+                "tool_name": "Read",
+                "tool_input": {"file_path": "src/app.py"},
+                "session_id": "sess_parent",
+            },
+            ["Read"],
+        )
+
+        assert update is None
+
     @pytest.mark.asyncio
     async def test_execute_task_sdk_not_installed(self) -> None:
         """Test handling when SDK is not installed."""
@@ -262,6 +308,81 @@ class TestClaudeAgentAdapter:
         assert len(result.value.messages) == 2
         assert result.value.session_id == "sess_123"
         assert result.value.resume_handle == runtime_handle
+
+    @pytest.mark.asyncio
+    async def test_execute_task_uses_hook_and_fork_session_for_inherited_runtime(self) -> None:
+        """Delegated child runs should fork the parent Claude session and inject tool context."""
+        adapter = ClaudeAgentAdapter(api_key="test")
+        inherited_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="sess_parent",
+            metadata={"fork_session": True},
+        )
+        captured_options: dict[str, Any] = {}
+
+        class FakeClaudeAgentOptions:
+            def __init__(self, **kwargs: Any) -> None:
+                captured_options.update(kwargs)
+
+        async def fake_query(*, prompt: str, options: Any):
+            yield _create_mock_sdk_message(
+                "SystemMessage",
+                subtype="init",
+                data={"session_id": "sess_child"},
+            )
+            yield _create_mock_sdk_message(
+                "ResultMessage",
+                result="Done",
+                subtype="success",
+                session_id="sess_child",
+                is_error=False,
+            )
+
+        with (
+            patch("claude_agent_sdk.ClaudeAgentOptions", FakeClaudeAgentOptions),
+            patch("claude_agent_sdk.query", fake_query),
+        ):
+            messages = [
+                message
+                async for message in adapter.execute_task(
+                    "test prompt",
+                    tools=["Read", "mcp__chrome-devtools__click"],
+                    resume_handle=inherited_handle,
+                )
+            ]
+
+        assert messages[-1].is_final is True
+        assert captured_options["resume"] == "sess_parent"
+        assert captured_options["fork_session"] is True
+        assert captured_options["allowed_tools"] == ["Read", "mcp__chrome-devtools__click"]
+
+        hook_matchers = captured_options["hooks"]["PreToolUse"]
+        assert len(hook_matchers) == 1
+        assert hook_matchers[0].matcher == DELEGATED_EXECUTE_SEED_TOOL_MATCHER
+        assert "mcp__plugin_ouroboros_ouroboros__ouroboros_execute_seed" in hook_matchers[0].matcher
+
+        hook_output = await hook_matchers[0].hooks[0](
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "mcp__plugin_ouroboros_ouroboros__ouroboros_start_execute_seed",
+                "tool_input": {"seed_content": "goal: child"},
+                "tool_use_id": "toolu_123",
+                "session_id": "sess_parent",
+                "transcript_path": "/tmp/parent.jsonl",
+                "cwd": "/tmp/project",
+                "permission_mode": "acceptEdits",
+            },
+            None,
+            {"signal": None},
+        )
+
+        assert hook_output is not None
+        updated_input = hook_output["updatedInput"]
+        assert updated_input[DELEGATED_PARENT_SESSION_ID_ARG] == "sess_parent"
+        assert updated_input[DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG] == [
+            "Read",
+            "mcp__chrome-devtools__click",
+        ]
 
     @pytest.mark.asyncio
     async def test_execute_task_to_result_failure(self) -> None:

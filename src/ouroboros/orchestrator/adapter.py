@@ -78,6 +78,61 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+DELEGATED_EXECUTE_SEED_TOOL_NAMES: tuple[str, ...] = (
+    "ouroboros_execute_seed",
+    "ouroboros_start_execute_seed",
+)
+DELEGATED_EXECUTE_SEED_TOOL_MATCHER = (
+    "mcp__plugin_ouroboros_ouroboros__ouroboros_execute_seed|"
+    "mcp__plugin_ouroboros_ouroboros__ouroboros_start_execute_seed|"
+    "mcp__ouroboros__ouroboros_execute_seed|"
+    "mcp__ouroboros__ouroboros_start_execute_seed|"
+    "ouroboros_execute_seed|"
+    "ouroboros_start_execute_seed"
+)
+
+DELEGATED_PARENT_SESSION_ID_ARG = "_ooo_parent_claude_session_id"
+DELEGATED_PARENT_TRANSCRIPT_PATH_ARG = "_ooo_parent_claude_transcript_path"
+DELEGATED_PARENT_CWD_ARG = "_ooo_parent_claude_cwd"
+DELEGATED_PARENT_PERMISSION_MODE_ARG = "_ooo_parent_claude_permission_mode"
+DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG = "_ooo_parent_effective_tools"
+
+
+def _is_delegated_execute_seed_tool(tool_name: object) -> bool:
+    """Return True for delegated execute-seed MCP tool calls."""
+    if not isinstance(tool_name, str) or not tool_name:
+        return False
+    return any(
+        tool_name == candidate or tool_name.endswith(f"__{candidate}")
+        for candidate in DELEGATED_EXECUTE_SEED_TOOL_NAMES
+    )
+
+
+def _build_delegated_tool_context_update(
+    hook_input: dict[str, Any],
+    effective_tools: list[str],
+) -> dict[str, Any] | None:
+    """Inject parent Claude runtime metadata into delegated execute-seed tool input."""
+    tool_name = hook_input.get("tool_name")
+    if not _is_delegated_execute_seed_tool(tool_name):
+        return None
+
+    tool_input = hook_input.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+
+    updated_input = dict(tool_input)
+    updated_input[DELEGATED_PARENT_SESSION_ID_ARG] = hook_input.get("session_id")
+    updated_input[DELEGATED_PARENT_TRANSCRIPT_PATH_ARG] = hook_input.get("transcript_path")
+    updated_input[DELEGATED_PARENT_CWD_ARG] = hook_input.get("cwd")
+    updated_input[DELEGATED_PARENT_PERMISSION_MODE_ARG] = hook_input.get("permission_mode")
+    updated_input[DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG] = list(effective_tools)
+    return {
+        "hookEventName": "PreToolUse",
+        "updatedInput": updated_input,
+    }
+
+
 # =============================================================================
 # Data Models
 # =============================================================================
@@ -358,6 +413,7 @@ class ClaudeAgentAdapter:
         try:
             # Lazy import to avoid loading SDK at module import time
             from claude_agent_sdk import ClaudeAgentOptions, query
+            from claude_agent_sdk.types import HookMatcher
         except ImportError as e:
             log.error(
                 "orchestrator.adapter.sdk_not_installed",
@@ -401,6 +457,22 @@ class ClaudeAgentAdapter:
                     "cwd": os.getcwd(),  # Use current working directory
                 }
 
+                async def _delegated_tool_context_hook(
+                    hook_input: dict[str, Any],
+                    _tool_name: str | None,
+                    _context: dict[str, Any],
+                ) -> dict[str, Any] | None:
+                    return _build_delegated_tool_context_update(hook_input, effective_tools)
+
+                options_kwargs["hooks"] = {
+                    "PreToolUse": [
+                        HookMatcher(
+                            matcher=DELEGATED_EXECUTE_SEED_TOOL_MATCHER,
+                            hooks=[_delegated_tool_context_hook],
+                        )
+                    ]
+                }
+
                 if self._model:
                     options_kwargs["model"] = self._model
 
@@ -409,6 +481,10 @@ class ClaudeAgentAdapter:
 
                 if current_session_id:
                     options_kwargs["resume"] = current_session_id
+                    if current_runtime_handle and current_runtime_handle.metadata.get(
+                        "fork_session"
+                    ):
+                        options_kwargs["fork_session"] = True
 
                 options = ClaudeAgentOptions(**options_kwargs)
 

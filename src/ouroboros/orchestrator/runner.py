@@ -299,6 +299,8 @@ class OrchestratorRunner:
         mcp_tool_prefix: str = "",
         debug: bool = False,
         enable_decomposition: bool = True,
+        inherited_runtime_handle: RuntimeHandle | None = None,
+        inherited_tools: list[str] | None = None,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -313,6 +315,10 @@ class OrchestratorRunner:
                            conflicts (e.g., "mcp_" makes "read" become "mcp_read").
             debug: Enable verbose logging output. When False, only Live display shown.
             enable_decomposition: Enable AC decomposition into Sub-ACs.
+            inherited_runtime_handle: Optional parent Claude runtime handle for
+                        delegated child executions that should fork a session.
+            inherited_tools: Optional effective tool set inherited from a
+                        delegating parent session.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -322,6 +328,8 @@ class OrchestratorRunner:
         self._mcp_tool_prefix = mcp_tool_prefix
         self._debug = debug
         self._enable_decomposition = enable_decomposition
+        self._inherited_runtime_handle = inherited_runtime_handle
+        self._inherited_tools = list(inherited_tools) if inherited_tools else None
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
 
@@ -581,6 +589,10 @@ class OrchestratorRunner:
         # Start with strategy tools (or DEFAULT_TOOLS as fallback)
         base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
         merged_tools = list(base_tools)
+        if self._inherited_tools:
+            for tool_name in self._inherited_tools:
+                if tool_name not in merged_tools:
+                    merged_tools.append(tool_name)
 
         if self._mcp_manager is None:
             return merged_tools, None
@@ -870,6 +882,7 @@ class OrchestratorRunner:
                     prompt=task_prompt,
                     tools=merged_tools,
                     system_prompt=system_prompt,
+                    resume_handle=self._inherited_runtime_handle,
                 ):
                     messages_processed += 1
 
@@ -1185,6 +1198,7 @@ class OrchestratorRunner:
             event_store=self._event_store,
             console=self._console,
             enable_decomposition=self._enable_decomposition,
+            inherited_runtime_handle=self._inherited_runtime_handle,
         )
 
         # Check for cancellation before starting parallel execution

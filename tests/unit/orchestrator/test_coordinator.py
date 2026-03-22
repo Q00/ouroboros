@@ -11,9 +11,12 @@ Tests cover:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import Any
+
 import pytest
 
-from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.coordinator import (
     CoordinatorReview,
     FileConflict,
@@ -409,6 +412,53 @@ class TestParseReviewResponse:
         assert review.review_summary == "partial"
         assert review.fixes_applied == ()
         assert review.warnings_for_next_level == ()
+
+
+class TestRunReview:
+    """Tests for LevelCoordinator.run_review()."""
+
+    @pytest.mark.asyncio
+    async def test_run_review_uses_inherited_runtime_handle(self) -> None:
+        """Coordinator review should reuse the delegated parent runtime."""
+        inherited_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="sess_parent",
+            metadata={"fork_session": True},
+        )
+        captured_kwargs: dict[str, Any] = {}
+
+        class FakeAdapter:
+            async def execute_task(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+                captured_kwargs.update(kwargs)
+                yield AgentMessage(
+                    type="result",
+                    content=(
+                        '{"review_summary": "Resolved shared conflict", '
+                        '"fixes_applied": ["Merged app.py edits"], '
+                        '"warnings_for_next_level": [], '
+                        '"conflicts_resolved": ["src/app.py"]}'
+                    ),
+                    data={"subtype": "success"},
+                )
+
+        coordinator = LevelCoordinator(
+            FakeAdapter(),
+            inherited_runtime_handle=inherited_handle,
+        )
+        conflicts = [FileConflict(file_path="src/app.py", ac_indices=(0, 1))]
+        level_context = LevelContext(
+            level_number=1,
+            completed_acs=(
+                ACContextSummary(ac_index=0, ac_content="AC 1", success=True),
+                ACContextSummary(ac_index=1, ac_content="AC 2", success=True),
+            ),
+        )
+
+        review = await coordinator.run_review(conflicts, level_context, 1)
+
+        assert review.review_summary == "Resolved shared conflict"
+        assert review.conflicts_detected[0].resolved is True
+        assert captured_kwargs["resume_handle"] == inherited_handle
 
 
 # =============================================================================

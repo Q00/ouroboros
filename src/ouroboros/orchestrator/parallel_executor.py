@@ -41,7 +41,7 @@ import anyio
 from rich.console import Console
 
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.adapter import AgentMessage
+from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.coordinator import LevelCoordinator
 from ouroboros.orchestrator.events import (
     create_ac_stall_detected_event,
@@ -205,6 +205,7 @@ class ParallelACExecutor:
         enable_decomposition: bool = True,
         max_concurrent: int = 3,
         checkpoint_store: Any | None = None,
+        inherited_runtime_handle: RuntimeHandle | None = None,
     ):
         """Initialize executor.
 
@@ -215,12 +216,18 @@ class ParallelACExecutor:
             enable_decomposition: Enable Claude to decompose complex ACs.
             max_concurrent: Maximum number of concurrent AC executions.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
+            inherited_runtime_handle: Optional parent Claude runtime handle for
+                        delegated child executions.
         """
         self._adapter = adapter
         self._event_store = event_store
         self._console = console or Console()
         self._enable_decomposition = enable_decomposition
-        self._coordinator = LevelCoordinator(adapter)
+        self._inherited_runtime_handle = inherited_runtime_handle
+        self._coordinator = LevelCoordinator(
+            adapter,
+            inherited_runtime_handle=inherited_runtime_handle,
+        )
         self._semaphore = anyio.Semaphore(max_concurrent)
         self._checkpoint_store = checkpoint_store
 
@@ -1052,6 +1059,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 prompt=decompose_prompt,
                 tools=[],  # No tools for decomposition analysis
                 system_prompt="You are a task decomposition expert. Analyze tasks and break them down if needed.",
+                resume_handle=self._inherited_runtime_handle,
             ):
                 if message.content:
                     response_text = message.content
@@ -1364,6 +1372,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                     prompt=prompt,
                     tools=tools,
                     system_prompt=system_prompt,
+                    resume_handle=self._inherited_runtime_handle,
                 ):
                     # Reset stall deadline on every message (RC6 core)
                     stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS

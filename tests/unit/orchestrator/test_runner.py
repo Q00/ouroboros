@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -381,6 +382,145 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert captured_kwargs["resume_handle"] == runtime_handle
 
+    @pytest.mark.asyncio
+    async def test_execute_seed_uses_inherited_runtime_handle(
+        self,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Delegated child runs should fork from the inherited parent runtime handle."""
+        inherited_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="sess_parent",
+            metadata={"fork_session": True},
+        )
+        mock_adapter = MagicMock()
+        captured_kwargs: dict[str, Any] = {}
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            captured_kwargs.update(kwargs)
+            yield AgentMessage(
+                type="result",
+                content="Task completed successfully",
+                data={"subtype": "success"},
+            )
+
+        mock_adapter.execute_task = mock_execute
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            inherited_runtime_handle=inherited_handle,
+            inherited_tools=["mcp__chrome-devtools__click"],
+        )
+
+        from ouroboros.core.types import Result
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+        assert captured_kwargs["resume_handle"] == inherited_handle
+        assert "mcp__chrome-devtools__click" in captured_kwargs["tools"]
+
+    @pytest.mark.asyncio
+    async def test_execute_parallel_passes_inherited_runtime_handle_to_executor(
+        self,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Parallel delegated runs should propagate inherited runtime/tool context."""
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+        from ouroboros.orchestrator.parallel_executor import (
+            ACExecutionResult,
+            ParallelExecutionResult,
+        )
+
+        inherited_handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="sess_parent",
+            metadata={"fork_session": True},
+        )
+        mock_adapter = MagicMock()
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            inherited_runtime_handle=inherited_handle,
+        )
+        tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
+        captured_init: dict[str, Any] = {}
+        captured_execute: dict[str, Any] = {}
+
+        class FakeParallelExecutor:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                captured_init.update(kwargs)
+
+            async def execute_parallel(self, **kwargs: Any) -> ParallelExecutionResult:
+                captured_execute.update(kwargs)
+                return ParallelExecutionResult(
+                    results=tuple(
+                        ACExecutionResult(
+                            ac_index=index,
+                            ac_content=ac,
+                            success=True,
+                            final_message="[TASK_COMPLETE]",
+                        )
+                        for index, ac in enumerate(sample_seed.acceptance_criteria)
+                    ),
+                    success_count=len(sample_seed.acceptance_criteria),
+                    failure_count=0,
+                    total_messages=3,
+                    total_duration_seconds=0.1,
+                )
+
+        dependency_graph = DependencyGraph(
+            nodes=tuple(
+                ACNode(index=index, content=ac)
+                for index, ac in enumerate(sample_seed.acceptance_criteria)
+            ),
+            execution_levels=(tuple(range(len(sample_seed.acceptance_criteria))),),
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                FakeParallelExecutor,
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id="exec_parallel",
+                tracker=tracker,
+                merged_tools=["Read", "mcp__chrome-devtools__click"],
+                system_prompt="system",
+                start_time=datetime.now(UTC),
+            )
+
+        assert result.is_ok
+        assert captured_init["inherited_runtime_handle"] == inherited_handle
+        assert captured_execute["tools"] == ["Read", "mcp__chrome-devtools__click"]
+
 
 class TestOrchestratorError:
     """Tests for OrchestratorError."""
@@ -537,6 +677,27 @@ class TestOrchestratorRunnerWithMCP:
         assert all(t in merged_tools for t in DEFAULT_TOOLS)
         assert "external_tool" in merged_tools
         assert provider is not None
+
+    @pytest.mark.asyncio
+    async def test_get_merged_tools_includes_inherited_tools(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Delegated runners should merge inherited tools without duplicating built-ins."""
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            inherited_tools=["Read", "mcp__chrome-devtools__click"],
+        )
+
+        merged_tools, provider = await runner._get_merged_tools("session_123")
+
+        assert "mcp__chrome-devtools__click" in merged_tools
+        assert merged_tools.count("Read") == 1
+        assert provider is None
 
     @pytest.mark.asyncio
     async def test_get_merged_tools_mcp_failure(
