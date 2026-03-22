@@ -1157,6 +1157,8 @@ def create_ouroboros_server(
         ),
         PMInterviewHandler(
             data_dir=state_dir,
+            llm_adapter=llm_adapter,
+            llm_backend=llm_backend,
         ),
         BrownfieldHandler(),
         EvaluateHandler(

@@ -229,6 +229,8 @@ class PMInterviewHandler:
 
     pm_engine: PMInterviewEngine | None = field(default=None, repr=False)
     data_dir: Path | None = field(default=None, repr=False)
+    llm_adapter: Any | None = field(default=None, repr=False)
+    llm_backend: str | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -296,13 +298,14 @@ class PMInterviewHandler:
         )
 
     def _get_engine(self) -> PMInterviewEngine:
-        """Return the injected engine or create a new one with default adapter."""
+        """Return the injected engine or create a new one using the server's configured backend."""
         if self.pm_engine is not None:
             return self.pm_engine
-        adapter = ClaudeAgentAdapter(permission_mode="bypassPermissions")
+        adapter = self.llm_adapter or ClaudeAgentAdapter(permission_mode="bypassPermissions")
         return PMInterviewEngine.create(
             llm_adapter=adapter,
             state_dir=self.data_dir or _DATA_DIR,
+            model=self.llm_backend,
         )
 
     async def handle(
@@ -1013,7 +1016,7 @@ class PMInterviewHandler:
                     "session_id": session_id,
                     "seed_path": str(seed_path),
                     "pm_path": str(pm_path),
-                    "next_step": f"ooo interview {pm_path}",
+                    "next_step": f"Run 'ooo interview' to start a dev interview using {pm_path} as context",
                 },
             )
         )

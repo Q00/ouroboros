@@ -138,7 +138,7 @@ def _check_existing_pm_seeds() -> bool:
     if not seeds_dir.is_dir():
         return True
 
-    existing = sorted(seeds_dir.glob("pm_seed_*.json"))
+    existing = sorted(seeds_dir.glob("pm_*.json"))
 
     if not existing:
         return True

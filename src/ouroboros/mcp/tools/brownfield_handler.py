@@ -55,6 +55,9 @@ def _detect_action(arguments: dict[str, Any]) -> str:
     if explicit:
         return explicit
 
+    if "indices" in arguments:
+        return "set_defaults"
+
     if "is_default" in arguments:
         return "set_default"
 
