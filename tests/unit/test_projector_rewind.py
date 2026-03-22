@@ -56,7 +56,7 @@ class TestFindResumePointRewind:
             ),
         ]
 
-        gen, phase = projector.find_resume_point(events)
+        gen, phase, _ = projector.find_resume_point(events)
 
         # The "rewound" event should be skipped; last valid state is gen 1 completed
         assert gen == 1
@@ -96,7 +96,7 @@ class TestFindResumePointRewind:
             # but the completed event for gen 2 was the last, so gen=2 COMPLETED
         ]
 
-        gen, phase = projector.find_resume_point(events)
+        gen, phase, _ = projector.find_resume_point(events)
 
         assert gen == 2
         assert phase == GenerationPhase.COMPLETED
@@ -114,7 +114,7 @@ class TestFindResumePointRewind:
             ),
         ]
 
-        gen, phase = projector.find_resume_point(events)
+        gen, phase, _ = projector.find_resume_point(events)
 
         # Unknown phase skipped; defaults remain
         assert gen == 0

@@ -154,7 +154,7 @@ class JobManager:
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
                 terminal_type = "mcp.job.cancelled"
                 terminal_status = JobStatus.CANCELLED
-            elif getattr(result, "meta", {}).get("action") == "interrupted":
+            elif getattr(result, "is_interrupted", False):
                 terminal_type = "mcp.job.failed"
                 terminal_status = JobStatus.FAILED
             await self._append_event(

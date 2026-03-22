@@ -121,6 +121,11 @@ class StepResult:
     action: StepAction
     next_generation: int
 
+    @property
+    def is_interrupted(self) -> bool:
+        """Whether this step was interrupted by graceful shutdown."""
+        return self.action == StepAction.INTERRUPTED
+
 
 class EvolutionaryLoop:
     """Manages the evolutionary cycle across generations.
@@ -165,6 +170,7 @@ class EvolutionaryLoop:
         )
         self._shutdown_requested = False
         self._original_sigint_handler: signal.Handlers | None = None
+        self._sigint_installed = False
         self._convergence = ConvergenceCriteria(
             convergence_threshold=self.config.convergence_threshold,
             stagnation_window=self.config.stagnation_window,
@@ -177,6 +183,8 @@ class EvolutionaryLoop:
 
     def _install_sigint_handler(self) -> None:
         """Replace SIGINT handler with graceful shutdown flag."""
+        if self._sigint_installed:
+            return
         self._shutdown_requested = False
 
         def _handle_sigint(signum: int, frame: Any) -> None:  # noqa: ARG001
@@ -190,6 +198,7 @@ class EvolutionaryLoop:
         try:
             self._original_sigint_handler = signal.getsignal(signal.SIGINT)
             signal.signal(signal.SIGINT, _handle_sigint)
+            self._sigint_installed = True
         except (ValueError, OSError) as exc:
             logger.warning(
                 "evolution.sigint_handler_unavailable",
@@ -199,6 +208,8 @@ class EvolutionaryLoop:
 
     def _uninstall_sigint_handler(self) -> None:
         """Restore the original SIGINT handler."""
+        if not self._sigint_installed:
+            return
         if self._original_sigint_handler is not None:
             try:
                 signal.signal(signal.SIGINT, self._original_sigint_handler)
@@ -208,6 +219,7 @@ class EvolutionaryLoop:
                     extra={"reason": str(exc)},
                 )
             self._original_sigint_handler = None
+        self._sigint_installed = False
 
     def set_project_dir(self, project_dir: str | None) -> Token[str | None]:
         """Set task-local project directory context for the current generation."""
@@ -372,21 +384,21 @@ class EvolutionaryLoop:
                 )
 
             # Check convergence
-            signal = self._convergence.evaluate(
+            conv_signal = self._convergence.evaluate(
                 lineage,
                 result.wonder_output,
                 latest_evaluation=result.evaluation_summary,
                 validation_output=result.validation_output,
             )
 
-            if signal.converged:
+            if conv_signal.converged:
                 logger.info(
                     "evolution.converged",
                     extra={
                         "lineage_id": lineage.lineage_id,
                         "generation": generation_number,
-                        "reason": signal.reason,
-                        "similarity": signal.ontology_similarity,
+                        "reason": conv_signal.reason,
+                        "similarity": conv_signal.ontology_similarity,
                     },
                 )
 
@@ -400,12 +412,12 @@ class EvolutionaryLoop:
                         )
                     )
                     lineage = lineage.with_status(LineageStatus.EXHAUSTED)
-                elif "Stagnation" in signal.reason or "Oscillation" in signal.reason:
+                elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
                     await self.event_store.append(
                         lineage_stagnated(
                             lineage.lineage_id,
                             generation_number,
-                            signal.reason,
+                            conv_signal.reason,
                             self.config.stagnation_window,
                         )
                     )
@@ -415,8 +427,8 @@ class EvolutionaryLoop:
                         lineage_converged(
                             lineage.lineage_id,
                             generation_number,
-                            signal.reason,
-                            signal.ontology_similarity,
+                            conv_signal.reason,
+                            conv_signal.ontology_similarity,
                         )
                     )
                     lineage = lineage.with_status(LineageStatus.CONVERGED)
@@ -489,6 +501,8 @@ class EvolutionaryLoop:
             await self.event_store.append(lineage_created(lineage.lineage_id, lineage.goal))
             generation_number = 1
             current_seed = initial_seed
+            last_phase = GenerationPhase.COMPLETED  # Gen 1: no prior state
+            interrupted_at_phase = None
 
         else:
             # Gen 2+: reconstruct from events
@@ -505,7 +519,7 @@ class EvolutionaryLoop:
                 )
 
             # Determine resume point
-            last_gen, last_phase = projector.find_resume_point(events)
+            last_gen, last_phase, interrupted_at_phase = projector.find_resume_point(events)
 
             if last_phase in (GenerationPhase.FAILED, GenerationPhase.INTERRUPTED):
                 # Resume the failed/interrupted generation
@@ -558,6 +572,8 @@ class EvolutionaryLoop:
                 return Result.err(OuroborosError("Events exist but no completed generations found"))
 
         # Step 2: Run one generation with graceful shutdown support
+        # Pass resume phase hint for interrupted generations
+        resume_after_phase = interrupted_at_phase if last_phase == GenerationPhase.INTERRUPTED else None
         self._install_sigint_handler()
         timeout = self.config.generation_timeout_seconds or None  # 0 = no timeout
         try:
@@ -568,6 +584,7 @@ class EvolutionaryLoop:
                     current_seed=current_seed,
                     execute=execute,
                     parallel=parallel,
+                    resume_after_phase=resume_after_phase,
                 ),
                 timeout=timeout,
             )
@@ -583,7 +600,7 @@ class EvolutionaryLoop:
                 phase=GenerationPhase.FAILED,
                 success=False,
             )
-            signal = ConvergenceSignal(
+            conv_signal = ConvergenceSignal(
                 converged=False,
                 reason=f"Generation timed out after {self.config.generation_timeout_seconds}s",
                 ontology_similarity=0.0,
@@ -592,7 +609,7 @@ class EvolutionaryLoop:
             return Result.ok(
                 StepResult(
                     generation_result=failed_gen,
-                    convergence_signal=signal,
+                    convergence_signal=conv_signal,
                     lineage=lineage,
                     action=StepAction.FAILED,
                     next_generation=generation_number,
@@ -618,7 +635,7 @@ class EvolutionaryLoop:
                 phase=GenerationPhase.FAILED,
                 success=False,
             )
-            signal = ConvergenceSignal(
+            conv_signal = ConvergenceSignal(
                 converged=False,
                 reason=str(gen_result.error),
                 ontology_similarity=0.0,
@@ -627,7 +644,7 @@ class EvolutionaryLoop:
             return Result.ok(
                 StepResult(
                     generation_result=failed_gen,
-                    convergence_signal=signal,
+                    convergence_signal=conv_signal,
                     lineage=lineage,
                     action=StepAction.FAILED,
                     next_generation=generation_number,
@@ -638,7 +655,7 @@ class EvolutionaryLoop:
 
         # Handle graceful interruption — return without emitting completed
         if result.phase == GenerationPhase.INTERRUPTED:
-            signal = ConvergenceSignal(
+            conv_signal = ConvergenceSignal(
                 converged=False,
                 reason="Generation interrupted by SIGINT",
                 ontology_similarity=0.0,
@@ -647,7 +664,7 @@ class EvolutionaryLoop:
             return Result.ok(
                 StepResult(
                     generation_result=result,
-                    convergence_signal=signal,
+                    convergence_signal=conv_signal,
                     lineage=lineage,
                     action=StepAction.INTERRUPTED,
                     next_generation=generation_number,
@@ -694,7 +711,7 @@ class EvolutionaryLoop:
             )
 
         # Step 4: Check convergence
-        signal = self._convergence.evaluate(
+        conv_signal = self._convergence.evaluate(
             lineage,
             result.wonder_output,
             latest_evaluation=result.evaluation_summary,
@@ -702,7 +719,7 @@ class EvolutionaryLoop:
         )
 
         action = StepAction.CONTINUE
-        if signal.converged:
+        if conv_signal.converged:
             if generation_number >= self.config.max_generations:
                 await self.event_store.append(
                     lineage_exhausted(
@@ -713,12 +730,12 @@ class EvolutionaryLoop:
                 )
                 lineage = lineage.with_status(LineageStatus.EXHAUSTED)
                 action = StepAction.EXHAUSTED
-            elif "Stagnation" in signal.reason or "Oscillation" in signal.reason:
+            elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
                 await self.event_store.append(
                     lineage_stagnated(
                         lineage.lineage_id,
                         generation_number,
-                        signal.reason,
+                        conv_signal.reason,
                         self.config.stagnation_window,
                     )
                 )
@@ -729,8 +746,8 @@ class EvolutionaryLoop:
                     lineage_converged(
                         lineage.lineage_id,
                         generation_number,
-                        signal.reason,
-                        signal.ontology_similarity,
+                        conv_signal.reason,
+                        conv_signal.ontology_similarity,
                     )
                 )
                 lineage = lineage.with_status(LineageStatus.CONVERGED)
@@ -739,7 +756,7 @@ class EvolutionaryLoop:
         return Result.ok(
             StepResult(
                 generation_result=result,
-                convergence_signal=signal,
+                convergence_signal=conv_signal,
                 lineage=lineage,
                 action=action,
                 next_generation=generation_number + 1,
@@ -753,11 +770,16 @@ class EvolutionaryLoop:
         current_seed: Seed,
         execute: bool = True,
         parallel: bool = True,
+        resume_after_phase: str | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run a single generation within the loop.
 
         Gen 1: Execute → Evaluate (seed already provided)
         Gen 2+: Wonder → Reflect → Seed → Execute → Evaluate
+
+        Args:
+            resume_after_phase: If set, skip phases up to and including this
+                phase (for resuming interrupted generations).
         """
         try:
             return await self._run_generation_phases(
@@ -766,6 +788,7 @@ class EvolutionaryLoop:
                 current_seed=current_seed,
                 execute=execute,
                 parallel=parallel,
+                resume_after_phase=resume_after_phase,
             )
         except asyncio.CancelledError:
             # MCP transport disconnect, timeout, or external task cancellation.
@@ -827,7 +850,7 @@ class EvolutionaryLoop:
                 partial_state["mutation_count"] = len(reflect_output.ontology_mutations)
             if execution_output:
                 partial_state["execution_output"] = execution_output[:10_000]
-        except Exception:
+        except (TypeError, ValueError, KeyError):
             logger.warning("evolution.generation.partial_state_build_failed", exc_info=True)
 
         try:
@@ -849,6 +872,10 @@ class EvolutionaryLoop:
                 },
                 exc_info=True,
             )
+            logger.warning(
+                "evolution.generation.resume_may_fail: interrupted event was NOT persisted. "
+                "On next resume, this generation may restart from scratch."
+            )
 
         return GenerationResult(
             generation_number=generation_number,
@@ -867,12 +894,29 @@ class EvolutionaryLoop:
         current_seed: Seed,
         execute: bool = True,
         parallel: bool = True,
+        resume_after_phase: str | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Inner implementation of _run_generation with all phase logic.
 
         Separated from _run_generation to allow CancelledError guard at the
         outer level without deeply nesting the entire method body.
+
+        Args:
+            resume_after_phase: If set, skip phases that were already completed
+                before interruption. Phase order: wondering → reflecting →
+                seeding → executing → evaluating.
         """
+        # Phase ordering for resume skip logic
+        _PHASE_ORDER = ["started", "wondering", "reflecting", "seeding", "executing", "evaluating"]
+
+        def _should_skip(phase: str) -> bool:
+            """Return True if this phase was already completed before interruption."""
+            if resume_after_phase is None:
+                return False
+            try:
+                return _PHASE_ORDER.index(phase) <= _PHASE_ORDER.index(resume_after_phase)
+            except ValueError:
+                return False
         wonder_output: WonderOutput | None = None
         reflect_output: ReflectOutput | None = None
         ontology_delta: OntologyDelta | None = None
@@ -890,8 +934,8 @@ class EvolutionaryLoop:
                 )
             )
 
-            # Wonder phase
-            if self.wonder_engine:
+            # Wonder phase (skip if already completed before interruption)
+            if self.wonder_engine and not _should_skip("wondering"):
                 wonder_result = await self.wonder_engine.wonder(
                     current_ontology=current_seed.ontology_schema,
                     evaluation_summary=prev_gen.evaluation_summary,
@@ -936,10 +980,13 @@ class EvolutionaryLoop:
                     )
 
             # Check for graceful shutdown after Wonder phase
+            post_wonder_phase = (
+                GenerationPhase.WONDERING.value if wonder_output is not None else "started"
+            )
             interrupted = await self._check_shutdown(
                 lineage.lineage_id,
                 generation_number,
-                GenerationPhase.WONDERING.value,
+                post_wonder_phase,
                 current_seed,
                 wonder_output=wonder_output,
             )
@@ -956,7 +1003,8 @@ class EvolutionaryLoop:
             )
 
             # Reflect phase (with retry on parse failure)
-            if self.reflect_engine and wonder_output and prev_gen.evaluation_summary:
+            # Skip if already completed before interruption
+            if self.reflect_engine and wonder_output and prev_gen.evaluation_summary and not _should_skip("reflecting"):
                 max_reflect_attempts = 2
                 for attempt in range(max_reflect_attempts):
                     reflect_result = await self.reflect_engine.reflect(
@@ -1076,7 +1124,7 @@ class EvolutionaryLoop:
         elif wonder_output is not None:
             pre_exec_phase = GenerationPhase.WONDERING.value
         else:
-            pre_exec_phase = None  # Gen 1: no phase completed yet
+            pre_exec_phase = "started"  # Gen 1: only started event emitted
         interrupted = await self._check_shutdown(
             lineage.lineage_id,
             generation_number,

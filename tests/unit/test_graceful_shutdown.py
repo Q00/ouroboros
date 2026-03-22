@@ -132,9 +132,10 @@ class TestProjectorInterrupted:
                 },
             ),
         ]
-        gen, phase = projector.find_resume_point(events)
+        gen, phase, interrupted_at = projector.find_resume_point(events)
         assert gen == 2
         assert phase == GenerationPhase.INTERRUPTED
+        assert interrupted_at == "reflecting"
 
 
 # -- Shutdown flag tests --

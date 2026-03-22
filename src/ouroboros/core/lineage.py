@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -288,6 +289,8 @@ class GenerationRecord(BaseModel, frozen=True):
     seed_json: str | None = None
     execution_output: str | None = None
     failure_error: str | None = None
+    last_completed_phase: str | None = None
+    partial_state: dict[str, Any] | None = None
 
 
 class RewindRecord(BaseModel, frozen=True):
