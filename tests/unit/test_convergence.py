@@ -883,3 +883,97 @@ class TestOntologyCompletenessGate:
         # Stagnation safety should override the completeness gate
         assert signal.converged
         assert signal.termination_reason == TerminationReason.STAGNATED
+
+
+# --- Wonder Gate ---
+
+
+class TestWonderGate:
+    """Tests for wonder_gate in convergence criteria."""
+
+    @staticmethod
+    def _stable_lineage_with_wonder(
+        prev_questions: tuple[str, ...] = (),
+    ) -> OntologyLineage:
+        """Create a stable lineage where gen2-3 have identical ontology."""
+        schema_a = _schema(("x",))
+        schema_b = _schema(("name", "age", "email"))
+        return OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(
+                    generation_number=1, seed_id="s1", ontology_snapshot=schema_a,
+                    wonder_questions=prev_questions,
+                ),
+                GenerationRecord(
+                    generation_number=2, seed_id="s2", ontology_snapshot=schema_b,
+                    wonder_questions=prev_questions,
+                ),
+                GenerationRecord(
+                    generation_number=3, seed_id="s3", ontology_snapshot=schema_b,
+                    wonder_questions=prev_questions,
+                ),
+            ),
+        )
+
+    def test_blocks_when_novel_questions_exceed_threshold(self) -> None:
+        """Wonder gate blocks when majority of questions are novel."""
+        lineage = self._stable_lineage_with_wonder(("old question 1", "old question 2"))
+        wonder = WonderOutput(
+            questions=("brand new question A", "brand new question B", "old question 1"),
+            should_continue=True,
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=True,
+            wonder_novelty_threshold=0.5,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=wonder)
+        assert not signal.converged
+        assert "Wonder gate" in signal.reason
+        assert "novel questions" in signal.reason
+
+    def test_allows_when_all_questions_are_repeated(self) -> None:
+        """Wonder gate allows convergence when all questions are old."""
+        prev = ("question A", "question B")
+        lineage = self._stable_lineage_with_wonder(prev)
+        wonder = WonderOutput(
+            questions=("question A", "question B"),
+            should_continue=True,
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=True,
+            wonder_novelty_threshold=0.5,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=wonder)
+        assert signal.converged
+
+    def test_allows_when_wonder_is_none(self) -> None:
+        """Wonder gate passes when no wonder output is provided."""
+        lineage = self._stable_lineage_with_wonder()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=True,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=None)
+        assert signal.converged
+
+    def test_disabled_allows_convergence(self) -> None:
+        """Disabled wonder gate allows convergence regardless of novelty."""
+        lineage = self._stable_lineage_with_wonder()
+        wonder = WonderOutput(
+            questions=("completely new question",),
+            should_continue=True,
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=wonder)
+        assert signal.converged

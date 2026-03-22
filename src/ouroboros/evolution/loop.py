@@ -77,6 +77,8 @@ class EvolutionaryLoopConfig:
     validation_gate_enabled: bool = True
     ontology_completeness_gate_enabled: bool = False
     ontology_min_fields: int = 3
+    wonder_gate_enabled: bool = False
+    wonder_novelty_threshold: float = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +186,8 @@ class EvolutionaryLoop:
             validation_gate_enabled=self.config.validation_gate_enabled,
             ontology_completeness_gate_enabled=self.config.ontology_completeness_gate_enabled,
             ontology_min_fields=self.config.ontology_min_fields,
+            wonder_gate_enabled=self.config.wonder_gate_enabled,
+            wonder_novelty_threshold=self.config.wonder_novelty_threshold,
         )
 
     def set_project_dir(self, project_dir: str | None) -> Token[str | None]:

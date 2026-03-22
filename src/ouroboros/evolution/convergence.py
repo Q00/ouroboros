@@ -72,6 +72,8 @@ class ConvergenceCriteria:
     validation_gate_enabled: bool = True
     ontology_completeness_gate_enabled: bool = False
     ontology_min_fields: int = 3
+    wonder_gate_enabled: bool = False
+    wonder_novelty_threshold: float = 0.5
 
     def evaluate(
         self,
@@ -210,6 +212,17 @@ class ConvergenceCriteria:
                     return ConvergenceSignal(
                         converged=False,
                         reason=completeness_block,
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                    )
+
+            # Wonder gate: block convergence if Wonder found significant novel questions
+            if self.wonder_gate_enabled and latest_wonder is not None:
+                wonder_block = self._check_wonder_gate(lineage, latest_wonder)
+                if wonder_block is not None:
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=wonder_block,
                         ontology_similarity=latest_sim,
                         generation=current_gen,
                     )
@@ -356,6 +369,36 @@ class ConvergenceCriteria:
                     f"Per-AC gate (mode=ratio): pass ratio {ratio:.2f} "
                     f"< required {self.ac_min_pass_ratio:.2f}"
                 )
+
+        return None
+
+    def _check_wonder_gate(
+        self, lineage: OntologyLineage, latest_wonder: WonderOutput
+    ) -> str | None:
+        """Block convergence if Wonder found significant novel questions.
+
+        Compares latest wonder questions against all previous generations.
+        If novelty ratio >= threshold, ontology may still benefit from evolution.
+
+        Returns blocking reason if novel questions exceed threshold, None if OK.
+        """
+        if not latest_wonder.questions:
+            return None
+
+        prev_questions: set[str] = set()
+        for gen in lineage.generations:
+            prev_questions.update(gen.wonder_questions)
+
+        novel = [q for q in latest_wonder.questions if q not in prev_questions]
+        if not latest_wonder.questions:
+            return None
+        novelty_ratio = len(novel) / len(latest_wonder.questions)
+
+        if novelty_ratio >= self.wonder_novelty_threshold:
+            return (
+                f"Wonder gate: {len(novel)}/{len(latest_wonder.questions)} novel questions "
+                f"(novelty {novelty_ratio:.0%} >= {self.wonder_novelty_threshold:.0%} threshold)"
+            )
 
         return None
 
