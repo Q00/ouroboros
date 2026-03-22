@@ -147,12 +147,14 @@ class EvaluationSummary(BaseModel, frozen=True):
 
     @model_validator(mode="after")
     def _reconcile_approval_with_ac_results(self) -> "EvaluationSummary":
-        """Eagerly reconcile approval_status with AC results at construction time."""
+        """Eagerly reconcile approval fields with AC results at construction time."""
         if self.ac_results:
             ac_passed = all(ac.passed for ac in self.ac_results)
-            expected = "approved" if ac_passed else "rejected"
-            if self.approval_status != expected:
-                object.__setattr__(self, "approval_status", expected)
+            expected_status = "approved" if ac_passed else "rejected"
+            if self.approval_status != expected_status:
+                object.__setattr__(self, "approval_status", expected_status)
+            if self.final_approved != ac_passed:
+                object.__setattr__(self, "final_approved", ac_passed)
         return self
 
     @property

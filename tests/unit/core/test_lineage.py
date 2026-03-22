@@ -188,6 +188,7 @@ class TestEvaluationSummary:
         # Deliberately do NOT access run_verdict_passed before serializing
         payload = summary.model_dump(mode="json")
         assert payload["approval_status"] == "approved"
+        assert payload["final_approved"] is True
 
 
 class TestACResult:
