@@ -277,10 +277,10 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             should_continue = True
 
         return WonderOutput(
-            questions=tuple(questions)
-            if questions
-            else ("What are we assuming about this domain?",),
+            questions=tuple(questions),
             ontology_tensions=tuple(tensions),
             should_continue=should_continue,
-            reasoning="Degraded mode: LLM unavailable, using heuristic questions",
+            reasoning="Degraded mode: LLM unavailable, using heuristic questions"
+            if should_continue
+            else "Degraded mode: evaluation passed, no in-scope gaps remain",
         )

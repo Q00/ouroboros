@@ -589,17 +589,27 @@ class InterviewEngine:
 
         perspective_panel = self._build_perspective_panel_prompt(state)
 
-        full_prompt = f"{dynamic_header}\n{base_prompt}\n\n{perspective_panel}"
-
         # Cap total system prompt to prevent Agent SDK CLI empty responses.
         # The bundled CLI can fail silently when the prompt exceeds ~5,000 chars.
         _MAX_SYSTEM_PROMPT_CHARS = 4800
+        _OVERHEAD = 20  # newlines, ellipsis, separators
+
+        # Budget for base_prompt after accounting for other sections
+        base_budget = _MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - len(perspective_panel) - _OVERHEAD
+        if base_budget < 0:
+            # Header + panel already exceed budget — truncate both proportionally
+            total = len(dynamic_header) + len(perspective_panel)
+            ratio = max(0.0, (_MAX_SYSTEM_PROMPT_CHARS - _OVERHEAD) / total) if total > 0 else 0.0
+            dynamic_header = dynamic_header[: int(len(dynamic_header) * ratio)]
+            perspective_panel = perspective_panel[: int(len(perspective_panel) * ratio)]
+            base_budget = 0
+
+        trimmed_base = base_prompt[:base_budget] if base_budget < len(base_prompt) else base_prompt
+        full_prompt = f"{dynamic_header}\n{trimmed_base}\n\n{perspective_panel}"
+
+        # Hard-truncate as final safety net
         if len(full_prompt) > _MAX_SYSTEM_PROMPT_CHARS:
-            # Keep the dynamic header (has initial_context + codebase) and trim base_prompt
-            trimmed_base = base_prompt[
-                : _MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - len(perspective_panel) - 20
-            ]
-            full_prompt = f"{dynamic_header}\n{trimmed_base}...\n\n{perspective_panel}"
+            full_prompt = full_prompt[:_MAX_SYSTEM_PROMPT_CHARS]
 
         return full_prompt
 
