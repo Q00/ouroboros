@@ -147,8 +147,10 @@ class EvaluationSummary(BaseModel, frozen=True):
 
     @property
     def run_verdict_passed(self) -> bool:
-        """Aggregate verdict incorporating execution status and AC results."""
+        """Aggregate verdict incorporating execution status, approval, and AC results."""
         if self.execution_completion_status != "completed":
+            return False
+        if self.approval_status == "rejected" and not self.ac_results:
             return False
         if self.ac_results:
             return all(ac.passed for ac in self.ac_results)

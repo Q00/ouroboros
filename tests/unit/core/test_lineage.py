@@ -107,6 +107,18 @@ class TestEvaluationSummary:
         assert summary.run_verdict_passed is False
         assert summary.run_verdict == "FAIL"
 
+    def test_run_verdict_fails_when_approval_rejected_no_ac_results(self) -> None:
+        """Rejected approval without AC results must be FAIL."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            execution_completion_status="completed",
+            approval_status="rejected",
+        )
+
+        assert summary.run_verdict_passed is False
+        assert summary.run_verdict == "FAIL"
+
 
 class TestACResult:
     """Tests for ACResult verdict backfill."""
