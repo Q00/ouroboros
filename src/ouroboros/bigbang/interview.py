@@ -258,7 +258,9 @@ class InterviewEngine:
             initial_context=initial_context,
         )
 
-        # Auto-detect brownfield projects from CWD
+        # Auto-detect brownfield projects from CWD.
+        # codebase_paths is informational only — the main session (not MCP)
+        # handles codebase exploration directly via Read/Glob/Grep.
         if cwd:
             from ouroboros.bigbang.explore import detect_brownfield
 

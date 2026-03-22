@@ -603,7 +603,7 @@ class InterviewHandler:
             backend=self.llm_backend,
             max_turns=1,
             use_case="interview",
-            allowed_tools=None,
+            allowed_tools=[],
         )
         engine = self.interview_engine or InterviewEngine(
             llm_adapter=llm_adapter,
@@ -643,6 +643,8 @@ class InterviewHandler:
                     )
                     # Return recoverable result with session ID for retry
                     if "empty response" in error_msg.lower():
+                        # Persist state so the session can actually be resumed
+                        await engine.save_state(state)
                         return Result.ok(
                             MCPToolResult(
                                 content=(
@@ -816,6 +818,10 @@ class InterviewHandler:
                         "mcp.tool.interview.response_recorded",
                         session_id=session_id,
                     )
+
+                    # Persist recorded answer immediately so it survives
+                    # question generation failures downstream
+                    await engine.save_state(state)
 
                     live_score = await self._score_interview_state(llm_adapter, state)
                     if (

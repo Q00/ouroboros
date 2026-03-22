@@ -349,9 +349,9 @@ class ClaudeCodeAdapter:
         # This enables MCP tools (mcp__*) and read-only built-in tools
         dangerous_tools = ["Write", "Edit", "Bash", "Task", "NotebookEdit"]
 
-        # If allowed_tools is specified, compute disallowed from it (strict mode)
-        # Otherwise, only block dangerous tools (permissive mode for MCP)
-        if self._allowed_tools:
+        # If allowed_tools is explicitly set (even empty []), compute disallowed
+        # from it (strict mode). None = permissive (only block dangerous).
+        if self._allowed_tools is not None:
             all_tools = [
                 "Read",
                 "Write",
@@ -383,7 +383,7 @@ class ClaudeCodeAdapter:
             log.debug("claude_code_adapter.stderr", line=line[:200])
 
         options_kwargs: dict = {
-            "allowed_tools": self._allowed_tools if self._allowed_tools else [],
+            "allowed_tools": self._allowed_tools if self._allowed_tools is not None else [],
             "disallowed_tools": disallowed,
             "max_turns": self._max_turns,
             # Allow MCP and other ~/.claude/ settings to be inherited

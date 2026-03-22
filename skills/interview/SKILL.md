@@ -179,7 +179,9 @@ Reset the counter whenever user answers directly (PATH 2 or PATH 3).
 
 If MCP returns `is_error=true` with `meta.recoverable=true`:
 1. Tell user: "Question generation encountered an issue. Retrying..."
-2. Call `ouroboros_interview(session_id=...)` to resume (max 2 retries)
+2. Call `ouroboros_interview(session_id=...)` to resume (max 2 retries).
+   State (including any recorded answers) is persisted before the error,
+   so resuming will not lose progress.
 3. If still failing: "MCP is having trouble. Switching to direct interview mode."
    Then switch to Path B and continue from where you left off.
 
