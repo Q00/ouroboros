@@ -567,10 +567,14 @@ class InterviewEngine:
         if web_search_hint:
             base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
 
-        # Inject codebase context for brownfield projects
+        # Inject codebase context for brownfield projects (truncate to prevent
+        # Agent SDK CLI empty responses from oversized system prompts)
         if state.is_brownfield and state.codebase_context:
+            codebase_ctx = state.codebase_context[:1200] + (
+                "..." if len(state.codebase_context) > 1200 else ""
+            )
             dynamic_header += (
-                f"\n\n## Existing Codebase Context\n{state.codebase_context}"
+                f"\n\n## Existing Codebase Context\n{codebase_ctx}"
                 "\n\nCRITICAL: You have codebase context. Ask CONFIRMATION questions "
                 "citing specific files/patterns."
                 '\n- GOOD: "I see Express.js with JWT middleware in src/auth/. '
@@ -585,7 +589,29 @@ class InterviewEngine:
 
         perspective_panel = self._build_perspective_panel_prompt(state)
 
-        return f"{dynamic_header}\n{base_prompt}\n\n{perspective_panel}"
+        # Cap total system prompt to prevent Agent SDK CLI empty responses.
+        # The bundled CLI can fail silently when the prompt exceeds ~5,000 chars.
+        _MAX_SYSTEM_PROMPT_CHARS = 4800
+        _OVERHEAD = 20  # newlines, ellipsis, separators
+
+        # Budget for base_prompt after accounting for other sections
+        base_budget = _MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - len(perspective_panel) - _OVERHEAD
+        if base_budget < 0:
+            # Header + panel already exceed budget — truncate both proportionally
+            total = len(dynamic_header) + len(perspective_panel)
+            ratio = max(0.0, (_MAX_SYSTEM_PROMPT_CHARS - _OVERHEAD) / total) if total > 0 else 0.0
+            dynamic_header = dynamic_header[: int(len(dynamic_header) * ratio)]
+            perspective_panel = perspective_panel[: int(len(perspective_panel) * ratio)]
+            base_budget = 0
+
+        trimmed_base = base_prompt[:base_budget] if base_budget < len(base_prompt) else base_prompt
+        full_prompt = f"{dynamic_header}\n{trimmed_base}\n\n{perspective_panel}"
+
+        # Hard-truncate as final safety net
+        if len(full_prompt) > _MAX_SYSTEM_PROMPT_CHARS:
+            full_prompt = full_prompt[:_MAX_SYSTEM_PROMPT_CHARS]
+
+        return full_prompt
 
     def _build_ambiguity_snapshot_prompt(self, state: InterviewState) -> str:
         """Build prompt context from the latest ambiguity snapshot."""
@@ -701,8 +727,16 @@ class InterviewEngine:
 
         return "\n".join(sections)
 
+    # Agent SDK CLI can return empty responses when the combined prompt
+    # (system_prompt + conversation history) exceeds an internal threshold.
+    # Cap each user response to keep the total prompt within safe limits.
+    _MAX_USER_RESPONSE_CHARS = 800
+
     def _build_conversation_history(self, state: InterviewState) -> list[Message]:
         """Build conversation history from completed rounds.
+
+        Long user responses are truncated to prevent Agent SDK CLI from
+        returning empty responses due to prompt size.
 
         Args:
             state: Current interview state.
@@ -715,7 +749,10 @@ class InterviewEngine:
         for round_data in state.rounds:
             messages.append(Message(role=MessageRole.ASSISTANT, content=round_data.question))
             if round_data.user_response:
-                messages.append(Message(role=MessageRole.USER, content=round_data.user_response))
+                response = round_data.user_response
+                if len(response) > self._MAX_USER_RESPONSE_CHARS:
+                    response = response[: self._MAX_USER_RESPONSE_CHARS] + "..."
+                messages.append(Message(role=MessageRole.USER, content=response))
 
         return messages
 

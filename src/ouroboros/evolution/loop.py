@@ -727,6 +727,7 @@ class EvolutionaryLoop:
                     evaluation_summary=prev_gen.evaluation_summary,
                     execution_output=prev_gen.execution_output,
                     lineage=lineage,
+                    seed=current_seed,
                 )
                 if wonder_result.is_ok:
                     wonder_output = wonder_result.value
