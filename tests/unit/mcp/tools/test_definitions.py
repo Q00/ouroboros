@@ -1050,6 +1050,11 @@ class TestEvaluateHandler:
         handler = EvaluateHandler()
         assert handler.definition.name == "ouroboros_evaluate"
 
+    def test_handler_has_no_server_side_timeout(self) -> None:
+        """Long-running evaluation should not inherit a fixed server timeout."""
+        handler = EvaluateHandler()
+        assert handler.TIMEOUT_SECONDS == 0
+
     def test_definition_requires_session_id_and_artifact(self) -> None:
         """EvaluateHandler requires session_id and artifact parameters."""
         handler = EvaluateHandler()

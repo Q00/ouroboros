@@ -92,8 +92,12 @@ ouroboros setup --non-interactive
 - Prompts you to select a runtime if multiple are found (or auto-selects if only one)
 - Writes `orchestrator.runtime_backend` to `~/.ouroboros/config.yaml`
 - For Claude Code: registers the MCP server in `~/.claude/mcp.json`
-- For Codex CLI: sets `orchestrator.codex_cli_path` in config
-- For Codex CLI: does **not** currently install global `~/.codex/` rules or skills
+- For Codex CLI: sets `orchestrator.codex_cli_path` and `llm.backend: codex` in `~/.ouroboros/config.yaml`
+- For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
+- For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
+- For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml`
+
+> **Codex config split:** put persistent Ouroboros per-role model overrides in `~/.ouroboros/config.yaml` (`clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, `consensus.models`, `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model`). `~/.codex/config.toml` is only the Codex MCP/env hookup file used by setup.
 
 > **`opencode` caveat:** `setup` detects the `opencode` binary in PATH but cannot configure it — if `opencode` is your only installed runtime, `setup` exits with `Error: Unsupported runtime: opencode`. The `opencode` runtime backend is **not yet implemented** (`runtime_factory.py` raises `NotImplementedError`). It is planned for a future release.
 

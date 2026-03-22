@@ -98,7 +98,9 @@ npm install -g @openai/codex      # Codex CLI (if not installed)
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
 ```
 
-Installs Ouroboros, registers Codex skills/rules and MCP server in one step.
+Installs Ouroboros, runs `ouroboros setup --runtime codex`, writes `~/.ouroboros/config.yaml`, installs managed Codex rules/skills, and registers the Ouroboros MCP server in `~/.codex/config.toml`.
+
+Set Codex role-specific model overrides such as `clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, and `consensus.*` in `~/.ouroboros/config.yaml`. Keep `~/.codex/config.toml` for MCP/env hookup only.
 
 ```bash
 ouroboros init start "I want to build a task management CLI"
