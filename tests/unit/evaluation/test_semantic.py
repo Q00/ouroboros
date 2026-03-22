@@ -64,7 +64,8 @@ class TestParseSemanticResponse:
             "goal_alignment": 0.9,
             "drift_score": 0.1,
             "uncertainty": 0.2,
-            "reasoning": "Good implementation"
+            "reasoning": "Good implementation",
+            "reward_hacking_risk": 0.05
         }"""
         result = parse_semantic_response(response)
 
@@ -76,11 +77,12 @@ class TestParseSemanticResponse:
         assert semantic.drift_score == 0.1
         assert semantic.uncertainty == 0.2
         assert semantic.reasoning == "Good implementation"
+        assert semantic.reward_hacking_risk == 0.05
 
     def test_json_with_surrounding_text(self) -> None:
         """Parse JSON embedded in text."""
         response = """Here is my evaluation:
-        {"score": 0.8, "ac_compliance": true, "goal_alignment": 0.85, "drift_score": 0.15, "uncertainty": 0.1, "reasoning": "Works well"}
+        {"score": 0.8, "ac_compliance": true, "goal_alignment": 0.85, "drift_score": 0.15, "uncertainty": 0.1, "reasoning": "Works well", "reward_hacking_risk": 0.0}
         Thank you for asking."""
         result = parse_semantic_response(response)
 
@@ -95,7 +97,8 @@ class TestParseSemanticResponse:
             "goal_alignment": -0.1,
             "drift_score": 2.0,
             "uncertainty": 0.2,
-            "reasoning": "Test"
+            "reasoning": "Test",
+            "reward_hacking_risk": 1.5
         }"""
         result = parse_semantic_response(response)
 
@@ -103,6 +106,7 @@ class TestParseSemanticResponse:
         assert result.value.score == 1.0  # clamped from 1.5
         assert result.value.goal_alignment == 0.0  # clamped from -0.1
         assert result.value.drift_score == 1.0  # clamped from 2.0
+        assert result.value.reward_hacking_risk == 1.0  # clamped from 1.5
 
     def test_missing_required_field(self) -> None:
         """Error when required field is missing."""
@@ -114,6 +118,21 @@ class TestParseSemanticResponse:
 
         assert result.is_err
         assert "Missing required fields" in result.error.message
+
+    def test_missing_reward_hacking_risk_is_rejected(self) -> None:
+        """Omitting reward_hacking_risk must fail, not silently default to 0.0."""
+        response = """{
+            "score": 0.8,
+            "ac_compliance": true,
+            "goal_alignment": 0.85,
+            "drift_score": 0.15,
+            "uncertainty": 0.1,
+            "reasoning": "Looks good"
+        }"""
+        result = parse_semantic_response(response)
+
+        assert result.is_err
+        assert "reward_hacking_risk" in str(result.error.details)
 
     def test_no_json_in_response(self) -> None:
         """Error when no JSON found."""
@@ -188,7 +207,8 @@ class TestSemanticEvaluator:
                     "goal_alignment": 0.9,
                     "drift_score": 0.1,
                     "uncertainty": 0.15,
-                    "reasoning": "Good implementation"
+                    "reasoning": "Good implementation",
+                    "reward_hacking_risk": 0.05
                 }""",
                 model="test-model",
                 usage=UsageInfo(100, 50, 150),
@@ -219,7 +239,8 @@ class TestSemanticEvaluator:
                     "goal_alignment": 0.8,
                     "drift_score": 0.2,
                     "uncertainty": 0.1,
-                    "reasoning": "OK"
+                    "reasoning": "OK",
+                    "reward_hacking_risk": 0.0
                 }""",
                 model="test",
                 usage=UsageInfo(0, 0, 0),
@@ -250,7 +271,8 @@ class TestSemanticEvaluator:
                     "goal_alignment": 0.9,
                     "drift_score": 0.1,
                     "uncertainty": 0.15,
-                    "reasoning": "Good"
+                    "reasoning": "Good",
+                    "reward_hacking_risk": 0.0
                 }""",
                 model="test",
                 usage=UsageInfo(0, 0, 0),
@@ -322,7 +344,8 @@ class TestRunSemanticEvaluation:
                     "goal_alignment": 0.9,
                     "drift_score": 0.05,
                     "uncertainty": 0.1,
-                    "reasoning": "Excellent"
+                    "reasoning": "Excellent",
+                    "reward_hacking_risk": 0.0
                 }""",
                 model="test",
                 usage=UsageInfo(0, 0, 0),
