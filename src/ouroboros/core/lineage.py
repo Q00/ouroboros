@@ -147,7 +147,9 @@ class EvaluationSummary(BaseModel, frozen=True):
 
     @property
     def run_verdict_passed(self) -> bool:
-        """Aggregate verdict: prefer AC results over final_approved flag."""
+        """Aggregate verdict incorporating execution status and AC results."""
+        if self.execution_completion_status != "completed":
+            return False
         if self.ac_results:
             return all(ac.passed for ac in self.ac_results)
         return self.final_approved

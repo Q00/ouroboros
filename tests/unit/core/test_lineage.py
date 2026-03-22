@@ -86,6 +86,28 @@ class TestEvaluationSummary:
         assert summary.run_verdict == "FAIL"
 
 
+    def test_run_verdict_fails_when_execution_incomplete(self) -> None:
+        """Execution failure overrides AC results — run must be FAIL."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            execution_completion_status="failed",
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Ship feature",
+                    passed=True,
+                    score=1.0,
+                    evidence="All checks passed",
+                    verification_method="semantic",
+                ),
+            ),
+        )
+
+        assert summary.run_verdict_passed is False
+        assert summary.run_verdict == "FAIL"
+
+
 class TestACResult:
     """Tests for ACResult verdict backfill."""
 
