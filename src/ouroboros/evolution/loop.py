@@ -1293,6 +1293,19 @@ class EvolutionaryLoop:
                     extra={"error": str(e), "generation": generation_number},
                 )
 
+        # Check for graceful shutdown after evaluating
+        interrupted = await self._check_shutdown(
+            lineage.lineage_id,
+            generation_number,
+            GenerationPhase.EVALUATING.value,
+            current_seed,
+            wonder_output=wonder_output,
+            reflect_output=reflect_output,
+            execution_output=execution_output,
+        )
+        if interrupted:
+            return Result.ok(interrupted)
+
         return Result.ok(
             GenerationResult(
                 generation_number=generation_number,
