@@ -1004,3 +1004,38 @@ class TestSystemPromptBrownfield:
         assert "I found X. Should I assume Y?" in prompt
         assert "flask" in prompt
         assert "### architect" in prompt
+
+    def test_system_prompt_hard_cap_enforced(self) -> None:
+        """Final prompt must never exceed _MAX_SYSTEM_PROMPT_CHARS (4800)."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        # Create state with oversized context to blow past the cap
+        state = InterviewState(
+            interview_id="test_cap",
+            initial_context="X" * 6000,
+            is_brownfield=True,
+            codebase_context="Y" * 3000,
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert len(prompt) <= 4800
+
+    def test_system_prompt_cap_when_header_and_panel_exceed_budget(self) -> None:
+        """Cap holds even when dynamic_header + perspective_panel alone exceed 4800."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        # Brownfield with huge codebase_context inflates dynamic_header;
+        # perspective panel also adds content. Together they can exceed 4800.
+        state = InterviewState(
+            interview_id="test_cap2",
+            initial_context="Z" * 4000,
+            is_brownfield=True,
+            codebase_context="W" * 4000,
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert len(prompt) <= 4800

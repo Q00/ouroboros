@@ -105,6 +105,7 @@ def create_stage2_completed_event(
     goal_alignment: float,
     drift_score: float,
     uncertainty: float,
+    reward_hacking_risk: float,
 ) -> BaseEvent:
     """Create event for Stage 2 semantic evaluation completion.
 
@@ -115,6 +116,7 @@ def create_stage2_completed_event(
         goal_alignment: Goal alignment score
         drift_score: Drift from seed
         uncertainty: Model uncertainty
+        reward_hacking_risk: Suspicion of evaluator gaming
 
     Returns:
         BaseEvent for stage2 completion
@@ -129,6 +131,7 @@ def create_stage2_completed_event(
             "goal_alignment": goal_alignment,
             "drift_score": drift_score,
             "uncertainty": uncertainty,
+            "reward_hacking_risk": reward_hacking_risk,
         },
     )
 

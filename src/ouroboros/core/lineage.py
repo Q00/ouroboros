@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ouroboros.core.seed import OntologyField, OntologySchema
 
@@ -59,6 +59,51 @@ class ACResult(BaseModel, frozen=True):
     score: float | None = None
     evidence: str = ""
     verification_method: str = "unknown"
+    ac_verdict_state: str = "evaluated"
+    final_verdict: str = ""
+    rendered_verdict: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_verdict(cls, data: dict) -> dict:  # type: ignore[override]
+        """Derive verdict fields from passed for legacy callers."""
+        if isinstance(data, dict):
+            passed = data.get("passed", False)
+            if not data.get("final_verdict"):
+                data["final_verdict"] = "pass" if passed else "fail"
+            # Normalize passed to match final_verdict (final_verdict wins)
+            fv = data["final_verdict"].lower()
+            data["passed"] = fv == "pass"
+            if not data.get("rendered_verdict"):
+                data["rendered_verdict"] = data["final_verdict"].upper()
+        return data
+
+    @property
+    def verdict_label(self) -> str:
+        """Canonical display label derived from final_verdict."""
+        return self.final_verdict.upper()
+
+    @property
+    def provisional_verdict(self) -> str:
+        """What the evaluator originally said before any override."""
+        # If overridden, the original was the opposite
+        if self.ac_verdict_state == "overridden":
+            return "fail" if self.final_verdict == "pass" else "pass"
+        return self.final_verdict
+
+    @property
+    def override_source(self) -> str | None:
+        """Which verifier overrode the provisional verdict."""
+        if self.ac_verdict_state == "overridden":
+            return self.verification_method
+        return None
+
+    @property
+    def override_reason(self) -> str | None:
+        """Why the override happened."""
+        if self.ac_verdict_state == "overridden":
+            return self.evidence
+        return None
 
 
 class EvaluationSummary(BaseModel, frozen=True):
@@ -71,9 +116,66 @@ class EvaluationSummary(BaseModel, frozen=True):
     final_approved: bool
     highest_stage_passed: int = Field(ge=1, le=3)
     score: float | None = None
-    drift_score: float | None = None
+    drift_score: float | None = Field(
+        default=None,
+        description="Measures goal/constraint/ontology divergence from the seed intent (0.0-1.0). Distinct from reward_hacking_risk.",
+    )
+    reward_hacking_risk: float | None = Field(
+        default=None,
+        description="Suspicion that the artifact is optimized for evaluator, rubric, or test approval rather than solving the real task (0.0-1.0). Distinct from drift_score.",
+    )
     failure_reason: str | None = None
     ac_results: tuple[ACResult, ...] = ()
+    execution_completion_status: str = Field(
+        description="Whether execution finished successfully. Cross-reference with approval_status for full run verdict.",
+    )
+    approval_status: str = Field(
+        description="Whether the evaluation approved the artifact. Cross-reference with execution_completion_status for full run verdict.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_status_fields(cls, data: dict) -> dict:  # type: ignore[override]
+        """Derive status fields from final_approved for legacy callers."""
+        if isinstance(data, dict):
+            if "execution_completion_status" not in data:
+                data["execution_completion_status"] = "completed"
+            if "approval_status" not in data:
+                approved = data.get("final_approved", False)
+                data["approval_status"] = "approved" if approved else "rejected"
+        return data
+
+    @model_validator(mode="after")
+    def _reconcile_approval_with_ac_results(self) -> "EvaluationSummary":
+        """Eagerly reconcile approval fields with AC results at construction time."""
+        if self.ac_results:
+            ac_passed = all(ac.passed for ac in self.ac_results)
+            expected_status = "approved" if ac_passed else "rejected"
+            if self.approval_status != expected_status:
+                object.__setattr__(self, "approval_status", expected_status)
+            if self.final_approved != ac_passed:
+                object.__setattr__(self, "final_approved", ac_passed)
+        return self
+
+    @property
+    def run_verdict_passed(self) -> bool:
+        """Aggregate verdict incorporating execution status, approval, and AC results.
+
+        Priority: execution_completion_status > ac_results > approval_status > final_approved.
+        approval_status is already reconciled with AC results at construction time.
+        """
+        if self.execution_completion_status != "completed":
+            return False
+        if self.ac_results:
+            return all(ac.passed for ac in self.ac_results)
+        if self.approval_status == "rejected":
+            return False
+        return self.final_approved
+
+    @property
+    def run_verdict(self) -> str:
+        """Human-readable aggregate verdict."""
+        return "PASS" if self.run_verdict_passed else "FAIL"
 
 
 class FieldModification(BaseModel, frozen=True):
