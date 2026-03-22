@@ -573,7 +573,9 @@ class EvolutionaryLoop:
 
         # Step 2: Run one generation with graceful shutdown support
         # Pass resume phase hint for interrupted generations
-        resume_after_phase = interrupted_at_phase if last_phase == GenerationPhase.INTERRUPTED else None
+        resume_after_phase = (
+            interrupted_at_phase if last_phase == GenerationPhase.INTERRUPTED else None
+        )
         self._install_sigint_handler()
         timeout = self.config.generation_timeout_seconds or None  # 0 = no timeout
         try:
@@ -917,6 +919,7 @@ class EvolutionaryLoop:
                 return _PHASE_ORDER.index(phase) <= _PHASE_ORDER.index(resume_after_phase)
             except ValueError:
                 return False
+
         wonder_output: WonderOutput | None = None
         reflect_output: ReflectOutput | None = None
         ontology_delta: OntologyDelta | None = None
@@ -1004,7 +1007,12 @@ class EvolutionaryLoop:
 
             # Reflect phase (with retry on parse failure)
             # Skip if already completed before interruption
-            if self.reflect_engine and wonder_output and prev_gen.evaluation_summary and not _should_skip("reflecting"):
+            if (
+                self.reflect_engine
+                and wonder_output
+                and prev_gen.evaluation_summary
+                and not _should_skip("reflecting")
+            ):
                 max_reflect_attempts = 2
                 for attempt in range(max_reflect_attempts):
                     reflect_result = await self.reflect_engine.reflect(

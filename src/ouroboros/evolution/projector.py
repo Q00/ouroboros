@@ -205,9 +205,7 @@ class LineageProjector:
             }
         )
 
-    def find_resume_point(
-        self, events: list[BaseEvent]
-    ) -> tuple[int, GenerationPhase, str | None]:
+    def find_resume_point(self, events: list[BaseEvent]) -> tuple[int, GenerationPhase, str | None]:
         """Determine where to resume from event history.
 
         Returns:
