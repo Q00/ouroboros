@@ -104,8 +104,8 @@ class ClaudeCodeAdapter:
                 SDK's bundled CLI.
             allowed_tools: List of tools to allow. None means no tools.
                 For interview mode with codebase access, use ["Read", "Glob", "Grep"].
-            max_turns: Maximum turns for the conversation. Default 1 for single response.
-                Increase for tool use scenarios.
+            max_turns: Maximum turns for the conversation. Default 1 for
+                single-response completions (most MCP use cases).
             on_message: Callback for streaming messages. Called with (type, content):
                 - ("thinking", "content") for agent reasoning
                 - ("tool", "tool_name") for tool usage
@@ -371,6 +371,17 @@ class ClaudeCodeAdapter:
         else:
             disallowed = dangerous_tools
 
+        # The bundled CLI refuses to start when CLAUDECODE is set (nested
+        # session check).  The Agent SDK sets CLAUDE_CODE_ENTRYPOINT=sdk-py
+        # to signal it's an SDK call, but the older check on CLAUDECODE fires
+        # first, causing silent empty responses.  Strip it via env override.
+        env_overrides: dict[str, str] = {}
+        if os.environ.get("CLAUDECODE"):
+            env_overrides["CLAUDECODE"] = ""
+
+        def _stderr_callback(line: str) -> None:
+            log.debug("claude_code_adapter.stderr", line=line[:200])
+
         options_kwargs: dict = {
             "allowed_tools": self._allowed_tools if self._allowed_tools else [],
             "disallowed_tools": disallowed,
@@ -379,7 +390,10 @@ class ClaudeCodeAdapter:
             "permission_mode": self._permission_mode,
             "cwd": os.getcwd(),
             "cli_path": self._cli_path,
+            "stderr": _stderr_callback,
+            "env": env_overrides,
         }
+
         # Pass model from CompletionConfig if specified
         # "default" is not a valid SDK model — treat it as None (use SDK default)
         if config.model and config.model != "default":

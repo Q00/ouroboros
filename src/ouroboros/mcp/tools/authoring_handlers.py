@@ -597,9 +597,11 @@ class InterviewHandler:
         answer = arguments.get("answer")
 
         # Use injected or create interview engine
+        # max_turns=1: MCP is a pure question generator. No tool use needed.
+        # Main session handles codebase exploration and answering.
         llm_adapter = self.llm_adapter or create_llm_adapter(
             backend=self.llm_backend,
-            max_turns=3,
+            max_turns=1,
             use_case="interview",
             allowed_tools=None,
         )
