@@ -147,13 +147,23 @@ class EvaluationSummary(BaseModel, frozen=True):
 
     @property
     def run_verdict_passed(self) -> bool:
-        """Aggregate verdict incorporating execution status, approval, and AC results."""
+        """Aggregate verdict incorporating execution status, approval, and AC results.
+
+        Priority: execution_completion_status > ac_results > approval_status > final_approved.
+        When AC results exist, they are authoritative and approval_status is reconciled.
+        """
         if self.execution_completion_status != "completed":
             return False
-        if self.approval_status == "rejected" and not self.ac_results:
-            return False
         if self.ac_results:
-            return all(ac.passed for ac in self.ac_results)
+            ac_passed = all(ac.passed for ac in self.ac_results)
+            # Reconcile approval_status to prevent contradictory serialization
+            if ac_passed and self.approval_status == "rejected":
+                object.__setattr__(self, "approval_status", "approved")
+            elif not ac_passed and self.approval_status == "approved":
+                object.__setattr__(self, "approval_status", "rejected")
+            return ac_passed
+        if self.approval_status == "rejected":
+            return False
         return self.final_approved
 
     @property

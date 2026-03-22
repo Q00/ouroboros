@@ -61,6 +61,8 @@ class TestEvaluationSummary:
 
         assert summary.run_verdict_passed is True
         assert summary.run_verdict == "PASS"
+        # approval_status must be reconciled to avoid contradictory serialization
+        assert summary.approval_status == "approved"
 
     def test_run_verdict_uses_canonical_final_verdict_over_legacy_passed_flag(self) -> None:
         """Summary verdict should aggregate from final_verdict even for legacy-shaped inputs."""
@@ -118,6 +120,53 @@ class TestEvaluationSummary:
 
         assert summary.run_verdict_passed is False
         assert summary.run_verdict == "FAIL"
+
+    def test_run_verdict_reconciles_approval_when_acs_override(self) -> None:
+        """When AC results all pass, approval_status must be reconciled to 'approved'."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            execution_completion_status="completed",
+            approval_status="rejected",
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Feature works",
+                    passed=True,
+                    score=1.0,
+                    evidence="All checks passed",
+                    verification_method="semantic",
+                ),
+            ),
+        )
+
+        assert summary.run_verdict_passed is True
+        assert summary.run_verdict == "PASS"
+        assert summary.approval_status == "approved"
+
+    def test_run_verdict_reconciles_approval_when_acs_fail(self) -> None:
+        """When AC results fail, approval_status must be reconciled to 'rejected'."""
+        summary = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=2,
+            execution_completion_status="completed",
+            approval_status="approved",
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Feature works",
+                    passed=True,
+                    final_verdict="fail",
+                    score=0.0,
+                    evidence="Spec override",
+                    verification_method="spec_verifier",
+                ),
+            ),
+        )
+
+        assert summary.run_verdict_passed is False
+        assert summary.run_verdict == "FAIL"
+        assert summary.approval_status == "rejected"
 
 
 class TestACResult:
