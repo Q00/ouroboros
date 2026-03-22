@@ -129,11 +129,12 @@ Guidelines:
 
 SCOPE GUARD — this is critical:
 - Only ask questions that are REQUIRED to satisfy the seed's goal and constraints.
-- Do NOT propose new ontology fields, concepts, or entities beyond what the seed demands.
+- Do NOT propose ontology fields, concepts, or entities unrelated to the seed's goal and constraints.
+- Concepts IMPLIED by the seed (not explicitly named but necessary to satisfy it) ARE allowed.
 - An ontology is ALWAYS incomplete — that is normal, not a gap to fill.
-- "This concept is not modeled" is NOT a valid tension unless the seed explicitly requires it.
+- "This concept is not modeled" is NOT a valid tension unless the seed requires it (explicitly or implicitly).
 - Prefer deepening existing fields over adding new ones.
-- If the current ontology already covers the seed's acceptance criteria, set should_continue to false.
+- If the current ontology covers the seed's acceptance criteria AND evaluation shows no regressions or failures, set should_continue to false.
 
 Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions (how to code it)."""
 

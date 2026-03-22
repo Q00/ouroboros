@@ -105,7 +105,7 @@ def create_stage2_completed_event(
     goal_alignment: float,
     drift_score: float,
     uncertainty: float,
-    reward_hacking_risk: float = 0.0,
+    reward_hacking_risk: float,
 ) -> BaseEvent:
     """Create event for Stage 2 semantic evaluation completion.
 

@@ -173,6 +173,7 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
         "drift_score",
         "uncertainty",
         "reasoning",
+        "reward_hacking_risk",
     ]
     missing = [f for f in required_fields if f not in data]
     if missing:
@@ -190,7 +191,7 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
         goal_alignment = max(0.0, min(1.0, float(data["goal_alignment"])))
         drift_score = max(0.0, min(1.0, float(data["drift_score"])))
         uncertainty = max(0.0, min(1.0, float(data["uncertainty"])))
-        reward_hacking_risk = max(0.0, min(1.0, float(data.get("reward_hacking_risk", 0.0))))
+        reward_hacking_risk = max(0.0, min(1.0, float(data["reward_hacking_risk"])))
 
         return Result.ok(
             SemanticResult(
