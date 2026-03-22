@@ -102,7 +102,7 @@ class WonderEngine:
                 "WonderEngine LLM call failed, using degraded mode: %s",
                 result.error,
             )
-            return Result.ok(self._degraded_output(evaluation_summary, current_ontology))
+            return Result.ok(self._degraded_output(evaluation_summary, current_ontology, seed))
 
         return Result.ok(self._parse_response(result.value.content))
 
@@ -249,24 +249,26 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
         self,
         eval_summary: EvaluationSummary | None,
         ontology: OntologySchema,
+        seed: Seed | None = None,
     ) -> WonderOutput:
         """Generate fallback output when LLM fails (degraded mode)."""
         questions: list[str] = []
         tensions: list[str] = []
+        scope_hint = f" (within scope: {seed.goal})" if seed else ""
 
         if eval_summary:
             if not eval_summary.final_approved:
-                questions.append("What fundamental requirement is the current ontology missing?")
+                questions.append(f"What requirement is the current ontology missing{scope_hint}?")
             if eval_summary.drift_score and eval_summary.drift_score > 0.3:
                 questions.append("Why has the implementation drifted from the original intent?")
                 tensions.append("The ontology describes one thing but execution produces another")
             if eval_summary.failure_reason:
                 questions.append(f"What ontological gap caused: {eval_summary.failure_reason}?")
         else:
-            questions.append("Is the current ontology complete enough to define this domain?")
+            questions.append(f"Does the current ontology cover the seed's acceptance criteria{scope_hint}?")
 
-        if len(ontology.fields) < 3:
-            questions.append("Are there missing entities or relationships in this ontology?")
+        if len(ontology.fields) < 3 and seed:
+            questions.append(f"Are there concepts implied by the seed goal that are not yet modeled{scope_hint}?")
 
         return WonderOutput(
             questions=tuple(questions)
