@@ -911,11 +911,7 @@ class TestInterviewEngineBrownfieldDetection:
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
-        with patch(
-            "ouroboros.bigbang.interview.InterviewEngine._trigger_codebase_exploration",
-            new_callable=AsyncMock,
-        ):
-            result = await engine.start_interview("Add a REST endpoint", cwd=str(tmp_path))
+        result = await engine.start_interview("Add a REST endpoint", cwd=str(tmp_path))
 
         assert result.is_ok
         state = result.value
@@ -934,41 +930,25 @@ class TestInterviewEngineBrownfieldDetection:
         assert result.value.is_brownfield is False
 
     @pytest.mark.asyncio
-    async def test_start_interview_brownfield_runs_exploration(self, tmp_path: Path) -> None:
-        """start_interview calls _trigger_codebase_exploration for brownfield."""
+    async def test_start_interview_brownfield_no_exploration(self, tmp_path: Path) -> None:
+        """start_interview detects brownfield but does NOT trigger exploration.
+
+        In the new architecture, main session handles code reading.
+        MCP only sets is_brownfield flag.
+        """
         (tmp_path / "package.json").write_text('{"name":"demo"}')
 
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
-        with patch.object(
-            engine,
-            "_trigger_codebase_exploration",
-            new_callable=AsyncMock,
-        ) as mock_explore:
-            await engine.start_interview("Add a feature", cwd=str(tmp_path))
+        result = await engine.start_interview("Add a feature", cwd=str(tmp_path))
 
-        mock_explore.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_start_interview_exploration_failure_non_blocking(self, tmp_path: Path) -> None:
-        """start_interview succeeds even when exploration raises."""
-        (tmp_path / "go.mod").write_text("module example.com/demo\n")
-
-        mock_adapter = MagicMock()
-        engine = InterviewEngine(llm_adapter=mock_adapter)
-
-        with patch.object(
-            engine,
-            "_trigger_codebase_exploration",
-            new_callable=AsyncMock,
-            side_effect=RuntimeError("explore boom"),
-        ):
-            result = await engine.start_interview("Add an endpoint", cwd=str(tmp_path))
-
-        # Interview should still start successfully
         assert result.is_ok
-        assert result.value.is_brownfield is True
+        state = result.value
+        assert state.is_brownfield is True
+        # No codebase_context populated (main session handles this)
+        assert not state.codebase_context
+        assert not state.explore_completed
 
     @pytest.mark.asyncio
     async def test_start_interview_empty_dir_stays_greenfield(self, tmp_path: Path) -> None:
@@ -986,7 +966,7 @@ class TestSystemPromptBrownfield:
     """Test brownfield system prompt injection."""
 
     def test_system_prompt_brownfield_round_1(self) -> None:
-        """System prompt includes confirmation instructions when brownfield context exists."""
+        """System prompt includes brownfield hint when is_brownfield is set."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
@@ -994,15 +974,14 @@ class TestSystemPromptBrownfield:
             interview_id="test_bf",
             initial_context="Add a REST endpoint",
             is_brownfield=True,
-            codebase_context="Tech: Python\nDeps: flask, sqlalchemy\n",
         )
 
         prompt = engine._build_system_prompt(state)
 
-        assert "Existing Codebase Context" in prompt
-        assert "CONFIRMATION questions" in prompt
-        assert "I found X. Should I assume Y?" in prompt
-        assert "flask" in prompt
+        # New architecture: no codebase_context stuffing, just a brownfield hint
+        assert "BROWNFIELD" in prompt
+        assert "INTENT" in prompt or "DECISIONS" in prompt
+        assert "[from-code]" in prompt
         assert "### architect" in prompt
 
     def test_system_prompt_hard_cap_enforced(self) -> None:

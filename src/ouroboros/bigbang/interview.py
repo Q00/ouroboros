@@ -258,21 +258,15 @@ class InterviewEngine:
             initial_context=initial_context,
         )
 
-        # Auto-detect brownfield projects from CWD
+        # Auto-detect brownfield projects from CWD.
+        # codebase_paths is informational only — the main session (not MCP)
+        # handles codebase exploration directly via Read/Glob/Grep.
         if cwd:
             from ouroboros.bigbang.explore import detect_brownfield
 
             if detect_brownfield(cwd):
                 state.is_brownfield = True
                 state.codebase_paths = [{"path": cwd, "role": "primary"}]
-                try:
-                    await self._trigger_codebase_exploration(state)
-                except Exception as e:
-                    log.warning(
-                        "interview.brownfield_explore_failed",
-                        interview_id=interview_id,
-                        error=str(e),
-                    )
 
         log.info(
             "interview.started",
@@ -392,47 +386,10 @@ class InterviewEngine:
             response_length=len(user_response),
         )
 
-        # Trigger codebase exploration if brownfield conditions met
-        await self._trigger_codebase_exploration(state)
-
         # Note: No auto-complete on round limit. User controls when to stop.
         # CLI handles prompting user to continue after each round.
 
         return Result.ok(state)
-
-    async def _trigger_codebase_exploration(self, state: InterviewState) -> None:
-        """Trigger codebase exploration for brownfield projects.
-
-        Explores referenced codebase directories and stores the context
-        in the interview state. Only runs once (guarded by explore_completed).
-        Failures are logged but do not interrupt the interview flow.
-
-        Args:
-            state: Current interview state (mutated in place on success).
-        """
-        if not state.is_brownfield or not state.codebase_paths or state.explore_completed:
-            return
-
-        try:
-            from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
-
-            explorer = CodebaseExplorer(llm_adapter=self.llm_adapter, model=self.model)
-            results = await explorer.explore(state.codebase_paths)
-            state.codebase_context = format_explore_results(results)
-            state.explore_completed = True
-
-            log.info(
-                "interview.explore_completed",
-                interview_id=state.interview_id,
-                paths_explored=len(results),
-                context_length=len(state.codebase_context),
-            )
-        except Exception as e:
-            log.warning(
-                "interview.explore_failed",
-                interview_id=state.interview_id,
-                error=str(e),
-            )
 
     async def save_state(self, state: InterviewState) -> Result[Path, ValidationError]:
         """Persist interview state to disk.
@@ -567,20 +524,14 @@ class InterviewEngine:
         if web_search_hint:
             base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
 
-        # Inject codebase context for brownfield projects (truncate to prevent
-        # Agent SDK CLI empty responses from oversized system prompts)
-        if state.is_brownfield and state.codebase_context:
-            codebase_ctx = state.codebase_context[:1200] + (
-                "..." if len(state.codebase_context) > 1200 else ""
-            )
+        # Brownfield hint: main session handles code reading, MCP just asks questions
+        if state.is_brownfield:
             dynamic_header += (
-                f"\n\n## Existing Codebase Context\n{codebase_ctx}"
-                "\n\nCRITICAL: You have codebase context. Ask CONFIRMATION questions "
-                "citing specific files/patterns."
-                '\n- GOOD: "I see Express.js with JWT middleware in src/auth/. '
-                'Should the new feature use this?"'
-                '\n- BAD: "Do you have any authentication set up?"'
-                '\n- Frame as: "I found X. Should I assume Y?" not "Do you have X?"'
+                "\n\nThis is a BROWNFIELD project. The caller (main session) has direct "
+                "codebase access and will enrich answers with code context. Focus your "
+                "questions on INTENT and DECISIONS, not on discovering what exists. "
+                "Answers prefixed with [from-code] describe existing code state. "
+                "Answers prefixed with [from-user] are human decisions."
             )
 
         ambiguity_snapshot = self._build_ambiguity_snapshot_prompt(state)

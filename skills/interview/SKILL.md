@@ -81,7 +81,20 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
 
 ### Path A: MCP Mode (Preferred)
 
-If the `ouroboros_interview` MCP tool is available (loaded via ToolSearch above), use it for persistent, structured interviews:
+If the `ouroboros_interview` MCP tool is available (loaded via ToolSearch above), use it for persistent, structured interviews.
+
+**Architecture**: MCP is a pure question generator. You (the main session) are the answerer and router.
+
+```
+MCP (question generator) ←→ You (answerer + router) ←→ User (human judgment only)
+```
+
+**Role split**:
+- **MCP**: Generates Socratic questions, manages interview state, scores ambiguity. Does NOT read code.
+- **You (main session)**: Receives MCP questions, answers them by reading code (Read/Glob/Grep), or routes to the user when human judgment is needed.
+- **User**: Only answers questions that require human decisions (goals, acceptance criteria, business logic, preferences).
+
+#### Interview Flow
 
 1. **Start a new interview**:
    ```
@@ -90,77 +103,89 @@ If the `ouroboros_interview` MCP tool is available (loaded via ToolSearch above)
      initial_context: <user's topic or idea>
      cwd: <current working directory>
    ```
-   The tool auto-detects brownfield projects from `cwd` and scans the codebase
-   before asking the first question. The first question will cite specific
-   files/patterns found in the project. Returns a session ID and question.
+   Returns a session ID and the first question.
 
-2. **Present the question using AskUserQuestion**:
-   After receiving a question from the tool, present it via `AskUserQuestion` with contextually relevant suggested answers:
-   ```json
-   {
-     "questions": [{
-       "question": "<question from MCP tool>",
-       "header": "Q<N>",
-       "options": [
-         {"label": "<option 1>", "description": "<brief explanation>"},
-         {"label": "<option 2>", "description": "<brief explanation>"}
-       ],
-       "multiSelect": false
-     }]
-   }
-   ```
+2. **For each question from MCP, apply 3-Path Routing:**
 
-   **Generating options** — analyze the question and suggest 2-3 likely answers:
-   - Binary questions (greenfield/brownfield, yes/no): use the natural choices
-   - Technology choices: suggest common options for the context
-   - Open-ended questions: suggest representative answer categories
-   - The user can always type a custom response via "Other"
+   **PATH 1 — Code Confirmation** (describe current state, user confirms):
+   When the question asks about existing tech stack, frameworks, dependencies,
+   current patterns, architecture, or file structure:
+   - Use Read/Glob/Grep to find the factual answer
+   - Present findings to user as a **confirmation question** via AskUserQuestion:
+     ```json
+     {
+       "questions": [{
+         "question": "MCP asks: What auth method does the project use?\n\nI found: JWT-based auth in src/auth/jwt.py\n\nIs this correct?",
+         "header": "Q<N> — Code Confirmation",
+         "options": [
+           {"label": "Yes, correct", "description": "Use this as the answer"},
+           {"label": "No, let me correct", "description": "I'll provide the right answer"}
+         ],
+         "multiSelect": false
+       }]
+     }
+     ```
+   - NEVER auto-send without user seeing and confirming
+   - Prefix answer with `[from-code]` when sending to MCP
+   - **Description, not prescription**: "The project uses JWT" is fact.
+     "The new feature should also use JWT" is a DECISION — route to PATH 2.
 
-3. **Relay the answer back**:
+   **PATH 2 — Human Judgment** (decisions only humans can make):
+   When the question asks about goals, vision, acceptance criteria, business logic,
+   preferences, tradeoffs, scope, or desired behavior for NEW features:
+   - Present question directly to user via AskUserQuestion with suggested options
+   - Prefix answer with `[from-user]` when sending to MCP
+
+   **PATH 3 — Code + Judgment** (facts exist but interpretation needed):
+   When code contains relevant facts BUT the question also requires judgment
+   (e.g., "I see a saga pattern in orders/. Should payments use the same?"):
+   - Read relevant code first
+   - Present BOTH the code findings AND the question to user
+   - If any part of the question requires judgment, route the ENTIRE question to user
+   - Prefix answer with `[from-user]` (human made the decision)
+
+   **When in doubt, use PATH 2.** It's safer to ask the user than to guess.
+
+3. **Send the answer back to MCP**:
    ```
    Tool: ouroboros_interview
    Arguments:
-     session_id: <session ID from step 1>
-     answer: <user's selected option or custom text>
+     session_id: <session ID>
+     answer: "[from-code] JWT-based auth in src/auth/jwt.py" or "[from-user] Stripe Billing"
    ```
-   The tool records the answer, generates the next question, and returns it.
+   MCP records the answer, generates the next question, and returns it.
 
-4. **Keep a visible ambiguity ledger while interviewing**:
-   Before or during the first 1-2 questions, identify the independent ambiguity tracks in the user's request.
-   Examples:
-   - For a feature request: scope, constraints, outputs, verification
-   - For a PR/review task: item-by-item validity, allowed code paths, non-goals, expected deliverables
-   - For a migration: source of truth, compatibility constraints, rollout boundaries
+6. **Keep a visible ambiguity ledger**:
+   Track independent ambiguity tracks (scope, constraints, outputs, verification).
+   Do NOT let the interview collapse onto a single subtopic.
 
-   Maintain this ledger mentally and do NOT let the interview collapse onto a single deep subtopic unless you have already checked whether the other tracks are resolved.
+7. **Repeat steps 2-6** until the user says "done" or MCP signals seed-ready.
 
-5. **Run periodic breadth checks**:
-   Every few rounds, or sooner if one thread has become very detailed, ask a breadth-check question that revisits unresolved tracks.
-   Good examples:
-   - "We seem aligned on the adapter refactor. Are the review adjudication output and path constraints also fixed now?"
-   - "We have the implementation path. Do we still need to settle acceptance tests or output format?"
+8. **Prefer stopping over over-interviewing**:
+   When scope, outputs, AC, and non-goals are clear, suggest `ooo seed`.
 
-   Use breadth checks especially when:
-   - The original request contains a list of review findings, bugs, subproblems, or deliverables
-   - The user mentions both implementation work and a written output
-   - The conversation starts refining one file or one abstraction for many consecutive rounds
-
-6. **Repeat steps 2-5** until the user says "done" or requirements are clear.
-
-7. **Prefer stopping over over-interviewing**:
-   When the following are already explicit, do not keep drilling into narrower sub-questions:
-   - In-scope vs out-of-scope boundaries
-   - Required outputs or deliverables
-   - Acceptance-test or verification expectations
-   - Important non-goals / frozen public contracts
-   - Enough detail to generate a Seed without inventing missing behavior
-
-   At that point, ask a closure question or suggest moving to `ooo seed` instead of opening a new deep thread.
-
-8. After completion, suggest the next step in `📍 Next:` format:
+9. After completion, suggest the next step:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
-**Advantages of MCP mode**: State persists to disk (survives session restarts), ambiguity scoring, direct integration with `ooo seed` via session ID, structured input with AskUserQuestion.
+#### Dialectic Rhythm Guard
+
+Track consecutive PATH 1 (code confirmation) answers. If 3 consecutive questions
+were answered via PATH 1, the next question MUST be routed to PATH 2 (directly
+to user), even if it appears code-answerable. This preserves the Socratic
+dialectic rhythm — the interview is with the human, not the codebase.
+Reset the counter whenever user answers directly (PATH 2 or PATH 3).
+
+#### Retry on Failure
+
+If MCP returns `is_error=true` with `meta.recoverable=true`:
+1. Tell user: "Question generation encountered an issue. Retrying..."
+2. Call `ouroboros_interview(session_id=...)` to resume (max 2 retries).
+   State (including any recorded answers) is persisted before the error,
+   so resuming will not lose progress.
+3. If still failing: "MCP is having trouble. Switching to direct interview mode."
+   Then switch to Path B and continue from where you left off.
+
+**Advantages of MCP mode**: State persists to disk, ambiguity scoring, direct `ooo seed` integration via session ID. Code-enriched confirmation questions reduce user burden — only human-judgment questions require user input.
 
 ### Path B: Plugin Fallback (No MCP Server)
 
@@ -181,32 +206,46 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 10. After completion, suggest the next step in `📍 Next:` format:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
-## Interviewer Behavior (Both Modes)
+## Interviewer Behavior
 
-The interviewer is **ONLY a questioner**:
-- Always ends responses with a question
-- Targets the biggest source of ambiguity
-- Preserves breadth across independent ambiguity tracks instead of over-focusing on one thread
-- Periodically checks whether the interview is already specific enough to stop
+**MCP (question generator)** is ONLY a questioner:
+- Always generates a question targeting the biggest source of ambiguity
+- Preserves breadth across independent ambiguity tracks
 - NEVER writes code, edits files, or runs commands
+
+**You (main session)** are a Socratic facilitator:
+- Read `src/ouroboros/agents/socratic-interviewer.md` to understand the interview methodology
+- You CAN use Read/Glob/Grep to scan the codebase for answering MCP questions
+- You present every MCP question to the user (as confirmation or direct question)
+- You NEVER skip a question or auto-send without user seeing it
+- You NEVER make decisions on behalf of the user
 
 ## Example Session
 
 ```
-User: ooo interview Build a REST API
+User: ooo interview Add payment module to existing project
 
-Q1: What domain will this REST API serve?
-User: It's for task management
+MCP Q1: "Is this a greenfield or brownfield project?"
+→ [Scanning... pyproject.toml, src/ found]
+→ Auto-answer: "Brownfield, Python/FastAPI project"
 
-Q2: What operations should tasks support?
-User: Create, read, update, delete
+MCP Q2: "What payment provider will you use?"
+→ This is a human decision.
+→ User: "Stripe"
 
-Q3: Will tasks have relationships (e.g., subtasks, tags)?
-User: Yes, tags for organizing
+MCP Q3: "What authentication method does the project use?"
+→ [Scanning... src/auth/jwt.py found]
+→ Auto-answer: "JWT-based auth in src/auth/jwt.py"
+
+MCP Q4: "How should payment failures affect order state?"
+→ This is a design decision.
+→ User: "Saga pattern for rollback"
+
+MCP Q5: "What are the acceptance criteria for this feature?"
+→ This requires human judgment.
+→ User: "Successful Stripe charge, webhook handling, refund support"
 
 📍 Next: `ooo seed` to crystallize these requirements into a specification
-
-User: ooo seed  [Generate seed from interview]
 ```
 
 ## Next Steps
