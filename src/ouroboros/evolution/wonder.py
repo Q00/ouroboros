@@ -104,7 +104,7 @@ class WonderEngine:
             )
             return Result.ok(self._degraded_output(evaluation_summary, current_ontology, seed))
 
-        return Result.ok(self._parse_response(result.value.content))
+        return Result.ok(self._parse_response(result.value.content, seed))
 
     def _system_prompt(self) -> str:
         return """You are the Wonder Engine of Ouroboros, an evolutionary development system.
@@ -220,7 +220,7 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
 
         return "\n".join(parts)
 
-    def _parse_response(self, content: str) -> WonderOutput:
+    def _parse_response(self, content: str, seed: Seed | None = None) -> WonderOutput:
         """Parse LLM response into WonderOutput."""
         try:
             # Strip markdown fences if present
@@ -238,11 +238,12 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             )
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.warning("Failed to parse WonderEngine response: %s", e)
+            scope_hint = f" for goal: {seed.goal}" if seed else ""
             return WonderOutput(
-                questions=("What aspects of this domain are we not modeling?",),
+                questions=(f"What assumptions remain untested{scope_hint}?",),
                 ontology_tensions=(),
                 should_continue=True,
-                reasoning=f"Parse error, using fallback: {e}",
+                reasoning=f"Parse error, using seed-scoped fallback: {e}",
             )
 
     def _degraded_output(
@@ -270,11 +271,16 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
         if len(ontology.fields) < 3 and seed:
             questions.append(f"Are there concepts implied by the seed goal that are not yet modeled{scope_hint}?")
 
+        # If evaluation passed and no questions were generated, allow convergence
+        should_continue = bool(questions)
+        if eval_summary and not eval_summary.final_approved:
+            should_continue = True
+
         return WonderOutput(
             questions=tuple(questions)
             if questions
             else ("What are we assuming about this domain?",),
             ontology_tensions=tuple(tensions),
-            should_continue=True,
+            should_continue=should_continue,
             reasoning="Degraded mode: LLM unavailable, using heuristic questions",
         )
