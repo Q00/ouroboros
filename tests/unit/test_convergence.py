@@ -977,3 +977,102 @@ class TestWonderGate:
         )
         signal = criteria.evaluate(lineage, latest_wonder=wonder)
         assert signal.converged
+
+
+# --- Drift Trend Gate ---
+
+
+class TestDriftTrendGate:
+    """Tests for drift_trend_gate in convergence criteria."""
+
+    @staticmethod
+    def _stable_lineage_with_drift(drift_scores: list[float | None]) -> OntologyLineage:
+        """Create a stable lineage with specified drift_scores per generation."""
+        schema_init = _schema(("different",))
+        schema = _schema(("name", "age", "email"))
+        gens: list[GenerationRecord] = [
+            GenerationRecord(
+                generation_number=1, seed_id="s1", ontology_snapshot=schema_init,
+            )
+        ]
+        for i, ds in enumerate(drift_scores, start=2):
+            eval_summary = EvaluationSummary(
+                final_approved=True,
+                highest_stage_passed=2,
+                score=0.8,
+                drift_score=ds,
+            ) if ds is not None else None
+            gens.append(
+                GenerationRecord(
+                    generation_number=i,
+                    seed_id=f"s{i}",
+                    ontology_snapshot=schema,
+                    evaluation_summary=eval_summary,
+                )
+            )
+        return OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=tuple(gens),
+        )
+
+    def test_blocks_when_drift_monotonically_increasing(self) -> None:
+        """Drift trend gate blocks when drift_score increases every generation."""
+        lineage = self._stable_lineage_with_drift([0.2, 0.4, 0.6])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            stagnation_window=5,  # avoid stagnation safety firing first
+            drift_trend_gate_enabled=True,
+            drift_trend_window=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert not signal.converged
+        assert "Drift trend gate" in signal.reason
+
+    def test_allows_when_drift_decreasing(self) -> None:
+        """Drift trend gate allows convergence when drift is improving."""
+        lineage = self._stable_lineage_with_drift([0.6, 0.4, 0.2])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            drift_trend_gate_enabled=True,
+            drift_trend_window=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+
+    def test_allows_when_drift_mixed(self) -> None:
+        """Drift trend gate allows when drift fluctuates (not monotonic)."""
+        lineage = self._stable_lineage_with_drift([0.3, 0.5, 0.4])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            drift_trend_gate_enabled=True,
+            drift_trend_window=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+
+    def test_passes_when_drift_scores_none(self) -> None:
+        """Gate passes when drift_score is None (fewer than 2 valid scores)."""
+        lineage = self._stable_lineage_with_drift([None, None, 0.5])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            drift_trend_gate_enabled=True,
+            drift_trend_window=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+
+    def test_disabled_allows_convergence(self) -> None:
+        """Disabled drift trend gate allows convergence regardless."""
+        lineage = self._stable_lineage_with_drift([0.2, 0.4, 0.6])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            drift_trend_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged

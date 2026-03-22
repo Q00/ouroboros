@@ -79,6 +79,8 @@ class EvolutionaryLoopConfig:
     ontology_min_fields: int = 3
     wonder_gate_enabled: bool = False
     wonder_novelty_threshold: float = 0.5
+    drift_trend_gate_enabled: bool = False
+    drift_trend_window: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +190,8 @@ class EvolutionaryLoop:
             ontology_min_fields=self.config.ontology_min_fields,
             wonder_gate_enabled=self.config.wonder_gate_enabled,
             wonder_novelty_threshold=self.config.wonder_novelty_threshold,
+            drift_trend_gate_enabled=self.config.drift_trend_gate_enabled,
+            drift_trend_window=self.config.drift_trend_window,
         )
 
     def set_project_dir(self, project_dir: str | None) -> Token[str | None]:
@@ -593,6 +597,7 @@ class EvolutionaryLoop:
             result.wonder_output,
             latest_evaluation=result.evaluation_summary,
             validation_output=result.validation_output,
+            validation_passed=result.validation_passed,
         )
 
         action = StepAction.CONTINUE

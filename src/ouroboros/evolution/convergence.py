@@ -74,6 +74,8 @@ class ConvergenceCriteria:
     ontology_min_fields: int = 3
     wonder_gate_enabled: bool = False
     wonder_novelty_threshold: float = 0.5
+    drift_trend_gate_enabled: bool = False
+    drift_trend_window: int = 3
 
     def evaluate(
         self,
@@ -227,6 +229,17 @@ class ConvergenceCriteria:
                         generation=current_gen,
                     )
 
+            # Drift trend gate: block if drift_score is monotonically increasing
+            if self.drift_trend_gate_enabled:
+                drift_block = self._check_drift_trend_gate(lineage)
+                if drift_block is not None:
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=drift_block,
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                    )
+
             # Validation gate: block convergence if validation was skipped or failed
             if self.validation_gate_enabled and validation_output:
                 # Use explicit bool flag when available; fall back to string matching
@@ -369,6 +382,40 @@ class ConvergenceCriteria:
                     f"Per-AC gate (mode=ratio): pass ratio {ratio:.2f} "
                     f"< required {self.ac_min_pass_ratio:.2f}"
                 )
+
+        return None
+
+    def _check_drift_trend_gate(self, lineage: OntologyLineage) -> str | None:
+        """Block convergence if drift_score shows monotonic increase.
+
+        Checks if drift_score has increased in every consecutive pair within
+        the recent window. This indicates the ontology is consistently moving
+        away from the goal.
+
+        Generations with missing evaluation or drift_score (None) are skipped.
+        If fewer than 2 valid scores remain, the gate passes.
+        """
+        gens = lineage.generations
+        if len(gens) < self.drift_trend_window:
+            return None
+
+        recent = gens[-self.drift_trend_window :]
+        scores = [
+            g.evaluation_summary.drift_score
+            for g in recent
+            if g.evaluation_summary is not None
+            and g.evaluation_summary.drift_score is not None
+        ]
+
+        if len(scores) < 2:
+            return None
+
+        increases = sum(1 for i in range(1, len(scores)) if scores[i] > scores[i - 1])
+        if increases >= len(scores) - 1:
+            return (
+                f"Drift trend gate: drift_score monotonically increasing over "
+                f"{len(scores)} generations ({scores[0]:.3f} → {scores[-1]:.3f})"
+            )
 
         return None
 
