@@ -145,23 +145,27 @@ class EvaluationSummary(BaseModel, frozen=True):
                 data["approval_status"] = "approved" if approved else "rejected"
         return data
 
+    @model_validator(mode="after")
+    def _reconcile_approval_with_ac_results(self) -> "EvaluationSummary":
+        """Eagerly reconcile approval_status with AC results at construction time."""
+        if self.ac_results:
+            ac_passed = all(ac.passed for ac in self.ac_results)
+            expected = "approved" if ac_passed else "rejected"
+            if self.approval_status != expected:
+                object.__setattr__(self, "approval_status", expected)
+        return self
+
     @property
     def run_verdict_passed(self) -> bool:
         """Aggregate verdict incorporating execution status, approval, and AC results.
 
         Priority: execution_completion_status > ac_results > approval_status > final_approved.
-        When AC results exist, they are authoritative and approval_status is reconciled.
+        approval_status is already reconciled with AC results at construction time.
         """
         if self.execution_completion_status != "completed":
             return False
         if self.ac_results:
-            ac_passed = all(ac.passed for ac in self.ac_results)
-            # Reconcile approval_status to prevent contradictory serialization
-            if ac_passed and self.approval_status == "rejected":
-                object.__setattr__(self, "approval_status", "approved")
-            elif not ac_passed and self.approval_status == "approved":
-                object.__setattr__(self, "approval_status", "rejected")
-            return ac_passed
+            return all(ac.passed for ac in self.ac_results)
         if self.approval_status == "rejected":
             return False
         return self.final_approved

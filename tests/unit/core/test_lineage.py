@@ -168,6 +168,27 @@ class TestEvaluationSummary:
         assert summary.run_verdict == "FAIL"
         assert summary.approval_status == "rejected"
 
+    def test_approval_reconciled_at_construction_not_lazily(self) -> None:
+        """model_dump() must show reconciled approval_status without reading run_verdict first."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            ac_results=(
+                ACResult(
+                    ac_index=0,
+                    ac_content="Feature works",
+                    passed=True,
+                    score=1.0,
+                    evidence="OK",
+                    verification_method="semantic",
+                ),
+            ),
+        )
+
+        # Deliberately do NOT access run_verdict_passed before serializing
+        payload = summary.model_dump(mode="json")
+        assert payload["approval_status"] == "approved"
+
 
 class TestACResult:
     """Tests for ACResult verdict backfill."""
