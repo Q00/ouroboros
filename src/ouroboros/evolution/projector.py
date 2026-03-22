@@ -13,9 +13,27 @@ from ouroboros.core.lineage import (
     LineageStatus,
     OntologyLineage,
     RewindRecord,
+    TerminationReason,
 )
 from ouroboros.core.seed import OntologySchema
 from ouroboros.events.base import BaseEvent
+from ouroboros.evolution.transitions import TERMINAL_EVENT_STATUS
+
+# Legacy reason strings → TerminationReason mapping for events
+# stored before TerminationReason was introduced.
+_LEGACY_REASON_MAP: dict[str, TerminationReason] = {
+    "ontology_converged": TerminationReason.CONVERGED,
+    "max_generations": TerminationReason.EXHAUSTED,
+    "stagnation": TerminationReason.STAGNATED,
+}
+
+# Default TerminationReason by event type (fallback when neither
+# termination_reason nor reason is in event data).
+_DEFAULT_TERMINATION: dict[str, TerminationReason] = {
+    "lineage.converged": TerminationReason.CONVERGED,
+    "lineage.exhausted": TerminationReason.EXHAUSTED,
+    "lineage.stagnated": TerminationReason.STAGNATED,
+}
 
 # Sentinel for generations that haven't completed (started/failed).
 # These don't have a real ontology yet, but GenerationRecord requires one.
@@ -30,6 +48,24 @@ class LineageProjector:
         projector = LineageProjector()
         lineage = projector.project(events)
     """
+
+    @staticmethod
+    def resolve_status(events: list[BaseEvent]) -> LineageStatus:
+        """Determine current LineageStatus from event stream.
+
+        Scans events in reverse for early return. Uses TERMINAL_EVENT_STATUS
+        as the single source of truth (shared with guard.py).
+
+        Args:
+            events: Ordered list of lineage events from EventStore.replay().
+
+        Returns:
+            Current LineageStatus (defaults to ACTIVE if no terminal events found).
+        """
+        for event in reversed(events):
+            if event.type in TERMINAL_EVENT_STATUS:
+                return TERMINAL_EVENT_STATUS[event.type]
+        return LineageStatus.ACTIVE
 
     def project(self, events: list[BaseEvent]) -> OntologyLineage | None:
         """Fold events into OntologyLineage state.
@@ -133,26 +169,25 @@ class LineageProjector:
                         failure_error=error_msg,
                     )
 
-            elif event.type == "lineage.converged":
+            elif event.type in ("lineage.converged", "lineage.exhausted", "lineage.stagnated"):
                 if lineage is not None:
-                    reason = event.data.get("reason", "ontology_converged")
-                    lineage = lineage.with_status(
-                        LineageStatus.CONVERGED, termination_reason=reason
-                    )
-
-            elif event.type == "lineage.exhausted":
-                if lineage is not None:
-                    reason = event.data.get("reason", "max_generations")
-                    lineage = lineage.with_status(
-                        LineageStatus.EXHAUSTED, termination_reason=reason
-                    )
-
-            elif event.type == "lineage.stagnated":
-                if lineage is not None:
-                    reason = event.data.get("reason", "stagnation")
-                    lineage = lineage.with_status(
-                        LineageStatus.CONVERGED, termination_reason=reason
-                    )
+                    target_status = TERMINAL_EVENT_STATUS[event.type]
+                    # Resolve termination_reason with fallback chain:
+                    # 1. New field: event.data["termination_reason"] (enum value string)
+                    # 2. Legacy field: event.data["reason"] → _LEGACY_REASON_MAP
+                    # 3. Default by event type
+                    raw_tr = event.data.get("termination_reason")
+                    if raw_tr:
+                        try:
+                            tr: TerminationReason | str = TerminationReason(raw_tr)
+                        except ValueError:
+                            tr = _DEFAULT_TERMINATION[event.type]
+                    else:
+                        raw_reason = event.data.get("reason", "")
+                        tr = _LEGACY_REASON_MAP.get(
+                            raw_reason, _DEFAULT_TERMINATION[event.type]
+                        )
+                    lineage = lineage.with_status(target_status, termination_reason=tr)
 
             elif event.type == "lineage.rewound":
                 data = event.data

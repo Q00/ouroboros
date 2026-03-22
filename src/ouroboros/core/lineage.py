@@ -29,6 +29,21 @@ class LineageStatus(StrEnum):
     ABORTED = "aborted"
 
 
+class TerminationReason(StrEnum):
+    """Why the evolutionary loop terminated.
+
+    Categorizes the termination cause (not the final status). Multiple
+    reasons can map to the same LineageStatus — e.g., STAGNATED, OSCILLATED,
+    and REPETITIVE all result in LineageStatus.CONVERGED.
+    """
+
+    CONVERGED = "converged"  # ontology stable: similarity >= threshold
+    STAGNATED = "stagnated"  # ontology unchanged for N consecutive generations
+    OSCILLATED = "oscillated"  # ontology cycling between similar states (A→B→A→B)
+    EXHAUSTED = "exhausted"  # max_generations reached
+    REPETITIVE = "repetitive"  # wonder questions repeating across generations
+
+
 class GenerationPhase(StrEnum):
     """Lifecycle phase of a single generation (for error recovery)."""
 
@@ -214,7 +229,7 @@ class OntologyLineage(BaseModel, frozen=True):
     generations: tuple[GenerationRecord, ...] = Field(default_factory=tuple)
     rewind_history: tuple[RewindRecord, ...] = Field(default_factory=tuple)
     status: LineageStatus = LineageStatus.ACTIVE
-    termination_reason: str | None = None
+    termination_reason: TerminationReason | str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
@@ -232,7 +247,9 @@ class OntologyLineage(BaseModel, frozen=True):
         return self.model_copy(update={"generations": self.generations + (record,)})
 
     def with_status(
-        self, status: LineageStatus, termination_reason: str | None = None
+        self,
+        status: LineageStatus,
+        termination_reason: TerminationReason | str | None = None,
     ) -> OntologyLineage:
         """Return new lineage with updated status and optional termination reason."""
         updates: dict = {"status": status}

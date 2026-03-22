@@ -10,9 +10,10 @@ from ouroboros.core.lineage import (
     GenerationRecord,
     OntologyDelta,
     OntologyLineage,
+    TerminationReason,
 )
 from ouroboros.core.seed import OntologyField, OntologySchema
-from ouroboros.evolution.convergence import ConvergenceCriteria
+from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSignal
 from ouroboros.evolution.wonder import WonderOutput
 
 # -- Helpers --
@@ -634,3 +635,121 @@ class TestValidationGate:
             validation_output="Validation skipped: no project directory",
         )
         assert signal.converged
+
+
+# --- TerminationReason enum tests ---
+
+
+class TestTerminationReasonEnum:
+    """Verify TerminationReason is correctly set for all converged=True paths."""
+
+    def test_converged_true_requires_termination_reason(self) -> None:
+        """__post_init__ enforces that converged=True has termination_reason."""
+        with pytest.raises(ValueError, match="requires termination_reason"):
+            ConvergenceSignal(
+                converged=True,
+                reason="test",
+                ontology_similarity=0.99,
+                generation=1,
+            )
+
+    def test_converged_false_allows_none(self) -> None:
+        """converged=False can have termination_reason=None."""
+        signal = ConvergenceSignal(
+            converged=False,
+            reason="test",
+            ontology_similarity=0.5,
+            generation=1,
+        )
+        assert signal.termination_reason is None
+
+    def test_max_generations_returns_exhausted(self) -> None:
+        schema_a = _schema(("name",))
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=tuple(
+                GenerationRecord(
+                    generation_number=i,
+                    seed_id=f"s{i}",
+                    ontology_snapshot=schema_a,
+                )
+                for i in range(1, 4)
+            ),
+        )
+        criteria = ConvergenceCriteria(max_generations=3, min_generations=2)
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason == TerminationReason.EXHAUSTED
+
+    def test_ontology_stable_returns_converged(self) -> None:
+        # Gen 1: different schema, Gen 2-3: same schema → evolution happened, then stable
+        schema_a = _schema(("name",))
+        schema_b = _schema(("name", "age"))
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(generation_number=1, seed_id="s1", ontology_snapshot=schema_a),
+                GenerationRecord(generation_number=2, seed_id="s2", ontology_snapshot=schema_b),
+                GenerationRecord(generation_number=3, seed_id="s3", ontology_snapshot=schema_b),
+            ),
+        )
+        criteria = ConvergenceCriteria(convergence_threshold=0.95, min_generations=2)
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason == TerminationReason.CONVERGED
+
+    def test_stagnation_returns_stagnated(self) -> None:
+        # Gen 1: different, Gen 2-5: same → evolution gate passes, stagnation detected
+        schema_a = _schema(("x",))
+        schema_b = _schema(("name", "age"))
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(generation_number=1, seed_id="s1", ontology_snapshot=schema_a),
+                *(
+                    GenerationRecord(
+                        generation_number=i,
+                        seed_id=f"s{i}",
+                        ontology_snapshot=schema_b,
+                    )
+                    for i in range(2, 6)
+                ),
+            ),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            stagnation_window=3,
+            min_generations=2,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason in (
+            TerminationReason.CONVERGED,
+            TerminationReason.STAGNATED,
+        )
+
+    def test_oscillation_returns_oscillated(self) -> None:
+        schema_a = _schema(("name",))
+        schema_b = _schema(("title",))
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(generation_number=1, seed_id="s1", ontology_snapshot=schema_a),
+                GenerationRecord(generation_number=2, seed_id="s2", ontology_snapshot=schema_b),
+                GenerationRecord(generation_number=3, seed_id="s3", ontology_snapshot=schema_a),
+                GenerationRecord(generation_number=4, seed_id="s4", ontology_snapshot=schema_b),
+            ),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            enable_oscillation_detection=True,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason == TerminationReason.OSCILLATED
+        assert "Oscillation" in signal.reason

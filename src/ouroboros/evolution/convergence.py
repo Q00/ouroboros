@@ -18,6 +18,7 @@ from ouroboros.core.lineage import (
     GenerationRecord,
     OntologyDelta,
     OntologyLineage,
+    TerminationReason,
 )
 from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.evolution.wonder import WonderOutput
@@ -25,13 +26,24 @@ from ouroboros.evolution.wonder import WonderOutput
 
 @dataclass(frozen=True, slots=True)
 class ConvergenceSignal:
-    """Result of convergence evaluation."""
+    """Result of convergence evaluation.
+
+    When converged=True, termination_reason must be set to indicate why.
+    When converged=False, termination_reason is None (loop continues).
+    """
 
     converged: bool
     reason: str
     ontology_similarity: float
     generation: int
     failed_acs: tuple[int, ...] = ()
+    termination_reason: TerminationReason | None = None
+
+    def __post_init__(self) -> None:
+        if self.converged and self.termination_reason is None:
+            raise ValueError(
+                "converged=True requires termination_reason to be set"
+            )
 
 
 @dataclass
@@ -87,6 +99,7 @@ class ConvergenceCriteria:
                 reason=f"Max generations reached ({self.max_generations})",
                 ontology_similarity=self._latest_similarity(lineage),
                 generation=current_gen,
+                termination_reason=TerminationReason.EXHAUSTED,
             )
 
         # Need at least min_generations completed before checking other signals
@@ -197,6 +210,7 @@ class ConvergenceCriteria:
                 ),
                 ontology_similarity=latest_sim,
                 generation=current_gen,
+                termination_reason=TerminationReason.CONVERGED,
             )
 
         # Signal 2: Stagnation (unchanged for N consecutive gens)
@@ -211,6 +225,7 @@ class ConvergenceCriteria:
                     ),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    termination_reason=TerminationReason.STAGNATED,
                 )
 
         # Signal 2.5: Oscillation detection (A→B→A→B cycling)
@@ -219,9 +234,10 @@ class ConvergenceCriteria:
             if oscillating:
                 return ConvergenceSignal(
                     converged=True,
-                    reason=("Oscillation detected: ontology is cycling between similar states"),
+                    reason="Oscillation detected: ontology is cycling between similar states",
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    termination_reason=TerminationReason.OSCILLATED,
                 )
 
         # Signal 3: Repetitive wonder questions
@@ -233,6 +249,7 @@ class ConvergenceCriteria:
                     reason="Repetitive feedback: wonder questions are repeating across generations",
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    termination_reason=TerminationReason.REPETITIVE,
                 )
 
         # Not converged
