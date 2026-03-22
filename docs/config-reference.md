@@ -29,6 +29,28 @@ Complete reference for `~/.ouroboros/config.yaml` and all related environment va
 
 ---
 
+## Codex CLI Users
+
+For Codex-backed Ouroboros workflows:
+
+- Put persistent Ouroboros role overrides in `~/.ouroboros/config.yaml`.
+- Use `~/.codex/config.toml` only for the Codex MCP/env hookup written by `ouroboros setup --runtime codex`.
+- The Codex-aware loader does **not** hardcode a mini model when these keys are left at their shipped defaults. It resolves Codex-backed lookups to Codex's `default` sentinel unless you set an explicit model string.
+
+### Codex Role Override Map
+
+| Role | `config.yaml` key |
+|------|-------------------|
+| Clarification / interview | `clarification.default_model` |
+| QA verdict | `llm.qa_model` |
+| Semantic evaluation | `evaluation.semantic_model` |
+| Consensus simple voting | `consensus.models` |
+| Consensus deliberative roles | `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model` |
+
+> **Recommended documented baseline:** use GPT-5.4 with medium reasoning effort in Codex CLI, then pin specific Ouroboros roles in `config.yaml` when you want deterministic per-role model selection.
+
+---
+
 ## Top-Level Sections
 
 | Section | Class | Purpose |
@@ -299,12 +321,12 @@ consensus:
 | `min_models` | `int >= 2` | `3` | Minimum number of models required for a consensus vote. |
 | `threshold` | `float [0.0, 1.0]` | `0.67` | Fraction of models that must agree for consensus to pass (e.g., `0.67` = 2/3 majority). |
 | `diversity_required` | `bool` | `true` | When `true`, consensus requires models from at least two different providers. |
-| `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. Specify as `provider/model` or `openrouter/provider/model`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
-| `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4-6"` | Model that argues in favor of the proposed solution in deliberative consensus. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
-| `devil_model` | `string` | `"openrouter/openai/gpt-4o"` | Model that argues against (devil's advocate) in deliberative consensus. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
-| `judge_model` | `string` | `"openrouter/google/gemini-2.5-pro"` | Model that renders a final verdict after deliberation. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
+| `models` | `list[string]` | (see above) | Model roster for Stage 3 simple voting. With `llm.backend: litellm`, use `provider/model` or `openrouter/provider/model`. With `llm.backend: codex`, use Codex/OpenAI model IDs such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_MODELS` (comma-separated). |
+| `advocate_model` | `string` | `"openrouter/anthropic/claude-opus-4-6"` | Model that argues in favor of the proposed solution in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_ADVOCATE_MODEL`. |
+| `devil_model` | `string` | `"openrouter/openai/gpt-4o"` | Model that argues against (devil's advocate) in deliberative consensus. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_DEVIL_MODEL`. |
+| `judge_model` | `string` | `"openrouter/google/gemini-2.5-pro"` | Model that renders a final verdict after deliberation. With `llm.backend: codex`, this can be a Codex/OpenAI model ID such as `gpt-5.4`. Overridable via `OUROBOROS_CONSENSUS_JUDGE_MODEL`. |
 
-> **Note:** Consensus models are accessed via OpenRouter. Ensure `OPENROUTER_API_KEY` is set in `credentials.yaml` or as an environment variable when `stage3_enabled: true`.
+> **Backend note:** With `llm.backend: litellm`, consensus models typically go through OpenRouter/LiteLLM and require the corresponding provider credentials (commonly `OPENROUTER_API_KEY`). With `llm.backend: codex`, the configured model strings are sent through Codex CLI instead.
 
 ---
 
@@ -484,9 +506,38 @@ orchestrator:
   runtime_backend: codex
   codex_cli_path: /usr/local/bin/codex   # omit if codex is already on PATH
 
+llm:
+  backend: codex
+
 logging:
   level: info
 ```
+
+### Codex CLI Runtime With Explicit Role Overrides
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: codex
+  codex_cli_path: /usr/local/bin/codex
+
+llm:
+  backend: codex
+  qa_model: gpt-5.4
+
+clarification:
+  default_model: gpt-5.4
+
+evaluation:
+  semantic_model: gpt-5.4
+
+consensus:
+  advocate_model: gpt-5.4
+  devil_model: gpt-5.4
+  judge_model: gpt-5.4
+```
+
+This is the recommended Ouroboros-side pattern for Codex users. Keep `~/.codex/config.toml` limited to the MCP/env block created by setup.
 
 ### Full Config Skeleton
 

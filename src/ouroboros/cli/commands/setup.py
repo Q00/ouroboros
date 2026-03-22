@@ -32,21 +32,95 @@ def _detect_runtimes() -> dict[str, str | None]:
     return runtimes
 
 
-_CODEX_MCP_SECTION = """\
+_CODEX_MCP_SECTION = """# Ouroboros MCP hookup for Codex CLI.
+# Keep Ouroboros runtime settings and per-role model overrides in
+# ~/.ouroboros/config.yaml (for example: clarification.default_model,
+# llm.qa_model, evaluation.semantic_model, consensus.*).
+# This file is only for the Codex MCP/env registration block.
 
 [mcp_servers.ouroboros]
 command = "uvx"
 args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
-tool_timeout_sec = 600
 
 [mcp_servers.ouroboros.env]
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
 
+_CODEX_MCP_COMMENT_LINES = (
+    "# Ouroboros MCP hookup for Codex CLI.",
+    "# Keep Ouroboros runtime settings and per-role model overrides in",
+    "# ~/.ouroboros/config.yaml (for example: clarification.default_model,",
+    "# llm.qa_model, evaluation.semantic_model, consensus.*).",
+    "# This file is only for the Codex MCP/env registration block.",
+)
+
+
+def _is_codex_ouroboros_table_header(line: str) -> bool:
+    """Return True when the line starts the managed Codex MCP table."""
+    return line == "[mcp_servers.ouroboros]" or line.startswith("[mcp_servers.ouroboros.")
+
+
+def _trim_managed_codex_comments(lines: list[str]) -> None:
+    """Remove the managed Codex comment block immediately before a table."""
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    comment_index = len(lines)
+    for expected in reversed(_CODEX_MCP_COMMENT_LINES):
+        if comment_index == 0 or lines[comment_index - 1] != expected:
+            return
+        comment_index -= 1
+
+    del lines[comment_index:]
+
+
+def _upsert_codex_mcp_section(raw: str) -> tuple[str, bool]:
+    """Insert or replace the managed Codex MCP block.
+
+    Returns:
+        Tuple of (updated_contents, existed_before).
+    """
+    section_lines = _CODEX_MCP_SECTION.strip("\n").splitlines()
+    input_lines = raw.splitlines()
+    output_lines: list[str] = []
+    index = 0
+    existed_before = False
+    inserted = False
+
+    while index < len(input_lines):
+        stripped = input_lines[index].strip()
+        if _is_codex_ouroboros_table_header(stripped):
+            existed_before = True
+            if not inserted:
+                _trim_managed_codex_comments(output_lines)
+                if output_lines and output_lines[-1].strip():
+                    output_lines.append("")
+                output_lines.extend(section_lines)
+                inserted = True
+
+            index += 1
+            while index < len(input_lines):
+                next_stripped = input_lines[index].strip()
+                is_table_header = next_stripped.startswith("[") and next_stripped.endswith("]")
+                if is_table_header and not _is_codex_ouroboros_table_header(next_stripped):
+                    break
+                index += 1
+            continue
+
+        output_lines.append(input_lines[index])
+        index += 1
+
+    if not inserted:
+        if output_lines and output_lines[-1].strip():
+            output_lines.append("")
+        output_lines.extend(section_lines)
+
+    return "\n".join(output_lines).rstrip() + "\n", existed_before
+
 
 def _register_codex_mcp_server() -> None:
-    """Register Ouroboros MCP server in ~/.codex/config.toml."""
+    """Register the Ouroboros MCP/env hookup in ~/.codex/config.toml."""
     import tomllib
 
     codex_config = Path.home() / ".codex" / "config.toml"
@@ -55,21 +129,35 @@ def _register_codex_mcp_server() -> None:
     if codex_config.exists():
         raw = codex_config.read_text(encoding="utf-8")
         try:
-            parsed = tomllib.loads(raw)
+            tomllib.loads(raw)
         except tomllib.TOMLDecodeError:
             print_error(f"Could not parse {codex_config} — skipping MCP registration.")
             return
 
-        if "ouroboros" in parsed.get("mcp_servers", {}):
-            print_info("Codex MCP server already registered.")
+        updated_raw, existed_before = _upsert_codex_mcp_section(raw)
+        if updated_raw == raw:
+            print_info("Codex MCP server already up to date.")
             return
 
-        # Append section to existing file
-        codex_config.write_text(raw.rstrip("\n") + "\n" + _CODEX_MCP_SECTION, encoding="utf-8")
+        codex_config.write_text(updated_raw, encoding="utf-8")
+        if existed_before:
+            print_success(f"Updated Ouroboros MCP server in {codex_config}")
+        else:
+            print_success(f"Registered Ouroboros MCP server in {codex_config}")
     else:
         codex_config.write_text(_CODEX_MCP_SECTION.lstrip("\n"), encoding="utf-8")
+        print_success(f"Registered Ouroboros MCP server in {codex_config}")
 
-    print_success(f"Registered Ouroboros MCP server in {codex_config}")
+
+def _print_codex_config_guidance(config_path: Path) -> None:
+    """Explain where Codex users should configure Ouroboros vs. Codex settings."""
+    print_info(
+        "Configure Ouroboros runtime and per-role model overrides in "
+        f"{config_path}."
+    )
+    print_info(
+        "Use ~/.codex/config.toml only for the Codex MCP/env hookup written by setup."
+    )
 
 
 def _install_codex_artifacts() -> None:
@@ -123,6 +211,7 @@ def _setup_codex(codex_path: str) -> None:
 
     # Register MCP server in Codex config (~/.codex/config.toml)
     _register_codex_mcp_server()
+    _print_codex_config_guidance(config_path)
 
     # Also register MCP server for Codex users who also have Claude Code
     mcp_config_path = Path.home() / ".claude" / "mcp.json"
@@ -140,13 +229,16 @@ def _setup_codex(codex_path: str) -> None:
                 "command": "uvx",
                 "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
             }
-        entry["timeout"] = 600
+        removed_timeout = entry.pop("timeout", None) is not None
         mcp_data["mcpServers"]["ouroboros"] = entry
 
         with mcp_config_path.open("w") as f:
             json.dump(mcp_data, f, indent=2)
 
-        print_info("Updated Claude MCP server config with timeout.")
+        if removed_timeout:
+            print_info("Removed legacy Claude MCP timeout override.")
+        else:
+            print_info("Updated Claude MCP server config.")
 
 
 def _setup_claude(claude_path: str) -> None:
@@ -186,19 +278,17 @@ def _setup_claude(claude_path: str) -> None:
         mcp_data["mcpServers"]["ouroboros"] = {
             "command": "uvx",
             "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-            "timeout": 600,
         }
         with mcp_config_path.open("w") as f:
             json.dump(mcp_data, f, indent=2)
         print_success("Registered MCP server in ~/.claude/mcp.json")
     else:
-        # Ensure existing entries have timeout
         entry = mcp_data["mcpServers"]["ouroboros"]
-        if "timeout" not in entry:
-            entry["timeout"] = 600
+        if "timeout" in entry:
+            del entry["timeout"]
             with mcp_config_path.open("w") as f:
                 json.dump(mcp_data, f, indent=2)
-            print_info("Updated MCP server config with timeout.")
+            print_info("Removed legacy MCP timeout override.")
         else:
             print_info("MCP server already registered.")
 

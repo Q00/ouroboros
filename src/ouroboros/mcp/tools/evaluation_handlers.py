@@ -242,6 +242,7 @@ class EvaluateHandler:
     event_store: EventStore | None = field(default=None, repr=False)
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    TIMEOUT_SECONDS: int = 0  # No server-side timeout; client/runtime decides.
 
     @property
     def definition(self) -> MCPToolDefinition:
