@@ -39,6 +39,14 @@ def pm_command(
             help="Resume an existing PM interview session by ID.",
         ),
     ] = None,
+    output: Annotated[
+        str | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Output directory for the generated PM document (default: .ouroboros/).",
+        ),
+    ] = None,
     model: Annotated[
         str,
         typer.Option(
@@ -61,12 +69,14 @@ def pm_command(
     define product requirements. Questions are automatically classified
     as planning (PM-answerable) or development (deferred to dev interview).
 
-    The output is a PMSeed JSON file saved to ~/.ouroboros/seeds/.
+    The output is a PMSeed JSON file saved to ~/.ouroboros/seeds/ and
+    a human-readable pm.md saved to the output directory.
 
     [bold]Examples:[/]
 
-        ouroboros pm                        Start new PM interview
-        ouroboros pm --resume abc123        Resume session
+        ouroboros pm                            Start new PM interview
+        ouroboros pm --resume abc123            Resume session
+        ouroboros pm --output ./docs            Save pm.md to ./docs/
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -80,14 +90,13 @@ def pm_command(
 
     console.print(f"  Model: [dim]{model}[/]\n")
 
-    # PMInterviewEngine integration point — the sibling agent is building
-    # PMInterviewEngine which will be wired in here.
     try:
         asyncio.run(
             _run_pm_interview(
                 resume_id=resume,
                 model=model,
                 debug=debug,
+                output_dir=output,
             )
         )
     except KeyboardInterrupt:
@@ -98,7 +107,8 @@ def pm_command(
 def _load_brownfield_from_db() -> list[dict[str, str]]:
     """Load brownfield repos from DB for PM interview context.
 
-    Uses the default brownfield repo registered via ``ooo setup``.
+    Loads all registered brownfield repos and lets the user select
+    which ones to include via ``_select_repos()``.
     No cwd-based detection — repos come from the DB only.
 
     Returns:
@@ -291,6 +301,7 @@ async def _run_pm_interview(
     resume_id: str | None,
     model: str,
     debug: bool,  # noqa: ARG001
+    output_dir: str | None = None,
 ) -> None:
     """Run the PM interview loop.
 
@@ -301,6 +312,7 @@ async def _run_pm_interview(
         resume_id: Optional session ID to resume.
         model: LLM model identifier.
         debug: Enable debug output.
+        output_dir: Optional output directory for the generated PM document.
     """
     from ouroboros.bigbang.pm_interview import PMInterviewEngine
     from ouroboros.providers.litellm_adapter import LiteLLMAdapter
@@ -444,7 +456,7 @@ async def _run_pm_interview(
             # Save human-readable pm.md alongside the seed
             from ouroboros.bigbang.pm_document import save_pm_document
 
-            pm_dir = Path.cwd() / ".ouroboros"
+            pm_dir = Path(output_dir) if output_dir else Path.cwd() / ".ouroboros"
             pm_path = save_pm_document(seed, output_dir=pm_dir)
             print_success(f"PM document saved: {pm_path}")
         else:

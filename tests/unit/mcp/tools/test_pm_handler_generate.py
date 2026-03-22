@@ -132,8 +132,7 @@ class TestHandleGenerate:
         assert "pm_path" in meta
         pm_path = Path(meta["pm_path"])
         assert pm_path.exists()
-        assert pm_path.name.startswith("prd_")
-        assert pm_path.name.endswith(".md")
+        assert pm_path.name == "pm.md"
 
     @pytest.mark.asyncio
     async def test_generate_returns_seed_path_in_meta(self, tmp_path: Path) -> None:
@@ -414,6 +413,54 @@ class TestHandleGenerate:
         assert result1.is_ok
         assert result2.is_ok
         assert result1.value.meta == result2.value.meta
+
+    @pytest.mark.asyncio
+    async def test_generate_rejects_incomplete_session(self, tmp_path: Path) -> None:
+        """Generate returns error when interview is not complete."""
+        from tests.unit.mcp.tools.conftest import make_pm_engine_mock
+
+        state = _make_state()
+        state.is_complete = False  # Mark as incomplete
+
+        engine = make_pm_engine_mock()
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
+
+        assert result.is_err
+        assert "not complete" in str(result.error).lower()
+        # generate_pm_seed should never be called for incomplete sessions
+        engine.generate_pm_seed = AsyncMock()
+        assert not engine.generate_pm_seed.called
+
+    @pytest.mark.asyncio
+    async def test_generate_pm_path_consistent_with_cli(self, tmp_path: Path) -> None:
+        """MCP generate saves pm.md to {cwd}/.ouroboros/ — same convention as CLI."""
+        seed = _make_seed()
+        state = _make_state()
+        engine = _make_engine_for_generate(state, seed)
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
+
+        assert result.is_ok
+        pm_path = Path(result.value.meta["pm_path"])
+        # File should be at {cwd}/.ouroboros/pm.md
+        assert pm_path.parent.name == ".ouroboros"
+        assert pm_path.name == "pm.md"
 
     @pytest.mark.asyncio
     async def test_generate_requires_session_id(self, tmp_path: Path) -> None:

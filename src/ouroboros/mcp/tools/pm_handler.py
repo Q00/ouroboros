@@ -949,8 +949,11 @@ class PMInterviewHandler:
 
         Loads InterviewState and pm_meta, restores engine via restore_meta(),
         runs generate_pm_seed, saves PM seed to ~/.ouroboros/seeds/ and
-        prd_{timestamp}.md to {cwd}/.  Idempotent — overwrites on retry with
+        pm.md to {cwd}/.ouroboros/.  Idempotent — overwrites on retry with
         the same session_id.
+
+        Rejects incomplete interviews with an error to prevent partial-spec
+        artifacts from being generated.
         """
         load_result = await engine.load_state(session_id)
         if load_result.is_err:
@@ -958,6 +961,16 @@ class PMInterviewHandler:
                 MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
             )
         state = load_result.value
+
+        # Guard: reject incomplete interviews
+        if not state.is_complete:
+            return Result.err(
+                MCPToolError(
+                    f"Interview '{session_id}' is not complete. "
+                    "Finish the interview before generating a PM document.",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
 
         # Restore PM meta into engine via engine.restore_meta()
         meta = _load_pm_meta(session_id, self.data_dir)
@@ -978,16 +991,9 @@ class PMInterviewHandler:
         # Save seed to ~/.ouroboros/seeds/ (idempotent — overwrites on retry)
         seed_path = engine.save_pm_seed(seed)
 
-        # Save human-readable prd_{session_id}.md to cwd (idempotent for retries)
-        # Derive a stable filename from session_id so repeated calls overwrite
-        # the same file regardless of whether the ID follows the interview_ convention.
-        safe_id = (
-            session_id.replace("interview_", "", 1)
-            if session_id.startswith("interview_")
-            else session_id
-        )
-        pm_filename = f"prd_{safe_id}.md"
-        pm_path = save_pm_document(seed, output_path=Path(cwd) / pm_filename)
+        # Save human-readable pm.md to {cwd}/.ouroboros/ (consistent with CLI path)
+        pm_output_dir = Path(cwd) / ".ouroboros"
+        pm_path = save_pm_document(seed, output_dir=pm_output_dir)
 
         return Result.ok(
             MCPToolResult(
