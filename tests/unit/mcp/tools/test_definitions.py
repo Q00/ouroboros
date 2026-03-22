@@ -29,6 +29,7 @@ from ouroboros.mcp.tools.definitions import (
 from ouroboros.mcp.types import ToolInputType
 from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
+    DELEGATED_PARENT_PERMISSION_MODE_ARG,
     DELEGATED_PARENT_SESSION_ID_ARG,
 )
 from ouroboros.orchestrator.runner import OrchestratorResult
@@ -139,7 +140,7 @@ class TestExecuteSeedHandler:
 
         with (
             patch("ouroboros.mcp.tools.definitions.EventStore", return_value=mock_event_store),
-            patch("ouroboros.mcp.tools.definitions.ClaudeAgentAdapter"),
+            patch("ouroboros.mcp.tools.definitions.ClaudeAgentAdapter") as adapter_cls,
             patch(
                 "ouroboros.mcp.tools.definitions.OrchestratorRunner",
                 return_value=mock_runner,
@@ -156,16 +157,19 @@ class TestExecuteSeedHandler:
                         "Read",
                         "mcp__chrome-devtools__click",
                     ],
+                    DELEGATED_PARENT_PERMISSION_MODE_ARG: "bypassPermissions",
                 },
                 execution_id="exec_child",
                 session_id_override="orch_child",
             )
 
         assert result.is_ok
+        adapter_cls.assert_called_once_with(permission_mode="bypassPermissions")
         runner_kwargs = runner_cls.call_args.kwargs
         inherited_handle = runner_kwargs["inherited_runtime_handle"]
         assert inherited_handle is not None
         assert inherited_handle.native_session_id == "sess_parent"
+        assert inherited_handle.approval_mode == "bypassPermissions"
         assert inherited_handle.metadata["fork_session"] is True
         assert runner_kwargs["inherited_tools"] == ["Read", "mcp__chrome-devtools__click"]
 

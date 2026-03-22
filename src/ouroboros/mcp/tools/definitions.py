@@ -222,7 +222,13 @@ class ExecuteSeedHandler:
 
         # Use injected or create orchestrator dependencies
         try:
-            agent_adapter = ClaudeAgentAdapter(permission_mode="acceptEdits")
+            agent_adapter = ClaudeAgentAdapter(
+                permission_mode=(
+                    inherited_runtime_handle.approval_mode
+                    if inherited_runtime_handle and inherited_runtime_handle.approval_mode
+                    else "acceptEdits"
+                )
+            )
             event_store = self.event_store or EventStore()
             await event_store.initialize()
             # Use stderr: in MCP stdio mode, stdout is the JSON-RPC channel.

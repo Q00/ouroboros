@@ -316,6 +316,7 @@ class TestClaudeAgentAdapter:
         inherited_handle = RuntimeHandle(
             backend="claude",
             native_session_id="sess_parent",
+            approval_mode="bypassPermissions",
             metadata={"fork_session": True},
         )
         captured_options: dict[str, Any] = {}
@@ -354,7 +355,10 @@ class TestClaudeAgentAdapter:
         assert messages[-1].is_final is True
         assert captured_options["resume"] == "sess_parent"
         assert captured_options["fork_session"] is True
+        assert captured_options["permission_mode"] == "bypassPermissions"
         assert captured_options["allowed_tools"] == ["Read", "mcp__chrome-devtools__click"]
+        assert messages[-1].resume_handle is not None
+        assert messages[-1].resume_handle.approval_mode == "bypassPermissions"
 
         hook_matchers = captured_options["hooks"]["PreToolUse"]
         assert len(hook_matchers) == 1

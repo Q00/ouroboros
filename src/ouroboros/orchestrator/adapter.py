@@ -371,7 +371,12 @@ class ClaudeAgentAdapter:
         error_str = str(error).lower()
         return any(pattern in error_str for pattern in TRANSIENT_ERROR_PATTERNS)
 
-    def _build_runtime_handle(self, native_session_id: str | None) -> RuntimeHandle | None:
+    def _build_runtime_handle(
+        self,
+        native_session_id: str | None,
+        *,
+        approval_mode: str | None = None,
+    ) -> RuntimeHandle | None:
         """Build a normalized runtime handle for the current Claude session."""
         if not native_session_id:
             return None
@@ -380,7 +385,7 @@ class ClaudeAgentAdapter:
             backend="claude",
             native_session_id=native_session_id,
             cwd=os.getcwd(),
-            approval_mode=self._permission_mode,
+            approval_mode=approval_mode or self._permission_mode,
             updated_at=datetime.now(UTC).isoformat(),
         )
 
@@ -450,10 +455,16 @@ class ClaudeAgentAdapter:
         while attempt < MAX_RETRIES:
             attempt += 1
             try:
+                effective_permission_mode = (
+                    current_runtime_handle.approval_mode
+                    if current_runtime_handle and current_runtime_handle.approval_mode
+                    else self._permission_mode
+                )
+
                 # Build options
                 options_kwargs: dict[str, Any] = {
                     "allowed_tools": effective_tools,
-                    "permission_mode": self._permission_mode,
+                    "permission_mode": effective_permission_mode,
                     "cwd": os.getcwd(),  # Use current working directory
                 }
 
@@ -499,7 +510,10 @@ class ClaudeAgentAdapter:
                     )
                     if session_id:
                         current_session_id = session_id  # Save for potential retry
-                        current_runtime_handle = self._build_runtime_handle(session_id)
+                        current_runtime_handle = self._build_runtime_handle(
+                            session_id,
+                            approval_mode=effective_permission_mode,
+                        )
 
                     if current_runtime_handle:
                         data = agent_message.data
