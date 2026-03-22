@@ -49,7 +49,7 @@ This may take a moment...
 
 The scan response `text` already contains a pre-formatted numbered list with `[default]` markers. **Do NOT make any additional MCP calls to list or query repos.**
 
-**Display the scan response text directly** — copy the full numbered list from the scan response `text` into your output as-is. Do not reformat, summarize, or truncate it. The user needs to see all repo numbers to pick defaults.
+**Display the repos in a compact 2-column grid** so the user can scan all repos quickly. Format the scan response `text` as two side-by-side columns. Include `*` markers for defaults exactly as they appear in the response.
 
 **If no repos found**, show:
 ```
