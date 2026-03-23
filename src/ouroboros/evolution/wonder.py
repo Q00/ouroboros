@@ -266,10 +266,14 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             if eval_summary.failure_reason:
                 questions.append(f"What ontological gap caused: {eval_summary.failure_reason}?")
         else:
-            questions.append(f"Does the current ontology cover the seed's acceptance criteria{scope_hint}?")
+            questions.append(
+                f"Does the current ontology cover the seed's acceptance criteria{scope_hint}?"
+            )
 
         if len(ontology.fields) < 3 and seed:
-            questions.append(f"Are there concepts implied by the seed goal that are not yet modeled{scope_hint}?")
+            questions.append(
+                f"Are there concepts implied by the seed goal that are not yet modeled{scope_hint}?"
+            )
 
         # If evaluation passed and no questions were generated, allow convergence
         should_continue = bool(questions)
