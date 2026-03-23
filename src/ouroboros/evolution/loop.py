@@ -962,6 +962,7 @@ class EvolutionaryLoop:
         wonder_output: WonderOutput | None = None
         reflect_output: ReflectOutput | None = None
         ontology_delta: OntologyDelta | None = None
+        restored_execution_output: str | None = None
 
         # Restore partial state from interrupted generation if resuming
         if resume_after_phase and lineage.generations:
@@ -980,6 +981,8 @@ class EvolutionaryLoop:
                         questions=tuple(ps["wonder_questions"]),
                         should_continue=True,
                     )
+                if _should_skip("executing") and ps.get("execution_output"):
+                    restored_execution_output = ps["execution_output"]
 
         # Gen 2+: Wonder and Reflect phases
         if generation_number > 1 and lineage.generations:
@@ -1131,6 +1134,9 @@ class EvolutionaryLoop:
                 if interrupted:
                     return Result.ok(interrupted)
 
+            # Seed generation — outside Reflect block so it runs even when
+            # Reflect is skipped on resume (resume_after_phase="reflecting")
+            if reflect_output and not _should_skip("seeding"):
                 # Phase transition: reflecting → seeding
                 await self.event_store.append(
                     lineage_generation_phase_changed(
@@ -1140,7 +1146,6 @@ class EvolutionaryLoop:
                     )
                 )
 
-                # Generate evolved seed
                 if self.seed_generator:
                     seed_result = self.seed_generator.generate_from_reflect(
                         current_seed,
@@ -1211,8 +1216,14 @@ class EvolutionaryLoop:
         )
 
         # Execute phase (placeholder - actual execution via OrchestratorRunner)
-        execution_output: str | None = None
-        if execute and self.executor:
+        # Skip if already completed before interruption (use restored output)
+        execution_output: str | None = restored_execution_output
+        if execution_output and _should_skip("executing"):
+            logger.info(
+                "evolution.generation.execution_restored_from_checkpoint",
+                extra={"generation": generation_number},
+            )
+        elif execute and self.executor:
             try:
                 exec_result = await self.executor(current_seed, parallel=parallel)
                 if hasattr(exec_result, "is_ok") and exec_result.is_ok:
