@@ -24,6 +24,7 @@ class JobStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +54,12 @@ class JobSnapshot:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+        return self.status in {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        }
 
 
 def _safe_meta(value: Any) -> Any:
@@ -155,8 +161,8 @@ class JobManager:
                 terminal_type = "mcp.job.cancelled"
                 terminal_status = JobStatus.CANCELLED
             elif getattr(result, "meta", {}).get("action") == "interrupted":
-                terminal_type = "mcp.job.failed"
-                terminal_status = JobStatus.FAILED
+                terminal_type = "mcp.job.interrupted"
+                terminal_status = JobStatus.INTERRUPTED
             await self._append_event(
                 terminal_type,
                 job_id,

@@ -858,6 +858,7 @@ class EvolutionaryLoop:
         wonder_output: WonderOutput | None = None,
         reflect_output: ReflectOutput | None = None,
         execution_output: str | None = None,
+        evaluation_summary: EvaluationSummary | None = None,
     ) -> GenerationResult | None:
         """Check if graceful shutdown was requested.
 
@@ -881,10 +882,12 @@ class EvolutionaryLoop:
         try:
             if wonder_output:
                 partial_state["wonder_questions"] = list(wonder_output.questions)
-            if reflect_output and reflect_output.ontology_mutations:
-                partial_state["mutation_count"] = len(reflect_output.ontology_mutations)
+            if reflect_output:
+                partial_state["reflect_output"] = reflect_output.model_dump(mode="json")
             if execution_output:
                 partial_state["execution_output"] = execution_output[:10_000]
+            if evaluation_summary:
+                partial_state["evaluation_summary"] = evaluation_summary.model_dump(mode="json")
         except (TypeError, ValueError, KeyError):
             logger.warning("evolution.generation.partial_state_build_failed", exc_info=True)
 
@@ -924,6 +927,7 @@ class EvolutionaryLoop:
             wonder_output=wonder_output,
             reflect_output=reflect_output,
             execution_output=execution_output,
+            evaluation_summary=evaluation_summary,
             phase=GenerationPhase.INTERRUPTED,
             success=False,
         )
@@ -963,6 +967,7 @@ class EvolutionaryLoop:
         reflect_output: ReflectOutput | None = None
         ontology_delta: OntologyDelta | None = None
         restored_execution_output: str | None = None
+        restored_evaluation_summary: EvaluationSummary | None = None
 
         # Restore partial state from interrupted generation if resuming
         if resume_after_phase and lineage.generations:
@@ -981,8 +986,26 @@ class EvolutionaryLoop:
                         questions=tuple(ps["wonder_questions"]),
                         should_continue=True,
                     )
+                if _should_skip("reflecting") and ps.get("reflect_output"):
+                    try:
+                        reflect_output = ReflectOutput.model_validate(ps["reflect_output"])
+                    except Exception as e:
+                        logger.warning(
+                            "evolution.resume.reflect_output_restore_failed",
+                            extra={"error": str(e)},
+                        )
                 if _should_skip("executing") and ps.get("execution_output"):
                     restored_execution_output = ps["execution_output"]
+                if _should_skip("evaluating") and ps.get("evaluation_summary"):
+                    try:
+                        restored_evaluation_summary = EvaluationSummary.model_validate(
+                            ps["evaluation_summary"]
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "evolution.resume.evaluation_summary_restore_failed",
+                            extra={"error": str(e)},
+                        )
 
         # Gen 2+: Wonder and Reflect phases
         if generation_number > 1 and lineage.generations:
@@ -1324,8 +1347,14 @@ class EvolutionaryLoop:
         )
 
         # Evaluate phase (placeholder - actual evaluation via EvaluationPipeline)
-        evaluation_summary: EvaluationSummary | None = None
-        if execute and self.evaluator:
+        # Skip if already completed before interruption (use restored summary)
+        evaluation_summary: EvaluationSummary | None = restored_evaluation_summary
+        if evaluation_summary and _should_skip("evaluating"):
+            logger.info(
+                "evolution.generation.evaluation_restored_from_checkpoint",
+                extra={"generation": generation_number},
+            )
+        elif execute and self.evaluator:
             try:
                 eval_result = await self.evaluator(current_seed, execution_output)
                 if hasattr(eval_result, "is_ok") and eval_result.is_ok:
@@ -1370,6 +1399,7 @@ class EvolutionaryLoop:
             wonder_output=wonder_output,
             reflect_output=reflect_output,
             execution_output=execution_output,
+            evaluation_summary=evaluation_summary,
         )
         if interrupted:
             return Result.ok(interrupted)
