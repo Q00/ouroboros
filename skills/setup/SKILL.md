@@ -344,6 +344,85 @@ Join the community:
 
 ---
 
+### Step 5.5: Brownfield Repository Scan
+
+Scan the user's home directory for existing git repositories and register them in the Ouroboros DB. This enables interviews to use brownfield context for existing projects.
+
+**Show scanning indicator:**
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Scanning for Existing Projects...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Looking for git repositories in your home directory.
+Only GitHub-hosted repos will be registered.
+This may take a moment...
+```
+
+**Implementation — use MCP tools only, do NOT use CLI or Python scripts:**
+
+1. Load the brownfield MCP tool: `ToolSearch query: "+ouroboros brownfield"`
+2. Call scan+register:
+   ```
+   Tool: ouroboros_brownfield
+   Arguments: { "action": "scan" }
+   ```
+   This scans `~/` for GitHub repos and registers them in DB. Existing defaults are preserved.
+
+The scan response `text` already contains a pre-formatted numbered list with `[default]` markers. **Do NOT make any additional MCP calls to list or query repos.**
+
+**Display the scan response text directly** — copy the full numbered list from the scan response `text` into your output as-is. Do not reformat, summarize, or truncate it. The user needs to see all repo numbers to pick defaults.
+
+**If no repos found**, skip the default selection prompt and proceed to Step 6.
+
+**Default repo selection — IMMEDIATELY after showing the list:**
+
+Use `AskUserQuestion` with the current default numbers from the scan response:
+
+```json
+{
+  "questions": [{
+    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
+    "header": "Default Repos",
+    "options": [
+      {"label": "<current default numbers> (Recommended)", "description": "<current default names>"}
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+Only ONE option: the current defaults as recommended. The user can "Type something" for custom numbers or "none".
+
+After the user responds, use ONE MCP call to update all defaults at once:
+
+```
+Tool: ouroboros_brownfield
+Arguments: { "action": "set_defaults", "indices": "<comma-separated IDs>" }
+```
+
+Example: if the user picks IDs 6, 18, 19 → `{ "action": "set_defaults", "indices": "6,18,19" }`
+
+This clears all existing defaults and sets the selected repos as default in one call.
+
+If "none" → `{ "action": "set_defaults", "indices": "" }` to clear all defaults.
+
+**Celebration Checkpoint 5.5:**
+```
+Brownfield defaults updated!
+Defaults: podo-app, podo-backend, grape
+
+These repos will be used as context in interviews.
+```
+
+Or if "none" selected:
+```
+No default repos set. interviews will run in greenfield mode.
+You can set defaults anytime by running ooo setup again.
+```
+
+---
+
 ### Step 6: First Project Nudge
 
 Encourage immediate action:
@@ -460,6 +539,8 @@ Track these checkpoints for conversion optimization:
 - [ ] MCP server registration accepted
 - [ ] CLAUDE.md integration accepted
 - [ ] Verification passed
+- [ ] Brownfield repos scanned and registered
+- [ ] Default brownfield repo selected
 - [ ] First project started (ooo interview)
 - [ ] First seed generated (ooo seed)
 - [ ] First execution completed (ooo run)

@@ -159,6 +159,8 @@ def evolve_rewind_handler() -> EvolveRewindHandler:
 # ---------------------------------------------------------------------------
 # Tool handler tuple type and factory
 # ---------------------------------------------------------------------------
+from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler  # noqa: E402
+from ouroboros.mcp.tools.pm_handler import PMInterviewHandler  # noqa: E402
 
 OuroborosToolHandlers = tuple[
     ExecuteSeedHandler
@@ -179,6 +181,8 @@ OuroborosToolHandlers = tuple[
     | LineageStatusHandler
     | EvolveRewindHandler
     | CancelExecutionHandler
+    | BrownfieldHandler
+    | PMInterviewHandler
     | QAHandler,
     ...,
 ]
@@ -213,6 +217,8 @@ def get_ouroboros_tools(
         LineageStatusHandler(),
         EvolveRewindHandler(),
         CancelExecutionHandler(),
+        BrownfieldHandler(),
+        PMInterviewHandler(llm_backend=llm_backend),
         QAHandler(llm_backend=llm_backend),
     )
 

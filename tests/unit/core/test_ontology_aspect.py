@@ -127,7 +127,7 @@ class TestOntologicalAspect:
     async def test_execute_valid_proceeds(self) -> None:
         """Valid analysis should execute core operation."""
         strategy = MockStrategy(is_valid=True)
-        aspect = OntologicalAspect(strategy=strategy)
+        aspect: OntologicalAspect = OntologicalAspect(strategy=strategy)
 
         async def core_op(ctx: MockContext) -> Result[str, Exception]:
             return Result.ok(f"success_{ctx.value}")
@@ -147,7 +147,7 @@ class TestOntologicalAspect:
             is_valid=False,
             suggestions=["Try this instead"],
         )
-        aspect = OntologicalAspect(strategy=strategy, halt_on_violation=True)
+        aspect: OntologicalAspect = OntologicalAspect(strategy=strategy, halt_on_violation=True)
 
         async def core_op(ctx: MockContext) -> Result[str, Exception]:
             return Result.ok("should not run")
@@ -164,7 +164,7 @@ class TestOntologicalAspect:
     async def test_execute_invalid_continues_when_not_halting(self) -> None:
         """Invalid analysis should continue when halt_on_violation=False."""
         strategy = MockStrategy(is_valid=False)
-        aspect = OntologicalAspect(strategy=strategy, halt_on_violation=False)
+        aspect: OntologicalAspect = OntologicalAspect(strategy=strategy, halt_on_violation=False)
 
         async def core_op(ctx: MockContext) -> Result[str, Exception]:
             return Result.ok("continued")
@@ -180,7 +180,7 @@ class TestOntologicalAspect:
     async def test_skip_analysis(self) -> None:
         """skip_analysis=True should bypass ontological analysis."""
         strategy = MockStrategy(is_valid=False)
-        aspect = OntologicalAspect(strategy=strategy)
+        aspect: OntologicalAspect = OntologicalAspect(strategy=strategy)
 
         async def core_op(ctx: MockContext) -> Result[str, Exception]:
             return Result.ok("skipped")
@@ -198,7 +198,7 @@ class TestOntologicalAspect:
     async def test_cache_hit(self) -> None:
         """Same context should use cached result."""
         strategy = MockStrategy(is_valid=True)
-        aspect = OntologicalAspect(strategy=strategy)
+        aspect: OntologicalAspect = OntologicalAspect(strategy=strategy)
 
         async def core_op(ctx: MockContext) -> Result[str, Exception]:
             return Result.ok("success")
@@ -217,7 +217,7 @@ class TestOntologicalAspect:
     async def test_strict_mode_raises_on_llm_failure(self) -> None:
         """strict_mode=True should raise on LLM failure."""
         strategy = MockStrategy(raise_exception=True)
-        aspect = OntologicalAspect(strategy=strategy, strict_mode=True)
+        aspect: OntologicalAspect = OntologicalAspect(strategy=strategy, strict_mode=True)
 
         async def core_op(ctx: MockContext) -> Result[str, Exception]:
             return Result.ok("should not reach")
@@ -228,7 +228,7 @@ class TestOntologicalAspect:
     async def test_fail_open_on_llm_failure(self) -> None:
         """strict_mode=False should continue on LLM failure."""
         strategy = MockStrategy(raise_exception=True)
-        aspect = OntologicalAspect(strategy=strategy, strict_mode=False)
+        aspect: OntologicalAspect = OntologicalAspect(strategy=strategy, strict_mode=False)
 
         async def core_op(ctx: MockContext) -> Result[str, Exception]:
             return Result.ok("continued despite failure")

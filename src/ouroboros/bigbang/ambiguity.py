@@ -156,6 +156,7 @@ class AmbiguityScorer:
         self,
         state: InterviewState,
         is_brownfield: bool = False,
+        additional_context: str = "",
     ) -> Result[AmbiguityScore, ProviderError]:
         """Calculate ambiguity score for interview state.
 
@@ -167,8 +168,17 @@ class AmbiguityScorer:
         Uses adaptive token allocation: starts with initial_max_tokens and
         doubles on parse failure, up to max_retries attempts.
 
+        Items explicitly deferred via ``additional_context`` (e.g. decide-later
+        items from a PM interview) are treated as **intentional deferrals** and
+        must not reduce the clarity score.  The LLM is instructed to score only
+        what is present and answerable, not penalise deliberate gaps.
+
         Args:
             state: The interview state to score.
+            is_brownfield: Whether this is a brownfield project.
+            additional_context: Extra context appended to the user prompt.
+                Useful for supplying decide-later items or other metadata
+                that should inform scoring without penalty.
 
         Returns:
             Result containing AmbiguityScore or ProviderError.
@@ -187,7 +197,10 @@ class AmbiguityScorer:
 
         # Create scoring prompt
         system_prompt = self._build_scoring_system_prompt(is_brownfield=is_brownfield)
-        user_prompt = self._build_scoring_user_prompt(context)
+        user_prompt = self._build_scoring_user_prompt(
+            context,
+            additional_context=additional_context,
+        )
 
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
@@ -326,8 +339,13 @@ class AmbiguityScorer:
         Returns:
             System prompt string.
         """
+        deferral_instruction = """
+
+IMPORTANT: If the additional context lists "decide-later" or "deferred" items, these are INTENTIONAL deferrals — the team has deliberately chosen to postpone those decisions. Do NOT penalise the clarity score for intentionally deferred items. Score only what is present and answerable."""
+
         if is_brownfield:
-            return """You are an expert requirements analyst. Evaluate the clarity of software requirements.
+            return (
+                """You are an expert requirements analyst. Evaluate the clarity of software requirements.
 
 Evaluate four components:
 1. Goal Clarity (35%): Is the goal specific and well-defined?
@@ -336,13 +354,18 @@ Evaluate four components:
 4. Context Clarity (15%): Is the existing codebase context clear? Are referenced codebases, patterns, and conventions well understood?
 
 Score each from 0.0 (unclear) to 1.0 (perfectly clear). Scores above 0.8 require very specific requirements.
+"""
+                + deferral_instruction
+                + """
 
 RESPOND ONLY WITH VALID JSON. No other text before or after.
 
 Required JSON format:
 {"goal_clarity_score": 0.0, "goal_clarity_justification": "string", "constraint_clarity_score": 0.0, "constraint_clarity_justification": "string", "success_criteria_clarity_score": 0.0, "success_criteria_clarity_justification": "string", "context_clarity_score": 0.0, "context_clarity_justification": "string"}"""
+            )
 
-        return """You are an expert requirements analyst. Evaluate the clarity of software requirements.
+        return (
+            """You are an expert requirements analyst. Evaluate the clarity of software requirements.
 
 Evaluate three components:
 1. Goal Clarity (40%): Is the goal specific and well-defined?
@@ -350,28 +373,45 @@ Evaluate three components:
 3. Success Criteria Clarity (30%): Are success criteria measurable?
 
 Score each from 0.0 (unclear) to 1.0 (perfectly clear). Scores above 0.8 require very specific requirements.
+"""
+            + deferral_instruction
+            + """
 
 RESPOND ONLY WITH VALID JSON. No other text before or after.
 
 Required JSON format:
 {"goal_clarity_score": 0.0, "goal_clarity_justification": "string", "constraint_clarity_score": 0.0, "constraint_clarity_justification": "string", "success_criteria_clarity_score": 0.0, "success_criteria_clarity_justification": "string"}"""
+        )
 
-    def _build_scoring_user_prompt(self, context: str) -> str:
+    def _build_scoring_user_prompt(
+        self,
+        context: str,
+        additional_context: str = "",
+    ) -> str:
         """Build user prompt with interview context.
 
         Args:
             context: Formatted interview context.
+            additional_context: Extra context (e.g. decide-later items).
 
         Returns:
             User prompt string.
         """
-        return f"""Please evaluate the clarity of the following requirements conversation:
+        prompt = f"""Please evaluate the clarity of the following requirements conversation:
 
 ---
 {context}
----
+---"""
 
-Analyze each component and provide scores with justifications."""
+        if additional_context:
+            prompt += f"""
+
+Additional context (intentional deferrals — do not penalise):
+{additional_context}"""
+
+        prompt += "\n\nAnalyze each component and provide scores with justifications."
+
+        return prompt
 
     def _parse_scoring_response(
         self,

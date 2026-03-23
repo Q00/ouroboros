@@ -202,7 +202,7 @@ class TestExecutionScreen:
         class MockExecutionUpdated:
             status = "running"
             execution_id = "exec_123"
-            data = {}
+            data: dict[str, str] = {}
 
         screen.on_execution_updated(MockExecutionUpdated())
 
