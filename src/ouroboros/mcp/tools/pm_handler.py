@@ -401,6 +401,13 @@ class PMInterviewHandler:
         if selected_repos is not None:
             # Backward compat: explicit selected_repos
             resolved = await self._resolve_repos_from_db(selected_repos)
+            if not resolved:
+                log.warning(
+                    "pm_handler.start.selected_repos_unresolved",
+                    requested=selected_repos,
+                    hint="All selected_repos paths were missing from the brownfield DB. "
+                    "Proceeding as greenfield interview.",
+                )
         else:
             # Auto-load defaults from DB
             resolved = await self._query_default_repos()
@@ -948,12 +955,15 @@ class PMInterviewHandler:
         session_id: str,
         cwd: str,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Generate PM seed from completed interview (idempotent).
+        """Generate PM seed from completed interview (path-idempotent).
 
         Loads InterviewState and pm_meta, restores engine via restore_meta(),
         runs generate_pm_seed, saves PM seed to ~/.ouroboros/seeds/ and
-        pm.md to {cwd}/.ouroboros/.  Idempotent — overwrites on retry with
-        the same session_id.
+        pm.md to {cwd}/.ouroboros/.
+
+        Path-idempotent: file paths are deterministic for a given session_id
+        (seed → ``pm_seed_{interview_id}.json``, document → ``pm.md``).
+        Content timestamps (created_at, Generated header) may differ on retry.
 
         Rejects incomplete interviews with an error to prevent partial-spec
         artifacts from being generated.

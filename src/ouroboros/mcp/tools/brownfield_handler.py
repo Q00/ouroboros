@@ -603,16 +603,21 @@ class BrownfieldHandler:
         defaults = await store.set_defaults_by_ids(ids)
 
         if not defaults:
+            # Distinguish clear-all (empty ids) from no-match (non-empty ids)
+            if not ids:
+                msg = "All defaults cleared."
+            else:
+                msg = "No defaults set (no matching IDs found)."
             return Result.ok(
                 MCPToolResult(
                     content=(
                         MCPContentItem(
                             type=ContentType.TEXT,
-                            text="No defaults set (no matching IDs found).",
+                            text=msg,
                         ),
                     ),
                     is_error=False,
-                    meta={"action": "set_defaults", "defaults": []},
+                    meta={"action": "set_defaults", "defaults": [], "cleared": not ids},
                 )
             )
 
