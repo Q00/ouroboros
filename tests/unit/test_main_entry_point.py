@@ -14,8 +14,11 @@ def test_version_exists():
     import re
 
     assert hasattr(ouroboros, "__version__")
-    # Check version format: X.Y.Z or X.Y.Z.devN or X.Y.ZbN.devN etc (PEP 440)
-    assert re.match(r"^\d+\.\d+\.\d+", ouroboros.__version__)
+    # PEP 440: X.Y.Z, X.Y.Z.devN, X.Y.ZbN, X.Y.ZbN.devN, with optional +local
+    assert re.match(
+        r"^\d+\.\d+\.\d+((a|b|rc)\d+)?(\.dev\d+)?(\+.+)?$",
+        ouroboros.__version__,
+    ), f"Invalid PEP 440 version: {ouroboros.__version__}"
 
 
 def test_main_invokes_cli():

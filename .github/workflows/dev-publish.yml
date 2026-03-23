@@ -47,13 +47,17 @@ jobs:
           uv build
           echo "Built package:"
           ls -la dist/
-          # Show the version hatch-vcs computed
+
+      - name: Smoke test
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          # Install the built wheel and verify runtime version
+          uv pip install dist/*.whl --system
           python -c "
-          import re
-          for f in __import__('pathlib').Path('dist').iterdir():
-              if f.suffix == '.whl':
-                  m = re.match(r'[^-]+-([^-]+)-', f.name)
-                  if m: print(f'Version: {m.group(1)}')
+          import ouroboros
+          v = ouroboros.__version__
+          print(f'Runtime version: {v}')
+          assert 'dev' in v or 'unknown' not in v, f'Unexpected version: {v}'
           "
 
       - name: Publish to PyPI
