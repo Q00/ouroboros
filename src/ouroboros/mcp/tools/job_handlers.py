@@ -262,16 +262,38 @@ async def _render_job_snapshot_inner(snapshot: JobSnapshot, event_store: EventSt
         workflow_event = next((e for e in events if e.type == "workflow.progress.updated"), None)
         if workflow_event is not None:
             data = workflow_event.data
-            lines.extend(
-                [
-                    "",
-                    "### Execution",
-                    f"**Execution ID**: {snapshot.links.execution_id}",
-                    f"**Phase**: {data.get('current_phase') or 'Working'}",
-                    f"**Activity**: {data.get('activity_detail') or data.get('activity') or 'running'}",
-                    f"**AC Progress**: {data.get('completed_count', 0)}/{data.get('total_count', '?')}",
-                ]
+            exec_lines = [
+                "",
+                "### Execution",
+                f"**Execution ID**: {snapshot.links.execution_id}",
+                f"**Phase**: {data.get('current_phase') or 'Working'}",
+                f"**Activity**: {data.get('activity_detail') or data.get('activity') or 'running'}",
+                f"**AC Progress**: {data.get('completed_count', 0)}/{data.get('total_count', '?')}",
+            ]
+            # Show runtime — from events if available, otherwise auto-detect
+            runtime_backend = data.get("runtime_backend") or next(
+                (e.data.get("runtime_backend") for e in events if e.data.get("runtime_backend")),
+                None,
             )
+            if not runtime_backend:
+                try:
+                    from ouroboros.config.loader import get_agent_runtime_backend
+
+                    runtime_backend = get_agent_runtime_backend()
+                except Exception:
+                    runtime_backend = "unknown"
+
+            # Model info from events or runtime default
+            model = data.get("model") or next(
+                (e.data.get("model") for e in events if e.data.get("model")),
+                None,
+            )
+            if not model:
+                model = {"cursor": "auto (Cursor plan)", "claude": "claude (Max Plan)", "codex": "gpt (Codex)"}.get(
+                    runtime_backend, "default"
+                )
+            exec_lines.append(f"**Runtime**: {runtime_backend} | **Model**: {model}")
+            lines.extend(exec_lines)
 
         subtasks: dict[str, tuple[str, str]] = {}
         for event in events:

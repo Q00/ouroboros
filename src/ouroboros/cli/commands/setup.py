@@ -24,10 +24,19 @@ app = typer.Typer(
 
 
 def _detect_runtimes() -> dict[str, str | None]:
-    """Detect available runtime CLIs in PATH."""
+    """Detect available runtime CLIs in PATH and known install locations."""
     runtimes: dict[str, str | None] = {}
-    for name in ("claude", "codex", "opencode"):
+    for name in ("claude", "cursor-agent", "codex", "opencode"):
         path = shutil.which(name)
+        if not path:
+            # Check common install locations not always on PATH
+            for candidate in (
+                Path.home() / ".local" / "bin" / name,
+                Path("/usr/local/bin") / name,
+            ):
+                if candidate.exists():
+                    path = str(candidate)
+                    break
         runtimes[name] = path
     return runtimes
 
@@ -241,6 +250,68 @@ def _setup_codex(codex_path: str) -> None:
             print_info("Updated Claude MCP server config.")
 
 
+def _ensure_cursor_auth(cursor_agent_path: str) -> None:
+    """Check cursor-agent authentication, prompt login if needed."""
+    import subprocess
+
+    result = subprocess.run(
+        [cursor_agent_path, "whoami"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if result.returncode != 0 or "not logged in" in result.stdout.lower():
+        print_info("cursor-agent is not authenticated. Opening login...")
+        subprocess.run([cursor_agent_path, "login"], timeout=60)
+        # Re-check
+        result = subprocess.run(
+            [cursor_agent_path, "whoami"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0 or "not logged in" in result.stdout.lower():
+            print_error(
+                "cursor-agent authentication failed.\n"
+                "Run `cursor-agent login` manually and try again."
+            )
+            raise typer.Exit(1)
+    print_success("cursor-agent authenticated.")
+
+
+def _setup_cursor(cursor_agent_path: str) -> None:
+    """Configure Ouroboros for the Cursor Agent runtime.
+
+    No config.yaml needed — runtime is auto-detected from host
+    environment variables at execution time. Setup only registers
+    the MCP server. Authentication is handled by cursor-agent ACP
+    at runtime.
+    """
+    print_success(f"Cursor Agent runtime ready (CLI: {cursor_agent_path})")
+    print_info("Runtime auto-detected — no config.yaml needed. Auth handled by ACP at runtime.")
+
+    # Register MCP server in ~/.cursor/mcp.json
+    mcp_config_path = Path.home() / ".cursor" / "mcp.json"
+    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mcp_data: dict = {}
+    if mcp_config_path.exists():
+        mcp_data = json.loads(mcp_config_path.read_text())
+
+    mcp_data.setdefault("mcpServers", {})
+    if "ouroboros" not in mcp_data["mcpServers"]:
+        mcp_data["mcpServers"]["ouroboros"] = {
+            "command": "uvx",
+            "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+            "timeout": 600,
+        }
+        with mcp_config_path.open("w") as f:
+            json.dump(mcp_data, f, indent=2)
+        print_success("Registered MCP server in ~/.cursor/mcp.json")
+    else:
+        print_info("MCP server already registered in ~/.cursor/mcp.json")
+
+
 def _setup_claude(claude_path: str) -> None:
     """Configure Ouroboros for the Claude Code runtime."""
     from ouroboros.config.loader import create_default_config, ensure_config_dir
@@ -303,7 +374,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex).",
+            help="Runtime backend to configure (claude, cursor, codex).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -321,6 +392,7 @@ def setup(
 
     [dim]Examples:[/dim]
     [dim]    ouroboros setup                    # auto-detect[/dim]
+    [dim]    ouroboros setup --runtime cursor   # use Cursor Agent[/dim]
     [dim]    ouroboros setup --runtime codex    # use Codex[/dim]
     [dim]    ouroboros setup --runtime claude   # use Claude Code[/dim]
     """
@@ -370,8 +442,9 @@ def setup(
             print_error(
                 "No runtimes found.\n\n"
                 "Install one of:\n"
-                "  • Claude Code: https://claude.ai/download\n"
-                "  • Codex CLI:   npm install -g @openai/codex"
+                "  • Claude Code:    https://claude.ai/download\n"
+                "  • Cursor Agent:   curl https://cursor.com/install -fsSL | bash\n"
+                "  • Codex CLI:      npm install -g @openai/codex"
             )
             raise typer.Exit(1)
 
@@ -382,6 +455,15 @@ def setup(
             print_error("Claude Code CLI not found in PATH.")
             raise typer.Exit(1)
         _setup_claude(claude_path)
+    elif selected in ("cursor", "cursor-agent", "cursor_agent"):
+        cursor_path = available.get("cursor-agent")
+        if not cursor_path:
+            print_error(
+                "cursor-agent CLI not found.\n"
+                "Install it: curl https://cursor.com/install -fsSL | bash"
+            )
+            raise typer.Exit(1)
+        _setup_cursor(cursor_path)
     elif selected in ("codex", "codex_cli"):
         codex_path = available.get("codex")
         if not codex_path:

@@ -55,7 +55,7 @@ Setup takes ~2 minutes. Let's go!
 
 ### Step 0.5: Community Support
 
-Before we begin, check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`, use **AskUserQuestion**:
+Before we begin, check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`, use **AskUserQuestion** (Claude Code) or **AskQuestion** (Cursor):
 
 ```json
 {
@@ -150,13 +150,35 @@ Great news! You're ready for the full Ouroboros experience.
 
 ### Step 2: MCP Server Registration
 
-Check if `~/.claude/mcp.json` exists:
+**Step 2a: Detect the current host**
 
 ```bash
-ls -la ~/.claude/mcp.json 2>/dev/null && echo "EXISTS" || echo "NOT_FOUND"
+# Detect which host is running this session
+ls -d ~/.cursor 2>/dev/null && echo "HOST_CURSOR=true"
+ls -d ~/.claude 2>/dev/null && echo "HOST_CLAUDE=true"
 ```
 
-**Show progress:**
+| Host | MCP Config Path |
+|------|----------------|
+| Claude Code | `~/.claude/mcp.json` |
+| Cursor IDE | `~/.cursor/mcp.json` |
+
+**Step 2b: Check for existing registration in the CURRENT host's config**
+
+Only check the config file for the host you are currently running in:
+
+```bash
+# If current host is Cursor:
+grep -q ouroboros ~/.cursor/mcp.json 2>/dev/null && echo "ALREADY_REGISTERED" || echo "NOT_FOUND"
+# If current host is Claude Code:
+grep -q ouroboros ~/.claude/mcp.json 2>/dev/null && echo "ALREADY_REGISTERED" || echo "NOT_FOUND"
+```
+
+- If `ALREADY_REGISTERED` → skip to **Step 2d** (duplicate check).
+- If `NOT_FOUND` → proceed to **Step 2c**.
+
+**Step 2c: Register MCP server in the current host's config**
+
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Registering MCP Server...
@@ -171,7 +193,7 @@ This enables:
   Session Replay         [Debug any execution from events]
 ```
 
-**Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects):
+Add the ouroboros entry to the **current host's** config file only:
 ```json
 {
   "mcpServers": {
@@ -184,7 +206,25 @@ This enables:
 }
 ```
 
-If `~/.claude/mcp.json` already exists, merge intelligently (preserve other servers).
+If the config file already exists, merge intelligently (preserve other servers).
+
+**Step 2d: Detect and resolve duplicate registration**
+
+In Cursor, the ouroboros plugin system (via `~/.claude/plugins/`) AND
+`~/.cursor/mcp.json` can BOTH load the same MCP server, causing duplicate
+instances (`plugin-ouroboros-ouroboros` + `user-ouroboros`).
+
+Check for this:
+```bash
+# If running in Cursor, check if plugin also registers ouroboros
+grep -q ouroboros ~/.cursor/mcp.json 2>/dev/null && echo "CURSOR_MCP=true"
+grep -rq ouroboros ~/.claude/plugins/installed_plugins.json 2>/dev/null && echo "PLUGIN=true"
+```
+
+If BOTH `CURSOR_MCP=true` AND `PLUGIN=true`:
+- Warn the user: "Ouroboros is registered in both `~/.cursor/mcp.json` and the Claude Code plugin system. This causes duplicate MCP servers."
+- Recommend: "Remove the ouroboros entry from `~/.cursor/mcp.json` — the plugin registration is sufficient for Cursor."
+- Offer to fix it automatically (remove ouroboros from `~/.cursor/mcp.json`).
 
 **Celebration Checkpoint 2:**
 ```

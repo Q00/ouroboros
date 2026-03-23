@@ -33,16 +33,15 @@ When the user invokes this skill:
 
 ### Load MCP Tools (Required first)
 
-The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before proceeding.**
+Ouroboros MCP tools must be available before proceeding. How they are discovered depends on your host:
 
-1. Use the `ToolSearch` tool to find and load the execution MCP tools:
-   ```
-   ToolSearch query: "+ouroboros execute"
-   ```
-2. The tools will typically be named with prefix `mcp__plugin_ouroboros_ouroboros__` (e.g., `ouroboros_execute_seed`, `ouroboros_session_status`). After ToolSearch returns, the tools become callable.
-3. If ToolSearch finds the tools → proceed with the steps below. If not → skip to **Fallback** section.
+- **Claude Code**: Tools are deferred — use `ToolSearch` to load them:
+  ```
+  ToolSearch query: "+ouroboros execute"
+  ```
+- **Cursor / other MCP clients**: Tools are auto-loaded when the server connects. They should already be callable as `ouroboros_execute_seed` / `ouroboros_start_execute_seed`.
 
-**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
+If the tool is available → proceed to **the steps below**. If not → skip to **Fallback** section.
 
 ### Execution Steps
 
@@ -58,17 +57,38 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    - If inline YAML: Use directly
    - If neither: Check conversation history for a recently generated seed
 
-3. **Start background execution** with `ouroboros_start_execute_seed`:
+3. **Model selection (Cursor only)**: If the previous interview response meta
+   contained `available_models`, or if the user previously selected a model,
+   ask the user which model to use via AskUserQuestion (Claude Code) or AskQuestion (Cursor) before starting execution:
+   ```json
+   {
+     "questions": [{
+       "question": "Which model should Ouroboros use for execution?",
+       "header": "Model",
+       "options": [
+         {"label": "Auto (default)", "description": "default[]"},
+         {"label": "<model name>", "description": "<model_id>"}
+       ],
+       "multiSelect": false
+     }]
+   }
+   ```
+   Pass the selected `model_id` as the `model` parameter.
+   If the user skips or is not on Cursor, omit `model`.
+
+4. **Start background execution** with `ouroboros_start_execute_seed`:
    ```
    Tool: ouroboros_start_execute_seed
    Arguments:
      seed_content: <the seed YAML>
      model_tier: "medium"  (or as specified by user)
      max_iterations: 10    (or as specified by user)
+     model: <selected model_id from step 3, or omit for auto>
    ```
+   The runtime backend is auto-detected from the host environment.
    This returns immediately with a `job_id`, `session_id`, and `execution_id`.
 
-4. If resuming an existing session, include `session_id`:
+5. If resuming an existing session, include `session_id`:
    ```
    Tool: ouroboros_start_execute_seed
    Arguments:
@@ -76,7 +96,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      session_id: <existing session ID>
    ```
 
-5. **Ask user about polling strategy** using `AskUserQuestion` immediately after IDs are returned:
+6. **Ask user about polling strategy** using `AskUserQuestion` (Claude Code) or `AskQuestion` (Cursor) immediately after IDs are returned:
 
    Present the session/job IDs first, then ask:
 
@@ -126,7 +146,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    ```
    Then **stop** — do NOT proceed to polling steps.
 
-6. **Poll for progress** using `ouroboros_job_wait` (only if user chose to poll):
+7. **Poll for progress** using `ouroboros_job_wait` (only if user chose to poll):
    ```
    loop:
      Tool: ouroboros_job_wait
@@ -140,24 +160,25 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      # Continue until status is "completed", "failed", or "cancelled"
    ```
 
-   Between polls, report progress concisely (one line):
+   Between polls, report progress concisely (one line). Include the
+   runtime and model from the `**Runtime**` field in the poll response:
    ```
-   [Executing] Phase: <current_phase> | AC: <completed>/<total>
+   [Executing] <runtime>/<model> | Phase: <current_phase> | AC: <completed>/<total>
    ```
 
-7. **Fetch final result** with `ouroboros_job_result`:
+8. **Fetch final result** with `ouroboros_job_result`:
    ```
    Tool: ouroboros_job_result
    Arguments:
      job_id: <job_id>
    ```
 
-8. Present the execution results to the user:
+9. Present the execution results to the user:
    - Show success/failure status
    - Show session ID (for later status checks)
    - Show execution summary
 
-9. **Post-execution QA** (automatic):
+10. **Post-execution QA** (automatic):
    `ouroboros_start_execute_seed` automatically runs QA after successful execution.
    The QA verdict is included in the final job result text.
    To skip: pass `skip_qa: true` to the tool.

@@ -14,6 +14,8 @@ import asyncio
 from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.definitions import EvolveStepHandler, ExecuteSeedHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -118,6 +120,15 @@ class TestExecuteSeedHandlerQA:
     execution + QA in a background task.  Tests must await those background
     tasks to verify QA behaviour.
     """
+
+    @pytest.fixture(autouse=True)
+    def _single_runtime(self):
+        """Ensure tests see only one runtime."""
+        with patch(
+            "ouroboros.config.loader.detect_available_runtimes",
+            return_value=["claude"],
+        ):
+            yield
 
     async def test_qa_called_on_success(self) -> None:
         """QA is called in background after successful execution."""

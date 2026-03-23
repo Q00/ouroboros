@@ -40,7 +40,7 @@
 
 **Turn a vague idea into a verified, working codebase -- with any AI coding agent.**
 
-Ouroboros sits between you and your AI runtime (Claude Code, Codex CLI, or others). It replaces ad-hoc prompting with a structured specification-first workflow: interview, crystallize, execute, evaluate, evolve.
+Ouroboros sits between you and your AI runtime (Claude Code, Cursor, Codex CLI, or others). It replaces ad-hoc prompting with a structured specification-first workflow: interview, crystallize, execute, evaluate, evolve.
 
 <!-- TODO: Replace with demo GIF or asciicast -->
 <p align="center">
@@ -87,6 +87,55 @@ ooo interview "I want to build a task management CLI"
 > `claude plugin ...` commands run in your terminal. `ooo` commands are Claude Code skills -- they only work inside an active Claude Code session (start one with `claude`).
 
 See the [Claude Code runtime guide](./docs/runtime-guides/claude-code.md) for backend configuration and CLI options.
+
+</details>
+
+<details>
+<summary><strong>Cursor IDE + Claude Code extension</strong></summary>
+
+If you have the Claude Code extension installed in Cursor:
+
+**Step 1 -- Install the plugin** (in your terminal)
+```bash
+claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
+```
+
+**Step 2 -- Set up** (inside Cursor's Claude Code chat)
+```
+ooo setup
+```
+
+**Step 3 -- Start building**
+```
+ooo interview "I want to build a task management CLI"
+```
+
+> When both Claude Code plugin and `~/.cursor/mcp.json` register ouroboros, `ooo setup` detects the duplicate and offers to clean it up.
+
+See the [Cursor IDE runtime guide](./docs/runtime-guides/cursor.md) for full details.
+
+</details>
+
+<details>
+<summary><strong>Cursor IDE standalone</strong></summary>
+
+No Claude Code extension needed:
+
+```bash
+curl https://cursor.com/install -fsSL | bash   # cursor-agent (ACP)
+pip install ouroboros-ai                         # Install Ouroboros
+ouroboros setup --runtime cursor                 # Register MCP server
+```
+
+Registers MCP server in `~/.cursor/mcp.json`.
+Uses ACP (Agent Client Protocol) for persistent sessions — no per-call overhead.
+Auth is automatic at runtime. No config.yaml needed. Restart Cursor, then:
+
+```
+ooo interview "I want to build a task management CLI"
+```
+
+See the [Cursor IDE runtime guide](./docs/runtime-guides/cursor.md) for full details.
 
 </details>
 
@@ -186,7 +235,7 @@ run        ->  Executed via Double Diamond decomposition
 evaluate   ->  3-stage verification: Mechanical -> Semantic -> Consensus
 ```
 
-> Use `ooo <cmd>` inside Claude Code or Codex CLI sessions, or `ouroboros init start`, `ouroboros run seed.yaml`, etc. from the terminal.
+> Use `ooo <cmd>` inside Claude Code, Cursor, or Codex CLI sessions, or `ouroboros init start`, `ouroboros run seed.yaml`, etc. from the terminal.
 
 The serpent completed one loop. Each loop, it knows more than the last.
 
@@ -305,7 +354,7 @@ src/ouroboros/
 +-- resilience/     4-pattern stagnation detection, 5 lateral personas
 +-- observability/  3-component drift measurement, auto-retrospective
 +-- persistence/    Event sourcing (SQLAlchemy + aiosqlite), checkpoints
-+-- orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI)
++-- orchestrator/   Runtime abstraction layer (Claude Code, Cursor, Codex CLI)
 +-- core/           Types, errors, seed, ontology, security
 +-- providers/      LiteLLM adapter (100+ models)
 +-- mcp/            MCP client/server integration
@@ -320,7 +369,7 @@ src/ouroboros/
 - **Brownfield** -- Auto-detects config files across multiple language ecosystems
 - **Evolution** -- Up to 30 generations, convergence at ontology similarity >= 0.95
 - **Stagnation** -- Detects spinning, oscillation, no-drift, and diminishing returns patterns
-- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code and Codex CLI; same workflow spec, different execution engines
+- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code, Cursor, and Codex CLI; same workflow spec, different execution engines
 
 See [Architecture](./docs/architecture.md) for the full design document.
 

@@ -114,7 +114,7 @@ class LLMConfig(BaseModel, frozen=True):
         context_compression_model: Default model for workflow context compression
     """
 
-    backend: Literal["claude", "claude_code", "litellm", "codex", "opencode"] = "claude_code"
+    backend: Literal["claude", "claude_code", "litellm", "codex", "cursor", "opencode"] = "claude_code"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     qa_model: str = "claude-sonnet-4-20250514"
@@ -296,13 +296,14 @@ class OrchestratorConfig(BaseModel, frozen=True):
         default_max_turns: Default max turns for agent execution
     """
 
-    runtime_backend: Literal["claude", "codex", "opencode"] = "claude"
+    runtime_backend: Literal["claude", "codex", "cursor", "opencode"] = "claude"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = (
         "bypassPermissions"
     )
     cli_path: str | None = None
     codex_cli_path: str | None = None
+    cursor_agent_path: str | None = None
     opencode_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
 

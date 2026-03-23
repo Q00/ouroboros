@@ -359,13 +359,78 @@ def get_cli_path() -> str | None:
     return None
 
 
+def _cli_exists(name: str) -> bool:
+    """Check if a CLI binary exists on PATH or in common install locations."""
+    import shutil
+
+    if shutil.which(name):
+        return True
+    # Check common install paths that may not be in the MCP server's PATH
+    home = Path.home()
+    for candidate in (
+        home / ".local" / "bin" / name,
+        Path("/usr/local/bin") / name,
+        Path("/opt/homebrew/bin") / name,
+    ):
+        if candidate.exists():
+            return True
+    return False
+
+
+def detect_available_runtimes() -> list[str]:
+    """Detect all available agent runtimes in the current environment.
+
+    Returns a list of available runtime backend names. When multiple
+    are available, the caller should let the user choose.
+    """
+    available: list[str] = []
+    if os.environ.get("CLAUDE_AGENT_SDK_VERSION") or _cli_exists("claude"):
+        available.append("claude")
+    if _cli_exists("cursor-agent"):
+        available.append("cursor")
+    if _cli_exists("codex") or _cli_exists("codex-cli"):
+        available.append("codex")
+    return available or ["claude"]
+
+
+def _detect_host_runtime() -> str:
+    """Auto-detect the runtime backend from the current host environment.
+
+    Uses host-specific environment variables to pick the right runtime
+    when multiple CLIs are installed:
+
+    - Running in Cursor IDE (CURSOR_EXTENSION_HOST_ROLE set) → "cursor"
+      if cursor-agent is available, else "claude"
+    - Running in Codex CLI (CODEX_* env vars) → "codex"
+    - Running in Claude Code or unknown → "claude"
+    """
+    available = detect_available_runtimes()
+
+    if len(available) == 1:
+        return available[0]
+
+    # Multiple runtimes available — use host env to pick
+    in_cursor = bool(
+        os.environ.get("CURSOR_EXTENSION_HOST_ROLE")
+        or os.environ.get("CURSOR_TRACE_ID")
+    )
+    if in_cursor and "cursor" in available:
+        return "cursor"
+
+    in_codex = any(k.startswith("CODEX_") for k in os.environ)
+    if in_codex and "codex" in available:
+        return "codex"
+
+    return "claude"
+
+
 def get_agent_runtime_backend() -> str:
     """Get orchestrator runtime backend from environment variable or config.
 
     Priority:
         1. OUROBOROS_AGENT_RUNTIME environment variable
         2. config.yaml orchestrator.runtime_backend
-        3. "claude"
+        3. Auto-detect from host environment (cursor-agent / codex / claude)
 
     Returns:
         Normalized runtime backend name.
@@ -378,7 +443,7 @@ def get_agent_runtime_backend() -> str:
         config = load_config()
         return config.orchestrator.runtime_backend
     except ConfigError:
-        return "claude"
+        return _detect_host_runtime()
 
 
 def _uses_opencode_backend(backend: str | None) -> bool:
@@ -464,13 +529,51 @@ def get_opencode_cli_path() -> str | None:
     return None
 
 
+def get_cursor_agent_cli_path() -> str | None:
+    """Get cursor-agent CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_CURSOR_AGENT_PATH or CURSOR_AGENT_PATH environment variable
+        2. config.yaml orchestrator.cursor_agent_path
+        3. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to cursor-agent CLI binary or None.
+    """
+    env_path = (
+        os.environ.get("OUROBOROS_CURSOR_AGENT_PATH", "").strip()
+        or os.environ.get("CURSOR_AGENT_PATH", "").strip()
+    )
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        if config.orchestrator.cursor_agent_path:
+            return config.orchestrator.cursor_agent_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def _detect_host_llm_backend() -> str:
+    """Auto-detect the LLM backend matching the detected host runtime."""
+    runtime = _detect_host_runtime()
+    if runtime == "cursor":
+        return "cursor"
+    if runtime == "codex":
+        return "codex"
+    return "claude_code"
+
+
 def get_llm_backend() -> str:
     """Get default LLM backend from environment variable or config.
 
     Priority:
         1. OUROBOROS_LLM_BACKEND environment variable
         2. config.yaml llm.backend
-        3. "claude_code"
+        3. Auto-detect from host environment
 
     Returns:
         Normalized LLM backend name.
@@ -483,7 +586,7 @@ def get_llm_backend() -> str:
         config = load_config()
         return config.llm.backend
     except ConfigError:
-        return "claude_code"
+        return _detect_host_llm_backend()
 
 
 def get_llm_permission_mode(backend: str | None = None) -> str:

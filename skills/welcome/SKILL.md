@@ -40,7 +40,7 @@ fi
 
 **If `ALREADY_COMPLETED` is true AND no `--force` flag:**
 
-Use **AskUserQuestion**:
+Use **AskUserQuestion** (Claude Code) or **AskQuestion** (Cursor):
 ```json
 {
   "questions": [{
@@ -90,7 +90,7 @@ Interview -> Seed -> Execute -> Evaluate
 
 ### Step 2: Persona Detection
 
-**AskUserQuestion**:
+**AskUserQuestion** (Claude Code) or **AskQuestion** (Cursor):
 ```json
 {
   "questions": [{
@@ -125,7 +125,7 @@ Give brief personalized response (1-2 sentences) based on choice.
 cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo "MCP_MISSING"
 ```
 
-**If MCP_MISSING**, **AskUserQuestion**:
+**If MCP_MISSING**, **AskUserQuestion** (Claude Code) or **AskQuestion** (Cursor):
 ```json
 {
   "questions": [{
@@ -165,7 +165,7 @@ Available Commands:
 
 ### Step 5: First Action
 
-**AskUserQuestion**:
+**AskUserQuestion** (Claude Code) or **AskQuestion** (Cursor):
 ```json
 {
   "questions": [{
@@ -197,7 +197,7 @@ gh auth status &>/dev/null && echo "GH_OK" || echo "GH_MISSING"
 
 **If `GH_OK` AND `star_asked` not true:**
 
-**AskUserQuestion**:
+**AskUserQuestion** (Claude Code) or **AskQuestion** (Cursor):
 ```json
 {
   "questions": [{

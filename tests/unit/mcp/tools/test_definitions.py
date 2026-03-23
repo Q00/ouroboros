@@ -80,6 +80,15 @@ def create_mock_live_ambiguity_score(
 class TestExecuteSeedHandler:
     """Test ExecuteSeedHandler class."""
 
+    @pytest.fixture(autouse=True)
+    def _single_runtime(self):
+        """Ensure tests see only one runtime so execution proceeds without asking."""
+        with patch(
+            "ouroboros.config.loader.detect_available_runtimes",
+            return_value=["claude"],
+        ):
+            yield
+
     def test_definition_name(self) -> None:
         """ExecuteSeedHandler has correct name."""
         handler = ExecuteSeedHandler()
@@ -163,8 +172,8 @@ class TestExecuteSeedHandler:
             background_tasks = tuple(handler._background_tasks)
             await asyncio.gather(*background_tasks)
 
-        assert mock_create_runtime.call_args.kwargs["backend"] is None
-        assert mock_create_runtime.call_args.kwargs["llm_backend"] is None
+        assert mock_create_runtime.call_args.kwargs["backend"] in (None, "claude")
+        assert mock_create_runtime.call_args.kwargs["llm_backend"] in (None, "claude")
         assert "permission_mode" not in mock_create_runtime.call_args.kwargs
 
     async def test_handle_forwards_llm_backend_to_runtime_factory(self) -> None:
@@ -383,7 +392,7 @@ metadata:
         assert result.value.meta["execution_id"] == "exec-456"
         assert result.value.meta["launched"] is True
         assert result.value.meta["status"] == "running"
-        assert result.value.meta["runtime_backend"] in ("claude", "codex")
+        assert result.value.meta["runtime_backend"] in ("claude", "codex", "cursor")
         assert result.value.meta["resume_requested"] is False
 
     async def test_handle_rejects_opencode_runtime_at_boundary(self) -> None:

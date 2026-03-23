@@ -505,6 +505,11 @@ class InterviewEngine:
         base_prompt = load_agent_prompt("socratic-interviewer")
 
         # For first round, add explicit instruction to start directly with a question
+        _option_format_hint = (
+            "\n\nFORMAT: Always include lettered options (A. B. C. ...) in your question "
+            "so the user can pick one quickly. Add a final option for custom input. Example:\n"
+            "`A. 웹` `B. 모바일` `C. 둘 다` `D. 기타 (직접 입력)`"
+        )
         if state.current_round_number == 1:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
@@ -513,12 +518,14 @@ class InterviewEngine:
                 f"Just ask a specific, clarifying question immediately.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
                 f"Initial context: {state.initial_context}\n"
+                f"{_option_format_hint}\n"
             )
         else:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
                 f"Initial context: {state.initial_context}\n"
+                f"{_option_format_hint}\n"
             )
 
         if web_search_hint:

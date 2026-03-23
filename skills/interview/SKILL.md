@@ -34,7 +34,7 @@ curl -s --max-time 3 https://api.github.com/repos/Q00/ouroboros/releases/latest 
 ```
 
 Compare the result with the current version in `.claude-plugin/plugin.json`.
-- If a newer version exists, ask the user via `AskUserQuestion`:
+- If a newer version exists, ask the user via `AskUserQuestion` (Claude Code) or `AskQuestion` (Cursor):
   ```json
   {
     "questions": [{
@@ -64,20 +64,15 @@ Then choose the execution path:
 
 ### Step 0.5: Load MCP Tools (Required before Path A/B decision)
 
-The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
+Ouroboros MCP tools must be available before proceeding. How they are discovered depends on your host:
 
-1. Use the `ToolSearch` tool to find and load the interview MCP tool:
-   ```
-   ToolSearch query: "+ouroboros interview"
-   ```
-   This searches for tools with "ouroboros" in the name related to "interview".
+- **Claude Code**: Tools are deferred — use `ToolSearch` to load them:
+  ```
+  ToolSearch query: "+ouroboros interview"
+  ```
+- **Cursor / other MCP clients**: Tools are auto-loaded when the server connects. They should already be callable as `ouroboros_interview`.
 
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_interview` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
-
-3. If ToolSearch finds the tool → proceed to **Path A**.
-   If ToolSearch returns no matching tools → proceed to **Path B**.
-
-**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
+If the tool is available → proceed to **Path A**. If not → skip to **Path B**.
 
 ### Path A: MCP Mode (Preferred)
 
@@ -104,6 +99,23 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
      cwd: <current working directory>
    ```
    Returns a session ID and the first question.
+
+   **Model selection (Cursor only)**: If the response meta contains `available_models`,
+   present them to the user via `AskQuestion` (Cursor) or `AskUserQuestion` (Claude Code) before the next round:
+   ```json
+   {
+     "questions": [{
+       "question": "Which model should Ouroboros use for this interview?",
+       "header": "Model",
+       "options": [
+         {"label": "<model name>", "description": "<model_id>"}
+       ],
+       "multiSelect": false
+     }]
+   }
+   ```
+   Then pass the selected `model_id` as `cursor_model` in subsequent calls.
+   If the user skips or no models are listed, omit `cursor_model` (uses auto).
 
 2. **For each question from MCP, apply 3-Path Routing:**
 
@@ -185,7 +197,7 @@ If MCP returns `is_error=true` with `meta.recoverable=true`:
 3. If still failing: "MCP is having trouble. Switching to direct interview mode."
    Then switch to Path B and continue from where you left off.
 
-**Advantages of MCP mode**: State persists to disk, ambiguity scoring, direct `ooo seed` integration via session ID. Code-enriched confirmation questions reduce user burden — only human-judgment questions require user input.
+**Advantages of MCP mode**: State persists to disk (survives session restarts), ambiguity scoring, direct `ooo seed` integration via session ID, structured input with AskUserQuestion/AskQuestion. Code-enriched confirmation questions reduce user burden — only human-judgment questions require user input.
 
 ### Path B: Plugin Fallback (No MCP Server)
 
@@ -194,7 +206,7 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 1. Read `src/ouroboros/agents/socratic-interviewer.md` and adopt that role
 2. **Pre-scan the codebase**: Use Glob to check for config files (`pyproject.toml`, `package.json`, `go.mod`, etc.). If found, use Read/Grep to scan key files and incorporate findings into your questions as confirmation-style ("I see X. Should I assume Y?") rather than open-ended discovery ("Do you have X?")
 3. Ask clarifying questions based on the user's topic and codebase context
-4. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)
+4. **Present each question using AskUserQuestion (Claude Code) or AskQuestion (Cursor)** with contextually relevant suggested answers (same format as Path A step 2)
 5. Use Read, Glob, Grep, WebFetch to explore further context if needed
 6. Maintain the same ambiguity ledger and breadth-check behavior as in Path A:
    - Track multiple independent ambiguity threads

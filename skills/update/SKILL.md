@@ -50,7 +50,7 @@ When the user invokes this skill:
    Changes: https://github.com/Q00/ouroboros/releases/tag/v0.X.Z
    ```
 
-   Then ask the user with AskUserQuestion:
+   Then ask the user with AskUserQuestion (Claude Code) or AskQuestion (Cursor):
    - **"Update now"** — Proceed with update
    - **"Skip"** — Do nothing
 

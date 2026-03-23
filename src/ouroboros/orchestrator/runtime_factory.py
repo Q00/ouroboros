@@ -20,6 +20,7 @@ from ouroboros.orchestrator.command_dispatcher import create_codex_command_dispa
 
 _CLAUDE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
+_CURSOR_BACKENDS = {"cursor", "cursor_agent"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 
 
@@ -30,8 +31,10 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
         return "claude"
     if candidate in _CODEX_BACKENDS:
         return "codex"
+    if candidate in _CURSOR_BACKENDS:
+        return "cursor"
     if candidate in _OPENCODE_BACKENDS:
-        msg = "OpenCode runtime is not yet available. Supported backends: claude, codex"
+        msg = "OpenCode runtime is not yet available. Supported backends: claude, codex, cursor"
         raise ValueError(msg)
 
     msg = f"Unsupported orchestrator runtime backend: {candidate}"
@@ -75,6 +78,14 @@ def create_agent_runtime(
     if resolved_backend == "codex":
         return CodexCliRuntime(
             cli_path=cli_path or get_codex_cli_path(),
+            **runtime_kwargs,
+        )
+
+    if resolved_backend == "cursor":
+        from ouroboros.orchestrator.cursor_acp_runtime import CursorACPRuntime
+
+        return CursorACPRuntime(
+            cli_path=cli_path,
             **runtime_kwargs,
         )
 

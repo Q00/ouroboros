@@ -306,6 +306,12 @@ class EvaluateHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="cursor_model",
+                    type=ToolInputType.STRING,
+                    description="Cursor ACP model ID for LLM calls",
+                    required=False,
+                ),
             ),
         )
 
@@ -353,6 +359,10 @@ class EvaluateHandler:
         acceptance_criterion = arguments.get("acceptance_criterion")
         artifact_type = arguments.get("artifact_type", "code")
         trigger_consensus = arguments.get("trigger_consensus", False)
+        cursor_model = arguments.pop("cursor_model", None)
+        if cursor_model in (None, "", "default[]"):
+            cursor_model = None
+        arguments.pop("_mcp_context", None)
 
         log.info(
             "mcp.tool.evaluate",
@@ -360,6 +370,43 @@ class EvaluateHandler:
             has_seed=seed_content is not None,
             trigger_consensus=trigger_consensus,
         )
+
+        # If Cursor backend and no model selected, return model list first
+        if not cursor_model and self.llm_backend in ("cursor", "cursor_agent"):
+                try:
+                    from ouroboros.providers.factory import create_llm_adapter as _create_adapter
+                    _adapter = _create_adapter(
+                        backend="cursor", max_turns=1,
+                    )
+                    _get_models = getattr(_adapter, "get_available_models", None)
+                    if _get_models:
+                        _models = await _get_models()
+                        if _models:
+                            return Result.ok(
+                                MCPToolResult(
+                                    content=(
+                                        MCPContentItem(
+                                            type=ContentType.TEXT,
+                                            text=(
+                                                "⚠ IMPORTANT: Before starting evaluation, "
+                                                "select a model.\n\n"
+                                                "Available models:\n"
+                                                + "\n".join(
+                                                    f"  - {m.name}: {m.model_id}"
+                                                    for m in _models[:15]
+                                                )
+                                                + "\n\nPass your choice as 'cursor_model' parameter."
+                                            ),
+                                        ),
+                                    ),
+                                    meta={
+                                        "action": "select_model",
+                                        "available_models": [{"model_id": m.model_id, "name": m.name} if hasattr(m, "model_id") else m for m in _models[:15]],
+                                    },
+                                )
+                            )
+                except Exception:
+                    pass
 
         try:
             # Extract goal/constraints from seed if provided
@@ -409,6 +456,16 @@ class EvaluateHandler:
                 backend=self.llm_backend,
                 max_turns=1,
             )
+
+            # Apply Cursor model if specified
+            if cursor_model:
+                set_model_fn = getattr(llm_adapter, "set_model", None)
+                if set_model_fn:
+                    try:
+                        await set_model_fn(cursor_model)
+                    except Exception:
+                        pass
+
             working_dir_str = arguments.get("working_dir")
             working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
             mechanical_config = build_mechanical_config(working_dir)

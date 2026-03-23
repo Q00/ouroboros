@@ -20,6 +20,7 @@ from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 
 _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
+_CURSOR_BACKENDS = {"cursor", "cursor_agent"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _LITELLM_BACKENDS = {"litellm", "openai", "openrouter"}
 _LLM_USE_CASES = frozenset({"default", "interview"})
@@ -32,10 +33,12 @@ def resolve_llm_backend(backend: str | None = None) -> str:
         return "claude_code"
     if candidate in _CODEX_BACKENDS:
         return "codex"
+    if candidate in _CURSOR_BACKENDS:
+        return "cursor"
     if candidate in _OPENCODE_BACKENDS:
         msg = (
             "OpenCode LLM adapter is not yet available. "
-            "Supported backends: claude_code, codex, litellm"
+            "Supported backends: claude_code, codex, cursor, litellm"
         )
         raise ValueError(msg)
     if candidate in _LITELLM_BACKENDS:
@@ -108,6 +111,13 @@ def create_llm_adapter(
             on_message=on_message,
             timeout=timeout,
             max_retries=max_retries,
+        )
+    if resolved_backend == "cursor":
+        from ouroboros.providers.cursor_acp_adapter import CursorACPAdapter
+
+        return CursorACPAdapter(
+            cli_path=cli_path,
+            cwd=cwd,
         )
     # opencode is rejected at resolve time; this is a defensive fallback
     from ouroboros.providers.litellm_adapter import LiteLLMAdapter

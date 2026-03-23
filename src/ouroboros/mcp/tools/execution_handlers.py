@@ -114,6 +114,25 @@ class ExecuteSeedHandler:
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    name="runtime_backend",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Agent runtime backend for sub-agent execution. "
+                        "Auto-detected if not provided. Options: claude, codex, cursor"
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="model",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Model to use for sub-agent execution. "
+                        "Examples: gpt-5, sonnet-4, claude-sonnet-4-6. "
+                        "If not specified, uses the runtime default."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -191,14 +210,67 @@ class ExecuteSeedHandler:
         session_id = session_id or session_id_override
         model_tier = arguments.get("model_tier", "medium")
         max_iterations = arguments.get("max_iterations", 10)
+        execution_model = arguments.get("model")
+        if execution_model in (None, "", "default[]"):
+            execution_model = None
+
+        effective_runtime = arguments.get("runtime_backend") or self.agent_runtime_backend
+        arguments.pop("runtime_backend", None)
+        arguments.pop("model", None)
+        arguments.pop("_mcp_context", None)
+
+        if not effective_runtime:
+            from ouroboros.config.loader import get_agent_runtime_backend
+
+            effective_runtime = get_agent_runtime_backend()
+
+        # If Cursor backend and no model selected, return model list first
+        if not execution_model and effective_runtime in ("cursor", "cursor_agent"):
+            try:
+                _adapter = create_llm_adapter(
+                    backend="cursor", max_turns=1,
+                )
+                _get_models = getattr(_adapter, "get_available_models", None)
+                if _get_models:
+                    _models = await _get_models()
+                    if _models:
+                        return Result.ok(
+                            MCPToolResult(
+                                content=(
+                                    MCPContentItem(
+                                        type=ContentType.TEXT,
+                                        text=(
+                                            "⚠ IMPORTANT: Before starting execution, "
+                                            "select a model.\n\n"
+                                            "Available models:\n"
+                                            + "\n".join(
+                                                f"  - {m.name}: {m.model_id}"
+                                                for m in _models[:15]
+                                            )
+                                            + "\n\nPass your choice as 'model' parameter "
+                                            "to start execution."
+                                        ),
+                                    ),
+                                ),
+                                meta={
+                                    "action": "select_model",
+                                    "available_models": [{"model_id": m.model_id, "name": m.name} if hasattr(m, "model_id") else m for m in _models[:15]],
+                                },
+                            )
+                        )
+            except Exception:
+                pass  # Fall through to normal execution with auto model
+
+        # Match LLM backend to runtime when not explicitly configured
+        selected_llm_backend = self.llm_backend or effective_runtime
 
         log.info(
             "mcp.tool.execute_seed",
             session_id=session_id,
             model_tier=model_tier,
             max_iterations=max_iterations,
-            runtime_backend=self.agent_runtime_backend,
-            llm_backend=self.llm_backend,
+            runtime_backend=effective_runtime,
+            llm_backend=selected_llm_backend,
             cwd=str(resolved_cwd),
         )
 
@@ -229,12 +301,13 @@ class ExecuteSeedHandler:
             from ouroboros.providers.factory import resolve_llm_backend
 
             agent_adapter = create_agent_runtime(
-                backend=self.agent_runtime_backend,
+                backend=effective_runtime,
+                model=execution_model,
                 cwd=resolved_cwd,
-                llm_backend=self.llm_backend,
+                llm_backend=selected_llm_backend,
             )
-            runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
-            resolved_llm_backend = resolve_llm_backend(self.llm_backend)
+            runtime_backend = resolve_agent_runtime_backend(effective_runtime)
+            resolved_llm_backend = resolve_llm_backend(selected_llm_backend)
             event_store = self.event_store or EventStore()
             owns_event_store = self.event_store is None
             await event_store.initialize()
@@ -301,6 +374,7 @@ class ExecuteSeedHandler:
                 _seed_content: str,
                 _resume_existing: bool,
                 _skip_qa: bool,
+                selected_llm_backend: str | None = selected_llm_backend,
                 _session_repo: SessionRepository = session_repo,
                 _event_store: EventStore = event_store,
                 _owns_event_store: bool = owns_event_store,
@@ -337,7 +411,7 @@ class ExecuteSeedHandler:
 
                         qa_handler = QAHandler(
                             llm_adapter=self.llm_adapter,
-                            llm_backend=self.llm_backend,
+                            llm_backend=self.llm_backend or selected_llm_backend,
                         )
                         quality_bar = self._derive_quality_bar(_seed)
                         await qa_handler.handle(
@@ -391,6 +465,7 @@ class ExecuteSeedHandler:
                                 f"Execution ID: {tracker.execution_id}\n"
                                 f"Goal: {seed.goal}\n\n"
                                 f"Runtime Backend: {runtime_backend}\n"
+                                f"Model: {execution_model or 'auto'}\n"
                                 f"LLM Backend: {resolved_llm_backend}\n\n"
                                 f"Execution is running in the background.\n"
                                 f"Use ouroboros_session_status to track progress.\n"
@@ -406,6 +481,7 @@ class ExecuteSeedHandler:
                         "launched": True,
                         "status": "running",
                         "runtime_backend": runtime_backend,
+                        "model": execution_model or "auto",
                         "llm_backend": resolved_llm_backend,
                         "resume_requested": bool(session_id),
                     },
@@ -500,6 +576,7 @@ class StartExecuteSeedHandler:
                 "Start a seed execution in the background and return a job ID immediately. "
                 "Use ouroboros_job_status, ouroboros_job_wait, and ouroboros_job_result "
                 "to monitor progress. "
+                "IMPORTANT: Before calling, ask the user which model to use via the 'model' parameter. "
                 "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
@@ -564,6 +641,20 @@ class StartExecuteSeedHandler:
 
         await self._event_store.initialize()
 
+        # Resolve runtime: explicit parameter > handler default > auto-detect.
+        # Auto-detection uses host env vars (CURSOR_EXTENSION_HOST_ROLE etc.)
+        # to pick the right runtime — no config.yaml needed.
+        effective_runtime = arguments.get("runtime_backend") or self._execute_handler.agent_runtime_backend
+        if not effective_runtime:
+            from ouroboros.config.loader import get_agent_runtime_backend
+
+            effective_runtime = get_agent_runtime_backend()
+
+        arguments["runtime_backend"] = effective_runtime
+        execution_model = arguments.get("model")
+        if execution_model in (None, "", "default[]"):
+            execution_model = None
+
         session_id = arguments.get("session_id")
         execution_id: str | None = None
         new_session_id: str | None = None
@@ -620,16 +711,43 @@ class StartExecuteSeedHandler:
         from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
         from ouroboros.providers.factory import resolve_llm_backend
 
+        # Use the effective runtime that was passed to the background task,
+        # not the handler's default (which may be None → resolves to "claude")
         try:
-            runtime_backend = resolve_agent_runtime_backend(
-                self._execute_handler.agent_runtime_backend
-            )
+            runtime_backend = resolve_agent_runtime_backend(effective_runtime)
         except (ValueError, Exception):
             runtime_backend = "unknown"
         try:
-            llm_backend = resolve_llm_backend(self._execute_handler.llm_backend)
+            selected_llm_backend = self._execute_handler.llm_backend or effective_runtime
+            llm_backend = resolve_llm_backend(selected_llm_backend)
         except (ValueError, Exception):
             llm_backend = "unknown"
+
+        # Get available models if on Cursor ACP
+        available_models_text = ""
+        try:
+            from ouroboros.providers.factory import create_llm_adapter as _create_adapter
+
+            _adapter = _create_adapter(backend=llm_backend, max_turns=1)
+            _get_models = getattr(_adapter, "get_available_models", None)
+            if _get_models:
+                import asyncio
+
+                models = await _get_models()
+                if models and not execution_model:
+                    model_lines = "\n".join(
+                        f"  - {m.name}: {m.model_id}"
+                        for m in models
+                        if m.model_id != "default[]"
+                    )
+                    available_models_text = (
+                        f"\n\n---\n"
+                        f"⚠ Model is 'auto'. To select a specific model, cancel this job and "
+                        f"re-run with the model parameter.\n"
+                        f"Available models:\n{model_lines}"
+                    )
+        except Exception:
+            pass
 
         text = (
             f"Started background execution.\n\n"
@@ -637,8 +755,10 @@ class StartExecuteSeedHandler:
             f"Session ID: {snapshot.links.session_id or 'pending'}\n"
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
             f"Runtime Backend: {runtime_backend}\n"
+            f"Model: {execution_model or 'auto'}\n"
             f"LLM Backend: {llm_backend}\n\n"
             "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
+            f"{available_models_text}"
         )
         return Result.ok(
             MCPToolResult(
@@ -651,6 +771,7 @@ class StartExecuteSeedHandler:
                     "status": snapshot.status.value,
                     "cursor": snapshot.cursor,
                     "runtime_backend": runtime_backend,
+                    "model": execution_model or "auto",
                     "llm_backend": llm_backend,
                 },
             )

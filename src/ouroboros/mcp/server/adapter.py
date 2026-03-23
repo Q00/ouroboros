@@ -36,6 +36,10 @@ from ouroboros.mcp.types import (
 
 log = structlog.get_logger(__name__)
 
+
+
+
+
 # Map MCPToolParameter types to Python annotations for FastMCP schema inference.
 _TOOL_TYPE_MAP: dict[ToolInputType, type] = {
     ToolInputType.STRING: str,
@@ -56,8 +60,24 @@ def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.S
 
     By setting __signature__ with explicit parameters, FastMCP generates the
     correct schema and clients can send flat argument dicts.
+
+    A Context parameter is prepended so FastMCP auto-injects the MCP context,
+    enabling elicitation support in tool handlers.
     """
-    sig_params = []
+    try:
+        from mcp.server.fastmcp import Context
+        ctx_type = Context
+    except ImportError:
+        ctx_type = Any
+
+    sig_params = [
+        inspect.Parameter(
+            name="ctx",
+            kind=inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            default=None,
+            annotation=ctx_type,
+        ),
+    ]
     for p in parameters:
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
         if p.required:
@@ -438,7 +458,7 @@ class MCPServerAdapter:
             defn = handler.definition
 
             def _make_tool_wrapper(h: ToolHandler) -> Any:
-                async def tool_wrapper(**kwargs: Any) -> Any:
+                async def tool_wrapper(ctx: Any = None, **kwargs: Any) -> Any:
                     # Backward compat: unwrap nested kwargs from clients that
                     # used the old schema where FastMCP inferred a single "kwargs" param.
                     if (
@@ -447,11 +467,38 @@ class MCPServerAdapter:
                         and isinstance(kwargs["kwargs"], dict)
                     ):
                         kwargs = kwargs["kwargs"]
+                    # Pass MCP Context to handler for elicitation support
+                    if ctx is not None:
+                        kwargs["_mcp_context"] = ctx
                     result = await h.handle(kwargs)
+                    log.info(
+                        "tool_wrapper.result",
+                        tool=h.definition.name,
+                        is_ok=getattr(result, 'is_ok', 'N/A'),
+                        result_type=type(result).__name__,
+                    )
                     if result.is_ok:
-                        # Convert MCPToolResult to FastMCP format
                         tool_result = result.value
-                        return tool_result.text_content
+                        meta = tool_result.meta
+
+                        # Convert MCPToolResult to FastMCP format.
+                        # Include structured meta as a parseable JSON block
+                        # appended after the human-readable text so that
+                        # host agents (Cursor, Codex, Claude Code) can
+                        # extract session_id, question, answer_hints, etc.
+                        # without relying on host-specific UI tools.
+                        text = tool_result.text_content
+                        if meta:
+                            import json as _json
+
+                            meta_json = _json.dumps(
+                                meta, ensure_ascii=False, indent=2,
+                            )
+                            text = (
+                                f"{text}\n\n"
+                                f"<ouroboros-meta>\n{meta_json}\n</ouroboros-meta>"
+                            )
+                        return text
                     else:
                         # Raise so FastMCP returns a proper MCP error response
                         # with isError: true, instead of a success with error text.
@@ -459,7 +506,15 @@ class MCPServerAdapter:
 
                 # Set proper signature so FastMCP generates correct JSON schema
                 # instead of a single "kwargs" parameter.
-                tool_wrapper.__signature__ = _build_tool_signature(h.definition.parameters)
+                sig = _build_tool_signature(h.definition.parameters)
+                tool_wrapper.__signature__ = sig
+                # Also set __annotations__ so FastMCP's find_context_parameter()
+                # can discover the ctx param via typing.get_type_hints().
+                tool_wrapper.__annotations__ = {
+                    p.name: p.annotation
+                    for p in sig.parameters.values()
+                    if p.annotation is not inspect.Parameter.empty
+                }
                 return tool_wrapper
 
             wrapper = _make_tool_wrapper(handler)

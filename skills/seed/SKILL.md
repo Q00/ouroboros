@@ -25,16 +25,15 @@ When the user invokes this skill:
 
 ### Load MCP Tools (Required before Path A/B decision)
 
-The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
+Ouroboros MCP tools must be available before proceeding. How they are discovered depends on your host:
 
-1. Use the `ToolSearch` tool to find and load the seed generation MCP tool:
-   ```
-   ToolSearch query: "+ouroboros seed"
-   ```
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_generate_seed` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
-3. If ToolSearch finds the tool → proceed to **Path A**. If not → proceed to **Path B**.
+- **Claude Code**: Tools are deferred — use `ToolSearch` to load them:
+  ```
+  ToolSearch query: "+ouroboros seed"
+  ```
+- **Cursor / other MCP clients**: Tools are auto-loaded when the server connects. They should already be callable as `ouroboros_generate_seed`.
 
-**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
+If the tool is available → proceed to **Path A**. If not → skip to **Path B**.
 
 ### Path A: MCP Mode (Preferred)
 
@@ -113,7 +112,7 @@ On successful seed generation, first announce:
 Your seed has been crystallized!
 ```
 
-Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not set to `true`, use the **AskUserQuestion tool** with this single question:
+Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not set to `true`, use **AskUserQuestion** (Claude Code) or **AskQuestion** (Cursor) with this single question:
 
 ```json
 {

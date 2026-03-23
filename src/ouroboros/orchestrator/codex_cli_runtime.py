@@ -746,8 +746,33 @@ class CodexCliRuntime:
         current_handle: RuntimeHandle | None,
         process: Any,
     ) -> tuple[AgentMessage, ...]:
-        """Handle runtime-specific stream events before generic normalization."""
-        del event, current_handle, process
+        """Handle runtime-specific stream events before generic normalization.
+
+        Extracts model info from init events (if available) and stores
+        it in the RuntimeHandle metadata for downstream display.
+        """
+        del process
+        # Extract model from system/init event (supported by Cursor and
+        # potentially Codex NDJSON streams)
+        if (
+            event.get("type") == "system"
+            and event.get("subtype") == "init"
+            and event.get("model")
+        ):
+            model_name = event["model"]
+            if current_handle is not None:
+                from dataclasses import replace as dc_replace
+
+                metadata = {**current_handle.metadata, "model": model_name}
+                updated = dc_replace(current_handle, metadata=metadata)
+                return (
+                    AgentMessage(
+                        type="assistant",
+                        content=f"[{self._display_name}] Model: {model_name}",
+                        data={"model": model_name},
+                        resume_handle=updated,
+                    ),
+                )
         return ()
 
     def _prepare_runtime_event(

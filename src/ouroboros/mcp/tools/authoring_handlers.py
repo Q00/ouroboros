@@ -262,6 +262,12 @@ class GenerateSeedHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="cursor_model",
+                    type=ToolInputType.STRING,
+                    description="Cursor ACP model ID for LLM calls (e.g. gpt-5.4[reasoning=medium,context=272k,fast=false])",
+                    required=False,
+                ),
             ),
         )
 
@@ -287,6 +293,10 @@ class GenerateSeedHandler:
             )
 
         ambiguity_score_value = arguments.get("ambiguity_score")
+        cursor_model = arguments.pop("cursor_model", None)
+        if cursor_model in (None, "", "default[]"):
+            cursor_model = None
+        arguments.pop("_mcp_context", None)
 
         log.info(
             "mcp.tool.generate_seed",
@@ -300,6 +310,49 @@ class GenerateSeedHandler:
                 backend=self.llm_backend,
                 max_turns=1,
             )
+
+            # If Cursor backend and no model selected, return model list first
+            if not cursor_model and self.llm_backend in ("cursor", "cursor_agent"):
+                get_models_fn = getattr(llm_adapter, "get_available_models", None)
+                if get_models_fn:
+                    try:
+                        _models = await get_models_fn()
+                        if _models:
+                            return Result.ok(
+                                MCPToolResult(
+                                    content=(
+                                        MCPContentItem(
+                                            type=ContentType.TEXT,
+                                            text=(
+                                                "⚠ IMPORTANT: Before generating seed, "
+                                                "select a model.\n\n"
+                                                "Available models:\n"
+                                                + "\n".join(
+                                                    f"  - {m.name}: {m.model_id}"
+                                                    for m in _models[:15]
+                                                )
+                                                + "\n\nPass your choice as 'cursor_model' parameter."
+                                            ),
+                                        ),
+                                    ),
+                                    meta={
+                                        "action": "select_model",
+                                        "available_models": [{"model_id": m.model_id, "name": m.name} if hasattr(m, "model_id") else m for m in _models[:15]],
+                                        "session_id": session_id,
+                                    },
+                                )
+                            )
+                    except Exception:
+                        pass
+
+            # Set Cursor model if specified
+            if cursor_model:
+                set_model_fn = getattr(llm_adapter, "set_model", None)
+                if set_model_fn:
+                    try:
+                        await set_model_fn(cursor_model)
+                    except Exception:
+                        pass
             interview_engine = self.interview_engine or InterviewEngine(
                 llm_adapter=llm_adapter,
                 model=get_clarification_model(self.llm_backend),
@@ -533,8 +586,11 @@ class InterviewHandler:
                 meta={
                     "session_id": session_id,
                     "completed": True,
+                    "round_number": len(state.rounds),
+                    "completed_rounds": _count_answered_rounds(state),
                     "ambiguity_score": score.overall_score if score is not None else None,
                     "seed_ready": score.is_ready_for_seed if score is not None else None,
+                    "status": "completed",
                 },
             )
         )
@@ -546,14 +602,17 @@ class InterviewHandler:
             name="ouroboros_interview",
             description=(
                 "Interactive interview for requirement clarification. "
-                "Start a new interview with initial_context, resume with session_id, "
-                "or record an answer to the current question."
+                "MUST provide initial_context to start a new interview, "
+                "or session_id to resume. At least one is required."
             ),
             parameters=(
                 MCPToolParameter(
                     name="initial_context",
                     type=ToolInputType.STRING,
-                    description="Initial context to start a new interview session",
+                    description=(
+                        "Topic or idea to start a new interview. "
+                        "Required for new interviews (e.g. 'Build a timer app')."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -577,6 +636,16 @@ class InterviewHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="cursor_model",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Cursor ACP model ID to use (e.g. 'gpt-5.4[reasoning=medium,context=272k,fast=false]'). "
+                        "Only applies when running on Cursor. Get available models from the "
+                        "first interview response meta.available_models field."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -595,6 +664,11 @@ class InterviewHandler:
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
+        cursor_model = arguments.pop("cursor_model", None)
+        if cursor_model in (None, "", "default[]"):
+            cursor_model = None
+        # Remove internal context key before processing
+        arguments.pop("_mcp_context", None)
 
         # Use injected or create interview engine
         # max_turns=1: MCP is a pure question generator. No tool use needed.
@@ -605,6 +679,15 @@ class InterviewHandler:
             use_case="interview",
             allowed_tools=[],
         )
+
+        # Set Cursor model if specified and adapter supports it
+        if cursor_model:
+            set_model_fn = getattr(llm_adapter, "set_model", None)
+            if set_model_fn:
+                try:
+                    await set_model_fn(cursor_model)
+                except Exception:
+                    pass
         engine = self.interview_engine or InterviewEngine(
             llm_adapter=llm_adapter,
             state_dir=Path.home() / ".ouroboros" / "data",
@@ -614,6 +697,42 @@ class InterviewHandler:
         _interview_id: str | None = None  # Track for error event emission
 
         try:
+            # If Cursor backend and no model selected yet, return model list first
+            # so the user picks a model BEFORE any LLM calls happen.
+            if initial_context and not cursor_model and not session_id:
+                get_models_fn = getattr(llm_adapter, "get_available_models", None)
+                if get_models_fn:
+                    try:
+                        available_models = await get_models_fn()
+                    except Exception:
+                        available_models = None
+                    if available_models:
+                        return Result.ok(
+                            MCPToolResult(
+                                content=(
+                                    MCPContentItem(
+                                        type=ContentType.TEXT,
+                                        text=(
+                                            "⚠ IMPORTANT: Before starting the interview, "
+                                            "select a model for Ouroboros to use.\n\n"
+                                            "Available models:\n"
+                                            + "\n".join(
+                                                f"  - {m.name}: {m.model_id}"
+                                                for m in available_models[:15]
+                                            )
+                                            + "\n\nPass your choice as cursor_model parameter "
+                                            "along with initial_context to start the interview."
+                                        ),
+                                    ),
+                                ),
+                                meta={
+                                    "action": "select_model",
+                                    "available_models": [{"model_id": m.model_id, "name": m.name} if hasattr(m, "model_id") else m for m in available_models[:15]],
+                                    "initial_context": initial_context,
+                                },
+                            )
+                        )
+
             # Start new interview
             if initial_context:
                 cwd = arguments.get("cwd") or os.getcwd()
@@ -701,27 +820,60 @@ class InterviewHandler:
                     session_id=state.interview_id,
                 )
 
+                # Collect available models if adapter supports it (Cursor ACP)
+                available_models = None
+                get_models_fn = getattr(llm_adapter, "get_available_models", None)
+                if get_models_fn:
+                    try:
+                        available_models = await get_models_fn()
+                    except Exception:
+                        pass
+
+                meta: dict[str, Any] = {
+                    "session_id": state.interview_id,
+                    "question": question,
+                    "round_number": 1,
+                    "completed_rounds": 0,
+                    "ambiguity_score": (
+                        live_score.overall_score if live_score is not None else None
+                    ),
+                    "seed_ready": (
+                        live_score.is_ready_for_seed if live_score is not None else None
+                    ),
+                    "status": state.status,
+                    "answer_mode": "freeform",
+                }
+                if available_models and not cursor_model:
+                    meta["available_models"] = [{"model_id": m.model_id, "name": m.name} if hasattr(m, "model_id") else m for m in available_models]
+
+                # Build response text — include model list if on Cursor
+                response_text = (
+                    f"Interview started. Session ID: {state.interview_id}\n\n"
+                    f"{display_question}"
+                )
+                if available_models and not cursor_model:
+                    model_lines = "\n".join(
+                        f"  - {m.name}: {m.model_id}"
+                        for m in available_models
+                        if m.model_id != "default[]"
+                    )
+                    response_text += (
+                        f"\n\n---\n"
+                        f"⚠ IMPORTANT: Before continuing, ask the user which model to use.\n"
+                        f"Available models:\n{model_lines}\n"
+                        f"Pass the selected model_id as cursor_model in the next call."
+                    )
+
                 return Result.ok(
                     MCPToolResult(
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=(
-                                    f"Interview started. Session ID: {state.interview_id}\n\n"
-                                    f"{display_question}"
-                                ),
+                                text=response_text,
                             ),
                         ),
                         is_error=False,
-                        meta={
-                            "session_id": state.interview_id,
-                            "ambiguity_score": (
-                                live_score.overall_score if live_score is not None else None
-                            ),
-                            "seed_ready": (
-                                live_score.is_ready_for_seed if live_score is not None else None
-                            ),
-                        },
+                        meta=meta,
                     )
                 )
 
@@ -744,6 +896,7 @@ class InterviewHandler:
                         state.rounds[-1].question,
                         _load_state_ambiguity_score(state),
                     )
+                    pending_question = state.rounds[-1].question
                     return Result.ok(
                         MCPToolResult(
                             content=(
@@ -755,11 +908,16 @@ class InterviewHandler:
                             is_error=False,
                             meta={
                                 "session_id": session_id,
+                                "question": pending_question,
+                                "round_number": state.current_round_number,
+                                "completed_rounds": _count_answered_rounds(state),
                                 "ambiguity_score": state.ambiguity_score,
                                 "seed_ready": (
                                     state.ambiguity_score is not None
                                     and state.ambiguity_score <= AMBIGUITY_THRESHOLD
                                 ),
+                                "status": state.status,
+                                "answer_mode": "freeform",
                             },
                         )
                     )
@@ -908,12 +1066,17 @@ class InterviewHandler:
                         is_error=False,
                         meta={
                             "session_id": session_id,
+                            "question": question,
+                            "round_number": state.current_round_number,
+                            "completed_rounds": _count_answered_rounds(state),
                             "ambiguity_score": (
                                 live_score.overall_score if live_score is not None else None
                             ),
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
                             ),
+                            "status": state.status,
+                            "answer_mode": "freeform",
                         },
                     )
                 )

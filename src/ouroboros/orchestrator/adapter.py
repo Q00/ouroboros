@@ -159,6 +159,9 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "claude_code": "claude",
     "codex": "codex_cli",
     "codex_cli": "codex_cli",
+    "cursor": "cursor_agent",
+    "cursor_agent": "cursor_agent",
+    "cursor_acp": "cursor_agent",
     "opencode": "opencode",
     "opencode_cli": "opencode",
 }
@@ -942,6 +945,13 @@ class ClaudeAgentAdapter:
                             session_id,
                             current_runtime_handle,
                         )
+                        # Capture model from init event into handle metadata
+                        init_model = agent_message.data.get("model")
+                        if init_model and current_runtime_handle:
+                            metadata = {**current_runtime_handle.metadata, "model": init_model}
+                            current_runtime_handle = replace(
+                                current_runtime_handle, metadata=metadata,
+                            )
 
                     if current_runtime_handle:
                         data = agent_message.data
@@ -1093,8 +1103,13 @@ class ClaudeAgentAdapter:
             msg_data = getattr(sdk_message, "data", {})
             if subtype == "init":
                 session_id = msg_data.get("session_id")
+                # Extract model from init event (Claude Agent SDK provides this)
+                model = getattr(sdk_message, "model", None) or msg_data.get("model")
                 content = f"Session initialized: {session_id}"
                 data["session_id"] = session_id
+                if model:
+                    data["model"] = model
+                    content += f" (model: {model})"
             else:
                 content = f"System: {subtype}"
             data["subtype"] = subtype

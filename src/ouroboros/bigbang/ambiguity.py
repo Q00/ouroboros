@@ -418,9 +418,13 @@ Analyze each component and provide scores with justifications."""
             "success_criteria_clarity_justification",
         ]
 
+        # Score fields are required; justification fields are optional
         for field_name in required_fields:
             if field_name not in data:
-                raise ValueError(f"Missing required field: {field_name}")
+                if field_name.endswith("_justification"):
+                    data[field_name] = ""
+                else:
+                    raise ValueError(f"Missing required field: {field_name}")
 
         # Parse and clamp scores
         def clamp_score(value: Any) -> float:
