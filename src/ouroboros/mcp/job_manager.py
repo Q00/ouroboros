@@ -163,6 +163,9 @@ class JobManager:
             elif getattr(result, "meta", {}).get("action") == "interrupted":
                 terminal_type = "mcp.job.interrupted"
                 terminal_status = JobStatus.INTERRUPTED
+            elif getattr(result, "is_error", False):
+                terminal_type = "mcp.job.failed"
+                terminal_status = JobStatus.FAILED
             await self._append_event(
                 terminal_type,
                 job_id,

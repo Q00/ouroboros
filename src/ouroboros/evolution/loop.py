@@ -1009,7 +1009,12 @@ class EvolutionaryLoop:
 
         # Gen 2+: Wonder and Reflect phases
         if generation_number > 1 and lineage.generations:
-            prev_gen = lineage.generations[-1]
+            # Use last COMPLETED generation for context (evaluation, execution output).
+            # The tail may be an interrupted/failed record which lacks these fields.
+            prev_gen = next(
+                (g for g in reversed(lineage.generations) if g.phase == GenerationPhase.COMPLETED),
+                lineage.generations[-1],  # fallback if no completed gen exists
+            )
 
             # Emit generation started
             await self.event_store.append(
