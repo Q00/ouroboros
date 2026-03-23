@@ -143,10 +143,28 @@ class InterviewState(BaseModel):
         """Get the current round number (1-based)."""
         return len(self.rounds) + 1
 
+    # Mirrors AMBIGUITY_THRESHOLD from ambiguity.py to avoid circular import.
+    _SEED_READY_THRESHOLD: float = 0.2
+
     @property
     def is_complete(self) -> bool:
         """Check if interview is marked complete (user-controlled)."""
         return self.status == InterviewStatus.COMPLETED
+
+    @property
+    def can_reopen(self) -> bool:
+        """True when a completed interview should be reopenable.
+
+        A completed interview is reopenable only when its stored ambiguity
+        score exceeds the seed-generation threshold — i.e. it was completed
+        prematurely and is now in a deadlock (can't generate seed, can't
+        resume).
+        """
+        return (
+            self.is_complete
+            and self.ambiguity_score is not None
+            and self.ambiguity_score > self._SEED_READY_THRESHOLD
+        )
 
     def mark_updated(self) -> None:
         """Update the updated_at timestamp."""
@@ -361,12 +379,20 @@ class InterviewEngine:
             return Result.err(ValidationError(error_msg, field="user_response"))
 
         if state.is_complete:
-            return Result.err(
-                ValidationError(
-                    "Cannot record response - interview is complete",
-                    field="status",
-                    value=state.status,
+            if not state.can_reopen:
+                return Result.err(
+                    ValidationError(
+                        "Cannot record response - interview is complete",
+                        field="status",
+                        value=state.status,
+                    )
                 )
+            # Deadlock recovery: reopen when completed prematurely
+            state.status = InterviewStatus.IN_PROGRESS
+            log.info(
+                "interview.reopened_for_ambiguity",
+                interview_id=state.interview_id,
+                ambiguity_score=state.ambiguity_score,
             )
 
         # Create new round
@@ -546,7 +572,9 @@ class InterviewEngine:
         _OVERHEAD = 20  # newlines, ellipsis, separators
 
         # Budget for base_prompt after accounting for other sections
-        base_budget = _MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - len(perspective_panel) - _OVERHEAD
+        base_budget = (
+            _MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - len(perspective_panel) - _OVERHEAD
+        )
         if base_budget < 0:
             # Header + panel already exceed budget — truncate both proportionally
             total = len(dynamic_header) + len(perspective_panel)
