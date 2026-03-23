@@ -340,6 +340,7 @@ class EvolutionaryLoop:
                     },
                 )
                 generation_results.append(result)
+                current_seed = result.seed  # Use interrupted gen's seed (may be evolved)
                 break
 
             generation_results.append(result)
@@ -962,6 +963,24 @@ class EvolutionaryLoop:
         reflect_output: ReflectOutput | None = None
         ontology_delta: OntologyDelta | None = None
 
+        # Restore partial state from interrupted generation if resuming
+        if resume_after_phase and lineage.generations:
+            interrupted_gen = next(
+                (
+                    g
+                    for g in reversed(lineage.generations)
+                    if g.phase == GenerationPhase.INTERRUPTED
+                ),
+                None,
+            )
+            if interrupted_gen and interrupted_gen.partial_state:
+                ps = interrupted_gen.partial_state
+                if _should_skip("wondering") and ps.get("wonder_questions"):
+                    wonder_output = WonderOutput(
+                        questions=tuple(ps["wonder_questions"]),
+                        should_continue=True,
+                    )
+
         # Gen 2+: Wonder and Reflect phases
         if generation_number > 1 and lineage.generations:
             prev_gen = lineage.generations[-1]
@@ -1022,7 +1041,7 @@ class EvolutionaryLoop:
 
             # Check for graceful shutdown after Wonder phase
             post_wonder_phase = (
-                GenerationPhase.WONDERING.value if wonder_output is not None else "started"
+                GenerationPhase.WONDERING.value if wonder_output is not None else None
             )
             interrupted = await self._check_shutdown(
                 lineage.lineage_id,
