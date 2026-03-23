@@ -1,0 +1,64 @@
+name: Dev Publish
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/*-beta'
+    tags-ignore:
+      - 'v*'
+
+jobs:
+  dev-publish:
+    name: Publish Dev Build to PyPI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if dev version
+        id: check
+        run: |
+          # Skip if HEAD is exactly on a tag (release.yml handles that)
+          if git describe --exact-match HEAD 2>/dev/null; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install uv
+        if: steps.check.outputs.skip == 'false'
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        if: steps.check.outputs.skip == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Build package
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          uv build
+          echo "Built package:"
+          ls -la dist/
+          # Show the version hatch-vcs computed
+          python -c "
+          import re
+          for f in __import__('pathlib').Path('dist').iterdir():
+              if f.suffix == '.whl':
+                  m = re.match(r'[^-]+-([^-]+)-', f.name)
+                  if m: print(f'Version: {m.group(1)}')
+          "
+
+      - name: Publish to PyPI
+        if: steps.check.outputs.skip == 'false'
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          uv publish --check-url https://pypi.org/simple/ dist/*

@@ -14,8 +14,8 @@ def test_version_exists():
     import re
 
     assert hasattr(ouroboros, "__version__")
-    # Check semver format (X.Y.Z)
-    assert re.match(r"^\d+\.\d+\.\d+$", ouroboros.__version__)
+    # Check version format: X.Y.Z or X.Y.Z.devN or X.Y.ZbN.devN etc (PEP 440)
+    assert re.match(r"^\d+\.\d+\.\d+", ouroboros.__version__)
 
 
 def test_main_invokes_cli():

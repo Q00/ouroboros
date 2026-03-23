@@ -90,6 +90,9 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
+# hatch-vcs generated version file
+src/ouroboros/_version.py
+
 # Project specific
 *.db
 *.sqlite

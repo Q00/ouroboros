@@ -13,7 +13,12 @@ Example:
     from ouroboros.bigbang import InterviewEngine
 """
 
-__version__ = "0.25.1"
+try:
+    from ouroboros._version import __version__
+except ImportError:
+    from importlib.metadata import version as _v
+
+    __version__ = _v("ouroboros-ai")
 
 __all__ = ["__version__", "main"]
 
