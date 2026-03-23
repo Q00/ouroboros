@@ -118,7 +118,9 @@ class TestWonderParseResponseFallback:
         output = engine._parse_response("not valid json at all", seed)
 
         assert len(output.questions) == 1
-        assert "login system" in output.questions[0].lower() or "goal" in output.questions[0].lower()
+        assert (
+            "login system" in output.questions[0].lower() or "goal" in output.questions[0].lower()
+        )
         assert "aspects of this domain" not in output.questions[0].lower()
 
     def test_malformed_json_fallback_without_seed(self) -> None:

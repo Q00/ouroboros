@@ -24,12 +24,14 @@ class TestEvaluationSummary:
 
         assert "execution_completion_status" in required
         assert "approval_status" in required
-        assert "approval_status" in schema["properties"]["execution_completion_status"][
-            "description"
-        ].lower()
-        assert "execution_completion_status" in schema["properties"]["approval_status"][
-            "description"
-        ].lower()
+        assert (
+            "approval_status"
+            in schema["properties"]["execution_completion_status"]["description"].lower()
+        )
+        assert (
+            "execution_completion_status"
+            in schema["properties"]["approval_status"]["description"].lower()
+        )
 
     def test_legacy_inputs_backfill_required_status_fields_in_serialized_output(self) -> None:
         """Legacy callers can omit statuses but serialized output must still include both."""
@@ -86,7 +88,6 @@ class TestEvaluationSummary:
         assert summary.ac_results[0].verdict_label == "FAIL"
         assert summary.run_verdict_passed is False
         assert summary.run_verdict == "FAIL"
-
 
     def test_run_verdict_fails_when_execution_incomplete(self) -> None:
         """Execution failure overrides AC results — run must be FAIL."""

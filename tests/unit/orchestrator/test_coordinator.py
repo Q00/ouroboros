@@ -11,9 +11,6 @@ Tests cover:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from typing import Any
-
 import pytest
 
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle

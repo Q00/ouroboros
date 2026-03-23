@@ -43,7 +43,6 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_PERMISSION_MODE_ARG,
     DELEGATED_PARENT_SESSION_ID_ARG,
 )
-from ouroboros.orchestrator.runner import OrchestratorResult
 from ouroboros.orchestrator.session import SessionTracker
 
 
@@ -471,14 +470,23 @@ class TestExecuteSeedHandler:
         mock_event_store.initialize = AsyncMock()
         mock_runner = MagicMock()
         prepared_tracker = SessionTracker.create(
-            "exec_child", "test-seed-123", session_id="orch_child",
+            "exec_child",
+            "test-seed-123",
+            session_id="orch_child",
         )
         mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
         mock_runner.execute_precreated_session = AsyncMock(
-            return_value=Result.ok(MagicMock(
-                success=True, session_id="orch_child", execution_id="exec_child",
-                final_message="Done", messages_processed=1, duration_seconds=0.1, summary={},
-            ))
+            return_value=Result.ok(
+                MagicMock(
+                    success=True,
+                    session_id="orch_child",
+                    execution_id="exec_child",
+                    final_message="Done",
+                    messages_processed=1,
+                    duration_seconds=0.1,
+                    summary={},
+                )
+            )
         )
         mock_runner.resume_session = AsyncMock()
 
