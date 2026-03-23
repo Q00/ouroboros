@@ -2117,12 +2117,8 @@ class TestResolveReposFromDB:
         assert resolved[0].name == "custom-name"
 
     @pytest.mark.asyncio
-    async def test_step2_all_repos_missing_falls_back_to_greenfield(self, engine, tmp_path):
-        """Step 2: if all selected_repos are missing from DB, start as greenfield."""
-        state = _make_state(interview_id="gf-sess")
-        engine.ask_opening_and_start.return_value = Result.ok(state)
-        engine.ask_next_question.return_value = Result.ok("Describe your project")
-
+    async def test_step2_all_repos_missing_returns_error(self, engine, tmp_path):
+        """Step 2: if all selected_repos are missing from DB, return explicit error."""
         handler = self._make_handler(engine, tmp_path)
 
         with patch.object(
@@ -2136,11 +2132,8 @@ class TestResolveReposFromDB:
                 }
             )
 
-        assert result.is_ok
-        # Should have started as greenfield (brownfield_repos=None)
-        call_kwargs = engine.ask_opening_and_start.call_args
-        brownfield_repos = call_kwargs.kwargs.get("brownfield_repos")
-        assert brownfield_repos is None
+        assert result.is_err
+        assert "could be resolved" in str(result.error)
 
     @pytest.mark.asyncio
     async def test_step2_partial_repos_missing_uses_found_only(self, engine, tmp_path):

@@ -398,19 +398,23 @@ class PMInterviewHandler:
         """
         # ── Load brownfield from DB defaults ────────────────────
         brownfield_repos = None
-        if selected_repos is not None:
-            # Backward compat: explicit selected_repos
+        if selected_repos is not None and len(selected_repos) > 0:
+            # Backward compat: explicit selected_repos — fail explicitly if none resolve
             resolved = await self._resolve_repos_from_db(selected_repos)
             if not resolved:
-                log.warning(
-                    "pm_handler.start.selected_repos_unresolved",
-                    requested=selected_repos,
-                    hint="All selected_repos paths were missing from the brownfield DB. "
-                    "Proceeding as greenfield interview.",
+                return Result.err(
+                    MCPToolError(
+                        f"None of the selected repos could be resolved: {selected_repos}. "
+                        "Register them first via 'ouroboros setup scan' or the brownfield tool.",
+                        tool_name="ouroboros_pm_interview",
+                    )
                 )
-        else:
-            # Auto-load defaults from DB
+        elif selected_repos is None:
+            # Auto-load defaults from DB (missing defaults → greenfield is OK)
             resolved = await self._query_default_repos()
+        else:
+            # Empty list explicitly passed → greenfield
+            resolved = []
 
         if resolved:
             brownfield_repos = [
