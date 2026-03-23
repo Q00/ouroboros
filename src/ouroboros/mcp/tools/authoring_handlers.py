@@ -479,6 +479,36 @@ class InterviewHandler:
         )
         return score
 
+    @staticmethod
+    def _ambiguity_gate_response(
+        session_id: str,
+        score: AmbiguityScore | None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Build an MCP response refusing premature interview completion."""
+        score_display = f"{score.overall_score:.2f}" if score is not None else "unknown"
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            f"Cannot complete yet — ambiguity score "
+                            f"{score_display} exceeds threshold "
+                            f"{AMBIGUITY_THRESHOLD}. "
+                            f"Please answer a few more questions to "
+                            f"clarify remaining areas."
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "session_id": session_id,
+                    "ambiguity_score": (score.overall_score if score is not None else None),
+                    "seed_ready": False,
+                },
+            )
+        )
+
     async def _complete_interview_response(
         self,
         engine: InterviewEngine,
@@ -769,12 +799,21 @@ class InterviewHandler:
                     if _is_interview_completion_signal(answer):
                         if state.rounds and state.rounds[-1].user_response is None:
                             state.rounds.pop()
-                        state.clear_stored_ambiguity()
-                        return await self._complete_interview_response(
-                            engine,
-                            state,
-                            session_id,
-                        )
+                        # Gate: check ambiguity before completing.
+                        # Stored score first; live scoring as fallback.
+                        exit_score = _load_state_ambiguity_score(state)
+                        if exit_score is None or not exit_score.is_ready_for_seed:
+                            exit_score = await self._score_interview_state(llm_adapter, state)
+                        if exit_score is not None and exit_score.is_ready_for_seed:
+                            return await self._complete_interview_response(
+                                engine,
+                                state,
+                                session_id,
+                                exit_score,
+                            )
+                        # Ambiguity too high — refuse completion
+                        await engine.save_state(state)
+                        return self._ambiguity_gate_response(session_id, exit_score)
 
                     if not state.rounds:
                         return Result.err(
