@@ -31,12 +31,59 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator import create_agent_runtime
+from ouroboros.orchestrator.adapter import (
+    DELEGATED_PARENT_CWD_ARG,
+    DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
+    DELEGATED_PARENT_PERMISSION_MODE_ARG,
+    DELEGATED_PARENT_SESSION_ID_ARG,
+    DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
+    RuntimeHandle,
+)
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Delegation context extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_inherited_runtime_handle(arguments: dict[str, Any]) -> RuntimeHandle | None:
+    """Build a forkable parent runtime handle from internal delegated tool arguments.
+
+    When a parent Claude session delegates to execute_seed via MCP, the
+    pre-tool-use hook injects hidden ``_ooo_parent_*`` keys.  This function
+    reconstitutes those into a RuntimeHandle the child runner can fork from.
+    """
+    session_id = arguments.get(DELEGATED_PARENT_SESSION_ID_ARG)
+    if not isinstance(session_id, str) or not session_id:
+        return None
+
+    transcript_path = arguments.get(DELEGATED_PARENT_TRANSCRIPT_PATH_ARG)
+    cwd = arguments.get(DELEGATED_PARENT_CWD_ARG)
+    permission_mode = arguments.get(DELEGATED_PARENT_PERMISSION_MODE_ARG)
+
+    return RuntimeHandle(
+        backend="claude",
+        native_session_id=session_id,
+        transcript_path=transcript_path if isinstance(transcript_path, str) else None,
+        cwd=cwd if isinstance(cwd, str) else None,
+        approval_mode=permission_mode if isinstance(permission_mode, str) else None,
+        metadata={"fork_session": True},
+    )
+
+
+def _extract_inherited_effective_tools(arguments: dict[str, Any]) -> list[str] | None:
+    """Extract the parent effective tool set from internal delegated tool arguments."""
+    tools = arguments.get(DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG)
+    if not isinstance(tools, list):
+        return None
+    inherited = [t for t in tools if isinstance(t, str) and t]
+    return inherited or None
 
 
 @dataclass
@@ -192,6 +239,14 @@ class ExecuteSeedHandler:
         model_tier = arguments.get("model_tier", "medium")
         max_iterations = arguments.get("max_iterations", 10)
 
+        # Extract delegation context (only for new executions, not resumes)
+        inherited_runtime_handle = (
+            None if is_resume else _extract_inherited_runtime_handle(arguments)
+        )
+        inherited_effective_tools = (
+            None if is_resume else _extract_inherited_effective_tools(arguments)
+        )
+
         log.info(
             "mcp.tool.execute_seed",
             session_id=session_id,
@@ -228,10 +283,16 @@ class ExecuteSeedHandler:
             from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
             from ouroboros.providers.factory import resolve_llm_backend
 
+            delegated_permission_mode = (
+                inherited_runtime_handle.approval_mode
+                if inherited_runtime_handle and inherited_runtime_handle.approval_mode
+                else None
+            )
             agent_adapter = create_agent_runtime(
                 backend=self.agent_runtime_backend,
                 cwd=resolved_cwd,
                 llm_backend=self.llm_backend,
+                **({"permission_mode": delegated_permission_mode} if delegated_permission_mode else {}),
             )
             runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
             resolved_llm_backend = resolve_llm_backend(self.llm_backend)
@@ -248,6 +309,8 @@ class ExecuteSeedHandler:
                 console=console,
                 debug=False,
                 enable_decomposition=True,
+                inherited_runtime_handle=inherited_runtime_handle,
+                inherited_tools=inherited_effective_tools,
             )
             session_repo = SessionRepository(event_store)
 

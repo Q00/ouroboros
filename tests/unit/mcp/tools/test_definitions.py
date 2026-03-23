@@ -466,25 +466,33 @@ class TestExecuteSeedHandler:
 
     async def test_handle_passes_inherited_parent_context_to_runner(self) -> None:
         """New delegated executions should receive inherited runtime and effective tools."""
+        mock_runtime = MagicMock()
         mock_event_store = AsyncMock()
         mock_event_store.initialize = AsyncMock()
         mock_runner = MagicMock()
-        mock_runner.execute_seed = AsyncMock(
-            return_value=Result.ok(
-                OrchestratorResult(
-                    success=True,
-                    session_id="orch_child",
-                    execution_id="exec_child",
-                    final_message="Done",
-                )
-            )
+        prepared_tracker = SessionTracker.create(
+            "exec_child", "test-seed-123", session_id="orch_child",
         )
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
+        mock_runner.execute_precreated_session = AsyncMock(
+            return_value=Result.ok(MagicMock(
+                success=True, session_id="orch_child", execution_id="exec_child",
+                final_message="Done", messages_processed=1, duration_seconds=0.1, summary={},
+            ))
+        )
+        mock_runner.resume_session = AsyncMock()
 
         with (
-            patch("ouroboros.mcp.tools.definitions.EventStore", return_value=mock_event_store),
-            patch("ouroboros.mcp.tools.definitions.ClaudeAgentAdapter") as adapter_cls,
             patch(
-                "ouroboros.mcp.tools.definitions.OrchestratorRunner",
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                return_value=mock_runtime,
+            ) as mock_create_runtime,
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
             ) as runner_cls,
         ):
@@ -504,9 +512,12 @@ class TestExecuteSeedHandler:
                 execution_id="exec_child",
                 session_id_override="orch_child",
             )
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
 
         assert result.is_ok
-        adapter_cls.assert_called_once_with(permission_mode="bypassPermissions")
+        # Verify delegation permission was forwarded to runtime factory
+        assert mock_create_runtime.call_args.kwargs.get("permission_mode") == "bypassPermissions"
         runner_kwargs = runner_cls.call_args.kwargs
         inherited_handle = runner_kwargs["inherited_runtime_handle"]
         assert inherited_handle is not None

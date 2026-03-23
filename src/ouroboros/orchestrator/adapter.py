@@ -918,22 +918,6 @@ class ClaudeAgentAdapter:
         Raises:
             ProviderError: If SDK initialization fails.
         """
-        try:
-            # Lazy import to avoid loading SDK at module import time
-            from claude_agent_sdk import ClaudeAgentOptions, query
-            from claude_agent_sdk.types import HookMatcher
-        except ImportError as e:
-            log.error(
-                "orchestrator.adapter.sdk_not_installed",
-                error=str(e),
-            )
-            yield AgentMessage(
-                type="result",
-                content="Claude Agent SDK is not installed. Run: pip install claude-agent-sdk",
-                data={"subtype": "error"},
-            )
-            return
-
         effective_tools = tools or DEFAULT_TOOLS
 
         log.info(
@@ -951,6 +935,22 @@ class ClaudeAgentAdapter:
         )
         if isinstance(dispatch, _RuntimeExecutionDispatchFailure):
             yield self._execution_dispatch_error_message(dispatch)
+            return
+
+        try:
+            # Lazy import to avoid loading SDK at module import time
+            from claude_agent_sdk import ClaudeAgentOptions, query
+            from claude_agent_sdk.types import HookMatcher
+        except ImportError as e:
+            log.error(
+                "orchestrator.adapter.sdk_not_installed",
+                error=str(e),
+            )
+            yield AgentMessage(
+                type="result",
+                content="Claude Agent SDK is not installed. Run: pip install claude-agent-sdk",
+                data={"subtype": "error"},
+            )
             return
 
         # Retry loop for transient errors

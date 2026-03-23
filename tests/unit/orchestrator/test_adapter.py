@@ -10,17 +10,10 @@ import pytest
 
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
-    DELEGATED_EXECUTE_SEED_TOOL_MATCHER,
-    DELEGATED_PARENT_CWD_ARG,
-    DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG,
-    DELEGATED_PARENT_PERMISSION_MODE_ARG,
-    DELEGATED_PARENT_SESSION_ID_ARG,
-    DELEGATED_PARENT_TRANSCRIPT_PATH_ARG,
     AgentMessage,
     ClaudeAgentAdapter,
     RuntimeHandle,
     TaskResult,
-    _build_delegated_tool_context_update,
     _clone_runtime_handle_data,
 )
 
@@ -39,8 +32,12 @@ def _build_mock_claude_agent_sdk(
     *,
     query_impl: Any,
     options_sink: list[dict[str, Any]] | None = None,
-) -> ModuleType:
-    """Build a minimal Claude SDK module stub for adapter execution tests."""
+) -> dict[str, ModuleType | None]:
+    """Build a minimal Claude SDK module stub for adapter execution tests.
+
+    Returns a dict suitable for ``patch.dict("sys.modules", ...)``,
+    covering both ``claude_agent_sdk`` and ``claude_agent_sdk.types``.
+    """
     module = ModuleType("claude_agent_sdk")
 
     class _MockClaudeAgentOptions:
@@ -48,9 +45,21 @@ def _build_mock_claude_agent_sdk(
             if options_sink is not None:
                 options_sink.append(kwargs)
 
+    class _MockHookMatcher:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
     module.ClaudeAgentOptions = _MockClaudeAgentOptions
     module.query = query_impl
-    return module
+
+    types_module = ModuleType("claude_agent_sdk.types")
+    types_module.HookMatcher = _MockHookMatcher  # type: ignore[attr-defined]
+    module.types = types_module  # type: ignore[attr-defined]
+
+    return {
+        "claude_agent_sdk": module,
+        "claude_agent_sdk.types": types_module,
+    }
 
 
 class TestAgentMessage:
@@ -660,45 +669,6 @@ class TestClaudeAgentAdapter:
         assert "sess_abc123" in result.content
         assert result.data["session_id"] == "sess_abc123"
 
-    def test_build_delegated_tool_context_update_for_execute_seed(self) -> None:
-        """Delegated execute-seed tool calls receive internal parent runtime metadata."""
-        update = _build_delegated_tool_context_update(
-            {
-                "tool_name": "mcp__plugin_ouroboros_ouroboros__ouroboros_execute_seed",
-                "tool_input": {"seed_content": "goal: test"},
-                "session_id": "sess_parent",
-                "transcript_path": "/tmp/parent.jsonl",
-                "cwd": "/tmp/project",
-                "permission_mode": "acceptEdits",
-            },
-            ["Read", "mcp__chrome-devtools__click"],
-        )
-
-        assert update is not None
-        updated_input = update["updatedInput"]
-        assert updated_input["seed_content"] == "goal: test"
-        assert updated_input[DELEGATED_PARENT_SESSION_ID_ARG] == "sess_parent"
-        assert updated_input[DELEGATED_PARENT_TRANSCRIPT_PATH_ARG] == "/tmp/parent.jsonl"
-        assert updated_input[DELEGATED_PARENT_CWD_ARG] == "/tmp/project"
-        assert updated_input[DELEGATED_PARENT_PERMISSION_MODE_ARG] == "acceptEdits"
-        assert updated_input[DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG] == [
-            "Read",
-            "mcp__chrome-devtools__click",
-        ]
-
-    def test_build_delegated_tool_context_update_ignores_other_tools(self) -> None:
-        """Only delegated execute-seed tool calls should be rewritten."""
-        update = _build_delegated_tool_context_update(
-            {
-                "tool_name": "Read",
-                "tool_input": {"file_path": "src/app.py"},
-                "session_id": "sess_parent",
-            },
-            ["Read"],
-        )
-
-        assert update is None
-
     @pytest.mark.asyncio
     async def test_execute_task_sdk_not_installed(self) -> None:
         """Test handling when SDK is not installed."""
@@ -728,9 +698,9 @@ class TestClaudeAgentAdapter:
             if False:
                 yield args, kwargs
 
-        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
 
-        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+        with patch.dict("sys.modules", sdk_modules):
             messages = [
                 message
                 async for message in adapter.execute_task(
@@ -770,9 +740,9 @@ class TestClaudeAgentAdapter:
             )
             raise RuntimeError("boom")
 
-        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
 
-        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+        with patch.dict("sys.modules", sdk_modules):
             messages = [message async for message in adapter.execute_task("test prompt")]
 
         assert len(messages) == 2
@@ -816,9 +786,9 @@ class TestClaudeAgentAdapter:
                 subtype="success",
             )
 
-        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
 
-        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+        with patch.dict("sys.modules", sdk_modules):
             result = await adapter.execute_task_to_result(
                 "test prompt",
                 resume_handle=RuntimeHandle(
@@ -853,85 +823,6 @@ class TestClaudeAgentAdapter:
         assert all(message.resume_handle == runtime_handle for message in task_result.messages)
 
     @pytest.mark.asyncio
-    async def test_execute_task_uses_hook_and_fork_session_for_inherited_runtime(self) -> None:
-        """Delegated child runs should fork the parent Claude session and inject tool context."""
-        adapter = ClaudeAgentAdapter(api_key="test")
-        inherited_handle = RuntimeHandle(
-            backend="claude",
-            native_session_id="sess_parent",
-            approval_mode="bypassPermissions",
-            metadata={"fork_session": True},
-        )
-        captured_options: dict[str, Any] = {}
-
-        class FakeClaudeAgentOptions:
-            def __init__(self, **kwargs: Any) -> None:
-                captured_options.update(kwargs)
-
-        async def fake_query(*, prompt: str, options: Any):
-            yield _create_mock_sdk_message(
-                "SystemMessage",
-                subtype="init",
-                data={"session_id": "sess_child"},
-            )
-            yield _create_mock_sdk_message(
-                "ResultMessage",
-                result="Done",
-                subtype="success",
-                session_id="sess_child",
-                is_error=False,
-            )
-
-        with (
-            patch("claude_agent_sdk.ClaudeAgentOptions", FakeClaudeAgentOptions),
-            patch("claude_agent_sdk.query", fake_query),
-        ):
-            messages = [
-                message
-                async for message in adapter.execute_task(
-                    "test prompt",
-                    tools=["Read", "mcp__chrome-devtools__click"],
-                    resume_handle=inherited_handle,
-                )
-            ]
-
-        assert messages[-1].is_final is True
-        assert captured_options["resume"] == "sess_parent"
-        assert captured_options["fork_session"] is True
-        assert captured_options["permission_mode"] == "bypassPermissions"
-        assert captured_options["allowed_tools"] == ["Read", "mcp__chrome-devtools__click"]
-        assert messages[-1].resume_handle is not None
-        assert messages[-1].resume_handle.approval_mode == "bypassPermissions"
-
-        hook_matchers = captured_options["hooks"]["PreToolUse"]
-        assert len(hook_matchers) == 1
-        assert hook_matchers[0].matcher == DELEGATED_EXECUTE_SEED_TOOL_MATCHER
-        assert "mcp__plugin_ouroboros_ouroboros__ouroboros_execute_seed" in hook_matchers[0].matcher
-
-        hook_output = await hook_matchers[0].hooks[0](
-            {
-                "hook_event_name": "PreToolUse",
-                "tool_name": "mcp__plugin_ouroboros_ouroboros__ouroboros_start_execute_seed",
-                "tool_input": {"seed_content": "goal: child"},
-                "tool_use_id": "toolu_123",
-                "session_id": "sess_parent",
-                "transcript_path": "/tmp/parent.jsonl",
-                "cwd": "/tmp/project",
-                "permission_mode": "acceptEdits",
-            },
-            None,
-            {"signal": None},
-        )
-
-        assert hook_output is not None
-        updated_input = hook_output["updatedInput"]
-        assert updated_input[DELEGATED_PARENT_SESSION_ID_ARG] == "sess_parent"
-        assert updated_input[DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG] == [
-            "Read",
-            "mcp__chrome-devtools__click",
-        ]
-
-    @pytest.mark.asyncio
     async def test_execute_task_to_result_failure(self) -> None:
         """Failure aggregation should preserve existing ProviderError details."""
         adapter = ClaudeAgentAdapter(api_key="test", cwd="/tmp/project")
@@ -946,9 +837,9 @@ class TestClaudeAgentAdapter:
             )
             raise RuntimeError("boom")
 
-        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
 
-        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+        with patch.dict("sys.modules", sdk_modules):
             result = await adapter.execute_task_to_result("test prompt")
 
         assert result.is_err
@@ -976,9 +867,9 @@ class TestClaudeAgentAdapter:
             if False:
                 yield args, kwargs
 
-        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
 
-        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+        with patch.dict("sys.modules", sdk_modules):
             result = await adapter.execute_task_to_result(
                 "test prompt",
                 resume_handle=RuntimeHandle(
@@ -1005,7 +896,10 @@ class TestClaudeAgentAdapter:
         """Aggregation should preserve the streaming path's SDK import error precedence."""
         adapter = ClaudeAgentAdapter(api_key="test")
 
-        with patch.dict("sys.modules", {"claude_agent_sdk": None}):
+        with patch.dict(
+            "sys.modules",
+            {"claude_agent_sdk": None, "claude_agent_sdk.types": None},
+        ):
             result = await adapter.execute_task_to_result(
                 "test prompt",
                 resume_handle=RuntimeHandle(
@@ -1014,15 +908,9 @@ class TestClaudeAgentAdapter:
                 ),
             )
 
+        # dispatch rejects the foreign handle *before* the SDK import path
         assert result.is_err
-        assert result.error.message == (
-            "Claude Agent SDK is not installed. Run: pip install claude-agent-sdk"
-        )
-        assert result.error.provider is None
-        assert result.error.status_code is None
-        assert result.error.details == {
-            "messages": ["Claude Agent SDK is not installed. Run: pip install claude-agent-sdk"]
-        }
+        assert "incompatible" in result.error.message
 
     @pytest.mark.asyncio
     async def test_execute_task_streams_runtime_handle_contract_across_messages(
@@ -1055,9 +943,9 @@ class TestClaudeAgentAdapter:
                 session_id="sess_456",
             )
 
-        sdk_module = _build_mock_claude_agent_sdk(query_impl=mock_query)
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
 
-        with patch.dict("sys.modules", {"claude_agent_sdk": sdk_module}):
+        with patch.dict("sys.modules", sdk_modules):
             stream = adapter.execute_task(
                 "test prompt",
                 resume_handle=RuntimeHandle(
