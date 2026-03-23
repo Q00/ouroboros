@@ -112,7 +112,7 @@ uv run ouroboros --version            # verify CLI
 |------|-------------|
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
-| Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key |
+| Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |
 
 ---
 
@@ -144,6 +144,32 @@ llm:
 logging:
   level: info
 ```
+
+For Codex CLI, the recommended documented baseline is GPT-5.4 with medium reasoning effort. Put Ouroboros per-role overrides in `~/.ouroboros/config.yaml`, not in `~/.codex/config.toml`:
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: codex
+  codex_cli_path: /usr/local/bin/codex
+
+llm:
+  backend: codex
+  qa_model: gpt-5.4
+
+clarification:
+  default_model: gpt-5.4
+
+evaluation:
+  semantic_model: gpt-5.4
+
+consensus:
+  advocate_model: gpt-5.4
+  devil_model: gpt-5.4
+  judge_model: gpt-5.4
+```
+
+`ouroboros setup --runtime codex` uses `~/.codex/config.toml` only for the Codex MCP/env hookup and installs managed Ouroboros rules/skills into `~/.codex/`.
 
 ### Environment Variables
 
@@ -272,10 +298,10 @@ Ouroboros delegates code execution to a pluggable runtime backend. Two ship out 
 |---|---|---|
 | **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing |
 | **Install** | `pip install ouroboros-ai[claude]` | `pip install ouroboros-ai` + `npm install -g @openai/codex` |
-| **Skill shortcuts** | `ooo` inside Claude Code | Use `ouroboros` CLI |
+| **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills |
 | **Config value** | `claude` | `codex` |
 
-Both backends run the same core workflow engine (seed execution, TUI). However, user-facing commands differ: Claude Code offers `ooo` skill shortcuts and the full MCP tool suite (evaluate, evolve, unstuck, ralph), while Codex CLI uses `ouroboros` command equivalents — some advanced operations are MCP/Claude-only.
+Both backends run the same core workflow engine (seed execution, TUI). However, user-facing commands still differ: Claude Code has native in-session `ooo` workflows, while Codex CLI relies on `ouroboros setup --runtime codex` to install managed rules/skills plus the MCP hookup. The `ouroboros` CLI remains the most universal terminal path, and some advanced operations are still MCP/Claude-only.
 
 For backend-specific configuration:
 - [Claude Code runtime guide](runtime-guides/claude-code.md)

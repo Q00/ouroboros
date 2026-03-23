@@ -63,7 +63,7 @@ These capabilities depend on the runtime backend's native features and execution
 | Aspect | Claude Code | Codex CLI |
 |--------|-------------|-----------|
 | **Primary UX** | In-session skills and MCP server | Session-oriented Ouroboros runtime over Codex CLI transport |
-| **Skill shortcuts (`ooo`)** | Yes -- skills loaded into Claude Code session | **Not yet available.** Codex skill artifacts exist in the repository but automatic installation into `~/.codex/` is not yet implemented. Use `ouroboros` CLI commands instead (see [Codex runtime guide](runtime-guides/codex.md#ooo-skill-availability-on-codex) for the full equivalence table). `ooo setup` is not supported on Codex — use `ouroboros setup --runtime codex` from the terminal |
+| **Skill shortcuts (`ooo`)** | Yes -- skills loaded into Claude Code session | Yes -- after `ouroboros setup --runtime codex` installs managed skills into `~/.codex/skills/`, rules into `~/.codex/rules/`, and the MCP/env hookup into `~/.codex/config.toml`. Keep role-specific Ouroboros model overrides in `~/.ouroboros/config.yaml` |
 | **MCP integration** | Native MCP server support | Deterministic skill/MCP dispatch through the Ouroboros Codex adapter |
 | **Session context** | Shares Claude Code session context | Preserved via runtime handles, native session IDs, and resume support |
 | **Install extras** | `ouroboros-ai[claude]` | `ouroboros-ai` (base package) + `codex` on PATH |

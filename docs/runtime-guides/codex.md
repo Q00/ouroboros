@@ -11,7 +11,7 @@ Ouroboros can use **OpenAI Codex CLI** as a runtime backend. [Codex CLI](https:/
 
 No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
-> **Model recommendation:** Use **GPT-5.4** (or later) for best results with Codex CLI. GPT-5.4 provides strong coding, multi-step reasoning, and agentic task execution that pairs well with the Ouroboros specification-first workflow harness.
+> **Model recommendation:** Use **GPT-5.4** with **medium** reasoning effort for the documented Codex setup. GPT-5.4 provides strong coding, multi-step reasoning, and agentic task execution that pairs well with the Ouroboros specification-first workflow harness.
 
 ## Prerequisites
 
@@ -66,21 +66,55 @@ Or pass the backend on the command line:
 uv run ouroboros run workflow --runtime codex ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
 ```
 
+### Where Codex users configure what
+
+Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings and per-role model overrides.
+
+Use `~/.codex/config.toml` only for the Codex MCP/env hookup written by `ouroboros setup --runtime codex`.
+
+If you want Codex-backed Ouroboros roles to use explicit models instead of inheriting Codex CLI's active default/profile, set the existing `config.yaml` keys directly:
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: codex
+  codex_cli_path: /usr/local/bin/codex   # omit if codex is already on PATH
+
+llm:
+  backend: codex
+  qa_model: gpt-5.4
+
+clarification:
+  default_model: gpt-5.4
+
+evaluation:
+  semantic_model: gpt-5.4
+
+consensus:
+  advocate_model: gpt-5.4
+  devil_model: gpt-5.4
+  judge_model: gpt-5.4
+  # Optional: the simple-voting roster also lives here as `consensus.models`
+```
+
+When these keys are left at their shipped defaults, the Codex-aware loader resolves them to Codex's `default` sentinel rather than hardcoding a mini model. In practice, Codex then uses its active global default/profile. Explicit `config.yaml` values always win.
+
 ## Command Surface
 
 From the user's perspective, the Codex integration behaves like a **session-oriented Ouroboros runtime** — the same specification-first workflow harness that drives the Claude runtime.
 
 Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, but it preserves native session IDs and resume handles, and the Codex command dispatcher can route `ooo`-style skill commands through the in-process Ouroboros MCP server.
 
-Today, the most reliable documented entrypoint is still the `ouroboros` CLI while Codex artifact installation is being finalized.
-
 `ouroboros setup --runtime codex` currently:
 
 - Detects the `codex` binary on your `PATH`
-- Writes `orchestrator.runtime_backend: codex` to `~/.ouroboros/config.yaml`
+- Writes `orchestrator.runtime_backend: codex` and `llm.backend: codex` to `~/.ouroboros/config.yaml`
 - Records `orchestrator.codex_cli_path` when available
+- Installs managed Ouroboros rules into `~/.codex/rules/`
+- Installs managed Ouroboros skills into `~/.codex/skills/`
+- Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml`
 
-Running `ouroboros setup --runtime codex` automatically installs Codex rule and skill assets into `~/.codex/rules/` and `~/.codex/skills/`. Once installed, Codex can route `ooo`-style skill commands through the Ouroboros MCP server.
+`~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, and `consensus` model settings in `~/.ouroboros/config.yaml`.
 
 ### `ooo` Skill Availability on Codex
 
@@ -141,7 +175,7 @@ The `CodexCliRuntime` adapter launches `codex` (or `codex-cli`) as its transport
 ## Codex CLI Strengths
 
 - **Session-aware Codex runtime** -- Ouroboros preserves Codex session handles and resume state across workflow steps
-- **Strong coding and reasoning** -- GPT-5.4 provides robust code generation and multi-file editing across languages
+- **Strong coding and reasoning** -- GPT-5.4 with medium reasoning effort provides robust code generation and multi-file editing across languages
 - **Agentic task execution** -- effective at decomposing complex tasks into sequential steps and iterating autonomously
 - **Open-source** -- Codex CLI is open-source (Apache 2.0), allowing inspection and contribution
 - **Ouroboros harness** -- the specification-first workflow engine adds structured acceptance criteria, evaluation principles, and deterministic exit conditions on top of Codex CLI's capabilities
@@ -154,7 +188,7 @@ Codex CLI and Claude Code are independent runtime backends with different tool s
 |--------|-----------|-------------|
 | What it is | Ouroboros session runtime backed by Codex CLI transport | Anthropic's agentic coding tool |
 | Authentication | OpenAI API key | Max Plan subscription |
-| Model | GPT-5.4 (recommended) | Claude (via claude-agent-sdk) |
+| Model | GPT-5.4 with medium reasoning effort (recommended) | Claude (via claude-agent-sdk) |
 | Sandbox | Codex CLI's own sandbox model | Claude Code's permission system |
 | Tool surface | Codex-native tools (file I/O, shell) | Read, Write, Edit, Bash, Glob, Grep |
 | Session model | Session-aware via runtime handles, resume IDs, and skill dispatch | Native Claude session context |
@@ -233,7 +267,7 @@ The database will be created automatically at `~/.ouroboros/ouroboros.db`.
 
 Using Codex CLI as the runtime backend requires an OpenAI API key and incurs standard OpenAI API usage charges. Costs depend on:
 
-- Model used (GPT-5.4 recommended)
+- Model used (GPT-5.4 with medium reasoning effort recommended)
 - Task complexity and token usage
 - Number of tool calls and iterations
 
