@@ -1485,8 +1485,8 @@ class TestInterviewHandlerCwd:
         assert result.is_ok
         assert state.status == InterviewStatus.COMPLETED
         assert state.rounds == []
-        assert state.ambiguity_score is None
-        assert state.ambiguity_breakdown is None
+        # Score is preserved (not cleared) since completion now gates on it
+        assert state.ambiguity_score == 0.14
         mock_engine.ask_next_question.assert_not_called()
         assert result.value.meta["completed"] is True
 
