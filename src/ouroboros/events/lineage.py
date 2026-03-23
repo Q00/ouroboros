@@ -112,6 +112,7 @@ def lineage_generation_interrupted(
     generation_number: int,
     last_completed_phase: str | None = None,
     partial_state: dict | None = None,
+    seed_json: str | None = None,
 ) -> BaseEvent:
     """Create event when a generation is gracefully interrupted by SIGINT.
 
@@ -122,6 +123,8 @@ def lineage_generation_interrupted(
         last_completed_phase: Must be a valid GenerationPhase value
             (wondering, reflecting, seeding, executing) or None if
             no phase completed before interruption.
+        seed_json: JSON-serialized current seed at time of interruption,
+            enabling resume with the evolved seed (not the stale parent).
     """
     data: dict = {
         "generation_number": generation_number,
@@ -130,6 +133,8 @@ def lineage_generation_interrupted(
         data["last_completed_phase"] = last_completed_phase
     if partial_state:
         data["partial_state"] = partial_state
+    if seed_json:
+        data["seed_json"] = seed_json
     return BaseEvent(
         type="lineage.generation.interrupted",
         aggregate_type="lineage",

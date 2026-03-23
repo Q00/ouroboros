@@ -141,11 +141,13 @@ class LineageProjector:
             elif event.type == "lineage.generation.interrupted":
                 data = event.data
                 gen_num = data["generation_number"]
-                interrupt_update = {
+                interrupt_update: dict = {
                     "phase": GenerationPhase.INTERRUPTED,
                     "last_completed_phase": data.get("last_completed_phase"),
                     "partial_state": data.get("partial_state"),
                 }
+                if data.get("seed_json"):
+                    interrupt_update["seed_json"] = data["seed_json"]
                 if gen_num in generations:
                     old = generations[gen_num]
                     generations[gen_num] = old.model_copy(update=interrupt_update)
@@ -263,5 +265,12 @@ class LineageProjector:
                     last_gen = gen
                     last_phase = GenerationPhase.INTERRUPTED
                     interrupted_phase = event.data.get("last_completed_phase")
+
+            elif event.type == "lineage.rewound":
+                target_gen = event.data.get("to_generation", 0)
+                if target_gen > 0:
+                    last_gen = target_gen
+                    last_phase = GenerationPhase.COMPLETED
+                    interrupted_phase = None
 
         return last_gen, last_phase, interrupted_phase

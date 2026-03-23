@@ -527,10 +527,50 @@ class EvolutionaryLoop:
             else:
                 generation_number = last_gen + 1
 
-            # Reconstruct seed from last completed generation
+            # Reconstruct seed — prefer interrupted gen's seed_json (has evolved state)
             if initial_seed is not None:
                 # Caller provided seed explicitly (e.g., after rewind)
                 current_seed = initial_seed
+            elif last_phase == GenerationPhase.INTERRUPTED:
+                # Try to use the interrupted generation's seed (preserves evolved state)
+                interrupted_gen = next(
+                    (
+                        g
+                        for g in reversed(lineage.generations)
+                        if g.phase == GenerationPhase.INTERRUPTED
+                    ),
+                    None,
+                )
+                if interrupted_gen and interrupted_gen.seed_json:
+                    try:
+                        current_seed = Seed.from_dict(json.loads(interrupted_gen.seed_json))
+                    except Exception as e:
+                        logger.warning(
+                            "evolution.resume.interrupted_seed_failed",
+                            extra={"error": str(e)},
+                        )
+                        # Fall through to last completed generation
+                        interrupted_gen = None
+
+                if not interrupted_gen or not interrupted_gen.seed_json:
+                    # Fallback: use last completed generation's seed
+                    last_completed = next(
+                        (
+                            g
+                            for g in reversed(lineage.generations)
+                            if g.phase == GenerationPhase.COMPLETED
+                        ),
+                        None,
+                    )
+                    if last_completed and last_completed.seed_json:
+                        current_seed = Seed.from_dict(json.loads(last_completed.seed_json))
+                    else:
+                        return Result.err(
+                            OuroborosError(
+                                "Lineage was interrupted before any generation completed. "
+                                "Re-provide initial_seed to resume."
+                            )
+                        )
             elif lineage.generations:
                 last_completed = next(
                     (
@@ -621,16 +661,8 @@ class EvolutionaryLoop:
             self._uninstall_sigint_handler()
 
         if gen_result.is_err:
-            # Emit generation.failed event so the event store reflects the failure.
-            # Without this, only generation.started is recorded, leaving an orphan.
-            await self.event_store.append(
-                lineage_generation_failed(
-                    lineage.lineage_id,
-                    generation_number,
-                    "executing",
-                    str(gen_result.error),
-                )
-            )
+            # Note: _run_generation_phases already emits a phase-specific
+            # generation.failed event. No duplicate emission here.
             failed_gen = GenerationResult(
                 generation_number=generation_number,
                 seed=current_seed,
@@ -856,12 +888,18 @@ class EvolutionaryLoop:
             logger.warning("evolution.generation.partial_state_build_failed", exc_info=True)
 
         try:
+            try:
+                seed_json_str = json.dumps(current_seed.to_dict())
+            except (TypeError, AttributeError):
+                seed_json_str = None
+
             await self.event_store.append(
                 lineage_generation_interrupted(
                     lineage_id,
                     generation_number,
                     last_completed_phase=last_completed_phase,
                     partial_state=partial_state or None,
+                    seed_json=seed_json_str,
                 )
             )
         except Exception:
@@ -909,7 +947,7 @@ class EvolutionaryLoop:
                 seeding → executing → evaluating.
         """
         # Phase ordering for resume skip logic
-        _PHASE_ORDER = ["started", "wondering", "reflecting", "seeding", "executing", "evaluating"]
+        _PHASE_ORDER = ["wondering", "reflecting", "seeding", "executing", "evaluating"]
 
         def _should_skip(phase: str) -> bool:
             """Return True if this phase was already completed before interruption."""
@@ -1132,7 +1170,7 @@ class EvolutionaryLoop:
         elif wonder_output is not None:
             pre_exec_phase = GenerationPhase.WONDERING.value
         else:
-            pre_exec_phase = "started"  # Gen 1: only started event emitted
+            pre_exec_phase = None  # Gen 1: no phase completed yet
         interrupted = await self._check_shutdown(
             lineage.lineage_id,
             generation_number,
