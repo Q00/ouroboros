@@ -1249,7 +1249,11 @@ class TestOrchestratorRunner:
             result = await runner.execute_seed(sample_seed, parallel=False)
 
         assert result.is_ok
-        assert captured_kwargs["resume_handle"] == inherited_handle
+        resume_handle = captured_kwargs["resume_handle"]
+        assert resume_handle is not None
+        assert resume_handle.backend == inherited_handle.backend
+        assert resume_handle.native_session_id == inherited_handle.native_session_id
+        assert resume_handle.metadata.get("fork_session") is True
         assert "mcp__chrome-devtools__click" in captured_kwargs["tools"]
 
     @pytest.mark.asyncio
@@ -1327,11 +1331,17 @@ class TestOrchestratorRunner:
                 runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
             ),
         ):
+            from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+            tool_catalog = assemble_session_tool_catalog(
+                ["Read", "mcp__chrome-devtools__click"],
+            )
             result = await runner._execute_parallel(
                 seed=sample_seed,
                 exec_id="exec_parallel",
                 tracker=tracker,
                 merged_tools=["Read", "mcp__chrome-devtools__click"],
+                tool_catalog=tool_catalog,
                 system_prompt="system",
                 start_time=datetime.now(UTC),
             )
@@ -1690,11 +1700,12 @@ class TestOrchestratorRunnerWithMCP:
             inherited_tools=["Read", "mcp__chrome-devtools__click"],
         )
 
-        merged_tools, provider = await runner._get_merged_tools("session_123")
+        merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
 
         assert "mcp__chrome-devtools__click" in merged_tools
         assert merged_tools.count("Read") == 1
         assert provider is None
+        assert tool_catalog is not None
 
     @pytest.mark.asyncio
     async def test_get_merged_tools_mcp_failure(
