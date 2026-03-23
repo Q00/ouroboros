@@ -146,7 +146,7 @@ class EvaluationSummary(BaseModel, frozen=True):
         return data
 
     @model_validator(mode="after")
-    def _reconcile_approval_with_ac_results(self) -> "EvaluationSummary":
+    def _reconcile_approval_with_ac_results(self) -> EvaluationSummary:
         """Eagerly reconcile approval fields with AC results at construction time."""
         if self.ac_results:
             ac_passed = all(ac.passed for ac in self.ac_results)

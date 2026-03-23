@@ -151,13 +151,8 @@ def _register_codex_mcp_server() -> None:
 
 def _print_codex_config_guidance(config_path: Path) -> None:
     """Explain where Codex users should configure Ouroboros vs. Codex settings."""
-    print_info(
-        "Configure Ouroboros runtime and per-role model overrides in "
-        f"{config_path}."
-    )
-    print_info(
-        "Use ~/.codex/config.toml only for the Codex MCP/env hookup written by setup."
-    )
+    print_info(f"Configure Ouroboros runtime and per-role model overrides in {config_path}.")
+    print_info("Use ~/.codex/config.toml only for the Codex MCP/env hookup written by setup.")
 
 
 def _install_codex_artifacts() -> None:

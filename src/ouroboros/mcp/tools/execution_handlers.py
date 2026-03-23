@@ -292,7 +292,11 @@ class ExecuteSeedHandler:
                 backend=self.agent_runtime_backend,
                 cwd=resolved_cwd,
                 llm_backend=self.llm_backend,
-                **({"permission_mode": delegated_permission_mode} if delegated_permission_mode else {}),
+                **(
+                    {"permission_mode": delegated_permission_mode}
+                    if delegated_permission_mode
+                    else {}
+                ),
             )
             runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
             resolved_llm_backend = resolve_llm_backend(self.llm_backend)
