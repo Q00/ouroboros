@@ -333,8 +333,15 @@ class OntologyLineage(BaseModel, frozen=True):
         return self.generations[-1].ontology_snapshot if self.generations else None
 
     def with_generation(self, record: GenerationRecord) -> OntologyLineage:
-        """Return new lineage with appended generation."""
-        return self.model_copy(update={"generations": self.generations + (record,)})
+        """Return new lineage with appended or replaced generation.
+
+        If a generation with the same number already exists (e.g., from a
+        failed/interrupted attempt), it is replaced instead of duplicated.
+        """
+        existing = tuple(
+            g for g in self.generations if g.generation_number != record.generation_number
+        )
+        return self.model_copy(update={"generations": existing + (record,)})
 
     def with_status(self, status: LineageStatus) -> OntologyLineage:
         """Return new lineage with updated status."""

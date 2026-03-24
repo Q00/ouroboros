@@ -171,11 +171,12 @@ class JobManager:
                 job_id,
                 {
                     "status": terminal_status.value,
-                    "message": "Job complete"
-                    if terminal_status == JobStatus.COMPLETED
-                    else "Job cancelled"
-                    if terminal_status == JobStatus.CANCELLED
-                    else "Job interrupted",
+                    "message": {
+                        JobStatus.COMPLETED: "Job complete",
+                        JobStatus.CANCELLED: "Job cancelled",
+                        JobStatus.INTERRUPTED: "Job interrupted",
+                        JobStatus.FAILED: "Job failed",
+                    }.get(terminal_status, "Job complete"),
                     "result_text": getattr(result, "text_content", str(result))[:20_000],
                     "result_meta": _safe_meta(getattr(result, "meta", {})),
                     "is_error": bool(getattr(result, "is_error", False)),

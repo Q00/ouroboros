@@ -859,6 +859,7 @@ class EvolutionaryLoop:
         reflect_output: ReflectOutput | None = None,
         execution_output: str | None = None,
         evaluation_summary: EvaluationSummary | None = None,
+        validation_output: str | None = None,
     ) -> GenerationResult | None:
         """Check if graceful shutdown was requested.
 
@@ -888,6 +889,8 @@ class EvolutionaryLoop:
                 partial_state["execution_output"] = execution_output[:10_000]
             if evaluation_summary:
                 partial_state["evaluation_summary"] = evaluation_summary.model_dump(mode="json")
+            if validation_output:
+                partial_state["validation_output"] = validation_output[:5_000]
         except (TypeError, ValueError, KeyError):
             logger.warning("evolution.generation.partial_state_build_failed", exc_info=True)
 
@@ -928,6 +931,7 @@ class EvolutionaryLoop:
             reflect_output=reflect_output,
             execution_output=execution_output,
             evaluation_summary=evaluation_summary,
+            validation_output=validation_output,
             phase=GenerationPhase.INTERRUPTED,
             success=False,
         )
@@ -1405,6 +1409,7 @@ class EvolutionaryLoop:
             reflect_output=reflect_output,
             execution_output=execution_output,
             evaluation_summary=evaluation_summary,
+            validation_output=validation_output,
         )
         if interrupted:
             return Result.ok(interrupted)
