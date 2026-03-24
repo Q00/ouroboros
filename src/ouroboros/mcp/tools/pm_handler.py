@@ -715,8 +715,10 @@ class PMInterviewHandler:
             (r for r in reversed(state.rounds) if r.user_response is None),
             None,
         )
-        first_question = pending.question if pending else (
-            state.rounds[-1].question if state.rounds else "No question available."
+        first_question = (
+            pending.question
+            if pending
+            else (state.rounds[-1].question if state.rounds else "No question available.")
         )
 
         return Result.ok(
@@ -839,7 +841,10 @@ class PMInterviewHandler:
             save_result = await engine.save_state(state)
             if isinstance(save_result, Result) and save_result.is_err:
                 return Result.err(
-                    MCPToolError(f"Failed to persist completed state: {save_result.error}", tool_name="ouroboros_pm_interview")
+                    MCPToolError(
+                        f"Failed to persist completed state: {save_result.error}",
+                        tool_name="ouroboros_pm_interview",
+                    )
                 )
             _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
@@ -936,7 +941,10 @@ class PMInterviewHandler:
         save_result = await engine.save_state(state)
         if isinstance(save_result, Result) and save_result.is_err:
             return Result.err(
-                MCPToolError(f"Failed to persist resume state: {save_result.error}", tool_name="ouroboros_pm_interview")
+                MCPToolError(
+                    f"Failed to persist resume state: {save_result.error}",
+                    tool_name="ouroboros_pm_interview",
+                )
             )
         _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 

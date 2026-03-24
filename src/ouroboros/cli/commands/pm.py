@@ -19,6 +19,7 @@ import typer
 from ouroboros.bigbang.interview import InterviewRound
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.core.types import Result
 
 app = typer.Typer(
     name="pm",
