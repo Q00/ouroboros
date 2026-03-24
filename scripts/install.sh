@@ -103,13 +103,16 @@ echo
 echo "Installing ${INSTALL_SPEC} ..."
 
 # 3. Install (or upgrade if already installed)
+INSTALL_METHOD=""
 if [ "$HAS_UV" = true ]; then
+  INSTALL_METHOD="uv"
   if [ -n "$PRE_FLAG" ]; then
     uv tool install --upgrade --prerelease=allow "$INSTALL_SPEC"
   else
     uv tool install --upgrade "$INSTALL_SPEC"
   fi
 elif [ "$HAS_PIPX" = true ]; then
+  INSTALL_METHOD="pipx"
   if [ -n "$PRE_FLAG" ]; then
     pipx install --pip-args='--pre' "$INSTALL_SPEC" 2>/dev/null \
       || pipx upgrade --pip-args='--pre' "$INSTALL_SPEC"
@@ -118,6 +121,7 @@ elif [ "$HAS_PIPX" = true ]; then
       || pipx upgrade "$INSTALL_SPEC"
   fi
 else
+  INSTALL_METHOD="pip"
   if [ -n "$PRE_FLAG" ]; then
     $PYTHON -m pip install --user --upgrade --pre "$INSTALL_SPEC"
   else
@@ -152,10 +156,10 @@ if command -v claude &>/dev/null; then
   MCP_FILE="$HOME/.claude/mcp.json"
   mkdir -p "$HOME/.claude"
 
-  # MCP command depends on how ouroboros was installed
-  if [ "$HAS_UV" = true ]; then
+  # MCP command matches the installer that actually ran in step 3
+  if [ "$INSTALL_METHOD" = "uv" ]; then
     OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"],"timeout":600}'
-  elif [ "$HAS_PIPX" = true ]; then
+  elif [ "$INSTALL_METHOD" = "pipx" ]; then
     OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"],"timeout":600}'
   else
     OUROBOROS_ENTRY='{"command":"python3","args":["-m","ouroboros","mcp","serve"],"timeout":600}'
