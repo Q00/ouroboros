@@ -113,7 +113,9 @@ class TestExecuteSeedHandlerQA:
         handler = ExecuteSeedHandler()
 
         fake_exec = FakeExecResult(
-            summary={"verification_report": "### AC 1: [PASS] All tests pass\nResult:\nDetailed proof"}
+            summary={
+                "verification_report": "### AC 1: [PASS] All tests pass\nResult:\nDetailed proof"
+            }
         )
         mock_runner = AsyncMock()
         mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))

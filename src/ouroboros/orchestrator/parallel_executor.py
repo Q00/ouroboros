@@ -258,7 +258,7 @@ def _render_ac_section(
         status = "PASS" if result.success else "FAIL"
         label = "AC" if len(index_path) == 1 else "Sub-AC"
         lines.append(
-            f'{"#" * heading_level} {label} {".".join(str(i) for i in index_path)}: '
+            f"{'#' * heading_level} {label} {'.'.join(str(i) for i in index_path)}: "
             f"[{status}] {result.ac_content}"
         )
 

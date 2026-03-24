@@ -548,7 +548,9 @@ class TestOrchestratorRunner:
                     type="tool",
                     content="Running tests",
                     tool_name="Bash",
-                    data={"tool_input": {"command": "uv   run pytest\n tests/unit/test_runner.py -q"}},
+                    data={
+                        "tool_input": {"command": "uv   run pytest\n tests/unit/test_runner.py -q"}
+                    },
                 ),
                 AgentMessage(
                     type="tool",
