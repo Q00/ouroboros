@@ -20,8 +20,19 @@
       "homepage": "https://github.com/Q00/ouroboros",
       "repository": "https://github.com/Q00/ouroboros",
       "license": "MIT",
-      "keywords": ["workflow", "requirements", "socratic", "interview", "seed", "evaluation"],
-      "tags": ["requirement-engineering", "self-improving", "crystallization"]
+      "keywords": [
+        "workflow",
+        "requirements",
+        "socratic",
+        "interview",
+        "seed",
+        "evaluation"
+      ],
+      "tags": [
+        "requirement-engineering",
+        "self-improving",
+        "crystallization"
+      ]
     }
   ]
 }

@@ -109,55 +109,41 @@ Ouroboros는 이 철학을 **Double Diamond** 구조로 풀어냅니다:
 
 ## 빠른 시작
 
-<details>
-<summary><strong>Claude Code (안정 버전)</strong></summary>
-
-```bash
-claude plugin marketplace add Q00/ouroboros
-claude plugin install ouroboros@ouroboros
-```
-
-Claude Code 세션 안에서 `ooo setup` 실행 후 바로 사용 가능합니다.
-
-```text
-ooo interview "I want to build a task management CLI"
-```
-
-</details>
-
-<details>
-<summary><strong>Codex CLI (베타)</strong></summary>
-
-```bash
-npm install -g @openai/codex      # Codex CLI 설치 (이미 있으면 스킵)
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
-```
-
-Ouroboros 설치 + Codex 스킬/룰/MCP 서버 등록이 한 번에 됩니다.
-
-```bash
-ouroboros init start "I want to build a task management CLI"
-```
-
-</details>
-
-<details>
-<summary><strong>pip 직접 설치</strong></summary>
+**설치** — 한 줄이면 전부 자동:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
 ```
 
-또는 수동으로:
-```bash
-pip install ouroboros-ai==0.26.0b3
-ouroboros setup
+**시작** — 세션 열고 바로:
+
+```
+claude
+> ooo interview "I want to build a task management CLI"
 ```
 
-</details>
+> Claude Code와 Codex CLI 모두 지원합니다. 런타임 감지, MCP 서버 등록, 스킬 설치까지 자동으로 처리됩니다.
 
-> `ooo` 명령어는 Claude Code 또는 Codex CLI 세션 안에서 실행됩니다.
-> 터미널에서는 `ouroboros init start`, `ouroboros run seed.yaml` 등을 사용합니다.
+<details>
+<summary><strong>다른 설치 방법</strong></summary>
+
+**Claude Code 플러그인만** (시스템 패키지 없이):
+```bash
+claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
+```
+Claude Code 세션 안에서 `ooo setup` 실행.
+
+**pip / uv / pipx**:
+```bash
+pip install ouroboros-ai                # 기본
+pip install ouroboros-ai[claude]        # + Claude Code 의존성
+pip install ouroboros-ai[all]           # 전부
+ouroboros setup                         # 런타임 설정
+```
+
+런타임별 가이드: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
+
+</details>
 
 <details>
 <summary><strong>무슨 일이 일어났나요?</strong></summary>

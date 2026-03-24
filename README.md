@@ -90,83 +90,39 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 
 ## Quick Start
 
-Ouroboros works with multiple AI runtime backends. Pick yours and follow three steps:
+**Install** — one command, everything auto-detected:
 
-<!-- Runtime tabs using HTML details -->
-<details open>
-<summary><strong>Claude Code</strong></summary>
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
+```
 
-**Step 1 -- Install the plugin**
+**Build** — open a session and go:
+
+```
+claude
+> ooo interview "I want to build a task management CLI"
+```
+
+> Works with Claude Code and Codex CLI. The installer detects your runtime, registers the MCP server, and installs skills automatically.
+
+<details>
+<summary><strong>Other install methods</strong></summary>
+
+**Claude Code plugin only** (no system package):
 ```bash
 claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros
 ```
+Then run `ooo setup` inside a Claude Code session.
 
-**Step 2 -- Set up your project** (inside a Claude Code session)
-```
-ooo setup
-```
-
-**Step 3 -- Start building**
-```
-ooo interview "I want to build a task management CLI"
-```
-
-> `claude plugin ...` commands run in your terminal. `ooo` commands are Claude Code skills -- they only work inside an active Claude Code session (start one with `claude`).
-
-See the [Claude Code runtime guide](./docs/runtime-guides/claude-code.md) for backend configuration and CLI options.
-
-</details>
-
-<details>
-<summary><strong>Codex CLI</strong></summary>
-
+**pip / uv / pipx**:
 ```bash
-npm install -g @openai/codex      # Codex CLI (if not installed)
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
+pip install ouroboros-ai                # base
+pip install ouroboros-ai[claude]        # + Claude Code deps
+pip install ouroboros-ai[all]           # everything
+ouroboros setup                         # configure runtime
 ```
 
-Installs Ouroboros, runs `ouroboros setup --runtime codex`, writes `~/.ouroboros/config.yaml`, installs managed Codex rules/skills, and registers the Ouroboros MCP server in `~/.codex/config.toml`.
-
-Set Codex role-specific model overrides such as `clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, and `consensus.*` in `~/.ouroboros/config.yaml`. Keep `~/.codex/config.toml` for MCP/env hookup only.
-
-```bash
-ouroboros init start "I want to build a task management CLI"
-```
-
-See the [Codex CLI runtime guide](./docs/runtime-guides/codex.md) for full details.
-
-</details>
-
-<details>
-<summary><strong>Alternative: Standalone (pip)</strong></summary>
-
-**One-liner (recommended):**
-```bash
-# TODO: Change URL to main branch when 0.26.0 stable is released
-curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
-```
-
-**Or manual install:**
-```bash
-pip install ouroboros-ai==0.26.0b3    # Beta: Claude + Codex support
-ouroboros setup                       # Auto-detects available runtimes
-```
-
-**Step 3 -- Start building**
-```bash
-ouroboros init start "I want to build a task management CLI"
-```
-
-<details>
-<summary>Optional extras</summary>
-
-```bash
-pip install ouroboros-ai[claude]      # + Claude Code runtime deps
-pip install ouroboros-ai[litellm]     # + LiteLLM multi-provider support
-pip install ouroboros-ai[all]         # Everything (claude + litellm + dashboard)
-```
-
-</details>
+See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
 
 </details>
 
