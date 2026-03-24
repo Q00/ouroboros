@@ -1171,7 +1171,26 @@ class EvolutionaryLoop:
 
             # Seed generation — outside Reflect block so it runs even when
             # Reflect is skipped on resume (resume_after_phase="reflecting")
-            if reflect_output and not _should_skip("seeding"):
+            # When seeding is skipped on resume, still compute ontology_delta
+            # so lineage.ontology.evolved events are emitted consistently.
+            if reflect_output and _should_skip("seeding"):
+                # Seeding was already done before interruption; compute delta
+                # from the previous generation's ontology to the current seed.
+                if lineage.generations:
+                    prev_completed = next(
+                        (
+                            g
+                            for g in reversed(lineage.generations)
+                            if g.phase == GenerationPhase.COMPLETED
+                        ),
+                        None,
+                    )
+                    if prev_completed:
+                        ontology_delta = OntologyDelta.compute(
+                            prev_completed.ontology_snapshot,
+                            current_seed.ontology_schema,
+                        )
+            elif reflect_output and not _should_skip("seeding"):
                 # Phase transition: reflecting → seeding
                 await self.event_store.append(
                     lineage_generation_phase_changed(
