@@ -41,6 +41,10 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Sync plugin version
+        if: steps.check.outputs.skip == 'false'
+        run: python scripts/sync-plugin-version.py --write
+
       - name: Build package
         if: steps.check.outputs.skip == 'false'
         id: build
