@@ -84,12 +84,13 @@ if [ -z "$RUNTIME" ]; then
     echo "  [3] All     (pip install ${PACKAGE_NAME}[all])"
     read -rp "Select [1]: " choice
   else
-    # Pipe mode (curl | bash): default to base package
+    # Pipe mode (curl | bash): install base package, skip runtime-specific setup
     echo
     echo "  No runtime detected (non-interactive: installing base package)"
-    choice=""
+    choice="0"
   fi
   case "${choice:-1}" in
+    0) EXTRAS=""; RUNTIME="" ;;
     2) EXTRAS="[claude]"; RUNTIME="claude" ;;
     3) EXTRAS="[all]"; RUNTIME="" ;;
     *) EXTRAS=""; RUNTIME="codex" ;;
@@ -151,7 +152,14 @@ if command -v claude &>/dev/null; then
   MCP_FILE="$HOME/.claude/mcp.json"
   mkdir -p "$HOME/.claude"
 
-  OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"],"timeout":600}'
+  # MCP command depends on how ouroboros was installed
+  if [ "$HAS_UV" = true ]; then
+    OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"],"timeout":600}'
+  elif [ "$HAS_PIPX" = true ]; then
+    OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"],"timeout":600}'
+  else
+    OUROBOROS_ENTRY='{"command":"python3","args":["-m","ouroboros","mcp","serve"],"timeout":600}'
+  fi
 
   # Find a working Python: system python3, or uv-managed python
   MCP_PYTHON=""
