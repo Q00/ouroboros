@@ -106,8 +106,15 @@ def _save_pm_meta(
             "classifications": [],
         }
 
+    # Preserve status from existing meta if not explicitly overridden.
+    # This prevents later saves from dropping the "interview_started" marker
+    # that _handle_select_repos() depends on for idempotent replay.
     if status is not None:
         meta["status"] = status
+    else:
+        existing = _load_pm_meta(session_id, data_dir)
+        if existing and "status" in existing:
+            meta["status"] = existing["status"]
 
     if extra:
         meta.update(extra)
