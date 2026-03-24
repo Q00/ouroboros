@@ -704,6 +704,29 @@ class TestAmbiguityScorerParseResponse:
             == "Goal Clarity justification not provided by model."
         )
 
+    def test_parse_brownfield_response_missing_context_justification_uses_fallback(self) -> None:
+        """_parse_scoring_response tolerates missing brownfield context justification."""
+        mock_adapter = MagicMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+
+        response = (
+            '{"goal_clarity_score": 0.9, "goal_clarity_justification": "Good goal.", '
+            '"constraint_clarity_score": 0.8, "constraint_clarity_justification": '
+            '"Clear constraints.", "success_criteria_clarity_score": 0.7, '
+            '"success_criteria_clarity_justification": "Clear criteria.", '
+            '"context_clarity_score": 0.6}'
+        )
+
+        breakdown = scorer._parse_scoring_response(response, is_brownfield=True)
+
+        assert breakdown.context_clarity is not None
+        assert breakdown.context_clarity.clarity_score == 0.6
+        assert breakdown.context_clarity.weight == 0.15
+        assert (
+            breakdown.context_clarity.justification
+            == "Context Clarity justification not provided by model."
+        )
+
     def test_parse_response_invalid_json(self) -> None:
         """_parse_scoring_response raises error for invalid JSON."""
         mock_adapter = MagicMock()
