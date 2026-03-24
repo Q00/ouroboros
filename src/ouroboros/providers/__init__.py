@@ -14,7 +14,11 @@ from ouroboros.providers.base import (
     MessageRole,
     UsageInfo,
 )
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+try:
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+except ImportError:
+    LiteLLMAdapter = None  # type: ignore[assignment,misc]
 
 __all__ = [
     # Protocol

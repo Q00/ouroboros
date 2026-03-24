@@ -37,6 +37,10 @@
 
 ---
 
+> **⚠️ Security Notice**: LiteLLM multi-provider support has been temporarily removed due to a [PyPI supply chain attack](https://github.com/Q00/ouroboros/issues/195) affecting litellm 1.82.7/1.82.8. If you installed ouroboros recently, please check the issue for remediation steps. The core plugin functionality (Claude Code / Codex) is **not affected**.
+
+---
+
 > *AI can build anything. The hard part is knowing what to build.*
 
 Ouroboros is a **specification-first AI development system**. It applies Socratic questioning and ontological analysis to expose your hidden assumptions — before a single line of code is written.

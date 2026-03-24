@@ -41,7 +41,11 @@ from ouroboros.events.evaluation import (
     create_stage3_started_event,
 )
 from ouroboros.providers.base import CompletionConfig, LLMAdapter, Message, MessageRole
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+try:
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+except ImportError:
+    LiteLLMAdapter = None  # type: ignore[assignment,misc]
 from ouroboros.strategies.devil_advocate import ConsensusContext, DevilAdvocateStrategy
 
 # Default models for consensus voting (Frontier tier)

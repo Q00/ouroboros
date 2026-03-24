@@ -21,7 +21,11 @@ from ouroboros.bigbang.interview import InterviewState
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+try:
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+except ImportError:
+    LiteLLMAdapter = None  # type: ignore[assignment,misc]
 
 log = structlog.get_logger()
 

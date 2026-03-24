@@ -17,13 +17,21 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import litellm
 import structlog
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+try:
+    import litellm
+except ImportError:
+    litellm = None  # type: ignore[assignment]
+
+try:
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+except ImportError:
+    LiteLLMAdapter = None  # type: ignore[assignment,misc]
 
 log = structlog.get_logger()
 
@@ -158,6 +166,9 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
     Returns:
         The number of tokens in the text.
     """
+    if litellm is None:
+        return len(text) // 4
+
     try:
         return litellm.token_counter(model=model, text=text)
     except Exception as e:

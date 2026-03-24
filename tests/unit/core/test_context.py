@@ -26,7 +26,11 @@ from ouroboros.providers.base import (
     CompletionResponse,
     UsageInfo,
 )
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+try:
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+except ImportError:
+    LiteLLMAdapter = None  # type: ignore[assignment,misc]
 
 
 class TestTokenCounting:
@@ -192,6 +196,7 @@ class TestWorkflowContext:
         assert restored.metadata == original.metadata
 
 
+@pytest.mark.skipif(LiteLLMAdapter is None, reason="litellm not installed")
 class TestLLMCompression:
     """Tests for LLM-based compression."""
 
@@ -242,6 +247,7 @@ class TestLLMCompression:
         assert result.error.status_code == 429
 
 
+@pytest.mark.skipif(LiteLLMAdapter is None, reason="litellm not installed")
 class TestContextCompression:
     """Tests for full context compression."""
 
@@ -461,6 +467,7 @@ class TestFilteredContext:
         assert len(filtered.relevant_facts) < len(full_context.key_facts)
 
 
+@pytest.mark.skipif(LiteLLMAdapter is None, reason="litellm not installed")
 class TestEdgeCases:
     """Tests for edge cases and error conditions."""
 

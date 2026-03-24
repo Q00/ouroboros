@@ -3,15 +3,17 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import litellm
+import pytest
 
-from ouroboros.core.errors import ProviderError
-from ouroboros.providers.base import (
+litellm = pytest.importorskip("litellm", reason="litellm not installed")
+
+from ouroboros.core.errors import ProviderError  # noqa: E402
+from ouroboros.providers.base import (  # noqa: E402
     CompletionConfig,
     Message,
     MessageRole,
 )
-from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+from ouroboros.providers.litellm_adapter import LiteLLMAdapter  # noqa: E402
 
 
 def create_mock_response(

@@ -6,7 +6,9 @@ Get Ouroboros running and execute your first AI workflow in under 10 minutes.
 
 - Python 3.14+
 - [uv](https://github.com/astral-sh/uv) package manager
-- An LLM API key (Anthropic, OpenAI, or any [LiteLLM-supported provider](https://docs.litellm.ai/docs/providers))
+- An LLM API key (Anthropic recommended)
+
+> **Note**: LiteLLM multi-provider support is temporarily unavailable due to a [PyPI supply chain incident](https://github.com/Q00/ouroboros/issues/195). Use Anthropic API or Claude Code plugin mode instead.
 
 ## 1. Install
 

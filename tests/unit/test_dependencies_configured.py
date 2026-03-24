@@ -21,7 +21,7 @@ def test_runtime_dependencies_configured():
         "httpx",
         "pydantic",
         "structlog",
-        "litellm",
+        # "litellm",  # Removed: PyPI supply chain attack (issue #195)
         "sqlalchemy",
         "aiosqlite",
         "stamina",
