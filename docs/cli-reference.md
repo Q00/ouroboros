@@ -83,7 +83,7 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 |--------|-------------|
 | `-r, --resume TEXT` | Resume an existing interview by ID |
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
-| `-o, --orchestrator` | Use Claude Code (Max Plan) instead of LiteLLM. No API key required |
+| `-o, --orchestrator` | Use Claude Code (Max Plan) instead of Anthropic API. No API key required |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -493,21 +493,21 @@ ouroboros run seed.yaml
 ouroboros monitor
 ```
 
-### Using LiteLLM (External API)
+### Using Anthropic API (Default Non-Orchestrator Path)
 
-Requires API key (OPENROUTER_API_KEY, ANTHROPIC_API_KEY, etc.)
+Requires `ANTHROPIC_API_KEY`.
 
 ```bash
 # 1. Initialize configuration
 ouroboros config init
 
-# 2. Set your API key
-ouroboros config set providers.openrouter.api_key $OPENROUTER_API_KEY
+# 2. Export your API key
+export ANTHROPIC_API_KEY=your-key-here
 
 # 3. Start interview
 ouroboros init "Build a REST API for task management"
 
-# 4. Execute workflow (use --no-orchestrator for LiteLLM path)
+# 4. Execute workflow (use --no-orchestrator for the standard path)
 ouroboros run seed.yaml --no-orchestrator
 ```
 
@@ -517,8 +517,8 @@ ouroboros run seed.yaml --no-orchestrator
 
 | Variable | Description |
 |----------|-------------|
-| `OPENROUTER_API_KEY` | OpenRouter API key for LiteLLM |
-| `ANTHROPIC_API_KEY` | Anthropic API key for LiteLLM |
+| `OPENROUTER_API_KEY` | OpenRouter API key for optional LiteLLM-based integrations |
+| `ANTHROPIC_API_KEY` | Anthropic API key for direct Anthropic-backed interview mode |
 | `OPENAI_API_KEY` | OpenAI API key for LiteLLM |
 
 ---

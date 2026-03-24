@@ -136,7 +136,7 @@ The orchestrator uses `claude-agent-sdk` which connects directly to your authent
 # Start interactive interview (Claude Code)
 uv run ouroboros init start --orchestrator "Your idea here"
 
-# Start interactive interview (LiteLLM - needs API key)
+# Start interactive interview (Anthropic API - needs ANTHROPIC_API_KEY)
 uv run ouroboros init start "Your idea here"
 
 # Resume an interrupted interview

@@ -665,6 +665,45 @@ class TestAmbiguityScorerParseResponse:
         with pytest.raises(ValueError, match="Missing required field"):
             scorer._parse_scoring_response(response)
 
+    def test_parse_response_missing_success_justification_uses_fallback(self) -> None:
+        """_parse_scoring_response tolerates missing success justification."""
+        mock_adapter = MagicMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+
+        response = (
+            '{"goal_clarity_score": 0.9, "goal_clarity_justification": "Good goal.", '
+            '"constraint_clarity_score": 0.8, "constraint_clarity_justification": '
+            '"Clear constraints.", "success_criteria_clarity_score": 0.7}'
+        )
+
+        breakdown = scorer._parse_scoring_response(response)
+
+        assert breakdown.success_criteria_clarity.clarity_score == 0.7
+        assert (
+            breakdown.success_criteria_clarity.justification
+            == "Success Criteria Clarity justification not provided by model."
+        )
+
+    def test_parse_response_missing_goal_justification_uses_fallback(self) -> None:
+        """_parse_scoring_response tolerates missing goal justification."""
+        mock_adapter = MagicMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+
+        response = (
+            '{"goal_clarity_score": 0.85, "constraint_clarity_score": 0.75, '
+            '"constraint_clarity_justification": "Good constraints.", '
+            '"success_criteria_clarity_score": 0.65, '
+            '"success_criteria_clarity_justification": "Clear criteria."}'
+        )
+
+        breakdown = scorer._parse_scoring_response(response)
+
+        assert breakdown.goal_clarity.clarity_score == 0.85
+        assert (
+            breakdown.goal_clarity.justification
+            == "Goal Clarity justification not provided by model."
+        )
+
     def test_parse_response_invalid_json(self) -> None:
         """_parse_scoring_response raises error for invalid JSON."""
         mock_adapter = MagicMock()
