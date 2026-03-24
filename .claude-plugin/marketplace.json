@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "ouroboros",
-  "description": "Requirement crystallization engine \u2014 Socratic interviews, seed generation, and 3-stage evaluation",
+  "description": "Requirement crystallization engine — Socratic interviews, seed generation, and 3-stage evaluation",
   "owner": {
     "name": "Q00",
     "email": "jqyu.lee@gmail.com"
@@ -10,7 +10,7 @@
     {
       "name": "ouroboros",
       "description": "Transform vague ideas into validated seed specifications through Socratic questioning and ontological analysis",
-      "version": "0.26.0b4",
+      "version": "0.26.0b5",
       "author": {
         "name": "Q00",
         "email": "jqyu.lee@gmail.com"

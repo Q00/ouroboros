@@ -24,17 +24,15 @@ from ouroboros.providers.factory import (
 def __getattr__(name: str) -> object:
     """Lazy import for optional adapters to avoid hard dependency on optional packages."""
     if name == "LiteLLMAdapter":
-        from ouroboros.providers.litellm_adapter import LiteLLMAdapter
-
+        try:
+            from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+        except ImportError:
+            return None
         return LiteLLMAdapter
     if name == "CodexCliLLMAdapter":
         from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 
         return CodexCliLLMAdapter
-    # TODO: uncomment when OpenCode adapter is shipped
-    # if name == "OpenCodeLLMAdapter":
-    #     from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
-    #     return OpenCodeLLMAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -50,8 +48,7 @@ __all__ = [
     # Implementations (AnthropicAdapter is the recommended default)
     "AnthropicAdapter",
     "CodexCliLLMAdapter",
-    # "OpenCodeLLMAdapter",  # TODO: uncomment when shipped
-    "LiteLLMAdapter",
+    # "LiteLLMAdapter",  # Removed: PyPI supply chain attack (issue #195)
     # Factory helpers
     "create_llm_adapter",
     "resolve_llm_backend",

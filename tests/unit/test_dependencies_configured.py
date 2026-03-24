@@ -34,7 +34,7 @@ def test_runtime_dependencies_configured():
     # Runtime-specific deps should be in optional extras, not core
     optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
     assert "claude" in optional_deps, "Missing 'claude' optional extra"
-    assert "litellm" in optional_deps, "Missing 'litellm' optional extra"
+    # "litellm" removed: PyPI supply chain attack (issue #195)
     assert "all" in optional_deps, "Missing 'all' optional extra"
 
 

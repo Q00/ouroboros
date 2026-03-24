@@ -18,7 +18,6 @@ from ouroboros.cli.commands.setup import (
     _set_default_repo,
 )
 
-
 # ── Codex setup tests ────────────────────────────────────────────
 
 
