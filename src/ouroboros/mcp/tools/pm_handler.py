@@ -302,10 +302,13 @@ class PMInterviewHandler:
         if self.pm_engine is not None:
             return self.pm_engine
         adapter = self.llm_adapter or ClaudeAgentAdapter(permission_mode="bypassPermissions")
+        # llm_backend is a backend selector (e.g. "codex", "litellm"), not a model ID.
+        # Only pass model when it looks like a valid model name, not a backend name.
+        model = self.llm_backend if self.llm_backend and "/" in (self.llm_backend or "") else None
         return PMInterviewEngine.create(
             llm_adapter=adapter,
             state_dir=self.data_dir or _DATA_DIR,
-            model=self.llm_backend,
+            model=model,
         )
 
     async def handle(
@@ -469,8 +472,15 @@ class PMInterviewHandler:
         )
         state.mark_updated()
 
-        # Persist
-        await engine.save_state(state)
+        # Persist — check save result to avoid handing back a session that wasn't written
+        save_result = await engine.save_state(state)
+        if isinstance(save_result, Result) and save_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to persist interview state: {save_result.error}",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
         _save_pm_meta(
             state.interview_id,
             engine,
@@ -819,7 +829,11 @@ class PMInterviewHandler:
         if completion is not None:
             # Mark interview as complete
             await engine.complete_interview(state)
-            await engine.save_state(state)
+            save_result = await engine.save_state(state)
+            if isinstance(save_result, Result) and save_result.is_err:
+                return Result.err(
+                    MCPToolError(f"Failed to persist completed state: {save_result.error}", tool_name="ouroboros_pm_interview")
+                )
             _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
             decide_later_summary = engine.format_decide_later_summary()
@@ -912,7 +926,11 @@ class PMInterviewHandler:
         )
         state.mark_updated()
 
-        await engine.save_state(state)
+        save_result = await engine.save_state(state)
+        if isinstance(save_result, Result) and save_result.is_err:
+            return Result.err(
+                MCPToolError(f"Failed to persist resume state: {save_result.error}", tool_name="ouroboros_pm_interview")
+            )
         _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
         # Include pending_reframe in response meta if a new reframe occurred
