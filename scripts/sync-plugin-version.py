@@ -111,7 +111,15 @@ def update_json(path: Path, version: str, *, nested_key: str | None = None) -> b
 
 def main() -> None:
     write = "--write" in sys.argv
-    raw_version = get_version()
+
+    # Allow explicit version override (e.g. --version 0.26.0b6)
+    # Used by the release process to sync BEFORE tagging.
+    explicit_version = None
+    for i, arg in enumerate(sys.argv):
+        if arg == "--version" and i + 1 < len(sys.argv):
+            explicit_version = sys.argv[i + 1]
+
+    raw_version = explicit_version or get_version()
     version = normalize_version(raw_version)
 
     print(f"Source version: {raw_version}")
