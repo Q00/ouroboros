@@ -7,14 +7,16 @@ set -euo pipefail
 PACKAGE_NAME="ouroboros-ai"
 MIN_PYTHON="3.12"
 
-# Auto-detect: if a stable release >= 0.26.0 exists, use it. Otherwise allow pre-release.
-# PyPI /json info.version returns latest stable only. If it's still 0.25.x, beta is needed.
+# Auto-detect: if a stable release exists on PyPI, use it. Otherwise allow pre-release.
+# PyPI /json info.version returns latest stable only.
 PRE_FLAG="yes"
 if command -v curl &>/dev/null; then
   STABLE=$(curl -fsSL "https://pypi.org/pypi/${PACKAGE_NAME}/json" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || true)
-  if [ -n "$STABLE" ] && [ "$(printf '%s\n' "0.26.0" "$STABLE" | sort -V | head -n1)" = "0.26.0" ]; then
-    PRE_FLAG=""
+  if [ -n "$STABLE" ]; then
+    if ! echo "$STABLE" | grep -qE '(a|b|rc|dev)'; then
+      PRE_FLAG=""
+    fi
   fi
 fi
 
@@ -73,12 +75,20 @@ if command -v claude &>/dev/null; then
 fi
 
 if [ -z "$RUNTIME" ]; then
-  echo
-  echo "No runtime CLI detected. Which runtime will you use?"
-  echo "  [1] Codex   (pip install ${PACKAGE_NAME})"
-  echo "  [2] Claude  (pip install ${PACKAGE_NAME}[claude])"
-  echo "  [3] All     (pip install ${PACKAGE_NAME}[all])"
-  read -rp "Select [1]: " choice
+  if [ -t 0 ]; then
+    # Interactive mode: ask the user
+    echo
+    echo "No runtime CLI detected. Which runtime will you use?"
+    echo "  [1] Codex   (pip install ${PACKAGE_NAME})"
+    echo "  [2] Claude  (pip install ${PACKAGE_NAME}[claude])"
+    echo "  [3] All     (pip install ${PACKAGE_NAME}[all])"
+    read -rp "Select [1]: " choice
+  else
+    # Pipe mode (curl | bash): default to base package
+    echo
+    echo "  No runtime detected (non-interactive: installing base package)"
+    choice=""
+  fi
   case "${choice:-1}" in
     2) EXTRAS="[claude]"; RUNTIME="claude" ;;
     3) EXTRAS="[all]"; RUNTIME="" ;;
@@ -114,13 +124,96 @@ else
   fi
 fi
 
-# 4. Setup
-if [ -n "$RUNTIME" ]; then
+# Ensure ouroboros binary is in PATH (uv tool install may add to ~/.local/bin)
+if ! command -v ouroboros &>/dev/null; then
+  for p in "$HOME/.local/bin" "$HOME/.cargo/bin" "$HOME/bin"; do
+    if [ -x "$p/ouroboros" ]; then
+      export PATH="$p:$PATH"
+      break
+    fi
+  done
+fi
+
+# 4. Setup (ouroboros CLI configures runtime-specific integration)
+if [ -n "$RUNTIME" ] && command -v ouroboros &>/dev/null; then
   echo
   echo "Running setup..."
-  ouroboros setup --runtime "$RUNTIME" --non-interactive
+  ouroboros setup --runtime "$RUNTIME" --non-interactive || true
+fi
+
+# 5. Claude Code integration (MCP + skills)
+if command -v claude &>/dev/null; then
+  echo
+  echo "Setting up Claude Code integration..."
+
+  # 5a. Register MCP server in ~/.claude/mcp.json
+  # (ouroboros setup may have done this already, but we ensure it with timeout)
+  MCP_FILE="$HOME/.claude/mcp.json"
+  mkdir -p "$HOME/.claude"
+
+  OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"],"timeout":600}'
+
+  # Find a working Python: system python3, or uv-managed python
+  MCP_PYTHON=""
+  if command -v python3 &>/dev/null; then
+    MCP_PYTHON="python3"
+  elif command -v uv &>/dev/null; then
+    MCP_PYTHON="uv run python3"
+  fi
+
+  if [ -n "$MCP_PYTHON" ]; then
+    if [ -f "$MCP_FILE" ]; then
+      if MCP_FILE="$MCP_FILE" OUROBOROS_ENTRY="$OUROBOROS_ENTRY" $MCP_PYTHON -c "
+import json, os
+mcp_file = os.environ['MCP_FILE']
+entry = json.loads(os.environ['OUROBOROS_ENTRY'])
+with open(mcp_file) as f:
+    data = json.load(f)
+servers = data.setdefault('mcpServers', {})
+servers['ouroboros'] = entry
+with open(mcp_file, 'w') as f:
+    json.dump(data, f, indent=2)
+print('merged')
+" 2>/dev/null; then
+        echo "  MCP: merged into existing $MCP_FILE"
+      else
+        echo "  MCP: could not merge — check $MCP_FILE manually"
+      fi
+    else
+      MCP_FILE="$MCP_FILE" OUROBOROS_ENTRY="$OUROBOROS_ENTRY" $MCP_PYTHON -c "
+import json, os
+mcp_file = os.environ['MCP_FILE']
+entry = json.loads(os.environ['OUROBOROS_ENTRY'])
+data = {'mcpServers': {'ouroboros': entry}}
+with open(mcp_file, 'w') as f:
+    json.dump(data, f, indent=2)
+" 2>/dev/null
+      echo "  MCP: created $MCP_FILE"
+    fi
+  else
+    echo "  MCP: skipped (no python3 found — add manually to $MCP_FILE)"
+  fi
+
+  # 5b. Install Ouroboros skills (claude plugin)
+  echo "  Installing Ouroboros skills..."
+  if claude plugin marketplace add Q00/ouroboros 2>/dev/null \
+     && claude plugin install ouroboros@ouroboros 2>/dev/null; then
+    echo "  Skills: installed"
+  else
+    echo "  Skills: skipped (install manually: claude plugin marketplace add Q00/ouroboros && claude plugin install ouroboros@ouroboros)"
+  fi
 fi
 
 echo
 echo "Done! Get started:"
-echo '  ouroboros init start "your idea here"'
+echo
+echo "  Open a new session and run:"
+if command -v claude &>/dev/null; then
+  echo '    claude'
+  echo '    > ooo interview "your idea here"'
+elif command -v codex &>/dev/null; then
+  echo '    codex'
+  echo '    > ooo interview "your idea here"'
+else
+  echo '    ouroboros init start "your idea here"'
+fi

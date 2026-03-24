@@ -21,12 +21,36 @@ ooo update
 When the user invokes this skill:
 
 1. **Check current version**:
+
+   First, try reading the version from the CLI binary (works for all install methods):
    ```bash
-   python3 -c "import ouroboros; print(ouroboros.__version__)"
+   ouroboros --version 2>/dev/null
    ```
-   If import fails, the package is not installed — skip to step 3.
+
+   If that fails, try the plugin version:
+   ```bash
+   cat .claude-plugin/plugin.json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version','unknown'))" 2>/dev/null
+   ```
+
+   If both fail, the package is not installed — skip to step 3.
 
 2. **Check latest version on PyPI**:
+
+   First, determine if the current installed version is a pre-release (contains `a`, `b`, `rc`, or `dev`).
+
+   If the current version **is a pre-release**, scan all PyPI releases to find the latest (including betas):
+   ```bash
+   python3 -c "
+   import json, ssl, urllib.request
+   from packaging.version import Version
+   ctx = ssl.create_default_context()
+   data = json.loads(urllib.request.urlopen('https://pypi.org/pypi/ouroboros-ai/json', timeout=5, context=ctx).read())
+   versions = [Version(v) for v in data.get('releases', {}) if data['releases'][v]]
+   print(str(max(versions)) if versions else data['info']['version'])
+   "
+   ```
+
+   If the current version **is stable**, use the standard latest:
    ```bash
    python3 -c "
    import json, ssl, urllib.request
@@ -56,23 +80,53 @@ When the user invokes this skill:
 
 4. **Run update** (if user chose to update):
 
-   a. **Update PyPI package**:
+   a. **Update PyPI package** — detect the original install method and use the same one:
+
+   Check which installer was used (in priority order):
    ```bash
-   pip install --upgrade ouroboros-ai
-   ```
-   Or if `uv` is available:
-   ```bash
-   uv pip install --upgrade ouroboros-ai
+   uv tool list 2>/dev/null | grep -q ouroboros && echo "uv"
+   pipx list 2>/dev/null | grep -q ouroboros && echo "pipx"
    ```
 
-   b. **Update runtime integration** (Claude Code only):
+   - If installed via **uv tool** (most common with install.sh):
+     ```bash
+     # For pre-release targets:
+     uv tool install --upgrade --prerelease=allow ouroboros-ai
+     # For stable targets:
+     uv tool install --upgrade ouroboros-ai
+     ```
+
+   - If installed via **pipx**:
+     ```bash
+     # For pre-release targets:
+     pipx upgrade --pip-args='--pre' ouroboros-ai
+     # For stable targets:
+     pipx upgrade ouroboros-ai
+     ```
+
+   - If installed via **pip** (fallback):
+     ```bash
+     # For pre-release targets:
+     pip install --upgrade --pre ouroboros-ai
+     # For stable targets:
+     pip install --upgrade ouroboros-ai
+     ```
+
+   b. **Update runtime integration**:
+
+   For Claude Code:
    ```bash
    claude plugin update ouroboros@ouroboros
    ```
 
+   For Codex CLI (re-install skills/rules to ~/.codex/):
+   ```bash
+   ouroboros setup --runtime codex --non-interactive
+   ```
+
    c. **Verify and update CLAUDE.md version marker**:
    ```bash
-   NEW_VERSION=$(python3 -c "import ouroboros; print(ouroboros.__version__)" 2>/dev/null)
+   NEW_VERSION=$(ouroboros --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z0-9]*')
    echo "Installed: v$NEW_VERSION"
 
    if [ -n "$NEW_VERSION" ] && grep -q "ooo:VERSION" CLAUDE.md 2>/dev/null; then
@@ -93,13 +147,13 @@ When the user invokes this skill:
    ```
    Updated to v0.X.Z
 
-   If you have an MCP server running, restart it:
-     ouroboros mcp serve --transport stdio
+   Restart your Claude Code session to apply the update.
+   (Close this session and start a new one with `claude`)
 
    If CLAUDE.md block content changed, regenerate it:
      ooo setup
 
-   📍 Run `ooo help` to see what's new.
+   Run `ooo help` to see what's new.
    ```
 
 ## Notes
@@ -107,3 +161,4 @@ When the user invokes this skill:
 - The update check uses PyPI as the source of truth for the latest version.
 - Plugin update (Claude Code) pulls the latest from the marketplace.
 - No data is lost during updates — event stores and session data are preserved.
+- **Always use the same installer** that was used for the original installation (uv tool > pipx > pip).

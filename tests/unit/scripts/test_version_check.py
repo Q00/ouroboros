@@ -140,6 +140,89 @@ class TestCheckUpdate:
         assert result["update_available"] is False
 
 
+class TestPrerelease:
+    """Test pre-release version handling."""
+
+    def test_is_prerelease_beta(self) -> None:
+        assert version_check._is_prerelease("0.26.0b4") is True
+
+    def test_is_prerelease_alpha(self) -> None:
+        assert version_check._is_prerelease("0.26.0a1") is True
+
+    def test_is_prerelease_rc(self) -> None:
+        assert version_check._is_prerelease("0.26.0rc1") is True
+
+    def test_is_prerelease_dev(self) -> None:
+        assert version_check._is_prerelease("0.26.0.dev3") is True
+
+    def test_is_not_prerelease_stable(self) -> None:
+        assert version_check._is_prerelease("0.26.0") is False
+
+    def test_is_not_prerelease_stable_three_part(self) -> None:
+        assert version_check._is_prerelease("1.0.0") is False
+
+    def test_beta_user_gets_prerelease_scan(self, tmp_path: Path) -> None:
+        """Beta user triggers include_prerelease=True, scans all releases."""
+        cache_file = tmp_path / "nonexistent-cache.json"
+
+        pypi_data = {
+            "info": {"version": "0.25.0"},  # stable latest
+            "releases": {
+                "0.25.0": [{"filename": "x"}],
+                "0.26.0b3": [{"filename": "x"}],
+                "0.26.0b4": [{"filename": "x"}],
+            },
+        }
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(pypi_data).encode()
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version(current="0.26.0b3")
+
+        assert result == "0.26.0b4"
+
+    def test_stable_user_gets_stable_only(self, tmp_path: Path) -> None:
+        """Stable user does NOT see beta releases."""
+        cache_file = tmp_path / "nonexistent-cache.json"
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({"info": {"version": "0.25.0"}}).encode()
+
+        with (
+            patch.object(version_check, "_CACHE_FILE", cache_file),
+            patch.object(version_check, "_CACHE_DIR", tmp_path),
+            patch("urllib.request.urlopen", return_value=mock_response),
+        ):
+            result = version_check.get_latest_version(current="0.25.0")
+
+        assert result == "0.25.0"
+
+    def test_beta_to_stable_upgrade_detected(self) -> None:
+        """Beta user is offered stable upgrade (0.26.0b4 → 0.26.0)."""
+        with (
+            patch.object(version_check, "get_installed_version", return_value="0.26.0b4"),
+            patch.object(version_check, "get_latest_version", return_value="0.26.0"),
+        ):
+            result = version_check.check_update()
+
+        assert result["update_available"] is True
+        assert result["latest"] == "0.26.0"
+
+    def test_stable_user_not_offered_beta(self) -> None:
+        """Stable user is NOT offered beta upgrade."""
+        with (
+            patch.object(version_check, "get_installed_version", return_value="0.26.0"),
+            patch.object(version_check, "get_latest_version", return_value="0.26.0"),
+        ):
+            result = version_check.check_update()
+
+        assert result["update_available"] is False
+
+
 class TestKeywordDetector:
     """Test that ooo update keyword is registered."""
 
