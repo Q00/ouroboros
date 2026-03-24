@@ -412,7 +412,10 @@ async def _run_pm_interview(
         # Persist state + meta AFTER displaying the question but BEFORE
         # waiting for input so that an interruption preserves the pending
         # question and --resume shows the same question.
-        await engine.save_state(state)
+        save_result = await engine.save_state(state)
+        if isinstance(save_result, Result) and save_result.is_err:
+            print_error(f"Failed to save state: {save_result.error}")
+            break
         _save_cli_pm_meta(state.interview_id, engine)
 
         user_response = console.input("[bold green]> [/]")
@@ -424,8 +427,12 @@ async def _run_pm_interview(
             # so extraction never sees a question the user didn't answer.
             if state.rounds and state.rounds[-1].user_response is None:
                 state.rounds.pop()
-            await engine.complete_interview(state)
-            await engine.save_state(state)
+            complete_result = await engine.complete_interview(state)
+            if isinstance(complete_result, Result) and complete_result.is_err:
+                print_error(f"Failed to complete interview: {complete_result.error}")
+            save_result = await engine.save_state(state)
+            if isinstance(save_result, Result) and save_result.is_err:
+                print_error(f"Failed to save completed state: {save_result.error}")
             _save_cli_pm_meta(state.interview_id, engine)
             break
 
@@ -434,8 +441,14 @@ async def _run_pm_interview(
         if state.rounds and state.rounds[-1].user_response is None:
             state.rounds.pop()
 
-        await engine.record_response(state, user_response, question)
-        await engine.save_state(state)
+        record_result = await engine.record_response(state, user_response, question)
+        if isinstance(record_result, Result) and record_result.is_err:
+            print_error(f"Failed to record response: {record_result.error}")
+            break
+        save_result = await engine.save_state(state)
+        if isinstance(save_result, Result) and save_result.is_err:
+            print_error(f"Failed to save state: {save_result.error}")
+            break
         _save_cli_pm_meta(state.interview_id, engine)
 
     # Show decide-later summary at interview end

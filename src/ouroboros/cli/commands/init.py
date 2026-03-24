@@ -563,10 +563,12 @@ def _display_pm_seed_info(seed_path: Path) -> dict[str, str]:
     try:
         with open(seed_path) as f:
             data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            raise ValueError("PM seed file is not a YAML mapping")
         name = data.get("product_name", "") or "Unnamed"
         goal = data.get("goal", "") or "No goal specified"
         pm_id = data.get("pm_id", seed_path.stem)
-    except (yaml.YAMLError, OSError):
+    except (yaml.YAMLError, OSError, ValueError, AttributeError):
         name = seed_path.stem
         goal = "No goal specified"
         pm_id = seed_path.stem
