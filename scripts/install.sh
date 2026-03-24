@@ -9,6 +9,8 @@ MIN_PYTHON="3.12"
 
 # Auto-detect: if a stable release exists on PyPI, use it. Otherwise allow pre-release.
 # PyPI /json info.version returns latest stable only.
+# If python3 is unavailable for JSON parsing, PRE_FLAG stays "yes" which is safe:
+# --pre/--prerelease=allow still installs stable versions when they're the latest.
 PRE_FLAG="yes"
 if command -v curl &>/dev/null; then
   STABLE=$(curl -fsSL "https://pypi.org/pypi/${PACKAGE_NAME}/json" 2>/dev/null \

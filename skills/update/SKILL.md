@@ -107,9 +107,9 @@ When the user invokes this skill:
    - If installed via **pip** (fallback):
      ```bash
      # For pre-release targets:
-     pip install --upgrade --pre ouroboros-ai
+     python3 -m pip install --upgrade --pre ouroboros-ai
      # For stable targets:
-     pip install --upgrade ouroboros-ai
+     python3 -m pip install --upgrade ouroboros-ai
      ```
 
    b. **Update runtime integration**:
@@ -126,7 +126,7 @@ When the user invokes this skill:
 
    c. **Verify and update CLAUDE.md version marker**:
    ```bash
-   NEW_VERSION=$(ouroboros --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z0-9]*')
+   NEW_VERSION=$(ouroboros --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.]*')
    echo "Installed: v$NEW_VERSION"
 
    if [ -n "$NEW_VERSION" ] && grep -q "ooo:VERSION" CLAUDE.md 2>/dev/null; then

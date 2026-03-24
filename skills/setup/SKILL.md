@@ -171,18 +171,12 @@ This enables:
   Session Replay         [Debug any execution from events]
 ```
 
-**Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects):
-```json
-{
-  "mcpServers": {
-    "ouroboros": {
-      "command": "uvx",
-      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-      "timeout": 600
-    }
-  }
-}
-```
+**Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects).
+
+Choose the MCP command based on how ouroboros is installed:
+- If `uvx` is available: `{"command": "uvx", "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"], "timeout": 600}`
+- If `ouroboros` binary is in PATH (pipx install): `{"command": "ouroboros", "args": ["mcp", "serve"], "timeout": 600}`
+- Fallback (pip install): `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"], "timeout": 600}`
 
 If `~/.claude/mcp.json` already exists, merge intelligently (preserve other servers).
 
