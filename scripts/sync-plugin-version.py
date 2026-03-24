@@ -105,7 +105,7 @@ def update_json(path: Path, version: str, *, nested_key: str | None = None) -> b
     if old == version:
         return False
 
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     return True
 
 

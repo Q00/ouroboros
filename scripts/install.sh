@@ -194,15 +194,18 @@ print('merged')
         echo "  MCP: could not merge — check $MCP_FILE manually"
       fi
     else
-      MCP_FILE="$MCP_FILE" OUROBOROS_ENTRY="$OUROBOROS_ENTRY" $MCP_PYTHON -c "
+      if MCP_FILE="$MCP_FILE" OUROBOROS_ENTRY="$OUROBOROS_ENTRY" $MCP_PYTHON -c "
 import json, os
 mcp_file = os.environ['MCP_FILE']
 entry = json.loads(os.environ['OUROBOROS_ENTRY'])
 data = {'mcpServers': {'ouroboros': entry}}
 with open(mcp_file, 'w') as f:
     json.dump(data, f, indent=2)
-" 2>/dev/null
-      echo "  MCP: created $MCP_FILE"
+" 2>/dev/null; then
+        echo "  MCP: created $MCP_FILE"
+      else
+        echo "  MCP: could not create — check $MCP_FILE manually"
+      fi
     fi
   else
     echo "  MCP: skipped (no python3 found — add manually to $MCP_FILE)"
