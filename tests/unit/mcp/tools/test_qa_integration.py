@@ -112,7 +112,9 @@ class TestExecuteSeedHandlerQA:
         """QA is called after successful execution and result includes verdict."""
         handler = ExecuteSeedHandler()
 
-        fake_exec = FakeExecResult()
+        fake_exec = FakeExecResult(
+            summary={"verification_report": "### AC 1: [PASS] All tests pass\nResult:\nDetailed proof"}
+        )
         mock_runner = AsyncMock()
         mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
 
@@ -138,6 +140,7 @@ class TestExecuteSeedHandlerQA:
         # QA handler was called
         mock_qa_handle.assert_awaited_once()
         qa_args = mock_qa_handle.call_args[0][0]
+        assert qa_args["artifact"] == fake_exec.summary["verification_report"]
         assert qa_args["artifact_type"] == "test_output"
         assert "All tests pass" in qa_args["quality_bar"]
         assert "No lint errors" in qa_args["quality_bar"]

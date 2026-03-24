@@ -290,7 +290,10 @@ class ExecuteSeedHandler:
                 quality_bar = self._derive_quality_bar(seed)
                 qa_result = await qa_handler.handle(
                     {
-                        "artifact": exec_result.final_message or "",
+                        "artifact": self._get_verification_artifact(
+                            exec_result.summary,
+                            exec_result.final_message,
+                        ),
                         "artifact_type": "test_output",
                         "quality_bar": quality_bar,
                         "seed_content": seed_content,
@@ -334,6 +337,14 @@ class ExecuteSeedHandler:
         """Derive a quality bar string from seed acceptance criteria."""
         ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
         return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
+
+    @staticmethod
+    def _get_verification_artifact(summary: dict[str, Any], final_message: str) -> str:
+        """Prefer the structured verification report when present."""
+        verification_report = summary.get("verification_report")
+        if isinstance(verification_report, str) and verification_report:
+            return verification_report
+        return final_message or ""
 
     @staticmethod
     def _format_execution_result(exec_result, seed: Seed) -> str:

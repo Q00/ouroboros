@@ -78,6 +78,7 @@ _STALL_SENTINEL = "__STALL_DETECTED__"  # Sentinel error for stall results
 _MIN_FREE_MEMORY_GB = 2.0
 _MEMORY_CHECK_INTERVAL_SECONDS = 5.0
 _MEMORY_WAIT_MAX_SECONDS = 120.0
+_MAX_LEAF_RESULT_CHARS = 1200
 
 
 def _get_available_memory_gb() -> float | None:
@@ -187,6 +188,152 @@ class ParallelExecutionResult:
     def any_succeeded(self) -> bool:
         """Return True if at least one AC succeeded."""
         return self.success_count > 0
+
+
+def _normalize_command(command: str) -> str:
+    """Normalize Bash commands for stable audit output."""
+    return " ".join(command.split())
+
+
+def _truncate_text(text: str, limit: int = _MAX_LEAF_RESULT_CHARS) -> str:
+    """Truncate long evidence blocks while preserving their beginning."""
+    stripped = text.strip()
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[:limit].rstrip() + "\n[TRUNCATED]"
+
+
+def _extract_leaf_evidence_lines(result: ACExecutionResult) -> list[str]:
+    """Extract normalized command, file, and result evidence for a leaf AC."""
+    lines: list[str] = []
+    seen_commands: set[str] = set()
+    seen_file_ops: set[tuple[str, str]] = set()
+
+    for message in result.messages:
+        if not message.tool_name:
+            continue
+        tool_input = message.data.get("tool_input", {})
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+
+        if message.tool_name == "Bash":
+            command = tool_input.get("command")
+            if isinstance(command, str):
+                normalized = _normalize_command(command)
+                if normalized and normalized not in seen_commands:
+                    if not lines:
+                        lines.append("Commands Run:")
+                    lines.append(f"- Bash: {normalized}")
+                    seen_commands.add(normalized)
+            continue
+
+        if message.tool_name in ("Write", "Edit", "NotebookEdit"):
+            path_key = "notebook_path" if message.tool_name == "NotebookEdit" else "file_path"
+            file_path = tool_input.get(path_key)
+            if isinstance(file_path, str) and file_path:
+                file_op = (message.tool_name, file_path)
+                if file_op not in seen_file_ops:
+                    if "File Changes:" not in lines:
+                        lines.append("File Changes:")
+                    lines.append(f"- {message.tool_name}: {file_path}")
+                    seen_file_ops.add(file_op)
+
+    result_text = result.final_message or (f"Error: {result.error}" if result.error else "")
+    if result_text:
+        lines.append("Result:")
+        lines.append(_truncate_text(result_text))
+    return lines
+
+
+def _render_ac_section(
+    result: ACExecutionResult,
+    *,
+    index_path: tuple[int, ...],
+    heading_level: int,
+    include_header: bool = True,
+) -> list[str]:
+    """Render a single AC or Sub-AC section for verification/audit output."""
+    lines: list[str] = []
+    if include_header:
+        status = "PASS" if result.success else "FAIL"
+        label = "AC" if len(index_path) == 1 else "Sub-AC"
+        lines.append(
+            f'{"#" * heading_level} {label} {".".join(str(i) for i in index_path)}: '
+            f"[{status}] {result.ac_content}"
+        )
+
+    if result.is_decomposed and result.sub_results:
+        lines.append(f"Decomposed into {len(result.sub_results)} Sub-ACs")
+        for idx, sub_result in enumerate(result.sub_results, start=1):
+            if lines:
+                lines.append("")
+            lines.extend(
+                _render_ac_section(
+                    sub_result,
+                    index_path=index_path + (idx,),
+                    heading_level=min(heading_level + 1, 6),
+                )
+            )
+        return lines
+
+    evidence_lines = _extract_leaf_evidence_lines(result)
+    if evidence_lines:
+        lines.extend(evidence_lines)
+    else:
+        lines.append("Result:")
+        lines.append("No final result message captured.")
+    return lines
+
+
+def render_parallel_verification_report(
+    parallel_result: ParallelExecutionResult,
+    total_acceptance_criteria: int,
+) -> str:
+    """Build the canonical QA artifact for parallel execution results."""
+    lines = [
+        "Parallel Execution Verification Report",
+        f"Success: {parallel_result.success_count}/{total_acceptance_criteria}",
+    ]
+    if parallel_result.failure_count > 0:
+        lines.append(f"Failed: {parallel_result.failure_count}")
+    if parallel_result.skipped_count > 0:
+        lines.append(f"Skipped: {parallel_result.skipped_count}")
+
+    lines.append("")
+    lines.append("## AC Results")
+    for result in parallel_result.results:
+        lines.append("")
+        lines.extend(
+            _render_ac_section(
+                result,
+                index_path=(result.ac_index + 1,),
+                heading_level=3,
+            )
+        )
+    return "\n".join(lines)
+
+
+def render_parallel_completion_message(
+    parallel_result: ParallelExecutionResult,
+    total_acceptance_criteria: int,
+) -> str:
+    """Build a concise operator-facing completion summary."""
+    lines = [
+        "Parallel Execution Complete",
+        f"Success: {parallel_result.success_count}/{total_acceptance_criteria}",
+    ]
+    if parallel_result.failure_count > 0:
+        lines.append(f"Failed: {parallel_result.failure_count}")
+    if parallel_result.skipped_count > 0:
+        lines.append(f"Skipped: {parallel_result.skipped_count}")
+
+    lines.append("")
+    lines.append("AC Status:")
+    for result in parallel_result.results:
+        status = "PASS" if result.success else "FAIL"
+        suffix = f" ({len(result.sub_results)} sub-ACs)" if result.is_decomposed else ""
+        lines.append(f"- AC {result.ac_index + 1}: [{status}] {result.ac_content}{suffix}")
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -988,7 +1135,23 @@ class ParallelACExecutor:
                     ac_content=ac_content,
                     success=all_success,
                     messages=(),
-                    final_message=f"Decomposed into {len(sub_acs)} Sub-ACs",
+                    final_message="\n".join(
+                        _render_ac_section(
+                            ACExecutionResult(
+                                ac_index=ac_index,
+                                ac_content=ac_content,
+                                success=all_success,
+                                messages=(),
+                                duration_seconds=duration,
+                                is_decomposed=True,
+                                sub_results=tuple(sub_results),
+                                depth=depth,
+                            ),
+                            index_path=(ac_index + 1,),
+                            heading_level=3,
+                            include_header=False,
+                        )
+                    ),
                     duration_seconds=duration,
                     is_decomposed=True,
                     sub_results=tuple(sub_results),

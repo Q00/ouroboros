@@ -888,7 +888,15 @@ class EvolutionaryLoop:
                 exec_result = await self.executor(current_seed, parallel=parallel)
                 if hasattr(exec_result, "is_ok") and exec_result.is_ok:
                     orch_result = exec_result.value
-                    execution_output = getattr(orch_result, "final_message", str(orch_result))
+                    summary = getattr(orch_result, "summary", {})
+                    verification_report = (
+                        summary.get("verification_report") if isinstance(summary, dict) else None
+                    )
+                    execution_output = (
+                        verification_report
+                        if isinstance(verification_report, str) and verification_report
+                        else getattr(orch_result, "final_message", str(orch_result))
+                    )
                     # Log structured metadata for observability
                     logger.info(
                         "evolution.generation.executed",

@@ -521,6 +521,120 @@ class TestOrchestratorRunner:
         assert captured_init["inherited_runtime_handle"] == inherited_handle
         assert captured_execute["tools"] == ["Read", "mcp__chrome-devtools__click"]
 
+    @pytest.mark.asyncio
+    async def test_execute_parallel_emits_verification_report_for_decomposed_acs(
+        self,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Parallel execution should preserve decomposed Sub-AC evidence for QA."""
+        from ouroboros.core.types import Result
+        from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
+        from ouroboros.orchestrator.parallel_executor import (
+            ACExecutionResult,
+            ParallelExecutionResult,
+        )
+
+        runner = OrchestratorRunner(MagicMock(), mock_event_store, mock_console)
+        tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
+
+        sub_result = ACExecutionResult(
+            ac_index=100,
+            ac_content="Create task storage",
+            success=True,
+            messages=(
+                AgentMessage(
+                    type="tool",
+                    content="Running tests",
+                    tool_name="Bash",
+                    data={"tool_input": {"command": "uv   run pytest\n tests/unit/test_runner.py -q"}},
+                ),
+                AgentMessage(
+                    type="tool",
+                    content="Writing file",
+                    tool_name="Write",
+                    data={"tool_input": {"file_path": "/tmp/project/task_store.py"}},
+                ),
+            ),
+            final_message="Implemented task storage and verified behavior.",
+        )
+
+        class FakeParallelExecutor:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+            async def execute_parallel(self, **kwargs: Any) -> ParallelExecutionResult:
+                return ParallelExecutionResult(
+                    results=(
+                        ACExecutionResult(
+                            ac_index=0,
+                            ac_content=sample_seed.acceptance_criteria[0],
+                            success=True,
+                            is_decomposed=True,
+                            sub_results=(sub_result,),
+                            final_message="Decomposed placeholder should not leak",
+                        ),
+                        ACExecutionResult(
+                            ac_index=1,
+                            ac_content=sample_seed.acceptance_criteria[1],
+                            success=True,
+                            final_message="Listed tasks correctly.",
+                        ),
+                        ACExecutionResult(
+                            ac_index=2,
+                            ac_content=sample_seed.acceptance_criteria[2],
+                            success=True,
+                            final_message="Deleted tasks correctly.",
+                        ),
+                    ),
+                    success_count=3,
+                    failure_count=0,
+                    total_messages=4,
+                    total_duration_seconds=0.2,
+                )
+
+        dependency_graph = DependencyGraph(
+            nodes=tuple(
+                ACNode(index=index, content=ac)
+                for index, ac in enumerate(sample_seed.acceptance_criteria)
+            ),
+            execution_levels=(tuple(range(len(sample_seed.acceptance_criteria))),),
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer.analyze",
+                AsyncMock(return_value=Result.ok(dependency_graph)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor",
+                FakeParallelExecutor,
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id="exec_parallel",
+                tracker=tracker,
+                merged_tools=["Read", "Write", "Bash"],
+                system_prompt="system",
+                start_time=datetime.now(UTC),
+            )
+
+        assert result.is_ok
+        assert "Commands Run:" not in result.value.final_message
+        assert "AC Status:" in result.value.final_message
+        verification_report = result.value.summary["verification_report"]
+        assert "### AC 1: [PASS] Tasks can be created" in verification_report
+        assert "#### Sub-AC 1.1: [PASS] Create task storage" in verification_report
+        assert "Bash: uv run pytest tests/unit/test_runner.py -q" in verification_report
+        assert "Write: /tmp/project/task_store.py" in verification_report
+        assert "Decomposed placeholder should not leak" not in verification_report
+
 
 class TestOrchestratorError:
     """Tests for OrchestratorError."""

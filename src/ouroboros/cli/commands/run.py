@@ -52,6 +52,14 @@ def _derive_quality_bar(seed: Seed) -> str:
     return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
 
 
+def _get_verification_artifact(summary: dict[str, Any], final_message: str) -> str:
+    """Prefer the structured verification report when present."""
+    verification_report = summary.get("verification_report")
+    if isinstance(verification_report, str) and verification_report:
+        return verification_report
+    return final_message or ""
+
+
 def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
     """Load seed configuration from YAML file.
 
@@ -238,7 +246,7 @@ async def _run_orchestrator(
 
                     qa_result = await qa_handler.handle(
                         {
-                            "artifact": res.final_message or "",
+                            "artifact": _get_verification_artifact(res.summary, res.final_message),
                             "artifact_type": "test_output",
                             "quality_bar": quality_bar,
                             "seed_content": yaml.dump(seed_data, default_flow_style=False),

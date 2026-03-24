@@ -93,3 +93,22 @@ class TestArtifactCollector:
         bundle = collector.collect(output, project_dir=tmpdir)
         assert len(bundle.files) == 1
         assert 1 in bundle.files[0].ac_indices  # AC 2 → 0-based index 1
+
+    def test_collects_file_from_sub_ac_report_format(self) -> None:
+        tmpdir = self._create_project({"task_store.py": "TASKS = []\n"})
+        path = os.path.join(tmpdir, "task_store.py")
+        output = (
+            "### AC 1: [PASS] Create tasks\n"
+            "Decomposed into 1 Sub-ACs\n\n"
+            "#### Sub-AC 1.1: [PASS] Create task storage\n"
+            "File Changes:\n"
+            f"- Write: {path}\n"
+            "Result:\n"
+            "Implemented storage.\n"
+        )
+
+        collector = ArtifactCollector()
+        bundle = collector.collect(output, project_dir=tmpdir)
+        assert len(bundle.files) == 1
+        assert bundle.files[0].file_path == path
+        assert bundle.files[0].ac_indices == (0,)
