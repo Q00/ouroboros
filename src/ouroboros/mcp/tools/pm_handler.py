@@ -692,7 +692,15 @@ class PMInterviewHandler:
             )
 
         state = load_result.value
-        first_question = state.rounds[0].question if state.rounds else "No question available."
+        # Return the last unanswered round's question (the pending PM-facing prompt),
+        # not rounds[0] which may be a hidden auto-deferred/auto-decided question.
+        pending = next(
+            (r for r in reversed(state.rounds) if r.user_response is None),
+            None,
+        )
+        first_question = pending.question if pending else (
+            state.rounds[-1].question if state.rounds else "No question available."
+        )
 
         return Result.ok(
             MCPToolResult(
