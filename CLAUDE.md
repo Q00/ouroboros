@@ -29,6 +29,8 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo qa` or `ooo qa ...` | Read `skills/qa/SKILL.md` and follow it |
 | `ooo help` | Read `skills/help/SKILL.md` and follow it |
 | `ooo update` | Read `skills/update/SKILL.md` and follow it |
+| `ooo pm` or `ooo pm ...` | Read `skills/pm/SKILL.md` and follow it |
+| `ooo brownfield` or `ooo brownfield ...` | Read `skills/brownfield/SKILL.md` and follow it |
 
 **Important**: Do NOT use the Skill tool. Read the file with the Read tool and execute its instructions directly.
 

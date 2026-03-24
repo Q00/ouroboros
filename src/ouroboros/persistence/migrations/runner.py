@@ -86,8 +86,11 @@ async def run_migrations(engine: AsyncEngine) -> list[str]:
             # Split by semicolon and execute each statement
             for statement in sql_content.split(";"):
                 statement = statement.strip()
-                if statement and not statement.startswith("--"):
-                    await conn.execute(text(statement))
+                # Strip comment lines before checking if statement is SQL
+                lines = [ln for ln in statement.splitlines() if not ln.strip().startswith("--")]
+                clean = "\n".join(lines).strip()
+                if clean:
+                    await conn.execute(text(clean))
 
             # Record this migration as applied
             await conn.execute(

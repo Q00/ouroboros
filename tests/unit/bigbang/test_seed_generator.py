@@ -484,7 +484,7 @@ class TestSeedGeneratorErrorHandling:
         low_ambiguity = create_low_ambiguity_score()
 
         # Missing required fields — both initial and retry return bad data
-        bad_response = Result.ok(create_mock_completion_response("INVALID: missing fields"))
+        bad_response: Result = Result.ok(create_mock_completion_response("INVALID: missing fields"))
         mock_adapter.complete = AsyncMock(side_effect=[bad_response, bad_response])
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -562,12 +562,14 @@ class TestSeedGeneratorRobustParsing:
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
 
-        conversational = Result.ok(
+        conversational: Result = Result.ok(
             create_mock_completion_response(
                 "Let me explore the codebase to provide accurate context."
             )
         )
-        valid = Result.ok(create_mock_completion_response(create_valid_extraction_response()))
+        valid: Result = Result.ok(
+            create_mock_completion_response(create_valid_extraction_response())
+        )
         mock_adapter.complete = AsyncMock(side_effect=[conversational, valid])
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -588,7 +590,7 @@ class TestSeedGeneratorRobustParsing:
         state = create_interview_state_with_rounds()
         low_ambiguity = create_low_ambiguity_score()
 
-        bad = Result.ok(
+        bad: Result = Result.ok(
             create_mock_completion_response("I'd be happy to help! Let me think about this...")
         )
         mock_adapter.complete = AsyncMock(side_effect=[bad, bad])

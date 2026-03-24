@@ -619,6 +619,7 @@ def create_ouroboros_server(
         SemanticConfig,
     )
     from ouroboros.mcp.job_manager import JobManager
+    from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
     from ouroboros.mcp.tools.definitions import (
         ACDashboardHandler,
         CancelExecutionHandler,
@@ -640,6 +641,7 @@ def create_ouroboros_server(
         StartEvolveStepHandler,
         StartExecuteSeedHandler,
     )
+    from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
@@ -1179,6 +1181,12 @@ def create_ouroboros_server(
             llm_adapter=llm_adapter,
             llm_backend=llm_backend,
         ),
+        PMInterviewHandler(
+            data_dir=state_dir,
+            llm_adapter=llm_adapter,
+            llm_backend=llm_backend,
+        ),
+        BrownfieldHandler(),
         EvaluateHandler(
             event_store=event_store,
             llm_adapter=llm_adapter,

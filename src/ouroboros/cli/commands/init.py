@@ -14,11 +14,11 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from rich.prompt import Confirm, Prompt
 import typer
+import yaml
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
-    SOFT_LIMIT_WARNING_THRESHOLD,
     InterviewEngine,
     InterviewState,
     InterviewStatus,
@@ -242,13 +242,6 @@ async def _run_interview_loop(
 
         # Tiered confirmation logic
         if current_round >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-            # Show warning for rounds beyond soft limit
-            if current_round >= SOFT_LIMIT_WARNING_THRESHOLD:
-                print_warning(
-                    f"Round {current_round}: Diminishing returns expected. "
-                    "Consider generating Seed to check ambiguity score."
-                )
-
             should_continue = Confirm.ask(
                 "Continue with more questions?",
                 default=True,
@@ -515,6 +508,167 @@ async def _start_workflow(
         print_info("Standard workflow execution not yet implemented.")
 
 
+def _find_pm_seeds(seeds_dir: Path | None = None) -> list[Path]:
+    """Find all pm_seed YAML files in the seeds directory.
+
+    Args:
+        seeds_dir: Directory to scan. Defaults to ~/.ouroboros/seeds/.
+
+    Returns:
+        List of paths to pm_seed files (JSON or YAML), sorted by modification time (newest first).
+    """
+    seeds_dir = seeds_dir or Path.home() / ".ouroboros" / "seeds"
+    if not seeds_dir.is_dir():
+        return []
+    # Support both JSON (new) and YAML (legacy) PM seed formats
+    pm_seeds = sorted(
+        list(seeds_dir.glob("pm_seed_*.json")) + list(seeds_dir.glob("pm_seed_*.yaml")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return pm_seeds
+
+
+def _has_dev_seed(seeds_dir: Path | None = None) -> bool:
+    """Check if any dev seed (non-PM) exists in the seeds directory.
+
+    Looks for seed.json or any YAML seed file that is NOT a pm_seed.
+
+    Args:
+        seeds_dir: Directory to check. Defaults to ~/.ouroboros/seeds/.
+
+    Returns:
+        True if a dev seed file exists.
+    """
+    seeds_dir = seeds_dir or Path.home() / ".ouroboros" / "seeds"
+    if not seeds_dir.is_dir():
+        return False
+    # Check for seed.json
+    if (seeds_dir / "seed.json").exists():
+        return True
+    # Check for any non-pm seed YAML files
+    return any(not yaml_file.name.startswith("pm_seed_") for yaml_file in seeds_dir.glob("*.yaml"))
+
+
+def _display_pm_seed_info(seed_path: Path) -> dict[str, str]:
+    """Read and display summary info for a PM seed file.
+
+    Args:
+        seed_path: Path to the pm_seed YAML file.
+
+    Returns:
+        Dict with 'name', 'goal', and 'pm_id' extracted from the file.
+        Falls back to defaults if the file is malformed.
+    """
+    try:
+        with open(seed_path) as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            raise ValueError("PM seed file is not a YAML mapping")
+        name = data.get("product_name", "") or "Unnamed"
+        goal = data.get("goal", "") or "No goal specified"
+        pm_id = data.get("pm_id", seed_path.stem)
+    except (yaml.YAMLError, OSError, ValueError, AttributeError):
+        name = seed_path.stem
+        goal = "No goal specified"
+        pm_id = seed_path.stem
+    return {"name": name, "goal": goal, "pm_id": pm_id}
+
+
+def _notify_pm_seed_detected(pm_seeds: list[Path]) -> None:
+    """Display a prominent notification that PM seed(s) were auto-detected.
+
+    Shows a bordered panel with seed details so the user clearly sees
+    that PM output is available for use as dev interview context.
+
+    Args:
+        pm_seeds: List of detected PM seed file paths.
+    """
+    console.print()
+    console.print("[bold cyan]╔══════════════════════════════════════════════╗[/]")
+    console.print(
+        "[bold cyan]║[/]  [bold yellow]PM Seed Auto-Detected[/]                      [bold cyan]║[/]"
+    )
+    console.print("[bold cyan]╚══════════════════════════════════════════════╝[/]")
+    console.print()
+
+    for seed_path in pm_seeds:
+        info = _display_pm_seed_info(seed_path)
+        goal_display = info["goal"][:80] + "..." if len(info["goal"]) > 80 else info["goal"]
+        console.print(f"  [bold]{info['name']}[/] [dim]({info['pm_id']})[/]")
+        console.print(f"  [dim]{goal_display}[/]")
+        console.print()
+
+    console.print(
+        "[dim]A PM seed contains product requirements from a prior PM interview.\n"
+        "Using it as initial context gives the dev interview a head start.[/]"
+    )
+    console.print()
+
+
+def _prompt_pm_seed_selection(pm_seeds: list[Path]) -> Path | None:
+    """Prompt user to select a PM seed to use as initial context.
+
+    Shows a notification banner, lists available seeds, and asks the user
+    to pick one or skip. For a single seed, offers a simple yes/no confirmation.
+
+    Args:
+        pm_seeds: List of available PM seed paths.
+
+    Returns:
+        Selected PM seed path, or None if user declines.
+    """
+    _notify_pm_seed_detected(pm_seeds)
+
+    if len(pm_seeds) == 1:
+        # Single seed — simple yes/no confirmation
+        use_it = Confirm.ask(
+            "[yellow]Use this PM seed as initial context for the dev interview?[/]",
+            default=True,
+        )
+        return pm_seeds[0] if use_it else None
+
+    # Multiple seeds — numbered selection
+    console.print("[bold]Available PM seeds:[/]")
+    console.print()
+    for i, seed_path in enumerate(pm_seeds, 1):
+        info = _display_pm_seed_info(seed_path)
+        goal_display = info["goal"][:80] + "..." if len(info["goal"]) > 80 else info["goal"]
+        console.print(f"  [cyan]{i}[/] - [bold]{info['name']}[/] ({info['pm_id']})")
+        console.print(f"      {goal_display}")
+    console.print("  [cyan]0[/] - Skip (start fresh interview)")
+    console.print()
+
+    choice = Prompt.ask(
+        "[yellow]Select PM seed[/]",
+        choices=[str(i) for i in range(len(pm_seeds) + 1)],
+        default="1",
+    )
+
+    idx = int(choice)
+    if idx == 0:
+        return None
+    return pm_seeds[idx - 1]
+
+
+def _load_pm_seed_as_context(seed_path: Path) -> str:
+    """Load a PM seed YAML and convert to initial_context string.
+
+    Args:
+        seed_path: Path to the pm_seed YAML file.
+
+    Returns:
+        YAML-formatted string for use as dev interview initial_context.
+    """
+    from ouroboros.bigbang.pm_seed import PMSeed
+
+    with open(seed_path) as f:
+        data = yaml.safe_load(f)
+
+    pm_seed = PMSeed.from_dict(data)
+    return pm_seed.to_initial_context()
+
+
 @app.command()
 def start(
     context: Annotated[
@@ -597,18 +751,47 @@ def start(
         ouroboros init start
     """
     # Get initial context if not provided
-    if not resume and not context:
-        console.print("[bold cyan]Welcome to Ouroboros Interview![/]")
-        console.print()
-        console.print(
-            "This interactive process will help refine your ideas into clear requirements.",
-        )
-        console.print(
-            "You control when to stop - no arbitrary round limit.",
-        )
-        console.print()
+    if not resume:
+        # Auto-detect PM seeds and offer to use as context
+        seeds_dir = Path.home() / ".ouroboros" / "seeds"
+        if not _has_dev_seed(seeds_dir):
+            pm_seeds = _find_pm_seeds(seeds_dir)
+            if pm_seeds:
+                if context:
+                    # User provided context but PM seed exists — notify and ask
+                    _notify_pm_seed_detected(pm_seeds)
+                    use_pm = Confirm.ask(
+                        "[yellow]Use PM seed instead of the provided context?[/]",
+                        default=False,
+                    )
+                    if use_pm:
+                        selected = (
+                            _prompt_pm_seed_selection(pm_seeds)
+                            if len(pm_seeds) > 1
+                            else pm_seeds[0]
+                        )
+                        if selected:
+                            context = _load_pm_seed_as_context(selected)
+                            print_success(f"Using PM seed: {selected.name}")
+                else:
+                    # No context provided — offer PM seed as primary option
+                    selected = _prompt_pm_seed_selection(pm_seeds)
+                    if selected:
+                        context = _load_pm_seed_as_context(selected)
+                        print_success(f"Using PM seed: {selected.name}")
 
-        context = asyncio.run(_multiline_prompt_async("What would you like to build?"))
+        if not context:
+            console.print("[bold cyan]Welcome to Ouroboros Interview![/]")
+            console.print()
+            console.print(
+                "This interactive process will help refine your ideas into clear requirements.",
+            )
+            console.print(
+                "You control when to stop - no arbitrary round limit.",
+            )
+            console.print()
+
+            context = asyncio.run(_multiline_prompt_async("What would you like to build?"))
 
     if not resume and not context:
         print_error("Initial context is required when not resuming.")

@@ -752,7 +752,7 @@ class TestOuroborosTools:
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
         """OUROBOROS_TOOLS contains all standard handlers."""
-        assert len(OUROBOROS_TOOLS) == 19
+        assert len(OUROBOROS_TOOLS) == 21
 
         handler_types = {type(h) for h in OUROBOROS_TOOLS}
         assert ExecuteSeedHandler in handler_types
@@ -788,7 +788,7 @@ class TestOuroborosTools:
     def test_get_ouroboros_tools_can_inject_runtime_backend(self) -> None:
         """Tool factory can build execute_seed with a specific runtime backend."""
         tools = get_ouroboros_tools(runtime_backend="codex")
-        assert len(tools) == 19
+        assert len(tools) == 21
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
         assert execute_handler.agent_runtime_backend == "codex"
 

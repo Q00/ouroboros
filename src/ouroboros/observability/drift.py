@@ -8,7 +8,7 @@ the original Seed specification. Three components are tracked:
 2. Constraint drift: Constraint violations accumulated
 3. Ontology drift: Evolution of the concept space
 
-The combined drift uses weighted formula (PRD 13.1):
+The combined drift uses weighted formula (PM 13.1):
     combined = (goal * 0.5) + (constraint * 0.3) + (ontology * 0.2)
 
 NFR5 requires combined drift ≤ 0.3 to be acceptable.
@@ -47,7 +47,7 @@ log = get_logger(__name__)
 # Constants
 # =============================================================================
 
-# Weights from PRD 13.1
+# Weights from PM 13.1
 GOAL_DRIFT_WEIGHT = 0.5
 CONSTRAINT_DRIFT_WEIGHT = 0.3
 ONTOLOGY_DRIFT_WEIGHT = 0.2
@@ -69,7 +69,7 @@ class DriftMetrics:
     """Immutable drift measurement result.
 
     Contains individual drift components and computed combined drift.
-    Uses weighted formula from PRD 13.1.
+    Uses weighted formula from PM 13.1.
 
     Attributes:
         goal_drift: Deviation from seed goal (0.0-1.0)
@@ -93,7 +93,7 @@ class DriftMetrics:
     def combined_drift(self) -> float:
         """Calculate combined drift using weighted formula.
 
-        Formula from PRD 13.1:
+        Formula from PM 13.1:
             combined = (goal * 0.5) + (constraint * 0.3) + (ontology * 0.2)
 
         Returns:
@@ -160,7 +160,7 @@ def calculate_constraint_drift(constraint_violations: list[str], seed: Seed) -> 
     """Calculate constraint drift based on violations.
 
     Each violation adds 0.1 to drift, capped at 1.0.
-    Formula from PRD 13.1: min(violations * 0.1, 1.0)
+    Formula from PM 13.1: min(violations * 0.1, 1.0)
 
     Args:
         constraint_violations: List of violation descriptions
