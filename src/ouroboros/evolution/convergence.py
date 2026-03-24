@@ -65,6 +65,7 @@ class ConvergenceCriteria:
         latest_wonder: WonderOutput | None = None,
         latest_evaluation: EvaluationSummary | None = None,
         validation_output: str | None = None,
+        validation_passed: bool | None = None,
     ) -> ConvergenceSignal:
         """Check if the loop should terminate.
 
@@ -172,7 +173,15 @@ class ConvergenceCriteria:
 
             # Validation gate: block convergence if validation was skipped or failed
             if self.validation_gate_enabled and validation_output:
-                if "skipped" in validation_output.lower() or "error" in validation_output.lower():
+                # Use explicit bool flag when available; fall back to string matching
+                if validation_passed is not None:
+                    gate_blocked = not validation_passed
+                else:
+                    gate_blocked = (
+                        "skipped" in validation_output.lower()
+                        or "error" in validation_output.lower()
+                    )
+                if gate_blocked:
                     return ConvergenceSignal(
                         converged=False,
                         reason=(f"Validation gate blocked: {validation_output}"),

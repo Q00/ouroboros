@@ -135,15 +135,24 @@ class LineageProjector:
 
             elif event.type == "lineage.converged":
                 if lineage is not None:
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
+                    reason = event.data.get("reason", "ontology_converged")
+                    lineage = lineage.with_status(
+                        LineageStatus.CONVERGED, termination_reason=reason
+                    )
 
             elif event.type == "lineage.exhausted":
                 if lineage is not None:
-                    lineage = lineage.with_status(LineageStatus.EXHAUSTED)
+                    reason = event.data.get("reason", "max_generations")
+                    lineage = lineage.with_status(
+                        LineageStatus.EXHAUSTED, termination_reason=reason
+                    )
 
             elif event.type == "lineage.stagnated":
                 if lineage is not None:
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
+                    reason = event.data.get("reason", "stagnation")
+                    lineage = lineage.with_status(
+                        LineageStatus.CONVERGED, termination_reason=reason
+                    )
 
             elif event.type == "lineage.rewound":
                 data = event.data

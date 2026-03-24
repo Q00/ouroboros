@@ -83,6 +83,7 @@ class GenerationResult:
     reflect_output: ReflectOutput | None = None
     ontology_delta: OntologyDelta | None = None
     validation_output: str | None = None
+    validation_passed: bool | None = None
     phase: GenerationPhase = GenerationPhase.COMPLETED
     success: bool = True
 
@@ -312,6 +313,7 @@ class EvolutionaryLoop:
                 result.wonder_output,
                 latest_evaluation=result.evaluation_summary,
                 validation_output=result.validation_output,
+                validation_passed=result.validation_passed,
             )
 
             if signal.converged:
@@ -924,19 +926,25 @@ class EvolutionaryLoop:
 
         # Validate phase - reconcile parallel execution artifacts
         validation_output: str | None = None
+        validation_passed: bool | None = None
         if execute and execution_output and self.validator:
             try:
                 validation_result = await self.validator(current_seed, execution_output)
                 if isinstance(validation_result, str):
                     validation_output = validation_result
+                    validation_passed = True
                 elif hasattr(validation_result, "is_ok"):
                     if validation_result.is_ok:
                         validation_output = str(validation_result.value)
+                        validation_passed = True
                     else:
                         validation_output = f"Validation error: {validation_result.error}"
+                        validation_passed = False
                 else:
                     validation_output = str(validation_result)
+                    validation_passed = True
                 if validation_output and "skipped" in validation_output.lower():
+                    validation_passed = False
                     logger.warning(
                         "evolution.generation.validation_skipped",
                         extra={"generation": generation_number, "output": validation_output},
@@ -952,6 +960,7 @@ class EvolutionaryLoop:
                     extra={"error": str(e), "generation": generation_number},
                 )
                 validation_output = f"Validation skipped: {e}"
+                validation_passed = False
 
         # Phase transition: → evaluating
         await self.event_store.append(
@@ -1010,6 +1019,7 @@ class EvolutionaryLoop:
                 reflect_output=reflect_output,
                 ontology_delta=ontology_delta,
                 validation_output=validation_output,
+                validation_passed=validation_passed,
                 phase=GenerationPhase.COMPLETED,
                 success=True,
             )
