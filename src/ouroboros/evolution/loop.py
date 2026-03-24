@@ -972,6 +972,7 @@ class EvolutionaryLoop:
         ontology_delta: OntologyDelta | None = None
         restored_execution_output: str | None = None
         restored_evaluation_summary: EvaluationSummary | None = None
+        restored_validation_output: str | None = None
 
         # Restore partial state from interrupted generation if resuming
         if resume_after_phase and lineage.generations:
@@ -1010,6 +1011,8 @@ class EvolutionaryLoop:
                             "evolution.resume.evaluation_summary_restore_failed",
                             extra={"error": str(e)},
                         )
+                if _should_skip("evaluating") and ps.get("validation_output"):
+                    restored_validation_output = ps["validation_output"]
 
         # Gen 2+: Wonder and Reflect phases
         if generation_number > 1 and lineage.generations:
@@ -1303,8 +1306,14 @@ class EvolutionaryLoop:
                 return Result.err(OuroborosError(f"Execution error: {e}"))
 
         # Validate phase - reconcile parallel execution artifacts
-        validation_output: str | None = None
-        if execute and execution_output and self.validator:
+        # Skip if restored from checkpoint (resume after evaluating)
+        validation_output: str | None = restored_validation_output
+        if validation_output and _should_skip("evaluating"):
+            logger.info(
+                "evolution.generation.validation_restored_from_checkpoint",
+                extra={"generation": generation_number},
+            )
+        elif execute and execution_output and self.validator:
             try:
                 validation_result = await self.validator(current_seed, execution_output)
                 if isinstance(validation_result, str):
