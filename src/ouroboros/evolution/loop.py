@@ -554,7 +554,10 @@ class EvolutionaryLoop:
                         interrupted_gen = None
 
                 if not interrupted_gen or not interrupted_gen.seed_json:
-                    # Fallback: use last completed generation's seed
+                    # Fallback: use last completed generation's seed.
+                    # IMPORTANT: also reset interrupted_at_phase so we don't
+                    # skip phases with a stale seed from a different generation.
+                    interrupted_at_phase = None
                     last_completed = next(
                         (
                             g
