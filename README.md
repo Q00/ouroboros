@@ -96,10 +96,9 @@ Most AI coding fails at the **input**, not the output. The bottleneck is not AI 
 curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/release/0.26.0-beta/scripts/install.sh | bash
 ```
 
-**Build** — open a session and go:
+**Build** — open your AI coding agent and go:
 
 ```
-claude
 > ooo interview "I want to build a task management CLI"
 ```
 
@@ -169,7 +168,7 @@ run        ->  Executed via Double Diamond decomposition
 evaluate   ->  3-stage verification: Mechanical -> Semantic -> Consensus
 ```
 
-> Use `ooo <cmd>` inside Claude Code or Codex CLI sessions, or `ouroboros init start`, `ouroboros run seed.yaml`, etc. from the terminal.
+> Use `ooo <cmd>` inside your AI coding agent session, or `ouroboros init start`, `ouroboros run seed.yaml`, etc. from the terminal.
 
 The serpent completed one loop. Each loop, it knows more than the last.
 
@@ -218,7 +217,7 @@ Convergence is reached when ontology similarity >= 0.95 -- when the system has q
 
 ### Ralph: The Loop That Never Stops
 
-`ooo ralph` (Claude Code skill) runs the evolutionary loop persistently -- across session boundaries -- until convergence is reached. Each step is **stateless**: the EventStore reconstructs the full lineage, so even if your machine restarts, the serpent picks up where it left off.
+`ooo ralph` runs the evolutionary loop persistently -- across session boundaries -- until convergence is reached. Each step is **stateless**: the EventStore reconstructs the full lineage, so even if your machine restarts, the serpent picks up where it left off.
 
 ```
 Ralph Cycle 1: evolve_step(lineage, seed) -> Gen 1 -> action=CONTINUE
@@ -232,7 +231,7 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 
 ## Commands
 
-Inside Claude Code sessions, use `ooo <cmd>` skills. From the terminal, use the `ouroboros` CLI.
+Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use the `ouroboros` CLI.
 
 | Skill (`ooo`) | CLI equivalent | What It Does |
 |:---------------|:---------------|:-------------|
@@ -249,7 +248,7 @@ Inside Claude Code sessions, use `ooo <cmd>` skills. From the terminal, use the 
 | `ooo tutorial` | *(interactive)* | Interactive hands-on learning |
 | `ooo help` | `ouroboros --help` | Full reference |
 
-> Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`) are available through Claude Code skills or MCP tools only.
+> Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`) are available through agent skills or MCP tools only.
 
 See the [CLI reference](./docs/cli-reference.md) for full details.
 

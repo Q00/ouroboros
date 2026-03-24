@@ -224,13 +224,8 @@ fi
 echo
 echo "Done! Get started:"
 echo
-echo "  Open a new session and run:"
-if command -v claude &>/dev/null; then
-  echo '    claude'
-  echo '    > ooo interview "your idea here"'
-elif command -v codex &>/dev/null; then
-  echo '    codex'
-  echo '    > ooo interview "your idea here"'
-else
-  echo '    ouroboros init start "your idea here"'
-fi
+echo "  Open your AI coding agent and run:"
+echo '    > ooo interview "your idea here"'
+echo
+echo "  Or from the terminal:"
+echo '    ouroboros init start "your idea here"'
