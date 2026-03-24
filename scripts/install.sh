@@ -4,9 +4,16 @@
 # TODO: Change URL back to main branch when 0.26.0 is officially released
 set -euo pipefail
 
-# TODO: Remove version pin when 0.26.0 stable is released
 PACKAGE_NAME="ouroboros-ai"
-VERSION="==0.26.0b3"
+# Auto-detect latest version from PyPI (includes pre-releases)
+VERSION=""
+if command -v curl &>/dev/null; then
+  LATEST=$(curl -fsSL "https://pypi.org/pypi/${PACKAGE_NAME}/json" 2>/dev/null \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || true)
+  if [ -n "$LATEST" ]; then
+    VERSION="==${LATEST}"
+  fi
+fi
 MIN_PYTHON="3.12"
 
 echo "╭──────────────────────────────────────╮"
