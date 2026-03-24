@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "ouroboros": {
-      "command": "uvx",
-      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+      "command": "uv",
+      "args": ["run", "ouroboros", "mcp", "serve"],
       "timeout": 600
     }
   }
