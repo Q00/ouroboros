@@ -9,9 +9,11 @@ summary plus a detailed reference string for the QA judge.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
+from uuid import uuid4
 
 from ouroboros.core.security import InputValidator
 from ouroboros.core.text import truncate_head_tail
@@ -66,6 +68,15 @@ class GitCommandCapture:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactLocation:
+    """Filesystem location and identity for a persisted verification bundle."""
+
+    artifact_dir: Path
+    artifact_key: str
+    artifact_run_id: str
+
+
 def _configured_commands(config: MechanicalConfig) -> list[tuple[CheckType, tuple[str, ...]]]:
     commands: list[tuple[CheckType, tuple[str, ...]]] = []
     for check_type, command in (
@@ -80,18 +91,25 @@ def _configured_commands(config: MechanicalConfig) -> list[tuple[CheckType, tupl
     return commands
 
 
-def _artifact_dir_for(execution_id: str) -> Path:
+def _artifact_dir_for(execution_id: str) -> ArtifactLocation:
     segment = re.sub(r"[^A-Za-z0-9_-]+", "_", execution_id).strip("_-")
     if not segment:
         segment = "execution"
 
-    artifact_dir = _ARTIFACT_BASE_DIR / segment
+    artifact_key = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()[:16]
+    run_id = uuid4().hex[:12]
+    execution_dir = _ARTIFACT_BASE_DIR / f"{segment[:48]}-{artifact_key}"
+    artifact_dir = execution_dir / run_id
     is_valid, error = InputValidator.validate_path_containment(artifact_dir, _ARTIFACT_BASE_DIR)
     if not is_valid:
         raise ValueError(
             f"Artifact directory escapes root for execution_id {execution_id!r}: {error}"
         )
-    return artifact_dir
+    return ArtifactLocation(
+        artifact_dir=artifact_dir,
+        artifact_key=artifact_key,
+        artifact_run_id=run_id,
+    )
 
 
 def _last_nonempty_lines(text: str, *, limit: int = _OUTCOME_LINE_LIMIT) -> str:
@@ -280,6 +298,7 @@ def _render_reference(
     lines = [
         "# Raw Verification Evidence",
         f"Execution ID: {execution_id}",
+        f"Artifact Run ID: {artifact_dir.name}",
         f"Project Dir: {working_dir}",
         f"Artifact Dir: {artifact_dir}",
         f"Manifest: {artifact_dir / 'manifest.json'}",
@@ -343,9 +362,10 @@ async def build_verification_artifacts(
     working_dir: Path,
 ) -> VerificationArtifacts:
     """Run canonical mechanical checks and build QA evidence strings."""
-    artifact_dir = _artifact_dir_for(execution_id)
+    artifact_location = _artifact_dir_for(execution_id)
+    artifact_dir = artifact_location.artifact_dir
     runs_dir = artifact_dir / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir.mkdir(parents=True, exist_ok=False)
 
     config = build_mechanical_config(working_dir)
     commands = _configured_commands(config)
@@ -396,6 +416,8 @@ async def build_verification_artifacts(
     rendered_runs = tuple(runs)
     manifest = {
         "execution_id": execution_id,
+        "artifact_key": artifact_location.artifact_key,
+        "artifact_run_id": artifact_location.artifact_run_id,
         "working_dir": str(working_dir),
         "artifact_dir": str(artifact_dir),
         "changed_files": list(changed_files),

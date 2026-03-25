@@ -335,8 +335,11 @@ class TestBuildVerificationArtifacts:
         assert manifest["git_state_error"] == "fatal: not a git repository"
 
     @pytest.mark.asyncio
-    async def test_sanitizes_execution_id_for_artifact_directory(self, tmp_path: Path) -> None:
-        """Traversal-like execution IDs must still write under the artifact root."""
+    async def test_distinct_execution_ids_do_not_alias_artifact_directories(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Distinct execution IDs must not collapse onto the same persisted directory."""
         config = MechanicalConfig(
             test_command=("uv", "run", "pytest", "-q"),
             timeout_seconds=30,
@@ -355,7 +358,6 @@ class TestBuildVerificationArtifacts:
             raise AssertionError(f"Unexpected command: {command}")
 
         artifact_root = tmp_path / "artifact-store"
-        execution_id = "../../tmp/pwn"
         with (
             patch(
                 "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
@@ -370,12 +372,83 @@ class TestBuildVerificationArtifacts:
                 new=AsyncMock(side_effect=fake_run_command),
             ),
         ):
-            artifacts = await build_verification_artifacts(execution_id, "done", tmp_path)
+            first = await build_verification_artifacts("foo/bar", "done", tmp_path)
+            second = await build_verification_artifacts("foo?bar", "done", tmp_path)
+            third = await build_verification_artifacts("../../tmp/pwn", "done", tmp_path)
 
-        artifact_dir = Path(artifacts.artifact_dir).resolve()
-        assert artifact_dir.is_relative_to(artifact_root.resolve())
-        assert artifact_dir.name == "tmp_pwn"
-        manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
-        assert manifest["execution_id"] == execution_id
-        assert f"Execution ID: {execution_id}" in artifacts.artifact
-        assert f"Execution ID: {execution_id}" in artifacts.reference
+        directories = [
+            Path(first.artifact_dir).resolve(),
+            Path(second.artifact_dir).resolve(),
+            Path(third.artifact_dir).resolve(),
+        ]
+        assert len(set(directories)) == 3
+        for artifact_dir, execution_id, artifacts in (
+            (directories[0], "foo/bar", first),
+            (directories[1], "foo?bar", second),
+            (directories[2], "../../tmp/pwn", third),
+        ):
+            assert artifact_dir.is_relative_to(artifact_root.resolve())
+            manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
+            assert manifest["execution_id"] == execution_id
+            assert manifest["artifact_key"]
+            assert manifest["artifact_run_id"]
+            assert f"Execution ID: {execution_id}" in artifacts.artifact
+            assert f"Execution ID: {execution_id}" in artifacts.reference
+
+    @pytest.mark.asyncio
+    async def test_preserves_separate_artifacts_for_repeated_execution_ids(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Repeated verification attempts must not overwrite earlier evidence."""
+        config = MechanicalConfig(
+            test_command=("uv", "run", "pytest", "-q"),
+            timeout_seconds=30,
+            working_dir=tmp_path,
+        )
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            if command and command[0] == "git":
+                return CommandResult(0, _git_diff_side_effect(command), "")
+            if "pytest" in command:
+                return CommandResult(0, "1 passed in 0.10s\n", "")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            first = await build_verification_artifacts("lin_test-gen-3", "done", tmp_path)
+            second = await build_verification_artifacts("lin_test-gen-3", "done", tmp_path)
+
+        first_dir = Path(first.artifact_dir)
+        second_dir = Path(second.artifact_dir)
+        assert first_dir != second_dir
+        assert first_dir.exists()
+        assert second_dir.exists()
+        assert Path(first.manifest_path).exists()
+        assert Path(second.manifest_path).exists()
+        assert (first_dir / "runs" / "01-test" / "stdout.log").exists()
+        assert (second_dir / "runs" / "01-test" / "stdout.log").exists()
+
+        first_manifest = json.loads(Path(first.manifest_path).read_text(encoding="utf-8"))
+        second_manifest = json.loads(Path(second.manifest_path).read_text(encoding="utf-8"))
+        assert first_manifest["execution_id"] == "lin_test-gen-3"
+        assert second_manifest["execution_id"] == "lin_test-gen-3"
+        assert first_manifest["artifact_key"] == second_manifest["artifact_key"]
+        assert first_manifest["artifact_run_id"] != second_manifest["artifact_run_id"]
