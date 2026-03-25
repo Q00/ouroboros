@@ -74,7 +74,7 @@ class TestInitCommand:
     ) -> None:
         """Test init start with context argument."""
         # Mock the LLM adapter and asyncio.run
-        with patch("ouroboros.cli.commands.init.LiteLLMAdapter") as mock_adapter_class:
+        with patch("ouroboros.cli.commands.init.AnthropicAdapter") as mock_adapter_class:
             mock_adapter = MagicMock()
             mock_adapter.complete = mock_interview_llm_provider.complete
             mock_adapter_class.return_value = mock_adapter
@@ -107,7 +107,7 @@ class TestInitCommand:
 
     def test_init_list_no_interviews(self, temp_state_dir: Path) -> None:
         """Test init list when no interviews exist."""
-        with patch("ouroboros.cli.commands.init.LiteLLMAdapter"):
+        with patch("ouroboros.cli.commands.init.AnthropicAdapter"):
             with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
                 mock_run.return_value = []
 
@@ -121,7 +121,7 @@ class TestInitCommand:
 
     def test_init_resume_missing_interview(self, temp_state_dir: Path) -> None:
         """Test init resume with non-existent interview ID."""
-        with patch("ouroboros.cli.commands.init.LiteLLMAdapter") as mock_adapter_class:
+        with patch("ouroboros.cli.commands.init.AnthropicAdapter") as mock_adapter_class:
             mock_adapter = MagicMock()
             mock_adapter_class.return_value = mock_adapter
 

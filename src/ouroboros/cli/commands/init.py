@@ -1,7 +1,7 @@
 """Init command for starting interactive interview.
 
 This command initiates the Big Bang phase interview process.
-Supports both LiteLLM (external API) and Claude Code (Max Plan) modes.
+Supports both direct Anthropic API and Claude Code (Max Plan) modes.
 """
 
 import asyncio
@@ -27,12 +27,8 @@ from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.observability import LoggingConfig, configure_logging
+from ouroboros.providers.anthropic_adapter import AnthropicAdapter
 from ouroboros.providers.base import LLMAdapter
-
-try:
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
-except ImportError:
-    LiteLLMAdapter = None  # type: ignore[assignment,misc]
 
 
 class SeedGenerationResult(Enum):
@@ -140,7 +136,7 @@ def _get_adapter(
     """Get the appropriate LLM adapter.
 
     Args:
-        use_orchestrator: If True, use Claude Code (Max Plan). Otherwise LiteLLM.
+        use_orchestrator: If True, use Claude Code (Max Plan). Otherwise Anthropic API.
         for_interview: If True, enable Read/Glob/Grep tools for codebase exploration.
         debug: If True, show streaming messages (thinking, tool use).
 
@@ -160,8 +156,7 @@ def _get_adapter(
                 on_message=_make_message_callback(debug),
             )
         return ClaudeCodeAdapter()
-    else:
-        return LiteLLMAdapter()
+    return AnthropicAdapter()
 
 
 async def _run_interview_loop(
@@ -262,7 +257,7 @@ async def _run_interview(
         initial_context: Initial context or idea for the interview.
         resume_id: Optional interview ID to resume.
         state_dir: Optional custom state directory.
-        use_orchestrator: If True, use Claude Code (Max Plan) instead of LiteLLM.
+        use_orchestrator: If True, use Claude Code (Max Plan) instead of Anthropic API.
     """
     # Initialize components
     llm_adapter = _get_adapter(use_orchestrator, for_interview=True, debug=debug)
@@ -500,7 +495,7 @@ def start(
         typer.Option(
             "--orchestrator",
             "-o",
-            help="Use Claude Code (Max Plan) instead of LiteLLM. No API key required.",
+            help="Use Claude Code (Max Plan) instead of Anthropic API. No API key required.",
         ),
     ] = False,
     debug: Annotated[
@@ -553,7 +548,7 @@ def start(
     if orchestrator:
         print_info("Using Claude Code (Max Plan) - no API key required")
     else:
-        print_info("Using LiteLLM - API key required")
+        print_info("Using Anthropic API - ANTHROPIC_API_KEY required")
 
     # Run interview
     try:
@@ -581,7 +576,7 @@ def list_interviews(
     ] = None,
 ) -> None:
     """List all interview sessions."""
-    llm_adapter = LiteLLMAdapter()
+    llm_adapter = AnthropicAdapter()
     engine = InterviewEngine(
         llm_adapter=llm_adapter,
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",
