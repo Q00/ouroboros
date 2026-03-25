@@ -1460,3 +1460,81 @@ class TestCancelOrphanedSessions:
             event = call[0][0]
             assert event.type == "orchestrator.session.cancelled"
             assert "cancelled_at" in event.data
+
+
+class TestStaleRuntimeMetadataCleansing:
+    """Test that terminal sessions have stale runtime_status sanitized (#188)."""
+
+    async def test_cancelled_session_overwrites_stale_runtime_status(self) -> None:
+        """runtime_status should reflect terminal state after cancellation."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_event_store = AsyncMock()
+        mock_event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="sess-stale",
+                    data={"execution_id": "exec-1", "seed_id": "seed-1"},
+                ),
+                BaseEvent(
+                    type="orchestrator.progress.updated",
+                    aggregate_type="session",
+                    aggregate_id="sess-stale",
+                    data={"progress": {"runtime_status": "running", "phase": "executing"}},
+                ),
+                BaseEvent(
+                    type="orchestrator.session.cancelled",
+                    aggregate_type="session",
+                    aggregate_id="sess-stale",
+                    data={"reason": "Auto-cancelled on startup", "cancelled_by": "auto_cleanup"},
+                ),
+            ]
+        )
+        mock_event_store.query_session_related_events = None
+
+        repository = SessionRepository(mock_event_store)
+        result = await repository.reconstruct_session("sess-stale")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.status == SessionStatus.CANCELLED
+        assert tracker.progress.get("runtime_status") == "cancelled"
+
+    async def test_completed_session_overwrites_stale_runtime_status(self) -> None:
+        """runtime_status should reflect 'completed' for completed sessions."""
+        from ouroboros.events.base import BaseEvent
+
+        mock_event_store = AsyncMock()
+        mock_event_store.replay = AsyncMock(
+            return_value=[
+                BaseEvent(
+                    type="orchestrator.session.started",
+                    aggregate_type="session",
+                    aggregate_id="sess-done",
+                    data={"execution_id": "exec-2", "seed_id": "seed-2"},
+                ),
+                BaseEvent(
+                    type="orchestrator.progress.updated",
+                    aggregate_type="session",
+                    aggregate_id="sess-done",
+                    data={"progress": {"runtime_status": "running"}},
+                ),
+                BaseEvent(
+                    type="orchestrator.session.completed",
+                    aggregate_type="session",
+                    aggregate_id="sess-done",
+                    data={"summary": {"success": True}},
+                ),
+            ]
+        )
+        mock_event_store.query_session_related_events = None
+
+        repository = SessionRepository(mock_event_store)
+        result = await repository.reconstruct_session("sess-done")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.status == SessionStatus.COMPLETED
+        assert tracker.progress.get("runtime_status") == "completed"
