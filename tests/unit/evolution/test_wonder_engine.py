@@ -5,11 +5,10 @@ Tests the JSON parsing logic and degraded mode heuristics without LLM calls.
 
 from __future__ import annotations
 
-import pytest
 
-from ouroboros.core.lineage import ACResult, EvaluationSummary
+from ouroboros.core.lineage import EvaluationSummary
 from ouroboros.core.seed import OntologyField, OntologySchema
-from ouroboros.evolution.wonder import WonderEngine, WonderOutput
+from ouroboros.evolution.wonder import WonderEngine
 
 
 def _make_engine() -> WonderEngine:

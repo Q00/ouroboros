@@ -7,13 +7,11 @@ enum member is added but not handled.
 
 from __future__ import annotations
 
-import ast
 import re
 from pathlib import Path
 
-import pytest
 
-from ouroboros.core.lineage import MutationAction, TerminationReason
+from ouroboros.core.lineage import MutationAction
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "ouroboros"
 

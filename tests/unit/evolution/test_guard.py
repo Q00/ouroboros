@@ -10,12 +10,11 @@ Tests the gated_append() flow:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from ouroboros.core.errors import TransitionError
-from ouroboros.core.lineage import LineageStatus
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import (
     lineage_converged,
