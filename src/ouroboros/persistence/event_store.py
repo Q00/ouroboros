@@ -403,13 +403,13 @@ class EventStore:
             ) from e
 
     async def get_all_sessions(self) -> list[BaseEvent]:
-        """Get all session start events.
+        """Get all session lifecycle events.
 
-        This method retrieves all events of type 'orchestrator.session.started'
-        to identify every session recorded in the event store.
+        Returns all ``orchestrator.session.*`` events ordered by timestamp
+        ascending so callers can replay them to reconstruct current status.
 
         Returns:
-            List of session start events, ordered by timestamp descending.
+            List of session events, ordered by timestamp ascending.
 
         Raises:
             PersistenceError: If the query fails.
@@ -424,8 +424,8 @@ class EventStore:
             async with self._engine.begin() as conn:
                 query = (
                     select(events_table)
-                    .where(events_table.c.event_type == "orchestrator.session.started")
-                    .order_by(events_table.c.timestamp.desc())
+                    .where(events_table.c.event_type.like("orchestrator.session.%"))
+                    .order_by(events_table.c.timestamp.asc())
                 )
 
                 result = await conn.execute(query)
@@ -436,7 +436,7 @@ class EventStore:
                 f"Failed to get all sessions: {e}",
                 operation="select",
                 table="events",
-                details={"event_type": "orchestrator.session.started"},
+                details={"event_type": "orchestrator.session.%"},
             ) from e
 
     async def query_events(
