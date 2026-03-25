@@ -51,6 +51,17 @@ class VerificationArtifacts:
     manifest_path: str
     changed_files: tuple[str, ...] = ()
     runs: tuple[VerificationRunArtifact, ...] = ()
+    git_state_available: bool = True
+    git_state_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitCommandCapture:
+    """Captured git command output plus availability metadata."""
+
+    text: str
+    available: bool
+    error: str | None = None
 
 
 def _configured_commands(config: MechanicalConfig) -> list[tuple[CheckType, tuple[str, ...]]]:
@@ -86,12 +97,14 @@ async def _capture_git_command(
     command: tuple[str, ...],
     working_dir: Path,
     destination: Path,
-) -> str:
+) -> GitCommandCapture:
     result = await run_command(command, timeout=30, working_dir=working_dir)
     text = result.stdout or result.stderr
     text = text.rstrip("\n")
     destination.write_text(text, encoding="utf-8")
-    return text
+    available = result.return_code == 0 and not result.timed_out
+    error = None if available else text or f"Git command failed: {_quote_command(command)}"
+    return GitCommandCapture(text=text, available=available, error=error)
 
 
 def _parse_changed_files(git_status_porcelain: str) -> tuple[str, ...]:
@@ -127,24 +140,47 @@ def _parse_changed_files(git_status_porcelain: str) -> tuple[str, ...]:
 
 async def _capture_git_state(
     working_dir: Path, artifact_dir: Path
-) -> tuple[tuple[str, ...], str, str]:
-    git_status = await _capture_git_command(
+) -> tuple[tuple[str, ...], str, str, bool, str | None]:
+    git_status_capture = await _capture_git_command(
         ("git", "status", "--short"),
         working_dir,
         artifact_dir / "git-status.txt",
     )
-    git_status_porcelain = await _capture_git_command(
+    git_status_porcelain_capture = await _capture_git_command(
         ("git", "status", "--porcelain=v1", "-z"),
         working_dir,
         artifact_dir / "git-status-porcelain.txt",
     )
-    git_diff_stat = await _capture_git_command(
+    git_diff_stat_capture = await _capture_git_command(
         ("git", "diff", "--stat", "--find-renames"),
         working_dir,
         artifact_dir / "git-diff-stat.txt",
     )
-    changed_files = _parse_changed_files(git_status_porcelain)
-    return changed_files, git_status, git_diff_stat
+    git_state_available = (
+        git_status_capture.available
+        and git_status_porcelain_capture.available
+        and git_diff_stat_capture.available
+    )
+    git_state_error = next(
+        (
+            capture.error
+            for capture in (
+                git_status_capture,
+                git_status_porcelain_capture,
+                git_diff_stat_capture,
+            )
+            if capture.error
+        ),
+        None,
+    )
+    changed_files = (
+        _parse_changed_files(git_status_porcelain_capture.text)
+        if git_status_porcelain_capture.available
+        else ()
+    )
+    git_status = git_status_capture.text if git_status_capture.available else ""
+    git_diff_stat = git_diff_stat_capture.text if git_diff_stat_capture.available else ""
+    return changed_files, git_status, git_diff_stat, git_state_available, git_state_error
 
 
 def _render_run_summary(run: VerificationRunArtifact) -> list[str]:
@@ -167,6 +203,8 @@ def _render_compact_artifact(
     execution_output: str,
     changed_files: tuple[str, ...],
     git_diff_stat: str,
+    git_state_available: bool,
+    git_state_error: str | None,
     runs: tuple[VerificationRunArtifact, ...],
 ) -> str:
     integrated_run = next((run for run in runs if run.is_integrated), None)
@@ -186,11 +224,15 @@ def _render_compact_artifact(
 
     if changed_files:
         lines.extend(f"- {path}" for path in changed_files)
+    elif not git_state_available:
+        lines.append("- (git state unavailable)")
     else:
         lines.append("- (no changed files detected)")
 
     if git_diff_stat:
         lines.extend(["", "## Diff Stat", git_diff_stat])
+    elif git_state_error:
+        lines.extend(["", "## Git State", git_state_error])
 
     for run in runs:
         lines.extend(["", *_render_run_summary(run)])
@@ -219,6 +261,8 @@ def _render_reference(
     changed_files: tuple[str, ...],
     git_status: str,
     git_diff_stat: str,
+    git_state_available: bool,
+    git_state_error: str | None,
     runs: tuple[VerificationRunArtifact, ...],
 ) -> str:
     lines = [
@@ -233,8 +277,13 @@ def _render_reference(
 
     if changed_files:
         lines.extend(f"- {path}" for path in changed_files)
+    elif not git_state_available:
+        lines.append("- (git state unavailable)")
     else:
         lines.append("- (none)")
+
+    if git_state_error:
+        lines.extend(["", "## Git State", git_state_error])
 
     if git_status:
         lines.extend(["", "## git status --short", git_status])
@@ -288,7 +337,9 @@ async def build_verification_artifacts(
 
     config = build_mechanical_config(working_dir)
     commands = _configured_commands(config)
-    changed_files, git_status, git_diff_stat = await _capture_git_state(working_dir, artifact_dir)
+    changed_files, git_status, git_diff_stat, git_state_available, git_state_error = (
+        await _capture_git_state(working_dir, artifact_dir)
+    )
 
     runs: list[VerificationRunArtifact] = []
     for index, (check_type, command) in enumerate(commands, start=1):
@@ -332,6 +383,8 @@ async def build_verification_artifacts(
         "working_dir": str(working_dir),
         "artifact_dir": str(artifact_dir),
         "changed_files": list(changed_files),
+        "git_state_available": git_state_available,
+        "git_state_error": git_state_error,
         "runs": [asdict(run) for run in rendered_runs],
         "has_integrated_verification": any(run.is_integrated for run in rendered_runs),
     }
@@ -344,6 +397,8 @@ async def build_verification_artifacts(
         execution_output,
         changed_files,
         git_diff_stat,
+        git_state_available,
+        git_state_error,
         rendered_runs,
     )
     reference = _render_reference(
@@ -354,6 +409,8 @@ async def build_verification_artifacts(
         changed_files,
         git_status,
         git_diff_stat,
+        git_state_available,
+        git_state_error,
         rendered_runs,
     )
 
@@ -364,4 +421,6 @@ async def build_verification_artifacts(
         manifest_path=str(manifest_path),
         changed_files=changed_files,
         runs=rendered_runs,
+        git_state_available=git_state_available,
+        git_state_error=git_state_error,
     )

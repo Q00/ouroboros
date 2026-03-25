@@ -276,3 +276,60 @@ class TestBuildVerificationArtifacts:
         assert manifest["changed_files"] == ["src/ouroboros/example.py"]
         assert "coverage.xml" not in manifest["changed_files"]
         assert "- coverage.xml" not in artifacts.artifact
+
+    @pytest.mark.asyncio
+    async def test_marks_git_state_unavailable_when_working_dir_is_not_a_repo(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Git stderr must not be parsed into fake changed files."""
+        config = MechanicalConfig(
+            lint_command=("uv", "run", "ruff", "check", "."),
+            timeout_seconds=30,
+            working_dir=tmp_path,
+        )
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            if command[:3] == ("git", "status", "--short"):
+                return CommandResult(128, "", "fatal: not a git repository\n")
+            if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
+                return CommandResult(128, "", "fatal: not a git repository\n")
+            if command[:3] == ("git", "diff", "--stat"):
+                return CommandResult(128, "", "fatal: not a git repository\n")
+            if "ruff" in command:
+                return CommandResult(0, "All checks passed!\n", "")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            artifacts = await build_verification_artifacts("exec_non_repo", "", tmp_path)
+
+        manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
+        assert artifacts.changed_files == ()
+        assert artifacts.git_state_available is False
+        assert artifacts.git_state_error == "fatal: not a git repository"
+        assert "- (git state unavailable)" in artifacts.artifact
+        assert "## Git State" in artifacts.reference
+        assert "fatal: not a git repository" in artifacts.reference
+        assert "## git status --short" not in artifacts.reference
+        assert "## git diff --stat --find-renames" not in artifacts.reference
+        assert manifest["changed_files"] == []
+        assert manifest["git_state_available"] is False
+        assert manifest["git_state_error"] == "fatal: not a git repository"
