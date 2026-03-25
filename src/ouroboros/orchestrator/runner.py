@@ -1488,8 +1488,9 @@ class OrchestratorRunner:
         """
         from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyAnalyzer
         from ouroboros.orchestrator.parallel_executor import (
-            ACExecutionOutcome,
             ParallelACExecutor,
+            render_parallel_completion_message,
+            render_parallel_verification_report,
         )
 
         log.info(
@@ -1588,77 +1589,38 @@ class OrchestratorRunner:
         # Determine overall success
         success = parallel_result.all_succeeded
 
-        # Build summary message with per-AC results for downstream evaluation.
-        # The evaluator uses final_message as the artifact to judge compliance,
-        # so a bare "Success: 6/6" gives it no evidence to work with.
-        summary_parts = [
-            "Parallel Execution Complete",
-            f"Success: {parallel_result.success_count}/{len(seed.acceptance_criteria)}",
-        ]
-        if parallel_result.failure_count > 0:
-            summary_parts.append(f"Failed: {parallel_result.failure_count}")
-        if parallel_result.blocked_count > 0:
-            summary_parts.append(f"Blocked: {parallel_result.blocked_count}")
-        if parallel_result.invalid_count > 0:
-            summary_parts.append(f"Invalid: {parallel_result.invalid_count}")
-
-        summary_parts.append("\n## Stage Results")
-        for stage_result in parallel_result.stages:
-            stage_bits = [
-                f"success={stage_result.success_count}",
-                f"failed={stage_result.failure_count}",
-            ]
-            if stage_result.blocked_count:
-                stage_bits.append(f"blocked={stage_result.blocked_count}")
-            if not stage_result.started:
-                stage_bits.append("not_started")
-            summary_parts.append(
-                f"- Stage {stage_result.level_number}: {stage_result.outcome.value} "
-                f"({', '.join(stage_bits)})"
-            )
-
-        summary_parts.append("\n## AC Results")
-        for r in parallel_result.results:
-            if r.outcome == ACExecutionOutcome.SUCCEEDED:
-                status = "PASS"
-            elif r.outcome == ACExecutionOutcome.BLOCKED:
-                status = "BLOCKED"
-            elif r.outcome == ACExecutionOutcome.INVALID:
-                status = "INVALID"
-            else:
-                status = "FAIL"
-            ac_label = f"AC {r.ac_index + 1}"
-            summary_parts.append(f"\n### {ac_label}: [{status}] {r.ac_content}")
-            if r.final_message:
-                # Include last 500 chars of agent output as evidence
-                evidence = r.final_message[-500:] if len(r.final_message) > 500 else r.final_message
-                summary_parts.append(evidence)
-            elif r.error:
-                summary_parts.append(f"Error: {r.error}")
-
-        final_message = "\n".join(summary_parts)
+        final_message = render_parallel_completion_message(
+            parallel_result,
+            len(seed.acceptance_criteria),
+        )
+        verification_report = render_parallel_verification_report(
+            parallel_result,
+            len(seed.acceptance_criteria),
+        )
+        execution_summary = {
+            "goal": seed.goal,
+            "acceptance_criteria_count": len(seed.acceptance_criteria),
+            "parallel_execution": True,
+            "success_count": parallel_result.success_count,
+            "failure_count": parallel_result.failure_count,
+            "blocked_count": parallel_result.blocked_count,
+            "invalid_count": parallel_result.invalid_count,
+            "skipped_count": parallel_result.skipped_count,
+            "total_levels": execution_plan.total_stages,
+            "verification_report": verification_report,
+        }
 
         # Emit completion event
         if success:
-            completion_summary = {
-                "parallel_execution": True,
-                "success_count": parallel_result.success_count,
-                "failure_count": parallel_result.failure_count,
-                "blocked_count": parallel_result.blocked_count,
-                "invalid_count": parallel_result.invalid_count,
-                "skipped_count": parallel_result.skipped_count,
-                "total_levels": execution_plan.total_stages,
-                "messages_processed": parallel_result.total_messages,
-            }
             completed_event = create_session_completed_event(
                 session_id=tracker.session_id,
-                summary=completion_summary,
+                summary=execution_summary,
                 messages_processed=parallel_result.total_messages,
             )
             await self._event_store.append(completed_event)
             await self._session_repo.mark_completed(
                 tracker.session_id,
-                completion_summary,
+                execution_summary,
             )
 
             self._console.print(
@@ -1716,16 +1678,7 @@ class OrchestratorRunner:
                 success=success,
                 session_id=tracker.session_id,
                 execution_id=exec_id,
-                summary={
-                    "goal": seed.goal,
-                    "acceptance_criteria_count": len(seed.acceptance_criteria),
-                    "parallel_execution": True,
-                    "success_count": parallel_result.success_count,
-                    "failure_count": parallel_result.failure_count,
-                    "blocked_count": parallel_result.blocked_count,
-                    "invalid_count": parallel_result.invalid_count,
-                    "skipped_count": parallel_result.skipped_count,
-                },
+                summary=execution_summary,
                 messages_processed=parallel_result.total_messages,
                 final_message=final_message,
                 duration_seconds=duration,

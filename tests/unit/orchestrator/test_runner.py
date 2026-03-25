@@ -1447,11 +1447,14 @@ class TestOrchestratorRunner:
                 runner._session_repo, "mark_completed", AsyncMock(return_value=Result.ok(None))
             ),
         ):
+            from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
             result = await runner._execute_parallel(
                 seed=sample_seed,
                 exec_id="exec_parallel",
                 tracker=tracker,
                 merged_tools=["Read", "Write", "Bash"],
+                tool_catalog=assemble_session_tool_catalog(["Read", "Write", "Bash"]),
                 system_prompt="system",
                 start_time=datetime.now(UTC),
             )

@@ -448,17 +448,14 @@ Additional context (intentional deferrals — do not penalise):
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON response: {e}") from e
 
-        # Validate all required fields are present
-        required_fields = [
+        # Numeric score fields must be present. Missing justifications are recoverable.
+        required_score_fields = [
             "goal_clarity_score",
-            "goal_clarity_justification",
             "constraint_clarity_score",
-            "constraint_clarity_justification",
             "success_criteria_clarity_score",
-            "success_criteria_clarity_justification",
         ]
 
-        for field_name in required_fields:
+        for field_name in required_score_fields:
             if field_name not in data:
                 raise ValueError(f"Missing required field: {field_name}")
 
@@ -466,6 +463,15 @@ Additional context (intentional deferrals — do not penalise):
         def clamp_score(value: Any) -> float:
             score = float(value)
             return max(0.0, min(1.0, score))
+
+        def justification_for(field_name: str, component_name: str) -> str:
+            value = data.get(field_name)
+            if value is None:
+                return f"{component_name} justification not provided by model."
+            text = str(value).strip()
+            if not text:
+                return f"{component_name} justification not provided by model."
+            return text
 
         # Select weights based on project type
         if is_brownfield:
@@ -484,7 +490,10 @@ Additional context (intentional deferrals — do not penalise):
                 name="Context Clarity",
                 clarity_score=clamp_score(data["context_clarity_score"]),
                 weight=BROWNFIELD_CONTEXT_CLARITY_WEIGHT,
-                justification=str(data.get("context_clarity_justification", "")),
+                justification=justification_for(
+                    "context_clarity_justification",
+                    "Context Clarity",
+                ),
             )
 
         return ScoreBreakdown(
@@ -492,19 +501,28 @@ Additional context (intentional deferrals — do not penalise):
                 name="Goal Clarity",
                 clarity_score=clamp_score(data["goal_clarity_score"]),
                 weight=goal_weight,
-                justification=str(data["goal_clarity_justification"]),
+                justification=justification_for(
+                    "goal_clarity_justification",
+                    "Goal Clarity",
+                ),
             ),
             constraint_clarity=ComponentScore(
                 name="Constraint Clarity",
                 clarity_score=clamp_score(data["constraint_clarity_score"]),
                 weight=constraint_weight,
-                justification=str(data["constraint_clarity_justification"]),
+                justification=justification_for(
+                    "constraint_clarity_justification",
+                    "Constraint Clarity",
+                ),
             ),
             success_criteria_clarity=ComponentScore(
                 name="Success Criteria Clarity",
                 clarity_score=clamp_score(data["success_criteria_clarity_score"]),
                 weight=criteria_weight,
-                justification=str(data["success_criteria_clarity_justification"]),
+                justification=justification_for(
+                    "success_criteria_clarity_justification",
+                    "Success Criteria Clarity",
+                ),
             ),
             context_clarity=context_clarity,
         )

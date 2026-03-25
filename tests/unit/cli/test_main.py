@@ -255,7 +255,7 @@ class TestShorthandCommands:
 
     def test_init_list_subcommand_still_works(self) -> None:
         """Test backward compat: 'ouroboros init list' still routes to list."""
-        with patch("ouroboros.cli.commands.init.AnthropicAdapter"):
+        with patch("ouroboros.cli.commands.init.create_llm_adapter"):
             with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
                 mock_run.return_value = []
                 result = runner.invoke(app, ["init", "list"])
