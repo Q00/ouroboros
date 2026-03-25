@@ -371,6 +371,7 @@ class EvolutionaryLoop:
                     list(result.wonder_output.questions) if result.wonder_output else None,
                     seed_json=json.dumps(result.seed.to_dict()),
                     execution_output=result.execution_output,
+                    parent_seed_id=result.seed.metadata.parent_seed_id,
                 )
             )
 
@@ -735,6 +736,7 @@ class EvolutionaryLoop:
                 list(result.wonder_output.questions) if result.wonder_output else None,
                 seed_json=json.dumps(result.seed.to_dict()),
                 execution_output=result.execution_output,
+                parent_seed_id=result.seed.metadata.parent_seed_id,
             )
         )
 

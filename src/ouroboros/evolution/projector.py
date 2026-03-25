@@ -69,7 +69,7 @@ class LineageProjector:
                     try:
                         phase = GenerationPhase(data.get("phase", "wondering"))
                     except ValueError:
-                        phase = GenerationPhase.WONDERING
+                        continue  # Skip events with invalid/legacy phase values
                     generations[gen_num] = GenerationRecord(
                         generation_number=gen_num,
                         seed_id=data.get("seed_id") or "",
@@ -109,7 +109,7 @@ class LineageProjector:
                     try:
                         phase = GenerationPhase(data.get("phase", "wondering"))
                     except ValueError:
-                        phase = GenerationPhase.WONDERING
+                        continue  # Skip events with invalid/legacy phase values
                     old = generations[gen_num]
                     generations[gen_num] = old.model_copy(update={"phase": phase})
 
