@@ -17,6 +17,7 @@ import structlog
 import yaml
 
 from ouroboros.core.errors import ValidationError
+from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
@@ -538,28 +539,9 @@ class ExecuteSeedHandler:
         if isinstance(delegated_parent_cwd, str) and delegated_parent_cwd.strip():
             return Path(delegated_parent_cwd).expanduser().resolve()
 
-        seed_meta = getattr(seed, "metadata", None)
-        if seed_meta is not None:
-            project_dir = getattr(seed_meta, "project_dir", None) or getattr(
-                seed_meta,
-                "working_directory",
-                None,
-            )
-            if isinstance(project_dir, str) and project_dir:
-                return Path(project_dir).expanduser()
-
-        brownfield_context = getattr(seed, "brownfield_context", None)
-        context_references = getattr(brownfield_context, "context_references", ()) or ()
-        for reference in context_references:
-            path = getattr(reference, "path", None)
-            role = getattr(reference, "role", None)
-            if isinstance(path, str) and path and role == "primary":
-                return Path(path).expanduser()
-
-        for reference in context_references:
-            path = getattr(reference, "path", None)
-            if isinstance(path, str) and path:
-                return Path(path).expanduser()
+        seed_project_dir = resolve_seed_project_path(seed, stable_base=dispatch_cwd)
+        if seed_project_dir is not None:
+            return seed_project_dir
 
         return dispatch_cwd
 

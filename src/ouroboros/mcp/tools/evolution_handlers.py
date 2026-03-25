@@ -15,6 +15,7 @@ from typing import Any
 import structlog
 import yaml
 
+from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed_project_path
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
@@ -34,36 +35,19 @@ from ouroboros.persistence.event_store import EventStore
 log = structlog.get_logger(__name__)
 
 
-def _resolve_verification_working_dir(project_dir: str | None, seed: Seed | None) -> Path:
+def _resolve_verification_working_dir(
+    project_dir: str | None,
+    seed: Seed | None,
+    *,
+    stable_base: Path,
+) -> Path:
     """Resolve the best project directory for post-run verification."""
     if project_dir:
-        return Path(project_dir).expanduser()
+        resolved = resolve_path_against_base(project_dir, stable_base=stable_base)
+        if resolved is not None:
+            return resolved
 
-    if seed is not None:
-        seed_meta = getattr(seed, "metadata", None)
-        if seed_meta is not None:
-            configured_dir = getattr(seed_meta, "project_dir", None) or getattr(
-                seed_meta,
-                "working_directory",
-                None,
-            )
-            if isinstance(configured_dir, str) and configured_dir:
-                return Path(configured_dir).expanduser()
-
-        brownfield_context = getattr(seed, "brownfield_context", None)
-        context_references = getattr(brownfield_context, "context_references", ()) or ()
-        for reference in context_references:
-            path = getattr(reference, "path", None)
-            role = getattr(reference, "role", None)
-            if isinstance(path, str) and path and role == "primary":
-                return Path(path).expanduser()
-
-        for reference in context_references:
-            path = getattr(reference, "path", None)
-            if isinstance(path, str) and path:
-                return Path(path).expanduser()
-
-    return Path.cwd()
+    return resolve_seed_project_path(seed, stable_base=stable_base) or stable_base
 
 
 def _resolve_evolve_verification_working_dir(
@@ -73,18 +57,33 @@ def _resolve_evolve_verification_working_dir(
     initial_seed: Seed | None,
 ) -> Path:
     """Resolve the best project directory for evolve-step verification."""
+    cwd_base = Path.cwd().resolve()
     if explicit_project_dir:
-        return Path(explicit_project_dir).expanduser()
+        resolved = resolve_path_against_base(explicit_project_dir, stable_base=cwd_base)
+        if resolved is not None:
+            return resolved
 
     if configured_project_dir:
-        return Path(configured_project_dir).expanduser()
+        resolved = resolve_path_against_base(configured_project_dir, stable_base=cwd_base)
+        if resolved is not None:
+            return resolved
+
+    stable_base = (
+        resolve_path_against_base(configured_project_dir, stable_base=cwd_base)
+        or resolve_path_against_base(explicit_project_dir, stable_base=cwd_base)
+        or cwd_base
+    )
 
     for candidate_seed in (generation_seed, initial_seed):
-        candidate_dir = _resolve_verification_working_dir(None, candidate_seed)
-        if candidate_dir != Path.cwd():
+        candidate_dir = _resolve_verification_working_dir(
+            None,
+            candidate_seed,
+            stable_base=stable_base,
+        )
+        if candidate_dir != stable_base:
             return candidate_dir
 
-    return Path.cwd()
+    return stable_base
 
 
 @dataclass

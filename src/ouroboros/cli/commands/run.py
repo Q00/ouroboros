@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 
@@ -93,6 +94,12 @@ def _load_seed_from_yaml(seed_file: Path) -> dict[str, Any]:
     except Exception as e:
         print_error(f"Failed to load seed file: {e}")
         raise typer.Exit(1) from e
+
+
+def _resolve_cli_project_dir(seed: "Seed", seed_file: Path) -> Path:
+    """Resolve the project directory for CLI execution and verification."""
+    stable_base = seed_file.parent.resolve()
+    return resolve_seed_project_path(seed, stable_base=stable_base) or stable_base
 
 
 async def _initialize_mcp_manager(
@@ -211,9 +218,10 @@ async def _run_orchestrator(
     event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
     await event_store.initialize()
 
+    project_dir = _resolve_cli_project_dir(seed, seed_file)
     adapter = create_agent_runtime(
         backend=runtime_backend,
-        cwd=Path.cwd(),
+        cwd=project_dir,
     )
     runner = OrchestratorRunner(
         adapter,
@@ -260,7 +268,7 @@ async def _run_orchestrator(
                         verification = await build_verification_artifacts(
                             res.execution_id,
                             execution_artifact,
-                            Path.cwd(),
+                            project_dir,
                         )
                         artifact = verification.artifact
                         reference = verification.reference

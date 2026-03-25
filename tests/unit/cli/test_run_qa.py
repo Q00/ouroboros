@@ -39,6 +39,20 @@ VALID_SEED_DATA = {
     },
 }
 
+VALID_SEED_DATA_WITH_RELATIVE_PROJECT = {
+    **VALID_SEED_DATA,
+    "brownfield_context": {
+        "project_type": "brownfield",
+        "context_references": [
+            {
+                "path": "repo-root",
+                "role": "primary",
+                "summary": "",
+            }
+        ],
+    },
+}
+
 FAKE_QA_RESULT = Result.ok(
     MCPToolResult(
         content=(MCPContentItem(type=ContentType.TEXT, text="QA Verdict [PASS]"),),
@@ -96,11 +110,65 @@ async def test_run_orchestrator_passes_artifact_and_reference_to_qa(tmp_path: Pa
     mock_verification.assert_awaited_once_with(
         "exec-test",
         "Parallel Execution Verification Report",
-        Path.cwd(),
+        seed_file.parent.resolve(),
     )
     qa_args = mock_qa_handle.call_args.args[0]
     assert qa_args["artifact"] == "Structured verification artifact"
     assert qa_args["reference"] == "Raw verification reference"
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrator_uses_seed_relative_project_dir_for_runtime_and_qa(
+    tmp_path: Path,
+) -> None:
+    """CLI execution and QA should share the seed-derived project root."""
+    seed_dir = tmp_path / "seed-dir"
+    seed_dir.mkdir()
+    seed_file = seed_dir / "seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    expected_project_dir = (seed_dir / "repo-root").resolve()
+
+    fake_exec = SimpleNamespace(
+        success=True,
+        session_id="sess-test",
+        messages_processed=5,
+        duration_seconds=1.0,
+        execution_id="exec-test",
+        summary={"verification_report": "Parallel Execution Verification Report"},
+        final_message="fallback final message",
+    )
+    mock_runner = MagicMock()
+    mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
+    mock_runner.resume_session = AsyncMock()
+
+    with (
+        patch(
+            "ouroboros.cli.commands.run._load_seed_from_yaml",
+            return_value=VALID_SEED_DATA_WITH_RELATIVE_PROJECT,
+        ),
+        patch("ouroboros.orchestrator.create_agent_runtime") as mock_runtime,
+        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
+        patch(
+            "ouroboros.cli.commands.run.build_verification_artifacts",
+            new_callable=AsyncMock,
+            return_value=FAKE_VERIFICATION_ARTIFACTS,
+        ) as mock_verification,
+        patch(
+            "ouroboros.mcp.tools.qa.QAHandler.handle",
+            new_callable=AsyncMock,
+            return_value=FAKE_QA_RESULT,
+        ),
+    ):
+        mock_event_store_cls.return_value.initialize = AsyncMock()
+        await _run_orchestrator(seed_file)
+
+    mock_runtime.assert_called_once_with(backend=None, cwd=expected_project_dir)
+    mock_verification.assert_awaited_once_with(
+        "exec-test",
+        "Parallel Execution Verification Report",
+        expected_project_dir,
+    )
 
 
 @pytest.mark.asyncio

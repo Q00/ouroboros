@@ -11,7 +11,9 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import re
 
+from ouroboros.core.security import InputValidator
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.evaluation.languages import build_mechanical_config
 from ouroboros.evaluation.mechanical import MechanicalConfig, run_command
@@ -79,7 +81,15 @@ def _configured_commands(config: MechanicalConfig) -> list[tuple[CheckType, tupl
 
 
 def _artifact_dir_for(execution_id: str) -> Path:
-    return _ARTIFACT_BASE_DIR / execution_id
+    segment = re.sub(r"[^A-Za-z0-9_-]+", "_", execution_id).strip("_-")
+    if not segment:
+        segment = "execution"
+
+    artifact_dir = _ARTIFACT_BASE_DIR / segment
+    is_valid, error = InputValidator.validate_path_containment(artifact_dir, _ARTIFACT_BASE_DIR)
+    if not is_valid:
+        raise ValueError(f"Artifact directory escapes root for execution_id {execution_id!r}: {error}")
+    return artifact_dir
 
 
 def _last_nonempty_lines(text: str, *, limit: int = _OUTCOME_LINE_LIMIT) -> str:

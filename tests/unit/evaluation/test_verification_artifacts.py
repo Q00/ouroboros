@@ -333,3 +333,49 @@ class TestBuildVerificationArtifacts:
         assert manifest["changed_files"] == []
         assert manifest["git_state_available"] is False
         assert manifest["git_state_error"] == "fatal: not a git repository"
+
+    @pytest.mark.asyncio
+    async def test_sanitizes_execution_id_for_artifact_directory(self, tmp_path: Path) -> None:
+        """Traversal-like execution IDs must still write under the artifact root."""
+        config = MechanicalConfig(
+            test_command=("uv", "run", "pytest", "-q"),
+            timeout_seconds=30,
+            working_dir=tmp_path,
+        )
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            if command and command[0] == "git":
+                return CommandResult(0, _git_diff_side_effect(command), "")
+            if "pytest" in command:
+                return CommandResult(0, "1 passed in 0.10s\n", "")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        execution_id = "../../tmp/pwn"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            artifacts = await build_verification_artifacts(execution_id, "done", tmp_path)
+
+        artifact_dir = Path(artifacts.artifact_dir).resolve()
+        assert artifact_dir.is_relative_to(artifact_root.resolve())
+        assert artifact_dir.name == "tmp_pwn"
+        manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
+        assert manifest["execution_id"] == execution_id
+        assert f"Execution ID: {execution_id}" in artifacts.artifact
+        assert f"Execution ID: {execution_id}" in artifacts.reference
