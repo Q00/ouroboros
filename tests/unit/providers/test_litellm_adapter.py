@@ -3,7 +3,7 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
+import litellm
 
 from ouroboros.config.models import CredentialsConfig, ProviderCredentials
 from ouroboros.core.errors import ProviderError

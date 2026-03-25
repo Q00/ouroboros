@@ -28,6 +28,11 @@ from ouroboros.providers.base import (
     UsageInfo,
 )
 
+try:
+    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+except ImportError:
+    LiteLLMAdapter = None  # type: ignore[assignment, misc]
+
 
 class TestTokenCounting:
     """Tests for token counting functions."""
