@@ -31,9 +31,11 @@ from ouroboros.mcp.tools.evaluation_handlers import (
 )
 from ouroboros.mcp.tools.evolution_handlers import (
     EvolveRewindHandler,
-    EvolveStepHandler as _BaseEvolveStepHandler,
     LineageStatusHandler,
     StartEvolveStepHandler,
+)
+from ouroboros.mcp.tools.evolution_handlers import (
+    EvolveStepHandler as _BaseEvolveStepHandler,
 )
 from ouroboros.mcp.tools.execution_handlers import (
     ExecuteSeedHandler,

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from ouroboros.config import get_dependency_analysis_model
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
+
 if TYPE_CHECKING:
     from ouroboros.providers.base import LLMAdapter
 

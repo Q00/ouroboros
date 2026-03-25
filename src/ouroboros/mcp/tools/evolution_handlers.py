@@ -17,7 +17,13 @@ import yaml
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
-from ouroboros.core.worktree import TaskWorkspace, WorktreeError, is_git_repo, maybe_restore_task_workspace, release_lock
+from ouroboros.core.worktree import (
+    TaskWorkspace,
+    WorktreeError,
+    is_git_repo,
+    maybe_restore_task_workspace,
+    release_lock,
+)
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.types import (
