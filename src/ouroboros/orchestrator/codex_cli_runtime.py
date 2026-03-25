@@ -739,8 +739,11 @@ class CodexCliRuntime:
         # Prevent child from re-entering Ouroboros MCP
         for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
             env.pop(key, None)
-        # Track recursion depth for diagnostics
-        depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        # Track recursion depth for diagnostics (defensive: ignore malformed values)
+        try:
+            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        except (ValueError, TypeError):
+            depth = 1
         env["_OUROBOROS_DEPTH"] = str(depth)
         return env
 

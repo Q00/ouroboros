@@ -9,44 +9,63 @@ from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 
 
+def _make_runtime() -> CodexCliRuntime:
+    """Create a bare CodexCliRuntime without __init__ side effects."""
+    return CodexCliRuntime.__new__(CodexCliRuntime)
+
+
 class TestCodexCliRuntimeChildEnv:
     """Test _build_child_env strips dangerous env vars."""
 
     def test_strips_ouroboros_agent_runtime(self) -> None:
         """Child env must not contain OUROBOROS_AGENT_RUNTIME."""
-        runtime = CodexCliRuntime.__new__(CodexCliRuntime)
+        runtime = _make_runtime()
         with patch.dict(os.environ, {"OUROBOROS_AGENT_RUNTIME": "codex"}):
             env = runtime._build_child_env()
         assert "OUROBOROS_AGENT_RUNTIME" not in env
 
     def test_strips_ouroboros_llm_backend(self) -> None:
         """Child env must not contain OUROBOROS_LLM_BACKEND."""
-        runtime = CodexCliRuntime.__new__(CodexCliRuntime)
+        runtime = _make_runtime()
         with patch.dict(os.environ, {"OUROBOROS_LLM_BACKEND": "codex"}):
             env = runtime._build_child_env()
         assert "OUROBOROS_LLM_BACKEND" not in env
 
     def test_increments_depth_counter(self) -> None:
         """Each child process increments _OUROBOROS_DEPTH."""
-        runtime = CodexCliRuntime.__new__(CodexCliRuntime)
-        with patch.dict(os.environ, {"_OUROBOROS_DEPTH": "2"}, clear=False):
+        runtime = _make_runtime()
+        with patch.dict(os.environ, {"_OUROBOROS_DEPTH": "2"}):
             env = runtime._build_child_env()
         assert env["_OUROBOROS_DEPTH"] == "3"
 
-    def test_depth_starts_at_one(self) -> None:
+    def test_depth_starts_at_one_when_absent(self) -> None:
         """First child starts at depth 1 when parent has no depth var."""
-        runtime = CodexCliRuntime.__new__(CodexCliRuntime)
-        with patch.dict(os.environ, {}, clear=False):
+        runtime = _make_runtime()
+        env_clean = {k: v for k, v in os.environ.items() if k != "_OUROBOROS_DEPTH"}
+        with patch.dict(os.environ, env_clean, clear=True):
+            env = runtime._build_child_env()
+        assert env["_OUROBOROS_DEPTH"] == "1"
+
+    def test_malformed_depth_defaults_to_one(self) -> None:
+        """Non-integer _OUROBOROS_DEPTH falls back to 1 instead of crashing."""
+        runtime = _make_runtime()
+        with patch.dict(os.environ, {"_OUROBOROS_DEPTH": "not_a_number"}):
+            env = runtime._build_child_env()
+        assert env["_OUROBOROS_DEPTH"] == "1"
+
+    def test_empty_depth_defaults_to_one(self) -> None:
+        """Empty string _OUROBOROS_DEPTH falls back to 1."""
+        runtime = _make_runtime()
+        with patch.dict(os.environ, {"_OUROBOROS_DEPTH": ""}):
             env = runtime._build_child_env()
         assert env["_OUROBOROS_DEPTH"] == "1"
 
     def test_preserves_other_env_vars(self) -> None:
         """Non-Ouroboros env vars are preserved."""
-        runtime = CodexCliRuntime.__new__(CodexCliRuntime)
-        with patch.dict(os.environ, {"PATH": "/usr/bin", "HOME": "/home/test"}):
+        runtime = _make_runtime()
+        with patch.dict(os.environ, {"MY_TEST_VAR": "hello"}):
             env = runtime._build_child_env()
-        assert env.get("PATH") == "/usr/bin"
-        assert env.get("HOME") == "/home/test"
+        assert env.get("MY_TEST_VAR") == "hello"
 
 
 class TestCodexCliAdapterChildEnv:
@@ -60,6 +79,12 @@ class TestCodexCliAdapterChildEnv:
 
     def test_increments_depth(self) -> None:
         """Adapter also tracks recursion depth."""
-        with patch.dict(os.environ, {"_OUROBOROS_DEPTH": "0"}, clear=False):
+        with patch.dict(os.environ, {"_OUROBOROS_DEPTH": "0"}):
+            env = CodexCliLLMAdapter._build_child_env()
+        assert env["_OUROBOROS_DEPTH"] == "1"
+
+    def test_malformed_depth_defaults_to_one(self) -> None:
+        """Adapter handles non-integer _OUROBOROS_DEPTH gracefully."""
+        with patch.dict(os.environ, {"_OUROBOROS_DEPTH": "garbage"}):
             env = CodexCliLLMAdapter._build_child_env()
         assert env["_OUROBOROS_DEPTH"] == "1"

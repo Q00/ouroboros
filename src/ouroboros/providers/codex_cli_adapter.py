@@ -621,7 +621,10 @@ class CodexCliLLMAdapter:
         env = os.environ.copy()
         for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
             env.pop(key, None)
-        depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        try:
+            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        except (ValueError, TypeError):
+            depth = 1
         env["_OUROBOROS_DEPTH"] = str(depth)
         return env
 
