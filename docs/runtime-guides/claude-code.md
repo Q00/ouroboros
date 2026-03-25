@@ -32,7 +32,7 @@ orchestrator:
   runtime_backend: claude
 ```
 
-When using the `--orchestrator` CLI flag, Claude Code is the default runtime backend.
+When `orchestrator.runtime_backend` is set to `claude`, Claude Code is used as the runtime backend.
 
 ## How It Works
 
@@ -72,8 +72,8 @@ All commands in this section run in your **regular terminal** (shell), not insid
 
 **Terminal:**
 ```bash
-# Start interactive interview (Claude Code runtime)
-uv run ouroboros init start --orchestrator "Your idea here"
+# Start interactive interview
+uv run ouroboros init start "Your idea here"
 
 # Resume an interrupted interview
 uv run ouroboros init start --resume interview_20260127_120000
@@ -86,24 +86,24 @@ uv run ouroboros init list
 
 **Terminal:**
 ```bash
-# Execute workflow (Claude Code runtime)
-uv run ouroboros run workflow --orchestrator seed.yaml
+# Execute workflow
+uv run ouroboros run workflow seed.yaml
 
 # Dry run (validate seed without executing)
 uv run ouroboros run workflow --dry-run seed.yaml
 
 # Debug output (show logs and agent thinking)
-uv run ouroboros run workflow --orchestrator --debug seed.yaml
+uv run ouroboros run workflow --debug seed.yaml
 
 # Resume a previous session
-uv run ouroboros run workflow --orchestrator --resume <session_id> seed.yaml
+uv run ouroboros run workflow --resume <session_id> seed.yaml
 ```
 
 ## Troubleshooting
 
 ### "Providers: warning" in health check
 
-This is normal when not using LiteLLM providers. The orchestrator mode uses Claude Code directly.
+This is normal when not using LiteLLM providers. The orchestrator mode uses the configured runtime backend directly.
 
 ### Session fails with empty error
 
@@ -112,7 +112,7 @@ Ensure you're running from the project directory:
 **Terminal:**
 ```bash
 cd /path/to/ouroboros
-uv run ouroboros run workflow --orchestrator seed.yaml
+uv run ouroboros run workflow seed.yaml
 ```
 
 ### "EventStore not initialized"

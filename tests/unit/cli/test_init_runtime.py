@@ -26,7 +26,6 @@ class TestInitWorkflowRuntimeHandoff:
         ):
             await _start_workflow(
                 Path("/tmp/generated-seed.yaml"),
-                use_orchestrator=True,
                 runtime_backend="codex",
             )
 
@@ -49,7 +48,6 @@ class TestInitWorkflowRuntimeHandoff:
                     "init",
                     "start",
                     "Build a REST API",
-                    "--orchestrator",
                     "--runtime",
                     "codex",
                     "--llm-backend",
@@ -58,8 +56,9 @@ class TestInitWorkflowRuntimeHandoff:
             )
 
         assert result.exit_code == 0
-        assert mock_run_interview.call_args.args[6] == "codex"
-        assert mock_run_interview.call_args.args[5] == "codex"
+        # _run_interview(context, resume, state_dir, debug, runtime, llm_backend)
+        assert mock_run_interview.call_args.args[5] == "codex"  # llm_backend
+        assert mock_run_interview.call_args.args[4] == "codex"  # runtime
 
     def test_get_adapter_uses_interview_use_case_for_codex(self) -> None:
         """Interview adapter creation stays backend-neutral for Codex."""
@@ -70,7 +69,6 @@ class TestInitWorkflowRuntimeHandoff:
             return_value=mock_adapter,
         ) as mock_create_adapter:
             adapter = _get_adapter(
-                use_orchestrator=True,
                 backend="codex",
                 for_interview=True,
                 debug=True,
@@ -90,7 +88,6 @@ class TestInitWorkflowRuntimeHandoff:
             return_value=mock_adapter,
         ) as mock_create_adapter:
             adapter = _get_adapter(
-                use_orchestrator=True,
                 backend="opencode",
                 for_interview=True,
                 debug=False,

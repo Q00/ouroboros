@@ -26,7 +26,7 @@ from ouroboros.bigbang.interview import (
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
-from ouroboros.config import get_clarification_model
+from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.observability import LoggingConfig, configure_logging
 from ouroboros.providers import create_llm_adapter
 from ouroboros.providers.base import LLMAdapter
@@ -145,15 +145,15 @@ async def _multiline_prompt_async(prompt_text: str) -> str:
 
 
 def _get_adapter(
-    use_orchestrator: bool,
     backend: str | None = None,
     for_interview: bool = False,
     debug: bool = False,
 ) -> LLMAdapter:
     """Get the appropriate LLM adapter.
 
+    Resolution order: explicit backend arg > config llm.backend > "claude_code".
+
     Args:
-        use_orchestrator: If True, default to Claude Code for compatibility.
         backend: Optional explicit LLM backend override.
         for_interview: If True, enable Read/Glob/Grep tools for codebase exploration.
         debug: If True, show streaming messages (thinking, tool use).
@@ -161,7 +161,7 @@ def _get_adapter(
     Returns:
         LLM adapter instance.
     """
-    resolved_backend = backend or ("claude_code" if use_orchestrator else "litellm")
+    resolved_backend = backend or get_llm_backend()
 
     if for_interview:
         # Interview mode: request the interview-specific permission policy and
@@ -260,7 +260,6 @@ async def _run_interview(
     initial_context: str,
     resume_id: str | None = None,
     state_dir: Path | None = None,
-    use_orchestrator: bool = False,
     debug: bool = False,
     workflow_runtime_backend: str | None = None,
     llm_backend: str | None = None,
@@ -271,13 +270,11 @@ async def _run_interview(
         initial_context: Initial context or idea for the interview.
         resume_id: Optional interview ID to resume.
         state_dir: Optional custom state directory.
-        use_orchestrator: If True, use Claude Code (Max Plan) instead of LiteLLM.
         workflow_runtime_backend: Optional agent runtime backend for the workflow handoff.
         llm_backend: Optional LLM backend override for interview and seed generation.
     """
     # Initialize components
     llm_adapter = _get_adapter(
-        use_orchestrator,
         backend=llm_backend,
         for_interview=True,
         debug=debug,
@@ -370,7 +367,6 @@ async def _run_interview(
     if should_start_workflow:
         await _start_workflow(
             seed_path,
-            use_orchestrator,
             runtime_backend=workflow_runtime_backend,
         )
 
@@ -472,40 +468,32 @@ async def _generate_seed_from_interview(
 
 async def _start_workflow(
     seed_path: Path,
-    use_orchestrator: bool = False,
     parallel: bool = True,
     runtime_backend: str | None = None,
 ) -> None:
-    """Start workflow from generated seed.
+    """Start workflow from generated seed (always orchestrator mode).
 
     Args:
         seed_path: Path to the seed YAML file.
-        use_orchestrator: Whether to use Claude Code orchestrator.
         parallel: Execute independent ACs in parallel. Default: True.
         runtime_backend: Optional runtime backend for orchestrator execution.
     """
     console.print()
     console.print("[bold cyan]Starting workflow...[/]")
 
-    if use_orchestrator:
-        # Direct function call instead of subprocess
-        from ouroboros.cli.commands.run import _run_orchestrator
+    from ouroboros.cli.commands.run import _run_orchestrator
 
-        try:
-            await _run_orchestrator(
-                seed_path,
-                resume_session=None,
-                parallel=parallel,
-                runtime_backend=runtime_backend,
-            )
-        except typer.Exit:
-            pass  # Normal exit
-        except KeyboardInterrupt:
-            print_info("Workflow interrupted.")
-    else:
-        # Standard workflow (placeholder for now)
-        print_info(f"Would execute workflow from: {seed_path}")
-        print_info("Standard workflow execution not yet implemented.")
+    try:
+        await _run_orchestrator(
+            seed_path,
+            resume_session=None,
+            parallel=parallel,
+            runtime_backend=runtime_backend,
+        )
+    except typer.Exit:
+        pass  # Normal exit
+    except KeyboardInterrupt:
+        print_info("Workflow interrupted.")
 
 
 def _find_pm_seeds(seeds_dir: Path | None = None) -> list[Path]:
@@ -693,12 +681,13 @@ def start(
             dir_okay=True,
         ),
     ] = None,
-    orchestrator: Annotated[
+    orchestrator: Annotated[  # noqa: ARG001 — kept for backward compat
         bool,
         typer.Option(
             "--orchestrator",
             "-o",
-            help="Use Claude Code (Max Plan) instead of LiteLLM. No API key required.",
+            help="Deprecated: no longer needed. Backend is resolved from config (llm.backend).",
+            hidden=True,
         ),
     ] = False,
     runtime: Annotated[
@@ -737,12 +726,13 @@ def start(
     This command initiates the Big Bang phase, which transforms vague ideas
     into clear, executable requirements through iterative questioning.
 
+    The LLM backend is resolved from config (llm.backend) by default.
+    Override with --llm-backend if needed.
+
     Example:
         ouroboros init start "I want to build a task management CLI tool"
 
-        ouroboros init start --orchestrator "Build a REST API"
-
-        ouroboros init start --orchestrator --runtime codex "Build a REST API"
+        ouroboros init start --runtime codex "Build a REST API"
 
         ouroboros init start --llm-backend codex "Build a REST API"
 
@@ -802,21 +792,16 @@ def start(
         configure_logging(LoggingConfig(log_level="DEBUG"))
         print_info("Debug mode enabled - showing verbose logs")
 
-    if runtime and not orchestrator:
-        print_warning(
-            "--runtime only affects the workflow execution step when --orchestrator is enabled."
-        )
-
-    # Show mode info
-    if orchestrator:
-        print_info("Using Claude Code (Max Plan) - no API key required")
-        if runtime:
-            print_info(f"Workflow runtime backend: {runtime.value}")
-    else:
-        print_info("Using LiteLLM - API key required")
-
-    if llm_backend:
-        print_info(f"Interview LLM backend: {llm_backend.value}")
+    # Show mode info — resolve actual backend used
+    resolved_display = llm_backend.value if llm_backend else get_llm_backend()
+    backend_labels = {
+        "claude_code": "Claude Code - no API key required",
+        "codex": "Codex CLI - no API key required",
+        "litellm": "LiteLLM - API key required",
+    }
+    print_info(f"Using {backend_labels.get(resolved_display, resolved_display)}")
+    if runtime:
+        print_info(f"Workflow runtime backend: {runtime.value}")
 
     # Run interview
     try:
@@ -825,7 +810,6 @@ def start(
                 context or "",
                 resume,
                 state_dir,
-                orchestrator,
                 debug,
                 runtime.value if runtime else None,
                 llm_backend.value if llm_backend else None,
@@ -854,7 +838,7 @@ def list_interviews(
     ] = None,
 ) -> None:
     """List all interview sessions."""
-    llm_adapter = create_llm_adapter(backend="litellm")
+    llm_adapter = create_llm_adapter(backend=get_llm_backend())
     engine = InterviewEngine(
         llm_adapter=llm_adapter,
         state_dir=state_dir or Path.home() / ".ouroboros" / "data",

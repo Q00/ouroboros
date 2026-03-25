@@ -452,7 +452,7 @@ Any change to a file under `src/ouroboros/cli/commands/` requires reviewing and 
 
 #### `init.py` — `ouroboros init` / `ouroboros init start`
 
-Flags covered: `--resume`, `--state-dir`, `--orchestrator`, `--runtime`, `--llm-backend`, `--debug`
+Flags covered: `--resume`, `--state-dir`, `--runtime`, `--llm-backend`, `--debug` (`--orchestrator` is deprecated/hidden)
 
 **Must update:**
 - `docs/cli-reference.md` — `init` command section (flags, examples)
@@ -461,7 +461,7 @@ Flags covered: `--resume`, `--state-dir`, `--orchestrator`, `--runtime`, `--llm-
 - `docs/getting-started.md` — onboarding flow
 
 **Also check:**
-- `docs/runtime-guides/claude-code.md` and `docs/runtime-guides/codex.md` — if `--orchestrator` or `--runtime` behavior changes
+- `docs/runtime-guides/claude-code.md` and `docs/runtime-guides/codex.md` — if `--runtime` or `--llm-backend` behavior changes
 
 #### `run.py` — `ouroboros run workflow`
 

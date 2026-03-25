@@ -65,11 +65,6 @@
 
 Ouroboros sits between you and your AI runtime (Claude Code, Codex CLI, or others). It replaces ad-hoc prompting with a structured specification-first workflow: interview, crystallize, execute, evaluate, evolve.
 
-<!-- TODO: Replace with demo GIF or asciicast -->
-<p align="center">
-  <em>[Demo: 2-minute walkthrough from vague idea to verified code -- coming soon]</em>
-</p>
-
 ---
 
 ## Why Ouroboros?
@@ -135,24 +130,6 @@ After one loop of the Ouroboros cycle, a vague idea becomes a verified codebase:
 | **Seed** | No spec | Immutable specification with acceptance criteria, ontology, constraints |
 | **Evaluate** | Manual review | 3-stage gate: Mechanical (free) -> Semantic -> Multi-Model Consensus |
 
-<!-- Screenshots: replace placeholder paths with actual images after recording -->
-<p align="center">
-  <strong>Interview Transcript</strong><br/>
-  <img src="./docs/images/demo-interview.png" width="720" alt="Ouroboros Socratic interview exposing hidden assumptions from a vague prompt"/><br/>
-  <sub>The Socratic Interviewer turns "build me a task CLI" into 12 clarified decisions.</sub>
-</p>
-
-<p align="center">
-  <strong>Seed Artifact</strong><br/>
-  <img src="./docs/images/demo-seed.png" width="720" alt="Ouroboros seed specification with acceptance criteria, ontology, and constraints"/><br/>
-  <sub>Immutable seed spec locks intent -- acceptance criteria, ontology, and constraints -- before a line of code is written.</sub>
-</p>
-
-<p align="center">
-  <strong>Evaluation Verdict</strong><br/>
-  <img src="./docs/images/demo-evaluation.png" width="720" alt="Ouroboros 3-stage evaluation gate showing mechanical, semantic, and consensus results"/><br/>
-  <sub>3-stage verification gate: Mechanical (free) -> Semantic -> Multi-Model Consensus.</sub>
-</p>
 
 <details>
 <summary><strong>What just happened?</strong></summary>

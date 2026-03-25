@@ -130,9 +130,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 |--------|-------------|
 | `-r, --resume TEXT` | Resume an existing interview by ID |
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
-| `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
-| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`. `opencode` appears in the CLI enum but is out of scope. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`). `opencode` appears in the CLI enum but is out of scope |
+| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation (`claude`, `codex`). |
+| `--llm-backend TEXT` | LLM backend override for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`). Resolved from config (`llm.backend`) by default. |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -144,13 +143,10 @@ ouroboros init "I want to build a task management CLI tool"
 # Explicit subcommand (equivalent)
 ouroboros init start "I want to build a task management CLI tool"
 
-# Start with Claude Code (no API key needed)
-ouroboros init --orchestrator "Build a REST API"
-
 # Specify runtime backend for the workflow step
-ouroboros init --orchestrator --runtime codex "Build a REST API"
+ouroboros init --runtime codex "Build a REST API"
 
-# Use Codex as the LLM backend for interview and seed generation
+# Override LLM backend for interview and seed generation
 ouroboros init --llm-backend codex "Build a REST API"
 
 # Resume an interrupted interview
@@ -203,7 +199,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 
 | Option | Description |
 |--------|-------------|
-| `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
+| `-o/-O, --orchestrator/--no-orchestrator` | Orchestrator mode (default: enabled). `--no-orchestrator` falls back to legacy placeholder mode. |
 | `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`). Uses configured default if omitted. (`opencode` is in the CLI enum but out of scope) |
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |

@@ -25,11 +25,10 @@ Usage:
     runner = OrchestratorRunner(adapter, event_store, mcp_manager=mcp_manager)
 
 CLI Usage:
-    ouroboros run --orchestrator seed.yaml
-    ouroboros run --orchestrator seed.yaml --parallel  # Parallel AC execution
-    ouroboros run --orchestrator seed.yaml --resume <session_id>
-    ouroboros run --orchestrator seed.yaml --runtime codex
-    ouroboros run --orchestrator seed.yaml --mcp-config mcp.yaml
+    ouroboros run seed.yaml
+    ouroboros run seed.yaml --runtime codex
+    ouroboros run seed.yaml --resume <session_id>
+    ouroboros run seed.yaml --mcp-config mcp.yaml
 """
 
 from ouroboros.orchestrator.adapter import (

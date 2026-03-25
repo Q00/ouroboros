@@ -335,7 +335,7 @@ acceptance_criteria:
 
 ## Validation
 
-> **Note — `--dry-run` is not functional in the current implementation.** In the default orchestrator mode (`--orchestrator` is `True` by default), the `--dry-run` flag is silently ignored and execution proceeds normally. In non-orchestrator mode (`--no-orchestrator`), `--dry-run` prints a placeholder message without performing any YAML or schema checks. This limitation is tracked for a future release.
+> **Note — `--dry-run` is not functional in the current implementation.** In the default orchestrator mode, the `--dry-run` flag is silently ignored and execution proceeds normally. In legacy non-orchestrator mode (`--no-orchestrator`), `--dry-run` prints a placeholder message without performing any YAML or schema checks. This limitation is tracked for a future release.
 
 **Current approach to pre-run validation:** Run the workflow normally. Schema validation errors surface *before* any agent sessions start, so an invalid seed will print an error and exit without executing:
 
@@ -394,10 +394,10 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 # or
 export OPENAI_API_KEY="sk-..."
 
-# To avoid needing an API key, use Claude Code (Max Plan):
+# To avoid needing an API key, use Claude Code or Codex CLI (configured in llm.backend):
 ooo interview "Build a REST API"
 # or standalone:
-ouroboros init start --orchestrator "Build a REST API"
+ouroboros init start "Build a REST API"
 ```
 
 #### LLM rate-limit or transient API error during questioning
@@ -708,22 +708,18 @@ ouroboros run minimal_seed.yaml
 
 ---
 
-### CLI Flag Warnings
+### CLI Flag Notes
 
-#### `--runtime` without `--orchestrator` (init command)
+#### `--orchestrator` (init command)
 
-**Symptom:**
-```
-Warning: --runtime only affects the workflow execution step when --orchestrator is enabled.
-```
+The `--orchestrator` flag on `ouroboros init` is **deprecated** and no longer needed. The LLM backend is resolved from config (`llm.backend`) automatically. The flag is accepted for backward compatibility but has no effect.
 
-**Cause:** `--runtime` (e.g., `--runtime codex`) was passed to `ouroboros init` without `--orchestrator`. The `--runtime` flag only controls which agent runtime backend is used when the generated seed is immediately handed off to workflow execution. Without `--orchestrator`, the workflow handoff step uses a placeholder.
-
-**Behavior:** This is a **warning only** — the interview and seed generation proceed normally. The runtime flag has no effect.
-
-**Fix:** Add `--orchestrator` if you want to use the specified runtime backend for the post-generation workflow step:
 ```bash
-ouroboros init start --orchestrator --runtime codex "Build a REST API"
+# Just use:
+ouroboros init start "Build a REST API"
+
+# Override backend explicitly if needed:
+ouroboros init start --llm-backend codex "Build a REST API"
 ```
 
 ---
