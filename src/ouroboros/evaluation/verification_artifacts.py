@@ -88,7 +88,9 @@ def _artifact_dir_for(execution_id: str) -> Path:
     artifact_dir = _ARTIFACT_BASE_DIR / segment
     is_valid, error = InputValidator.validate_path_containment(artifact_dir, _ARTIFACT_BASE_DIR)
     if not is_valid:
-        raise ValueError(f"Artifact directory escapes root for execution_id {execution_id!r}: {error}")
+        raise ValueError(
+            f"Artifact directory escapes root for execution_id {execution_id!r}: {error}"
+        )
     return artifact_dir
 
 
@@ -347,9 +349,13 @@ async def build_verification_artifacts(
 
     config = build_mechanical_config(working_dir)
     commands = _configured_commands(config)
-    changed_files, git_status, git_diff_stat, git_state_available, git_state_error = (
-        await _capture_git_state(working_dir, artifact_dir)
-    )
+    (
+        changed_files,
+        git_status,
+        git_diff_stat,
+        git_state_available,
+        git_state_error,
+    ) = await _capture_git_state(working_dir, artifact_dir)
 
     runs: list[VerificationRunArtifact] = []
     for index, (check_type, command) in enumerate(commands, start=1):
