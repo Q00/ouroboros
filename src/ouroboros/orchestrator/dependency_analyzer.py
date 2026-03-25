@@ -370,7 +370,9 @@ class DependencyAnalyzer:
         dependencies = {index: set(values) for index, values in structured_dependencies.items()}
         if self._llm is not None:
             try:
-                llm_dependencies = await self._analyze_with_llm(tuple(spec.content for spec in specs))
+                llm_dependencies = await self._analyze_with_llm(
+                    tuple(spec.content for spec in specs)
+                )
                 for index, values in llm_dependencies.items():
                     dependencies.setdefault(index, set()).update(values)
                 method = "llm+structured"

@@ -112,9 +112,8 @@ class LiteLLMAdapter:
         candidate = value.strip()
         if not candidate:
             return None
-        if (
-            candidate.startswith(_PLACEHOLDER_API_KEY_PREFIX)
-            and candidate.endswith(_PLACEHOLDER_API_KEY_SUFFIX)
+        if candidate.startswith(_PLACEHOLDER_API_KEY_PREFIX) and candidate.endswith(
+            _PLACEHOLDER_API_KEY_SUFFIX
         ):
             return None
         return candidate

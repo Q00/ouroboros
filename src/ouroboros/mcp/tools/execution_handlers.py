@@ -376,8 +376,7 @@ class ExecuteSeedHandler:
                 effective_runtime_backend = (
                     runtime_backend_attr
                     if isinstance(runtime_backend_attr, str) and runtime_backend_attr
-                    else runtime_backend
-                    or "unknown"
+                    else runtime_backend or "unknown"
                 )
 
                 # Create orchestrator runner
