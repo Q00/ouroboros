@@ -728,6 +728,25 @@ class CodexCliRuntime:
             return None
         return current_handle.native_session_id
 
+    def _build_child_env(self) -> dict[str, str]:
+        """Build an isolated environment for child runtime processes.
+
+        Strips ``OUROBOROS_AGENT_RUNTIME`` and ``OUROBOROS_LLM_BACKEND`` so
+        that a child Codex process does not re-load the Ouroboros MCP server,
+        preventing the recursive startup loop described in #185.
+        """
+        env = os.environ.copy()
+        # Prevent child from re-entering Ouroboros MCP
+        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
+            env.pop(key, None)
+        # Track recursion depth for diagnostics (defensive: ignore malformed values)
+        try:
+            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        except (ValueError, TypeError):
+            depth = 1
+        env["_OUROBOROS_DEPTH"] = str(depth)
+        return env
+
     def _requires_process_stdin(self) -> bool:
         """Return True when the runtime needs a writable stdin pipe."""
         return True
@@ -1441,6 +1460,7 @@ class CodexCliRuntime:
                 stdin=(asyncio.subprocess.PIPE if self._requires_process_stdin() else None),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._build_child_env(),
             )
         except FileNotFoundError as e:
             yield AgentMessage(

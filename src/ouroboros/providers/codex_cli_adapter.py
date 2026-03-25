@@ -612,6 +612,22 @@ class CodexCliLLMAdapter:
 
         return stdout_lines, stderr_lines, session_id, last_content
 
+    @staticmethod
+    def _build_child_env() -> dict[str, str]:
+        """Build an isolated environment for child Codex processes.
+
+        Strips Ouroboros MCP env vars to prevent recursive startup (#185).
+        """
+        env = os.environ.copy()
+        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
+            env.pop(key, None)
+        try:
+            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        except (ValueError, TypeError):
+            depth = 1
+        env["_OUROBOROS_DEPTH"] = str(depth)
+        return env
+
     async def _complete_once(
         self,
         messages: list[Message],
@@ -650,6 +666,7 @@ class CodexCliLLMAdapter:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=self._build_child_env(),
             )
         except FileNotFoundError as exc:
             output_path.unlink(missing_ok=True)
