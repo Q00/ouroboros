@@ -225,6 +225,10 @@ class TestProjectRewind:
 
         assert lineage is not None
         assert lineage.status == LineageStatus.ACTIVE
+        assert lineage.termination_reason is None, (
+            "Rewind must clear termination_reason — stale terminal metadata "
+            "on an ACTIVE lineage is internally inconsistent"
+        )
         # Rewind from gen 1 to gen 1 means no discarded generations
         assert len(lineage.rewind_history) == 1
         assert lineage.rewind_history[0].discarded_generations == ()

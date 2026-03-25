@@ -30,6 +30,7 @@ from ouroboros.core.lineage import (
     LineageStatus,
     OntologyDelta,
     OntologyLineage,
+    TerminationReason,
 )
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
@@ -46,6 +47,7 @@ from ouroboros.events.lineage import (
     lineage_wonder_degraded,
 )
 from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSignal
+from ouroboros.evolution.guard import LineageGuard
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.wonder import WonderEngine, WonderOutput
@@ -69,6 +71,16 @@ class EvolutionaryLoopConfig:
     enable_oscillation_detection: bool = True
     eval_gate_enabled: bool = True
     eval_min_score: float = 0.7
+    ac_gate_mode: str = "all"
+    ac_min_pass_ratio: float = 1.0
+    regression_gate_enabled: bool = True
+    validation_gate_enabled: bool = True
+    ontology_completeness_gate_enabled: bool = False
+    ontology_min_fields: int = 3
+    wonder_gate_enabled: bool = False
+    wonder_novelty_threshold: float = 0.5
+    drift_trend_gate_enabled: bool = False
+    drift_trend_window: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +95,7 @@ class GenerationResult:
     reflect_output: ReflectOutput | None = None
     ontology_delta: OntologyDelta | None = None
     validation_output: str | None = None
+    validation_passed: bool | None = None
     phase: GenerationPhase = GenerationPhase.COMPLETED
     success: bool = True
 
@@ -149,6 +162,7 @@ class EvolutionaryLoop:
         validator: Any | None = None,
     ) -> None:
         self.event_store = event_store
+        self._guard = LineageGuard(event_store)
         self.config = config or EvolutionaryLoopConfig()
         self.wonder_engine = wonder_engine
         self.reflect_engine = reflect_engine
@@ -168,6 +182,16 @@ class EvolutionaryLoop:
             enable_oscillation_detection=self.config.enable_oscillation_detection,
             eval_gate_enabled=self.config.eval_gate_enabled,
             eval_min_score=self.config.eval_min_score,
+            ac_gate_mode=self.config.ac_gate_mode,
+            ac_min_pass_ratio=self.config.ac_min_pass_ratio,
+            regression_gate_enabled=self.config.regression_gate_enabled,
+            validation_gate_enabled=self.config.validation_gate_enabled,
+            ontology_completeness_gate_enabled=self.config.ontology_completeness_gate_enabled,
+            ontology_min_fields=self.config.ontology_min_fields,
+            wonder_gate_enabled=self.config.wonder_gate_enabled,
+            wonder_novelty_threshold=self.config.wonder_novelty_threshold,
+            drift_trend_gate_enabled=self.config.drift_trend_gate_enabled,
+            drift_trend_window=self.config.drift_trend_window,
         )
 
     def set_project_dir(self, project_dir: str | None) -> Token[str | None]:
@@ -206,7 +230,7 @@ class EvolutionaryLoop:
         )
 
         # Emit lineage created event
-        await self.event_store.append(lineage_created(lineage.lineage_id, lineage.goal))
+        await self._guard.gated_append(lineage_created(lineage.lineage_id, lineage.goal))
 
         generation_results: list[GenerationResult] = []
         current_seed = initial_seed
@@ -243,7 +267,7 @@ class EvolutionaryLoop:
                         "timeout": self.config.generation_timeout_seconds,
                     },
                 )
-                await self.event_store.append(
+                await self._guard.gated_append(
                     lineage_generation_failed(
                         lineage.lineage_id,
                         generation_number,
@@ -281,7 +305,7 @@ class EvolutionaryLoop:
             lineage = lineage.with_generation(record)
 
             # Emit generation completed event (with seed_json for cross-session reconstruction)
-            await self.event_store.append(
+            await self._guard.gated_append(
                 lineage_generation_completed(
                     lineage.lineage_id,
                     generation_number,
@@ -298,7 +322,7 @@ class EvolutionaryLoop:
 
             # Emit ontology evolved event if delta exists
             if result.ontology_delta and result.ontology_delta.similarity < 1.0:
-                await self.event_store.append(
+                await self._guard.gated_append(
                     lineage_ontology_evolved(
                         lineage.lineage_id,
                         generation_number,
@@ -312,6 +336,7 @@ class EvolutionaryLoop:
                 result.wonder_output,
                 latest_evaluation=result.evaluation_summary,
                 validation_output=result.validation_output,
+                validation_passed=result.validation_passed,
             )
 
             if signal.converged:
@@ -322,40 +347,11 @@ class EvolutionaryLoop:
                         "generation": generation_number,
                         "reason": signal.reason,
                         "similarity": signal.ontology_similarity,
+                        "termination_reason": str(signal.termination_reason),
                     },
                 )
 
-                # Emit appropriate termination event
-                if generation_number >= self.config.max_generations:
-                    await self.event_store.append(
-                        lineage_exhausted(
-                            lineage.lineage_id,
-                            generation_number,
-                            self.config.max_generations,
-                        )
-                    )
-                    lineage = lineage.with_status(LineageStatus.EXHAUSTED)
-                elif "Stagnation" in signal.reason or "Oscillation" in signal.reason:
-                    await self.event_store.append(
-                        lineage_stagnated(
-                            lineage.lineage_id,
-                            generation_number,
-                            signal.reason,
-                            self.config.stagnation_window,
-                        )
-                    )
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
-                else:
-                    await self.event_store.append(
-                        lineage_converged(
-                            lineage.lineage_id,
-                            generation_number,
-                            signal.reason,
-                            signal.ontology_similarity,
-                        )
-                    )
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
-
+                lineage = await self._emit_termination(signal, lineage, generation_number)
                 break
 
             # Prepare for next generation
@@ -417,7 +413,7 @@ class EvolutionaryLoop:
                 lineage_id=lineage_id,
                 goal=initial_seed.goal,
             )
-            await self.event_store.append(lineage_created(lineage.lineage_id, lineage.goal))
+            await self._guard.gated_append(lineage_created(lineage.lineage_id, lineage.goal))
             generation_number = 1
             current_seed = initial_seed
 
@@ -428,7 +424,11 @@ class EvolutionaryLoop:
                 return Result.err(OuroborosError("Failed to project lineage from events"))
 
             # Check if lineage is already terminated
-            if lineage.status in (LineageStatus.CONVERGED, LineageStatus.EXHAUSTED):
+            if lineage.status in (
+                LineageStatus.CONVERGED,
+                LineageStatus.EXHAUSTED,
+                LineageStatus.ABORTED,
+            ):
                 return Result.err(
                     OuroborosError(
                         f"Lineage already terminated with status: {lineage.status.value}"
@@ -522,7 +522,7 @@ class EvolutionaryLoop:
         if gen_result.is_err:
             # Emit generation.failed event so the event store reflects the failure.
             # Without this, only generation.started is recorded, leaving an orphan.
-            await self.event_store.append(
+            await self._guard.gated_append(
                 lineage_generation_failed(
                     lineage.lineage_id,
                     generation_number,
@@ -568,7 +568,7 @@ class EvolutionaryLoop:
         )
         lineage = lineage.with_generation(record)
 
-        await self.event_store.append(
+        await self._guard.gated_append(
             lineage_generation_completed(
                 lineage.lineage_id,
                 generation_number,
@@ -585,7 +585,7 @@ class EvolutionaryLoop:
 
         # Emit ontology evolved event if delta exists
         if result.ontology_delta and result.ontology_delta.similarity < 1.0:
-            await self.event_store.append(
+            await self._guard.gated_append(
                 lineage_ontology_evolved(
                     lineage.lineage_id,
                     generation_number,
@@ -599,42 +599,12 @@ class EvolutionaryLoop:
             result.wonder_output,
             latest_evaluation=result.evaluation_summary,
             validation_output=result.validation_output,
+            validation_passed=result.validation_passed,
         )
 
         action = StepAction.CONTINUE
         if signal.converged:
-            if generation_number >= self.config.max_generations:
-                await self.event_store.append(
-                    lineage_exhausted(
-                        lineage.lineage_id,
-                        generation_number,
-                        self.config.max_generations,
-                    )
-                )
-                lineage = lineage.with_status(LineageStatus.EXHAUSTED)
-                action = StepAction.EXHAUSTED
-            elif "Stagnation" in signal.reason or "Oscillation" in signal.reason:
-                await self.event_store.append(
-                    lineage_stagnated(
-                        lineage.lineage_id,
-                        generation_number,
-                        signal.reason,
-                        self.config.stagnation_window,
-                    )
-                )
-                lineage = lineage.with_status(LineageStatus.CONVERGED)
-                action = StepAction.STAGNATED
-            else:
-                await self.event_store.append(
-                    lineage_converged(
-                        lineage.lineage_id,
-                        generation_number,
-                        signal.reason,
-                        signal.ontology_similarity,
-                    )
-                )
-                lineage = lineage.with_status(LineageStatus.CONVERGED)
-                action = StepAction.CONVERGED
+            lineage, action = await self._emit_termination_step(signal, lineage, generation_number)
 
         return Result.ok(
             StepResult(
@@ -645,6 +615,88 @@ class EvolutionaryLoop:
                 next_generation=generation_number + 1,
             )
         )
+
+    # Dispatch table: TerminationReason → (event_factory_key, LineageStatus)
+    # event_factory_key: "exhausted", "stagnated", or "converged"
+    _TERMINATION_DISPATCH: dict[TerminationReason, tuple[str, LineageStatus]] = {
+        TerminationReason.EXHAUSTED: ("exhausted", LineageStatus.EXHAUSTED),
+        TerminationReason.STAGNATED: ("stagnated", LineageStatus.CONVERGED),
+        TerminationReason.OSCILLATED: ("stagnated", LineageStatus.CONVERGED),
+        TerminationReason.REPETITIVE: ("stagnated", LineageStatus.CONVERGED),
+        TerminationReason.CONVERGED: ("converged", LineageStatus.CONVERGED),
+    }
+
+    async def _emit_termination(
+        self,
+        signal: ConvergenceSignal,
+        lineage: OntologyLineage,
+        generation_number: int,
+    ) -> OntologyLineage:
+        """Emit termination event and update lineage status. Used by run()."""
+        tr = signal.termination_reason
+        dispatch = self._TERMINATION_DISPATCH.get(tr)
+
+        if dispatch is None:
+            # Defensive: unknown TerminationReason falls back to CONVERGED
+            logger.warning(
+                "evolution.termination.unknown_reason",
+                extra={
+                    "termination_reason": str(tr),
+                    "lineage_id": lineage.lineage_id,
+                    "generation": generation_number,
+                },
+            )
+            dispatch = ("converged", LineageStatus.CONVERGED)
+
+        event_key, target_status = dispatch
+
+        if event_key == "exhausted":
+            event = lineage_exhausted(
+                lineage.lineage_id,
+                generation_number,
+                self.config.max_generations,
+                termination_reason=str(tr),
+            )
+        elif event_key == "stagnated":
+            event = lineage_stagnated(
+                lineage.lineage_id,
+                generation_number,
+                signal.reason,
+                self.config.stagnation_window,
+                termination_reason=str(tr),
+            )
+        else:  # converged
+            event = lineage_converged(
+                lineage.lineage_id,
+                generation_number,
+                signal.reason,
+                signal.ontology_similarity,
+                termination_reason=str(tr),
+            )
+
+        await self._guard.gated_append(event)
+        return lineage.with_status(target_status, termination_reason=tr)
+
+    async def _emit_termination_step(
+        self,
+        signal: ConvergenceSignal,
+        lineage: OntologyLineage,
+        generation_number: int,
+    ) -> tuple[OntologyLineage, StepAction]:
+        """Emit termination event and return (lineage, action). Used by evolve_step()."""
+        tr = signal.termination_reason
+        lineage = await self._emit_termination(signal, lineage, generation_number)
+
+        if tr == TerminationReason.EXHAUSTED:
+            return lineage, StepAction.EXHAUSTED
+        if tr in (
+            TerminationReason.STAGNATED,
+            TerminationReason.OSCILLATED,
+            TerminationReason.REPETITIVE,
+        ):
+            return lineage, StepAction.STAGNATED
+        # CONVERGED or unknown
+        return lineage, StepAction.CONVERGED
 
     async def _run_generation(
         self,
@@ -678,7 +730,7 @@ class EvolutionaryLoop:
                 },
             )
             try:
-                await self.event_store.append(
+                await self._guard.gated_append(
                     lineage_generation_failed(
                         lineage.lineage_id,
                         generation_number,
@@ -712,7 +764,7 @@ class EvolutionaryLoop:
             prev_gen = lineage.generations[-1]
 
             # Emit generation started
-            await self.event_store.append(
+            await self._guard.gated_append(
                 lineage_generation_started(
                     lineage.lineage_id,
                     generation_number,
@@ -757,7 +809,7 @@ class EvolutionaryLoop:
                         )
                 else:
                     # Wonder degraded - emit event but continue
-                    await self.event_store.append(
+                    await self._guard.gated_append(
                         lineage_wonder_degraded(
                             lineage.lineage_id,
                             generation_number,
@@ -766,7 +818,7 @@ class EvolutionaryLoop:
                     )
 
             # Phase transition: wondering → reflecting
-            await self.event_store.append(
+            await self._guard.gated_append(
                 lineage_generation_phase_changed(
                     lineage.lineage_id,
                     generation_number,
@@ -799,7 +851,7 @@ class EvolutionaryLoop:
                             },
                         )
                     else:
-                        await self.event_store.append(
+                        await self._guard.gated_append(
                             lineage_generation_failed(
                                 lineage.lineage_id,
                                 generation_number,
@@ -826,7 +878,7 @@ class EvolutionaryLoop:
                     )
 
                 # Phase transition: reflecting → seeding
-                await self.event_store.append(
+                await self._guard.gated_append(
                     lineage_generation_phase_changed(
                         lineage.lineage_id,
                         generation_number,
@@ -841,7 +893,7 @@ class EvolutionaryLoop:
                         reflect_output,
                     )
                     if seed_result.is_err:
-                        await self.event_store.append(
+                        await self._guard.gated_append(
                             lineage_generation_failed(
                                 lineage.lineage_id,
                                 generation_number,
@@ -864,7 +916,7 @@ class EvolutionaryLoop:
 
         else:
             # Gen 1: just emit started event
-            await self.event_store.append(
+            await self._guard.gated_append(
                 lineage_generation_started(
                     lineage.lineage_id,
                     generation_number,
@@ -874,7 +926,7 @@ class EvolutionaryLoop:
             )
 
         # Phase transition: → executing
-        await self.event_store.append(
+        await self._guard.gated_append(
             lineage_generation_phase_changed(
                 lineage.lineage_id,
                 generation_number,
@@ -909,7 +961,7 @@ class EvolutionaryLoop:
                         },
                     )
                 elif hasattr(exec_result, "is_ok"):
-                    await self.event_store.append(
+                    await self._guard.gated_append(
                         lineage_generation_failed(
                             lineage.lineage_id,
                             generation_number,
@@ -921,7 +973,7 @@ class EvolutionaryLoop:
                 else:
                     execution_output = str(exec_result)
             except Exception as e:
-                await self.event_store.append(
+                await self._guard.gated_append(
                     lineage_generation_failed(
                         lineage.lineage_id,
                         generation_number,
@@ -933,19 +985,25 @@ class EvolutionaryLoop:
 
         # Validate phase - reconcile parallel execution artifacts
         validation_output: str | None = None
+        validation_passed: bool | None = None
         if execute and execution_output and self.validator:
             try:
                 validation_result = await self.validator(current_seed, execution_output)
                 if isinstance(validation_result, str):
                     validation_output = validation_result
+                    validation_passed = True
                 elif hasattr(validation_result, "is_ok"):
                     if validation_result.is_ok:
                         validation_output = str(validation_result.value)
+                        validation_passed = True
                     else:
                         validation_output = f"Validation error: {validation_result.error}"
+                        validation_passed = False
                 else:
                     validation_output = str(validation_result)
+                    validation_passed = True
                 if validation_output and "skipped" in validation_output.lower():
+                    validation_passed = False
                     logger.warning(
                         "evolution.generation.validation_skipped",
                         extra={"generation": generation_number, "output": validation_output},
@@ -961,9 +1019,10 @@ class EvolutionaryLoop:
                     extra={"error": str(e), "generation": generation_number},
                 )
                 validation_output = f"Validation skipped: {e}"
+                validation_passed = False
 
         # Phase transition: → evaluating
-        await self.event_store.append(
+        await self._guard.gated_append(
             lineage_generation_phase_changed(
                 lineage.lineage_id,
                 generation_number,
@@ -1002,7 +1061,7 @@ class EvolutionaryLoop:
                     iteration=generation_number,
                     metrics=drift_metrics,
                 )
-                await self.event_store.append(drift_event)
+                await self._guard.gated_append(drift_event)
             except Exception as e:
                 logger.warning(
                     "evolution.drift.measurement_failed",
@@ -1019,6 +1078,7 @@ class EvolutionaryLoop:
                 reflect_output=reflect_output,
                 ontology_delta=ontology_delta,
                 validation_output=validation_output,
+                validation_passed=validation_passed,
                 phase=GenerationPhase.COMPLETED,
                 success=True,
             )
@@ -1046,7 +1106,7 @@ class EvolutionaryLoop:
 
             from ouroboros.events.lineage import lineage_rewound
 
-            await self.event_store.append(
+            await self._guard.gated_append(
                 lineage_rewound(
                     lineage.lineage_id,
                     from_gen,

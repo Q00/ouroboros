@@ -9,6 +9,7 @@ Exception Hierarchy:
     ├── ProviderError     - LLM provider failures (rate limits, API errors)
     ├── ConfigError       - Configuration and credentials issues
     ├── PersistenceError  - Database and storage issues
+    ├── TransitionError   - Invalid state transitions in event sourcing
     └── ValidationError   - Schema and data validation failures
 """
 
@@ -160,6 +161,29 @@ class PersistenceError(OuroborosError):
         super().__init__(message, details)
         self.operation = operation
         self.table = table
+
+
+class TransitionError(OuroborosError):
+    """Error from invalid state transitions in event sourcing.
+
+    Raised when a lineage event is not allowed in the current lineage status.
+
+    Attributes:
+        current_status: The lineage status at the time of the attempted transition.
+        event_type: The event type that was rejected.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        current_status: str,
+        event_type: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, details)
+        self.current_status = current_status
+        self.event_type = event_type
 
 
 class ValidationError(OuroborosError):

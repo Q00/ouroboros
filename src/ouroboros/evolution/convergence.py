@@ -18,6 +18,7 @@ from ouroboros.core.lineage import (
     GenerationRecord,
     OntologyDelta,
     OntologyLineage,
+    TerminationReason,
 )
 from ouroboros.evolution.regression import RegressionDetector
 from ouroboros.evolution.wonder import WonderOutput
@@ -25,13 +26,27 @@ from ouroboros.evolution.wonder import WonderOutput
 
 @dataclass(frozen=True, slots=True)
 class ConvergenceSignal:
-    """Result of convergence evaluation."""
+    """Result of convergence evaluation.
+
+    When converged=True, termination_reason must be set to indicate why.
+    When converged=False, termination_reason is None (loop continues).
+
+    Note: ``converged`` means "the loop should terminate", NOT "the ontology
+    has converged". EXHAUSTED, STAGNATED, OSCILLATED and REPETITIVE all
+    set converged=True despite not representing true ontological convergence.
+    """
 
     converged: bool
     reason: str
     ontology_similarity: float
     generation: int
     failed_acs: tuple[int, ...] = ()
+    termination_reason: TerminationReason | None = None
+    blocking_gate: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.converged and self.termination_reason is None:
+            raise ValueError("converged=True requires termination_reason to be set")
 
 
 @dataclass
@@ -56,8 +71,14 @@ class ConvergenceCriteria:
     eval_min_score: float = 0.7
     ac_gate_mode: str = "all"  # "all" | "ratio" | "off"
     ac_min_pass_ratio: float = 1.0  # for "ratio" mode
-    regression_gate_enabled: bool = True
-    validation_gate_enabled: bool = True
+    regression_gate_enabled: bool = False
+    validation_gate_enabled: bool = False
+    ontology_completeness_gate_enabled: bool = False
+    ontology_min_fields: int = 3
+    wonder_gate_enabled: bool = False
+    wonder_novelty_threshold: float = 0.5
+    drift_trend_gate_enabled: bool = False
+    drift_trend_window: int = 3
 
     def evaluate(
         self,
@@ -65,6 +86,7 @@ class ConvergenceCriteria:
         latest_wonder: WonderOutput | None = None,
         latest_evaluation: EvaluationSummary | None = None,
         validation_output: str | None = None,
+        validation_passed: bool | None = None,
     ) -> ConvergenceSignal:
         """Check if the loop should terminate.
 
@@ -86,6 +108,7 @@ class ConvergenceCriteria:
                 reason=f"Max generations reached ({self.max_generations})",
                 ontology_similarity=self._latest_similarity(lineage),
                 generation=current_gen,
+                termination_reason=TerminationReason.EXHAUSTED,
             )
 
         # Need at least min_generations completed before checking other signals
@@ -100,6 +123,23 @@ class ConvergenceCriteria:
         # Signal 1: Ontology stability (latest two generations)
         latest_sim = self._latest_similarity(lineage)
         if latest_sim >= self.convergence_threshold:
+            # Safety: if ontology has been stable for stagnation_window consecutive
+            # generations but gates keep blocking, force stagnation termination.
+            # Without this, gates (e.g., completeness) can block indefinitely
+            # since the stagnation check below only runs when similarity < threshold.
+            if self._check_stagnation(lineage):
+                return ConvergenceSignal(
+                    converged=True,
+                    reason=(
+                        f"Stagnation detected: ontology unchanged for "
+                        f"{self.stagnation_window} consecutive generations "
+                        f"(convergence gates could not be satisfied)"
+                    ),
+                    ontology_similarity=latest_sim,
+                    generation=current_gen,
+                    termination_reason=TerminationReason.STAGNATED,
+                )
+
             # Eval gate: block convergence if evaluation is unsatisfactory
             if self.eval_gate_enabled and latest_evaluation is not None:
                 eval_blocks = not latest_evaluation.final_approved or (
@@ -115,6 +155,7 @@ class ConvergenceCriteria:
                         ),
                         ontology_similarity=latest_sim,
                         generation=current_gen,
+                        blocking_gate="eval",
                     )
 
             # Per-AC gate: block convergence if individual ACs are failing
@@ -133,6 +174,7 @@ class ConvergenceCriteria:
                         ontology_similarity=latest_sim,
                         generation=current_gen,
                         failed_acs=failed_indices,
+                        blocking_gate="ac",
                     )
 
             # Signal 5: Regression gate — block convergence if ACs regressed
@@ -151,6 +193,7 @@ class ConvergenceCriteria:
                         ontology_similarity=latest_sim,
                         generation=current_gen,
                         failed_acs=regressed,
+                        blocking_gate="regression",
                     )
 
             # Evolution gate: withhold convergence if ontology never actually evolved.
@@ -168,16 +211,76 @@ class ConvergenceCriteria:
                     ),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    blocking_gate="evolution",
                 )
+
+            # Ontology completeness gate: block convergence if ontology is structurally thin
+            if self.ontology_completeness_gate_enabled:
+                completeness_block = self._check_ontology_completeness(lineage)
+                if completeness_block is not None:
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=completeness_block,
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                        blocking_gate="completeness",
+                    )
+
+            # Wonder gate: block convergence if Wonder found significant novel questions.
+            # When wonder_gate is enabled but no wonder output is available, block
+            # convergence — "unable to generate questions" is not the same as
+            # "no questions remain" (Ouroboros principle: questions must be answered).
+            if self.wonder_gate_enabled and latest_wonder is None:
+                return ConvergenceSignal(
+                    converged=False,
+                    reason=(
+                        "Wonder gate: wonder output unavailable — cannot confirm "
+                        "no questions remain (wonder_gate_enabled=True)"
+                    ),
+                    ontology_similarity=latest_sim,
+                    generation=current_gen,
+                    blocking_gate="wonder",
+                )
+            if self.wonder_gate_enabled and latest_wonder is not None:
+                wonder_block = self._check_wonder_gate(lineage, latest_wonder)
+                if wonder_block is not None:
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=wonder_block,
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                        blocking_gate="wonder",
+                    )
+
+            # Drift trend gate: block if drift_score is monotonically increasing
+            if self.drift_trend_gate_enabled:
+                drift_block = self._check_drift_trend_gate(lineage)
+                if drift_block is not None:
+                    return ConvergenceSignal(
+                        converged=False,
+                        reason=drift_block,
+                        ontology_similarity=latest_sim,
+                        generation=current_gen,
+                        blocking_gate="drift_trend",
+                    )
 
             # Validation gate: block convergence if validation was skipped or failed
             if self.validation_gate_enabled and validation_output:
-                if "skipped" in validation_output.lower() or "error" in validation_output.lower():
+                # Use explicit bool flag when available; fall back to string matching
+                if validation_passed is not None:
+                    gate_blocked = not validation_passed
+                else:
+                    gate_blocked = (
+                        "skipped" in validation_output.lower()
+                        or "error" in validation_output.lower()
+                    )
+                if gate_blocked:
                     return ConvergenceSignal(
                         converged=False,
                         reason=(f"Validation gate blocked: {validation_output}"),
                         ontology_similarity=latest_sim,
                         generation=current_gen,
+                        blocking_gate="validation",
                     )
 
             return ConvergenceSignal(
@@ -188,6 +291,7 @@ class ConvergenceCriteria:
                 ),
                 ontology_similarity=latest_sim,
                 generation=current_gen,
+                termination_reason=TerminationReason.CONVERGED,
             )
 
         # Signal 2: Stagnation (unchanged for N consecutive gens)
@@ -202,6 +306,7 @@ class ConvergenceCriteria:
                     ),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    termination_reason=TerminationReason.STAGNATED,
                 )
 
         # Signal 2.5: Oscillation detection (A→B→A→B cycling)
@@ -210,9 +315,10 @@ class ConvergenceCriteria:
             if oscillating:
                 return ConvergenceSignal(
                     converged=True,
-                    reason=("Oscillation detected: ontology is cycling between similar states"),
+                    reason="Oscillation detected: ontology is cycling between similar states",
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    termination_reason=TerminationReason.OSCILLATED,
                 )
 
         # Signal 3: Repetitive wonder questions
@@ -224,6 +330,7 @@ class ConvergenceCriteria:
                     reason="Repetitive feedback: wonder questions are repeating across generations",
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    termination_reason=TerminationReason.REPETITIVE,
                 )
 
         # Not converged
@@ -299,6 +406,106 @@ class ConvergenceCriteria:
                 return failed, (
                     f"Per-AC gate (mode=ratio): pass ratio {ratio:.2f} "
                     f"< required {self.ac_min_pass_ratio:.2f}"
+                )
+
+        return None
+
+    def _check_drift_trend_gate(self, lineage: OntologyLineage) -> str | None:
+        """Block convergence if drift_score shows monotonic increase.
+
+        Checks if drift_score has increased in every consecutive pair within
+        the recent window. This indicates the ontology is consistently moving
+        away from the goal.
+
+        Generations with missing evaluation or drift_score (None) are skipped.
+        If fewer than 2 valid scores remain, the gate passes.
+        """
+        gens = self._completed_generations(lineage)
+        if len(gens) < self.drift_trend_window:
+            return None
+
+        recent = gens[-self.drift_trend_window :]
+        scores = [
+            g.evaluation_summary.drift_score
+            for g in recent
+            if g.evaluation_summary is not None and g.evaluation_summary.drift_score is not None
+        ]
+
+        if len(scores) < 2:
+            return None
+
+        increases = sum(1 for i in range(1, len(scores)) if scores[i] > scores[i - 1])
+        if increases >= len(scores) - 1:
+            return (
+                f"Drift trend gate: drift_score monotonically increasing over "
+                f"{len(scores)} generations ({scores[0]:.3f} → {scores[-1]:.3f})"
+            )
+
+        return None
+
+    def _check_wonder_gate(
+        self, lineage: OntologyLineage, latest_wonder: WonderOutput
+    ) -> str | None:
+        """Block convergence if Wonder found significant novel questions.
+
+        Compares latest wonder questions against all previous generations.
+        If novelty ratio >= threshold, ontology may still benefit from evolution.
+
+        Returns blocking reason if novel questions exceed threshold, None if OK.
+        """
+        if not latest_wonder.questions:
+            return None
+
+        # Exclude the latest generation — its questions are the ones being
+        # evaluated via latest_wonder, so including them would make every
+        # question appear "already seen" and the gate would never block.
+        prev_questions: set[str] = set()
+        for gen in lineage.generations[:-1]:
+            prev_questions.update(gen.wonder_questions)
+
+        novel = [q for q in latest_wonder.questions if q not in prev_questions]
+        if not latest_wonder.questions:
+            return None
+        novelty_ratio = len(novel) / len(latest_wonder.questions)
+
+        if novelty_ratio >= self.wonder_novelty_threshold:
+            return (
+                f"Wonder gate: {len(novel)}/{len(latest_wonder.questions)} novel questions "
+                f"(novelty {novelty_ratio:.0%} >= {self.wonder_novelty_threshold:.0%} threshold)"
+            )
+
+        return None
+
+    def _check_ontology_completeness(self, lineage: OntologyLineage) -> str | None:
+        """Check if ontology meets minimum structural completeness.
+
+        Returns blocking reason if incomplete, None if OK.
+        Checks: (1) minimum field count, (2) description quality.
+        """
+        if not lineage.generations:
+            return None
+
+        ontology = lineage.generations[-1].ontology_snapshot
+
+        # Check 1: Minimum field count
+        if self.ontology_min_fields > 0 and len(ontology.fields) < self.ontology_min_fields:
+            return (
+                f"Ontology completeness gate: {len(ontology.fields)} fields "
+                f"(minimum {self.ontology_min_fields} required)"
+            )
+
+        # Check 2: Trivially short or name-echoing descriptions
+        if ontology.fields:
+            trivial_count = sum(
+                1
+                for f in ontology.fields
+                if len(f.description.strip()) < 10
+                or f.description.strip().lower() == f.name.strip().lower()
+            )
+            if trivial_count > len(ontology.fields) // 2:
+                return (
+                    f"Ontology completeness gate: {trivial_count}/{len(ontology.fields)} "
+                    f"fields have trivial descriptions"
                 )
 
         return None

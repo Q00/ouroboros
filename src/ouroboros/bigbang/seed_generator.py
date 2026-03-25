@@ -279,6 +279,12 @@ class SeedGenerator:
                 )
             elif action == "remove" and mutation.field_name in fields_by_name:
                 del fields_by_name[mutation.field_name]
+            else:
+                log.warning(
+                    "seed_generator.unhandled_mutation",
+                    action=action,
+                    field_name=mutation.field_name,
+                )
 
         return OntologySchema(
             name=schema.name,

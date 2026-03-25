@@ -10,9 +10,10 @@ from ouroboros.core.lineage import (
     GenerationRecord,
     OntologyDelta,
     OntologyLineage,
+    TerminationReason,
 )
 from ouroboros.core.seed import OntologyField, OntologySchema
-from ouroboros.evolution.convergence import ConvergenceCriteria
+from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSignal
 from ouroboros.evolution.wonder import WonderOutput
 
 # -- Helpers --
@@ -510,11 +511,15 @@ class TestEvolutionGateDetection:
     """
 
     def test_blocks_when_ontology_never_evolved(self) -> None:
-        """Identical ontology across all generations -> convergence withheld."""
+        """Identical ontology across 2 generations -> convergence withheld.
+
+        Uses stagnation_window=4 to avoid stagnation safety firing first.
+        """
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
+            stagnation_window=4,
             eval_gate_enabled=False,
         )
         signal = criteria.evaluate(lineage)
@@ -633,4 +638,506 @@ class TestValidationGate:
             lineage,
             validation_output="Validation skipped: no project directory",
         )
+        assert signal.converged
+
+
+# --- TerminationReason enum tests ---
+
+
+class TestTerminationReasonEnum:
+    """Verify TerminationReason is correctly set for all converged=True paths."""
+
+    def test_converged_true_requires_termination_reason(self) -> None:
+        """__post_init__ enforces that converged=True has termination_reason."""
+        with pytest.raises(ValueError, match="requires termination_reason"):
+            ConvergenceSignal(
+                converged=True,
+                reason="test",
+                ontology_similarity=0.99,
+                generation=1,
+            )
+
+    def test_converged_false_allows_none(self) -> None:
+        """converged=False can have termination_reason=None."""
+        signal = ConvergenceSignal(
+            converged=False,
+            reason="test",
+            ontology_similarity=0.5,
+            generation=1,
+        )
+        assert signal.termination_reason is None
+
+    def test_max_generations_returns_exhausted(self) -> None:
+        schema_a = _schema(("name",))
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=tuple(
+                GenerationRecord(
+                    generation_number=i,
+                    seed_id=f"s{i}",
+                    ontology_snapshot=schema_a,
+                )
+                for i in range(1, 4)
+            ),
+        )
+        criteria = ConvergenceCriteria(max_generations=3, min_generations=2)
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason == TerminationReason.EXHAUSTED
+
+    def test_ontology_stable_returns_converged(self) -> None:
+        # Gen 1: different schema, Gen 2-3: same schema → evolution happened, then stable
+        schema_a = _schema(("name",))
+        schema_b = _schema(("name", "age"))
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(generation_number=1, seed_id="s1", ontology_snapshot=schema_a),
+                GenerationRecord(generation_number=2, seed_id="s2", ontology_snapshot=schema_b),
+                GenerationRecord(generation_number=3, seed_id="s3", ontology_snapshot=schema_b),
+            ),
+        )
+        criteria = ConvergenceCriteria(convergence_threshold=0.95, min_generations=2)
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason == TerminationReason.CONVERGED
+
+    def test_stagnation_returns_stagnated(self) -> None:
+        # Gen 1: different, Gen 2-5: same → evolution gate passes, stagnation detected
+        schema_a = _schema(("x",))
+        schema_b = _schema(("name", "age"))
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(generation_number=1, seed_id="s1", ontology_snapshot=schema_a),
+                *(
+                    GenerationRecord(
+                        generation_number=i,
+                        seed_id=f"s{i}",
+                        ontology_snapshot=schema_b,
+                    )
+                    for i in range(2, 6)
+                ),
+            ),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            stagnation_window=3,
+            min_generations=2,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason in (
+            TerminationReason.CONVERGED,
+            TerminationReason.STAGNATED,
+        )
+
+    def test_oscillation_returns_oscillated(self) -> None:
+        schema_a = _schema(("name",))
+        schema_b = _schema(("title",))
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(generation_number=1, seed_id="s1", ontology_snapshot=schema_a),
+                GenerationRecord(generation_number=2, seed_id="s2", ontology_snapshot=schema_b),
+                GenerationRecord(generation_number=3, seed_id="s3", ontology_snapshot=schema_a),
+                GenerationRecord(generation_number=4, seed_id="s4", ontology_snapshot=schema_b),
+            ),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            enable_oscillation_detection=True,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason == TerminationReason.OSCILLATED
+        assert "Oscillation" in signal.reason
+
+
+# --- Ontology Completeness Gate ---
+
+
+class TestOntologyCompletenessGate:
+    """Tests for ontology_completeness_gate in convergence criteria."""
+
+    @staticmethod
+    def _stable_lineage(
+        fields: tuple[str, ...],
+        descriptions: tuple[str, ...] | None = None,
+    ) -> OntologyLineage:
+        """Create a lineage where the last 2 gens have identical ontology."""
+        if descriptions is None:
+            descriptions = tuple(f"Description of {f}" for f in fields)
+        schema_init = _schema(("initial_different_field",))
+        schema = OntologySchema(
+            name="Test",
+            description="Test schema",
+            fields=tuple(
+                OntologyField(name=n, field_type="string", description=d, required=True)
+                for n, d in zip(fields, descriptions, strict=True)
+            ),
+        )
+        return OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(generation_number=1, seed_id="s1", ontology_snapshot=schema_init),
+                GenerationRecord(generation_number=2, seed_id="s2", ontology_snapshot=schema),
+                GenerationRecord(generation_number=3, seed_id="s3", ontology_snapshot=schema),
+            ),
+        )
+
+    def test_blocks_when_too_few_fields(self) -> None:
+        """Completeness gate blocks when field count < min_fields."""
+        lineage = self._stable_lineage(("name", "age"))
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            ontology_completeness_gate_enabled=True,
+            ontology_min_fields=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert not signal.converged
+        assert "completeness gate" in signal.reason.lower()
+        assert "2 fields" in signal.reason
+
+    def test_blocks_when_trivial_descriptions(self) -> None:
+        """Completeness gate blocks when majority of descriptions are trivial."""
+        lineage = self._stable_lineage(
+            ("name", "age", "email"),
+            descriptions=("name", "age", "Detailed email address for contact"),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            ontology_completeness_gate_enabled=True,
+            ontology_min_fields=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert not signal.converged
+        assert "trivial descriptions" in signal.reason.lower()
+
+    def test_passes_when_sufficient_fields_and_descriptions(self) -> None:
+        """Completeness gate passes with enough fields and good descriptions."""
+        lineage = self._stable_lineage(
+            ("name", "age", "email"),
+            descriptions=(
+                "Full legal name of the person",
+                "Age in years since birth",
+                "Primary email address for contact",
+            ),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            ontology_completeness_gate_enabled=True,
+            ontology_min_fields=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+        assert signal.termination_reason == TerminationReason.CONVERGED
+
+    def test_disabled_allows_convergence(self) -> None:
+        """Disabled completeness gate allows convergence regardless."""
+        lineage = self._stable_lineage(("x",))
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            ontology_completeness_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+
+    def test_stagnation_safety_overrides_gate_blocking(self) -> None:
+        """When stagnation_window is reached, stagnation terminates even if gate blocks."""
+        schema_init = _schema(("different",))
+        schema = OntologySchema(
+            name="T",
+            description="T",
+            fields=(OntologyField(name="x", field_type="string", description="x", required=True),),
+        )
+        # 4 gens: gen1 different, gen2-4 identical → stagnation_window=3 reached
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(generation_number=1, seed_id="s1", ontology_snapshot=schema_init),
+                GenerationRecord(generation_number=2, seed_id="s2", ontology_snapshot=schema),
+                GenerationRecord(generation_number=3, seed_id="s3", ontology_snapshot=schema),
+                GenerationRecord(generation_number=4, seed_id="s4", ontology_snapshot=schema),
+            ),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            stagnation_window=3,
+            ontology_completeness_gate_enabled=True,
+            ontology_min_fields=5,  # would block: only 1 field
+        )
+        signal = criteria.evaluate(lineage)
+        # Stagnation safety should override the completeness gate
+        assert signal.converged
+        assert signal.termination_reason == TerminationReason.STAGNATED
+
+
+# --- Wonder Gate ---
+
+
+class TestWonderGate:
+    """Tests for wonder_gate in convergence criteria."""
+
+    @staticmethod
+    def _stable_lineage_with_wonder(
+        prev_questions: tuple[str, ...] = (),
+    ) -> OntologyLineage:
+        """Create a stable lineage where gen2-3 have identical ontology."""
+        schema_a = _schema(("x",))
+        schema_b = _schema(("name", "age", "email"))
+        return OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(
+                    generation_number=1,
+                    seed_id="s1",
+                    ontology_snapshot=schema_a,
+                    wonder_questions=prev_questions,
+                ),
+                GenerationRecord(
+                    generation_number=2,
+                    seed_id="s2",
+                    ontology_snapshot=schema_b,
+                    wonder_questions=prev_questions,
+                ),
+                GenerationRecord(
+                    generation_number=3,
+                    seed_id="s3",
+                    ontology_snapshot=schema_b,
+                    wonder_questions=prev_questions,
+                ),
+            ),
+        )
+
+    def test_blocks_when_novel_questions_exceed_threshold(self) -> None:
+        """Wonder gate blocks when majority of questions are novel."""
+        lineage = self._stable_lineage_with_wonder(("old question 1", "old question 2"))
+        wonder = WonderOutput(
+            questions=("brand new question A", "brand new question B", "old question 1"),
+            should_continue=True,
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=True,
+            wonder_novelty_threshold=0.5,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=wonder)
+        assert not signal.converged
+        assert "Wonder gate" in signal.reason
+        assert "novel questions" in signal.reason
+
+    def test_blocks_when_latest_gen_has_same_questions(self) -> None:
+        """Wonder gate still blocks even when latest generation already contains the questions.
+
+        Regression test: the gate must exclude the latest generation when building
+        the set of previously-seen questions, otherwise every question appears
+        "already seen" and the gate can never fire.
+        """
+        schema_a = _schema(("x",))
+        schema_b = _schema(("name", "age", "email"))
+        novel_qs = ("brand new A", "brand new B")
+        # Gen1-2 have old questions; gen3 (latest) has the novel questions
+        lineage = OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=(
+                GenerationRecord(
+                    generation_number=1,
+                    seed_id="s1",
+                    ontology_snapshot=schema_a,
+                    wonder_questions=("old Q1",),
+                ),
+                GenerationRecord(
+                    generation_number=2,
+                    seed_id="s2",
+                    ontology_snapshot=schema_b,
+                    wonder_questions=("old Q2",),
+                ),
+                GenerationRecord(
+                    generation_number=3,
+                    seed_id="s3",
+                    ontology_snapshot=schema_b,
+                    wonder_questions=novel_qs,
+                ),
+            ),
+        )
+        wonder = WonderOutput(questions=novel_qs, should_continue=True)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=True,
+            wonder_novelty_threshold=0.5,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=wonder)
+        assert not signal.converged
+        assert "Wonder gate" in signal.reason
+
+    def test_allows_when_all_questions_are_repeated(self) -> None:
+        """Wonder gate allows convergence when all questions are old."""
+        prev = ("question A", "question B")
+        lineage = self._stable_lineage_with_wonder(prev)
+        wonder = WonderOutput(
+            questions=("question A", "question B"),
+            should_continue=True,
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=True,
+            wonder_novelty_threshold=0.5,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=wonder)
+        assert signal.converged
+
+    def test_blocks_when_wonder_is_none(self) -> None:
+        """Wonder gate blocks when no wonder output is available.
+
+        "Unable to generate questions" is not the same as "no questions remain".
+        When wonder_gate is enabled, absence of wonder output should block
+        convergence to avoid false convergence.
+        """
+        lineage = self._stable_lineage_with_wonder()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=True,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=None)
+        assert not signal.converged
+        assert signal.blocking_gate == "wonder"
+        assert "unavailable" in signal.reason
+
+    def test_disabled_allows_convergence(self) -> None:
+        """Disabled wonder gate allows convergence regardless of novelty."""
+        lineage = self._stable_lineage_with_wonder()
+        wonder = WonderOutput(
+            questions=("completely new question",),
+            should_continue=True,
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            wonder_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage, latest_wonder=wonder)
+        assert signal.converged
+
+
+# --- Drift Trend Gate ---
+
+
+class TestDriftTrendGate:
+    """Tests for drift_trend_gate in convergence criteria."""
+
+    @staticmethod
+    def _stable_lineage_with_drift(drift_scores: list[float | None]) -> OntologyLineage:
+        """Create a stable lineage with specified drift_scores per generation."""
+        schema_init = _schema(("different",))
+        schema = _schema(("name", "age", "email"))
+        gens: list[GenerationRecord] = [
+            GenerationRecord(
+                generation_number=1,
+                seed_id="s1",
+                ontology_snapshot=schema_init,
+            )
+        ]
+        for i, ds in enumerate(drift_scores, start=2):
+            eval_summary = (
+                EvaluationSummary(
+                    final_approved=True,
+                    highest_stage_passed=2,
+                    score=0.8,
+                    drift_score=ds,
+                )
+                if ds is not None
+                else None
+            )
+            gens.append(
+                GenerationRecord(
+                    generation_number=i,
+                    seed_id=f"s{i}",
+                    ontology_snapshot=schema,
+                    evaluation_summary=eval_summary,
+                )
+            )
+        return OntologyLineage(
+            lineage_id="test",
+            goal="test",
+            generations=tuple(gens),
+        )
+
+    def test_blocks_when_drift_monotonically_increasing(self) -> None:
+        """Drift trend gate blocks when drift_score increases every generation."""
+        lineage = self._stable_lineage_with_drift([0.2, 0.4, 0.6])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            stagnation_window=5,  # avoid stagnation safety firing first
+            drift_trend_gate_enabled=True,
+            drift_trend_window=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert not signal.converged
+        assert "Drift trend gate" in signal.reason
+
+    def test_allows_when_drift_decreasing(self) -> None:
+        """Drift trend gate allows convergence when drift is improving."""
+        lineage = self._stable_lineage_with_drift([0.6, 0.4, 0.2])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            drift_trend_gate_enabled=True,
+            drift_trend_window=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+
+    def test_allows_when_drift_mixed(self) -> None:
+        """Drift trend gate allows when drift fluctuates (not monotonic)."""
+        lineage = self._stable_lineage_with_drift([0.3, 0.5, 0.4])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            drift_trend_gate_enabled=True,
+            drift_trend_window=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+
+    def test_passes_when_drift_scores_none(self) -> None:
+        """Gate passes when drift_score is None (fewer than 2 valid scores)."""
+        lineage = self._stable_lineage_with_drift([None, None, 0.5])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            drift_trend_gate_enabled=True,
+            drift_trend_window=3,
+        )
+        signal = criteria.evaluate(lineage)
+        assert signal.converged
+
+    def test_disabled_allows_convergence(self) -> None:
+        """Disabled drift trend gate allows convergence regardless."""
+        lineage = self._stable_lineage_with_drift([0.2, 0.4, 0.6])
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            drift_trend_gate_enabled=False,
+        )
+        signal = criteria.evaluate(lineage)
         assert signal.converged

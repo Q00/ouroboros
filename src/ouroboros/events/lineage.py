@@ -129,17 +129,21 @@ def lineage_converged(
     generation_number: int,
     reason: str,
     similarity: float,
+    termination_reason: str | None = None,
 ) -> BaseEvent:
     """Create event when convergence is detected."""
+    data: dict = {
+        "generation_number": generation_number,
+        "reason": reason,
+        "similarity": similarity,
+    }
+    if termination_reason is not None:
+        data["termination_reason"] = str(termination_reason)
     return BaseEvent(
         type="lineage.converged",
         aggregate_type="lineage",
         aggregate_id=lineage_id,
-        data={
-            "generation_number": generation_number,
-            "reason": reason,
-            "similarity": similarity,
-        },
+        data=data,
     )
 
 
@@ -147,16 +151,20 @@ def lineage_exhausted(
     lineage_id: str,
     generation_number: int,
     max_generations: int,
+    termination_reason: str | None = None,
 ) -> BaseEvent:
     """Create event when max generations is reached."""
+    data: dict = {
+        "generation_number": generation_number,
+        "max_generations": max_generations,
+    }
+    if termination_reason is not None:
+        data["termination_reason"] = str(termination_reason)
     return BaseEvent(
         type="lineage.exhausted",
         aggregate_type="lineage",
         aggregate_id=lineage_id,
-        data={
-            "generation_number": generation_number,
-            "max_generations": max_generations,
-        },
+        data=data,
     )
 
 
@@ -199,15 +207,19 @@ def lineage_stagnated(
     generation_number: int,
     reason: str,
     window: int,
+    termination_reason: str | None = None,
 ) -> BaseEvent:
     """Create event when stagnation is detected (repeated feedback/unchanged ontology)."""
+    data: dict = {
+        "generation_number": generation_number,
+        "reason": reason,
+        "stagnation_window": window,
+    }
+    if termination_reason is not None:
+        data["termination_reason"] = str(termination_reason)
     return BaseEvent(
         type="lineage.stagnated",
         aggregate_type="lineage",
         aggregate_id=lineage_id,
-        data={
-            "generation_number": generation_number,
-            "reason": reason,
-            "stagnation_window": window,
-        },
+        data=data,
     )
