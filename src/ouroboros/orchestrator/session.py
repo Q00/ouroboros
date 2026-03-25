@@ -764,6 +764,13 @@ class SessionRepository:
                     }:
                         explicit_terminal_status = status_update
 
+            # Sanitize stale runtime metadata when session reached a terminal
+            # state.  Progress events captured during execution may contain
+            # ``runtime_status: running`` which contradicts the authoritative
+            # terminal status and confuses downstream consumers (#188).
+            if explicit_terminal_status is not None and last_progress.get("runtime_status"):
+                last_progress["runtime_status"] = explicit_terminal_status.value
+
             # Apply accumulated progress
             tracker = replace(
                 tracker,
