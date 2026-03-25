@@ -40,18 +40,14 @@
 
 > **Security Notice (2026-03-24): LiteLLM PyPI Supply Chain Attack**
 >
-> LiteLLM versions 1.82.7 and 1.82.8 on PyPI contained a malicious `.pth` file that **auto-executes on every Python startup** (no `import` needed), exfiltrating environment variables, API keys, SSH keys, and cloud credentials to an external server.
+> LiteLLM versions **1.82.7** and **1.82.8** on PyPI contained a malicious `.pth` file that auto-executes on every Python startup, exfiltrating environment variables, API keys, and credentials to an external server.
 >
-> **Am I affected?** You are at risk if, **after March 23, 2026**, you either:
-> - Fresh-installed Ouroboros (`pip install ouroboros-ai`, `uv tool install ouroboros-ai`), or
-> - Upgraded an existing install (`pip install --upgrade ouroboros-ai`)
+> **What we did:** Ouroboros now pins LiteLLM to **`<=1.82.6`** (safe versions only) as an optional dependency. LiteLLM is no longer a core dependency — it is only installed when you explicitly opt in via `pip install ouroboros-ai[litellm]`.
 >
-> In both cases, `litellm>=1.80.0` was a dependency, and your package manager would have resolved it to the malicious 1.82.7/1.82.8. If you installed before that date and haven't reinstalled or upgraded since, you are likely safe.
->
-> **Ouroboros has removed litellm entirely** as of v0.25.2 (stable) and v0.26.0b7 (beta). However, **upgrading Ouroboros only removes litellm from the dependency list — it does NOT uninstall litellm itself or delete the malicious `.pth` file already on your system.** You must clean up manually:
+> **If you previously installed litellm 1.82.7 or 1.82.8**, the malicious `.pth` file may still be on your system even after upgrading. Clean up manually:
 >
 > ```bash
-> # 1. Find the malicious file — delete any results
+> # 1. Find and delete the malicious file
 > find / -name "litellm_init.pth" 2>/dev/null
 >
 > # 2. Clean package manager caches
@@ -61,7 +57,7 @@
 > # 3. Rotate ALL credentials that were on your system during the exposure window
 > ```
 >
-> References: [LiteLLM #24512](https://github.com/BerriAI/litellm/issues/24512) · [Ouroboros #195](https://github.com/Q00/ouroboros/issues/195) · [Analysis](https://futuresearch.ai/blog/litellm-pypi-supply-chain-attack/)
+> References: [LiteLLM #24512](https://github.com/BerriAI/litellm/issues/24512) · [Ouroboros #195](https://github.com/Q00/ouroboros/issues/195) · [DSPy mitigation](https://github.com/stanfordnlp/dspy/commit/66e33399bf29)
 
 ---
 

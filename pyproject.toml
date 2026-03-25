@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 claude = ["claude-agent-sdk>=0.1.0", "anthropic>=0.52.0"]
-litellm = ["litellm>=1.80.0"]
+litellm = ["litellm>=1.80.0,<=1.82.6"]
 all = ["ouroboros-ai[claude,litellm,dashboard]"]
 dashboard = [
     "streamlit>=1.40.0",
