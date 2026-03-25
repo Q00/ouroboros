@@ -42,8 +42,9 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
-from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
+from ouroboros.config.loader import get_clarification_model
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
+from ouroboros.providers.factory import create_llm_adapter
 
 log = structlog.get_logger()
 
@@ -308,10 +309,13 @@ class PMInterviewHandler:
         """Return the injected engine or create a new one using the server's configured backend."""
         if self.pm_engine is not None:
             return self.pm_engine
-        adapter = self.llm_adapter or ClaudeAgentAdapter(permission_mode="bypassPermissions")
-        # llm_backend is a backend selector (e.g. "codex", "litellm"), not a model ID.
-        # Only pass model when it looks like a valid model name, not a backend name.
-        model = self.llm_backend if self.llm_backend and "/" in (self.llm_backend or "") else None
+        adapter = self.llm_adapter or create_llm_adapter(
+            backend=self.llm_backend,
+            max_turns=1,
+            use_case="interview",
+            allowed_tools=[],
+        )
+        model = get_clarification_model(self.llm_backend)
         return PMInterviewEngine.create(
             llm_adapter=adapter,
             state_dir=self.data_dir or _DATA_DIR,

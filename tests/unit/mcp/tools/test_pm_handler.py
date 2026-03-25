@@ -740,27 +740,36 @@ class TestGetEngine:
         assert handler._get_engine() is engine
 
     def test_creates_engine_when_none_injected(self) -> None:
-        """When no engine is injected, creates one with ClaudeAgentAdapter."""
+        """When no engine is injected, creates one via create_llm_adapter factory."""
         with (
-            patch("ouroboros.mcp.tools.pm_handler.ClaudeAgentAdapter") as mock_adapter_cls,
+            patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter") as mock_create,
+            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model") as mock_model,
             patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
         ):
             mock_adapter = MagicMock()
-            mock_adapter_cls.return_value = mock_adapter
+            mock_create.return_value = mock_adapter
+            mock_model.return_value = "claude-opus-4-6"
             mock_engine_cls.create.return_value = MagicMock()
 
             handler = PMInterviewHandler()
             handler._get_engine()
 
-            mock_adapter_cls.assert_called_once_with(permission_mode="bypassPermissions")
+            mock_create.assert_called_once_with(
+                backend=None,
+                max_turns=1,
+                use_case="interview",
+                allowed_tools=[],
+            )
             mock_engine_cls.create.assert_called_once()
             call_kwargs = mock_engine_cls.create.call_args
             assert call_kwargs.kwargs["llm_adapter"] is mock_adapter
+            assert call_kwargs.kwargs["model"] == "claude-opus-4-6"
 
     def test_uses_custom_data_dir(self, tmp_path: Path) -> None:
         """When data_dir is set, passes it to PMInterviewEngine.create."""
         with (
-            patch("ouroboros.mcp.tools.pm_handler.ClaudeAgentAdapter"),
+            patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter"),
+            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model", return_value="m"),
             patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
         ):
             mock_engine_cls.create.return_value = MagicMock()
