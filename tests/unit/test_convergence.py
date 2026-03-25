@@ -1004,8 +1004,13 @@ class TestWonderGate:
         signal = criteria.evaluate(lineage, latest_wonder=wonder)
         assert signal.converged
 
-    def test_allows_when_wonder_is_none(self) -> None:
-        """Wonder gate passes when no wonder output is provided."""
+    def test_blocks_when_wonder_is_none(self) -> None:
+        """Wonder gate blocks when no wonder output is available.
+
+        "Unable to generate questions" is not the same as "no questions remain".
+        When wonder_gate is enabled, absence of wonder output should block
+        convergence to avoid false convergence.
+        """
         lineage = self._stable_lineage_with_wonder()
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
@@ -1013,7 +1018,9 @@ class TestWonderGate:
             wonder_gate_enabled=True,
         )
         signal = criteria.evaluate(lineage, latest_wonder=None)
-        assert signal.converged
+        assert not signal.converged
+        assert signal.blocking_gate == "wonder"
+        assert "unavailable" in signal.reason
 
     def test_disabled_allows_convergence(self) -> None:
         """Disabled wonder gate allows convergence regardless of novelty."""

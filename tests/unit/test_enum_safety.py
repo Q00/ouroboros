@@ -33,6 +33,23 @@ class TestMutationActionExhaustiveness:
             )
 
 
+class TestTerminationReasonDispatchCoverage:
+    """_TERMINATION_DISPATCH must cover all TerminationReason members."""
+
+    def test_dispatch_covers_all_termination_reasons(self) -> None:
+        """Every TerminationReason member has a dispatch entry in loop.py."""
+        from ouroboros.core.lineage import TerminationReason
+        from ouroboros.evolution.loop import EvolutionaryLoop
+
+        dispatch = EvolutionaryLoop._TERMINATION_DISPATCH
+        for member in TerminationReason:
+            assert member in dispatch, (
+                f"TerminationReason.{member.name} is not in "
+                f"EvolutionaryLoop._TERMINATION_DISPATCH. "
+                f"Dispatched: {sorted(m.name for m in dispatch)}"
+            )
+
+
 class TestTerminationReasonProjectorCoverage:
     """Projector legacy/default mappings must cover all terminal event types."""
 

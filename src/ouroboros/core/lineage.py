@@ -229,7 +229,7 @@ class OntologyLineage(BaseModel, frozen=True):
     generations: tuple[GenerationRecord, ...] = Field(default_factory=tuple)
     rewind_history: tuple[RewindRecord, ...] = Field(default_factory=tuple)
     status: LineageStatus = LineageStatus.ACTIVE
-    termination_reason: TerminationReason | str | None = None
+    termination_reason: TerminationReason | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @property
@@ -249,7 +249,7 @@ class OntologyLineage(BaseModel, frozen=True):
     def with_status(
         self,
         status: LineageStatus,
-        termination_reason: TerminationReason | str | None = None,
+        termination_reason: TerminationReason | None = None,
     ) -> OntologyLineage:
         """Return new lineage with updated status and optional termination reason.
 

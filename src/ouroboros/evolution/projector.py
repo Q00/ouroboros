@@ -179,7 +179,7 @@ class LineageProjector:
                     raw_tr = event.data.get("termination_reason")
                     if raw_tr:
                         try:
-                            tr: TerminationReason | str = TerminationReason(raw_tr)
+                            tr: TerminationReason = TerminationReason(raw_tr)
                         except ValueError:
                             tr = _DEFAULT_TERMINATION[event.type]
                     else:
