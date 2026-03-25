@@ -32,7 +32,7 @@ from ouroboros.bigbang.interview import (
 )
 from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
-from ouroboros.config.loader import get_clarification_model
+from ouroboros.config import get_clarification_model
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
@@ -44,7 +44,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
-from ouroboros.providers.factory import create_llm_adapter
+from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger()
 
