@@ -9,6 +9,7 @@ Contains handlers for evolutionary loop operations:
 
 from dataclasses import dataclass, field
 import os
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -17,6 +18,7 @@ import yaml
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
+from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.types import (
@@ -30,6 +32,38 @@ from ouroboros.mcp.types import (
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
+
+
+def _resolve_verification_working_dir(project_dir: str | None, seed: Seed | None) -> Path:
+    """Resolve the best project directory for post-run verification."""
+    if project_dir:
+        return Path(project_dir).expanduser()
+
+    if seed is not None:
+        seed_meta = getattr(seed, "metadata", None)
+        if seed_meta is not None:
+            configured_dir = getattr(seed_meta, "project_dir", None) or getattr(
+                seed_meta,
+                "working_directory",
+                None,
+            )
+            if isinstance(configured_dir, str) and configured_dir:
+                return Path(configured_dir).expanduser()
+
+        brownfield_context = getattr(seed, "brownfield_context", None)
+        context_references = getattr(brownfield_context, "context_references", ()) or ()
+        for reference in context_references:
+            path = getattr(reference, "path", None)
+            role = getattr(reference, "role", None)
+            if isinstance(path, str) and path and role == "primary":
+                return Path(path).expanduser()
+
+        for reference in context_references:
+            path = getattr(reference, "path", None)
+            if isinstance(path, str) and path:
+                return Path(path).expanduser()
+
+    return Path.cwd()
 
 
 @dataclass
@@ -268,12 +302,24 @@ class EvolveStepHandler:
                     ac_lines
                 )
 
-            artifact = gen.execution_output or "\n".join(text_lines)
+            execution_artifact = gen.execution_output or "\n".join(text_lines)
+            try:
+                verification = await build_verification_artifacts(
+                    f"{step.lineage.lineage_id}-gen-{gen.generation_number}",
+                    execution_artifact,
+                    _resolve_verification_working_dir(normalized_project_dir, initial_seed),
+                )
+                artifact = verification.artifact
+                reference = verification.reference
+            except Exception as e:
+                artifact = execution_artifact
+                reference = f"Verification artifact generation failed: {e}"
             qa_result = await qa_handler.handle(
                 {
                     "artifact": artifact,
                     "artifact_type": "test_output",
                     "quality_bar": quality_bar,
+                    "reference": reference,
                     "seed_content": seed_content or "",
                     "pass_threshold": 0.80,
                 }

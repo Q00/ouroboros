@@ -20,6 +20,7 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.core.security import InputValidator
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
+from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.types import (
@@ -278,6 +279,12 @@ class ExecuteSeedHandler:
                 )
             )
 
+        verification_working_dir = self._resolve_verification_working_dir(
+            seed,
+            resolved_cwd,
+            arguments.get("cwd"),
+        )
+
         # Use injected or create orchestrator dependencies
         try:
             from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
@@ -407,14 +414,27 @@ class ExecuteSeedHandler:
                             llm_backend=self.llm_backend,
                         )
                         quality_bar = self._derive_quality_bar(_seed)
+                        execution_artifact = self._get_verification_artifact(
+                            result.value.summary,
+                            result.value.final_message,
+                        )
+                        try:
+                            verification = await build_verification_artifacts(
+                                result.value.execution_id,
+                                execution_artifact,
+                                verification_working_dir,
+                            )
+                            artifact = verification.artifact
+                            reference = verification.reference
+                        except Exception as e:
+                            artifact = execution_artifact
+                            reference = f"Verification artifact generation failed: {e}"
                         await qa_handler.handle(
                             {
-                                "artifact": self._get_verification_artifact(
-                                    result.value.summary,
-                                    result.value.final_message,
-                                ),
+                                "artifact": artifact,
                                 "artifact_type": "test_output",
                                 "quality_bar": quality_bar,
+                                "reference": reference,
                                 "seed_content": _seed_content,
                                 "pass_threshold": 0.80,
                             }
@@ -502,6 +522,41 @@ class ExecuteSeedHandler:
         """Derive a quality bar string from seed acceptance criteria."""
         ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
         return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
+
+    @staticmethod
+    def _resolve_verification_working_dir(
+        seed: Seed,
+        dispatch_cwd: Path,
+        raw_cwd: Any,
+    ) -> Path:
+        """Resolve the best project directory for post-run verification."""
+        if isinstance(raw_cwd, str) and raw_cwd.strip():
+            return dispatch_cwd
+
+        seed_meta = getattr(seed, "metadata", None)
+        if seed_meta is not None:
+            project_dir = getattr(seed_meta, "project_dir", None) or getattr(
+                seed_meta,
+                "working_directory",
+                None,
+            )
+            if isinstance(project_dir, str) and project_dir:
+                return Path(project_dir).expanduser()
+
+        brownfield_context = getattr(seed, "brownfield_context", None)
+        context_references = getattr(brownfield_context, "context_references", ()) or ()
+        for reference in context_references:
+            path = getattr(reference, "path", None)
+            role = getattr(reference, "role", None)
+            if isinstance(path, str) and path and role == "primary":
+                return Path(path).expanduser()
+
+        for reference in context_references:
+            path = getattr(reference, "path", None)
+            if isinstance(path, str) and path:
+                return Path(path).expanduser()
+
+        return dispatch_cwd
 
     @staticmethod
     def _get_verification_artifact(summary: dict[str, Any], final_message: str) -> str:

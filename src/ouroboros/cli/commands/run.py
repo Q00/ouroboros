@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.core.security import InputValidator
+from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 
 
 class _DefaultWorkflowGroup(typer.core.TyperGroup):
@@ -254,12 +255,25 @@ async def _run_orchestrator(
                     print_info("Running post-execution QA...")
                     qa_handler = QAHandler()
                     quality_bar = _derive_quality_bar(seed)
+                    execution_artifact = _get_verification_artifact(res.summary, res.final_message)
+                    try:
+                        verification = await build_verification_artifacts(
+                            res.execution_id,
+                            execution_artifact,
+                            Path.cwd(),
+                        )
+                        artifact = verification.artifact
+                        reference = verification.reference
+                    except Exception as e:
+                        artifact = execution_artifact
+                        reference = f"Verification artifact generation failed: {e}"
 
                     qa_result = await qa_handler.handle(
                         {
-                            "artifact": _get_verification_artifact(res.summary, res.final_message),
+                            "artifact": artifact,
                             "artifact_type": "test_output",
                             "quality_bar": quality_bar,
+                            "reference": reference,
                             "seed_content": yaml.dump(seed_data, default_flow_style=False),
                             "pass_threshold": 0.80,
                         }

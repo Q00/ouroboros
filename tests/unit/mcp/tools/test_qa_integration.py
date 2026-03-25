@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ouroboros.core.types import Result
+from ouroboros.evaluation.verification_artifacts import VerificationArtifacts
 from ouroboros.mcp.tools.definitions import EvolveStepHandler, ExecuteSeedHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.session import SessionTracker
@@ -88,6 +90,13 @@ FAKE_QA_RESULT: Result = Result.ok(
     )
 )
 
+FAKE_VERIFICATION_ARTIFACTS = VerificationArtifacts(
+    artifact="Structured verification artifact",
+    reference="Raw verification reference",
+    artifact_dir="/tmp/ouroboros-artifacts/exec-test",
+    manifest_path="/tmp/ouroboros-artifacts/exec-test/manifest.json",
+)
+
 
 # ---------------------------------------------------------------------------
 # ExecuteSeedHandler tests — new background launch pattern
@@ -141,6 +150,11 @@ class TestExecuteSeedHandlerQA:
                 return_value=mock_runner,
             ),
             patch(
+                "ouroboros.mcp.tools.execution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
+            ) as mock_verification,
+            patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
                 new_callable=AsyncMock,
                 return_value=FAKE_QA_RESULT,
@@ -159,7 +173,13 @@ class TestExecuteSeedHandlerQA:
         # QA handler was called in background
         mock_qa_handle.assert_awaited_once()
         qa_args = mock_qa_handle.call_args[0][0]
-        assert qa_args["artifact"] == fake_exec.summary["verification_report"]
+        mock_verification.assert_awaited_once_with(
+            fake_exec.execution_id,
+            fake_exec.summary["verification_report"],
+            Path.cwd(),
+        )
+        assert qa_args["artifact"] == "Structured verification artifact"
+        assert qa_args["reference"] == "Raw verification reference"
         assert qa_args["artifact_type"] == "test_output"
         assert "All tests pass" in qa_args["quality_bar"]
         assert "No lint errors" in qa_args["quality_bar"]
@@ -180,6 +200,11 @@ class TestExecuteSeedHandlerQA:
             patch(
                 "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
             ),
             patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
@@ -211,6 +236,11 @@ class TestExecuteSeedHandlerQA:
             patch(
                 "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
             ),
             patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
@@ -247,6 +277,11 @@ class TestExecuteSeedHandlerQA:
             patch(
                 "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
                 return_value=mock_runner,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
             ),
             patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
@@ -335,11 +370,18 @@ class TestEvolveStepHandlerQA:
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
-        with patch(
-            "ouroboros.mcp.tools.qa.QAHandler.handle",
-            new_callable=AsyncMock,
-            return_value=FAKE_QA_RESULT,
-        ) as mock_qa:
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
+            ) as mock_verification,
+            patch(
+                "ouroboros.mcp.tools.qa.QAHandler.handle",
+                new_callable=AsyncMock,
+                return_value=FAKE_QA_RESULT,
+            ) as mock_qa,
+        ):
             result = await handler.handle(
                 {
                     "lineage_id": "lin_test",
@@ -350,6 +392,14 @@ class TestEvolveStepHandlerQA:
 
         assert result.is_ok, f"Expected ok, got: {result.error}"
         mock_qa.assert_awaited_once()
+        mock_verification.assert_awaited_once_with(
+            "lin_test-gen-3",
+            FakeGeneration.execution_output,
+            Path.cwd(),
+        )
+        qa_args = mock_qa.call_args[0][0]
+        assert qa_args["artifact"] == "Structured verification artifact"
+        assert qa_args["reference"] == "Raw verification reference"
 
         # QA verdict in text
         text = result.value.content[0].text
@@ -370,10 +420,17 @@ class TestEvolveStepHandlerQA:
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
-        with patch(
-            "ouroboros.mcp.tools.qa.QAHandler.handle",
-            new_callable=AsyncMock,
-        ) as mock_qa:
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
+            ),
+            patch(
+                "ouroboros.mcp.tools.qa.QAHandler.handle",
+                new_callable=AsyncMock,
+            ) as mock_qa,
+        ):
             result = await handler.handle(
                 {
                     "lineage_id": "lin_test",
@@ -396,10 +453,17 @@ class TestEvolveStepHandlerQA:
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
-        with patch(
-            "ouroboros.mcp.tools.qa.QAHandler.handle",
-            new_callable=AsyncMock,
-        ) as mock_qa:
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
+            ),
+            patch(
+                "ouroboros.mcp.tools.qa.QAHandler.handle",
+                new_callable=AsyncMock,
+            ) as mock_qa,
+        ):
             result = await handler.handle(
                 {
                     "lineage_id": "lin_test",
@@ -420,11 +484,18 @@ class TestEvolveStepHandlerQA:
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
-        with patch(
-            "ouroboros.mcp.tools.qa.QAHandler.handle",
-            new_callable=AsyncMock,
-            return_value=FAKE_QA_RESULT,
-        ) as mock_qa:
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
+            ),
+            patch(
+                "ouroboros.mcp.tools.qa.QAHandler.handle",
+                new_callable=AsyncMock,
+                return_value=FAKE_QA_RESULT,
+            ) as mock_qa,
+        ):
             await handler.handle(
                 {
                     "lineage_id": "lin_test",
@@ -447,11 +518,18 @@ class TestEvolveStepHandlerQA:
 
         handler = EvolveStepHandler(evolutionary_loop=mock_loop)
 
-        with patch(
-            "ouroboros.mcp.tools.qa.QAHandler.handle",
-            new_callable=AsyncMock,
-            return_value=FAKE_QA_RESULT,
-        ) as mock_qa:
+        with (
+            patch(
+                "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
+                new_callable=AsyncMock,
+                return_value=FAKE_VERIFICATION_ARTIFACTS,
+            ),
+            patch(
+                "ouroboros.mcp.tools.qa.QAHandler.handle",
+                new_callable=AsyncMock,
+                return_value=FAKE_QA_RESULT,
+            ) as mock_qa,
+        ):
             await handler.handle(
                 {
                     "lineage_id": "lin_test",
