@@ -15,6 +15,8 @@ from ouroboros.evaluation.verification_artifacts import build_verification_artif
 def _git_diff_side_effect(command: tuple[str, ...]) -> str:
     if command[:3] == ("git", "status", "--short"):
         return " M src/ouroboros/example.py\n?? tests/unit/test_example.py\n"
+    if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
+        return " M src/ouroboros/example.py\0?? tests/unit/test_example.py\0"
     if command[:3] == ("git", "diff", "--stat"):
         return (
             " src/ouroboros/example.py | 4 ++--\n"
@@ -149,3 +151,128 @@ class TestBuildVerificationArtifacts:
         manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
         assert manifest["has_integrated_verification"] is False
         assert len(manifest["runs"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_expands_rename_and_copy_paths_in_changed_files(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Rename and copy entries should expand into concrete file paths."""
+        config = MechanicalConfig(
+            test_command=("uv", "run", "pytest", "-q"),
+            timeout_seconds=30,
+            working_dir=tmp_path,
+        )
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            if command[:3] == ("git", "status", "--short"):
+                return CommandResult(
+                    0,
+                    (
+                        "R  src/ouroboros/old_name.py -> src/ouroboros/new_name.py\n"
+                        "C  src/ouroboros/source.py -> src/ouroboros/copied.py\n"
+                        "?? tests/unit/test_example.py\n"
+                    ),
+                    "",
+                )
+            if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
+                return CommandResult(
+                    0,
+                    (
+                        "R  src/ouroboros/old_name.py\0src/ouroboros/new_name.py\0"
+                        "C  src/ouroboros/source.py\0src/ouroboros/copied.py\0"
+                        "?? tests/unit/test_example.py\0"
+                    ),
+                    "",
+                )
+            if command[:3] == ("git", "diff", "--stat"):
+                return CommandResult(0, " 3 files changed, 8 insertions(+)\n", "")
+            if "pytest" in command:
+                return CommandResult(0, "1 passed in 0.10s\n", "")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            artifacts = await build_verification_artifacts("exec_rename_copy", "", tmp_path)
+
+        manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
+        assert manifest["changed_files"] == [
+            "src/ouroboros/old_name.py",
+            "src/ouroboros/new_name.py",
+            "src/ouroboros/source.py",
+            "src/ouroboros/copied.py",
+            "tests/unit/test_example.py",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_captures_git_state_before_verification_side_effects(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Verifier-generated files must not pollute execution diff evidence."""
+        config = MechanicalConfig(
+            lint_command=("uv", "run", "ruff", "check", "."),
+            timeout_seconds=30,
+            working_dir=tmp_path,
+        )
+        call_order: list[tuple[str, ...]] = []
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            call_order.append(command)
+            if command[:3] == ("git", "status", "--short"):
+                return CommandResult(0, " M src/ouroboros/example.py\n", "")
+            if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
+                return CommandResult(0, " M src/ouroboros/example.py\0", "")
+            if command[:3] == ("git", "diff", "--stat"):
+                return CommandResult(0, " src/ouroboros/example.py | 2 +-\n", "")
+            if "ruff" in command:
+                return CommandResult(0, "All checks passed!\nGenerated coverage.xml\n", "")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            artifacts = await build_verification_artifacts("exec_pre_git", "", tmp_path)
+
+        manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
+        assert call_order[:3] == [
+            ("git", "status", "--short"),
+            ("git", "status", "--porcelain=v1", "-z"),
+            ("git", "diff", "--stat", "--find-renames"),
+        ]
+        assert manifest["changed_files"] == ["src/ouroboros/example.py"]
+        assert "coverage.xml" not in manifest["changed_files"]
+        assert "- coverage.xml" not in artifacts.artifact

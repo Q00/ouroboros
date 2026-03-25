@@ -283,6 +283,7 @@ class ExecuteSeedHandler:
             seed,
             resolved_cwd,
             arguments.get("cwd"),
+            arguments.get(DELEGATED_PARENT_CWD_ARG),
         )
 
         # Use injected or create orchestrator dependencies
@@ -528,10 +529,14 @@ class ExecuteSeedHandler:
         seed: Seed,
         dispatch_cwd: Path,
         raw_cwd: Any,
+        delegated_parent_cwd: Any,
     ) -> Path:
         """Resolve the best project directory for post-run verification."""
         if isinstance(raw_cwd, str) and raw_cwd.strip():
             return dispatch_cwd
+
+        if isinstance(delegated_parent_cwd, str) and delegated_parent_cwd.strip():
+            return Path(delegated_parent_cwd).expanduser().resolve()
 
         seed_meta = getattr(seed, "metadata", None)
         if seed_meta is not None:

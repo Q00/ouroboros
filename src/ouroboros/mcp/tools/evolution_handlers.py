@@ -66,6 +66,27 @@ def _resolve_verification_working_dir(project_dir: str | None, seed: Seed | None
     return Path.cwd()
 
 
+def _resolve_evolve_verification_working_dir(
+    explicit_project_dir: str | None,
+    configured_project_dir: str | None,
+    generation_seed: Seed | None,
+    initial_seed: Seed | None,
+) -> Path:
+    """Resolve the best project directory for evolve-step verification."""
+    if explicit_project_dir:
+        return Path(explicit_project_dir).expanduser()
+
+    if configured_project_dir:
+        return Path(configured_project_dir).expanduser()
+
+    for candidate_seed in (generation_seed, initial_seed):
+        candidate_dir = _resolve_verification_working_dir(None, candidate_seed)
+        if candidate_dir != Path.cwd():
+            return candidate_dir
+
+    return Path.cwd()
+
+
 @dataclass
 class EvolveStepHandler:
     """Handler for the ouroboros_evolve_step tool.
@@ -195,6 +216,7 @@ class EvolveStepHandler:
         )
 
         project_dir_token = self.evolutionary_loop.set_project_dir(normalized_project_dir)
+        resolved_verification_working_dir = Path.cwd()
 
         try:
             # Ensure event store is initialized before evolve_step accesses it
@@ -203,6 +225,14 @@ class EvolveStepHandler:
             result = await self.evolutionary_loop.evolve_step(
                 lineage_id, initial_seed, execute=execute, parallel=parallel
             )
+            if result.is_ok:
+                step = result.value
+                resolved_verification_working_dir = _resolve_evolve_verification_working_dir(
+                    normalized_project_dir,
+                    self.evolutionary_loop.get_project_dir(),
+                    getattr(step.generation_result, "seed", None),
+                    initial_seed,
+                )
         except Exception as e:
             log.error("mcp.tool.evolve_step.error", error=str(e))
             return Result.err(
@@ -307,7 +337,7 @@ class EvolveStepHandler:
                 verification = await build_verification_artifacts(
                     f"{step.lineage.lineage_id}-gen-{gen.generation_number}",
                     execution_artifact,
-                    _resolve_verification_working_dir(normalized_project_dir, initial_seed),
+                    resolved_verification_working_dir,
                 )
                 artifact = verification.artifact
                 reference = verification.reference

@@ -88,9 +88,41 @@ async def _capture_git_command(
     destination: Path,
 ) -> str:
     result = await run_command(command, timeout=30, working_dir=working_dir)
-    text = result.stdout.strip() or result.stderr.strip()
+    text = result.stdout or result.stderr
+    text = text.rstrip("\n")
     destination.write_text(text, encoding="utf-8")
     return text
+
+
+def _parse_changed_files(git_status_porcelain: str) -> tuple[str, ...]:
+    seen: set[str] = set()
+    changed_files: list[str] = []
+    entries = git_status_porcelain.split("\0")
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        if not entry:
+            index += 1
+            continue
+        if len(entry) < 4:
+            index += 1
+            continue
+
+        status = entry[:2]
+        path = entry[3:]
+        paths = [path]
+        if "R" in status or "C" in status:
+            new_path = entries[index + 1] if index + 1 < len(entries) else ""
+            paths = [path, new_path]
+            index += 1
+
+        for candidate in paths:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                changed_files.append(candidate)
+        index += 1
+
+    return tuple(changed_files)
 
 
 async def _capture_git_state(
@@ -101,16 +133,17 @@ async def _capture_git_state(
         working_dir,
         artifact_dir / "git-status.txt",
     )
+    git_status_porcelain = await _capture_git_command(
+        ("git", "status", "--porcelain=v1", "-z"),
+        working_dir,
+        artifact_dir / "git-status-porcelain.txt",
+    )
     git_diff_stat = await _capture_git_command(
         ("git", "diff", "--stat", "--find-renames"),
         working_dir,
         artifact_dir / "git-diff-stat.txt",
     )
-    changed_files = tuple(
-        line.split(maxsplit=1)[1]
-        for line in git_status.splitlines()
-        if line.strip() and len(line.split(maxsplit=1)) == 2
-    )
+    changed_files = _parse_changed_files(git_status_porcelain)
     return changed_files, git_status, git_diff_stat
 
 
@@ -255,6 +288,7 @@ async def build_verification_artifacts(
 
     config = build_mechanical_config(working_dir)
     commands = _configured_commands(config)
+    changed_files, git_status, git_diff_stat = await _capture_git_state(working_dir, artifact_dir)
 
     runs: list[VerificationRunArtifact] = []
     for index, (check_type, command) in enumerate(commands, start=1):
@@ -291,8 +325,6 @@ async def build_verification_artifacts(
                 is_integrated=check_type == CheckType.TEST,
             )
         )
-
-    changed_files, git_status, git_diff_stat = await _capture_git_state(working_dir, artifact_dir)
 
     rendered_runs = tuple(runs)
     manifest = {
