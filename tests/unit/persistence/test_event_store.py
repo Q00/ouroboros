@@ -553,6 +553,70 @@ class TestEventStoreErrorHandling:
             await store.replay("test", "test-123")
 
 
+class TestGetAllSessions:
+    """Test get_all_sessions returns all session lifecycle events."""
+
+    async def test_returns_all_session_event_types(self, event_store: EventStore) -> None:
+        """get_all_sessions returns started, completed, cancelled, and failed events."""
+        started = BaseEvent(
+            type="orchestrator.session.started",
+            aggregate_type="session",
+            aggregate_id="sess-1",
+            data={"seed_goal": "Build API"},
+        )
+        completed = BaseEvent(
+            type="orchestrator.session.completed",
+            aggregate_type="session",
+            aggregate_id="sess-1",
+            data={"summary": "done"},
+        )
+        cancelled = BaseEvent(
+            type="orchestrator.session.cancelled",
+            aggregate_type="session",
+            aggregate_id="sess-2",
+            data={"reason": "orphaned"},
+        )
+        unrelated = BaseEvent(
+            type="orchestrator.execution.started",
+            aggregate_type="execution",
+            aggregate_id="exec-1",
+            data={},
+        )
+        for evt in [started, completed, cancelled, unrelated]:
+            await event_store.append(evt)
+
+        result = await event_store.get_all_sessions()
+        types = [e.type for e in result]
+        assert "orchestrator.session.started" in types
+        assert "orchestrator.session.completed" in types
+        assert "orchestrator.session.cancelled" in types
+        assert "orchestrator.execution.started" not in types
+
+    async def test_returns_events_in_ascending_order(self, event_store: EventStore) -> None:
+        """Events are returned oldest-first so callers can replay status."""
+        for suffix in ("started", "completed"):
+            await event_store.append(
+                BaseEvent(
+                    type=f"orchestrator.session.{suffix}",
+                    aggregate_type="session",
+                    aggregate_id="sess-asc",
+                    data={},
+                )
+            )
+
+        result = await event_store.get_all_sessions()
+        sess_events = [e for e in result if e.aggregate_id == "sess-asc"]
+        assert len(sess_events) == 2
+        assert sess_events[0].type == "orchestrator.session.started"
+        assert sess_events[1].type == "orchestrator.session.completed"
+
+    async def test_raises_when_not_initialized(self) -> None:
+        """get_all_sessions raises PersistenceError when store not initialized."""
+        store = EventStore("sqlite+aiosqlite:///dummy.db")
+        with pytest.raises(PersistenceError):
+            await store.get_all_sessions()
+
+
 class TestEventStoreTransactions:
     """Test transaction handling per AC7."""
 
