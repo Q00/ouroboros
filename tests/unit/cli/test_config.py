@@ -128,6 +128,13 @@ class TestConfigBackend:
         assert result.exit_code == 1
         assert "Unsupported" in result.output
 
+    def test_switch_opencode_not_switchable(self, config_dir: Path) -> None:
+        """opencode is a valid backend but not yet switchable via config backend."""
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["backend", "opencode"])
+        assert result.exit_code == 1
+        assert "opencode" in result.output
+
     def test_switch_cli_not_found(self, config_dir: Path) -> None:
         with (
             patch("ouroboros.config.models.get_config_dir", return_value=config_dir),

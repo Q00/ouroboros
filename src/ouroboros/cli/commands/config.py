@@ -22,7 +22,8 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_SUPPORTED_BACKENDS = ("claude", "codex", "opencode")
+_VALID_BACKENDS = ("claude", "codex", "opencode")
+_SWITCHABLE_BACKENDS = ("claude", "codex")
 
 
 def _load_config() -> tuple[dict, Path]:
@@ -167,9 +168,11 @@ def backend(
 
     # Validate
     new_backend = new_backend.lower()
-    if new_backend not in _SUPPORTED_BACKENDS:
+    if new_backend not in _SWITCHABLE_BACKENDS:
         print_error(
-            f"Unsupported backend: {new_backend}\nSupported: {', '.join(_SUPPORTED_BACKENDS)}"
+            f"Unsupported backend for switching: {new_backend}\n"
+            f"Switchable backends: {', '.join(_SWITCHABLE_BACKENDS)}\n"
+            "For opencode, edit config manually or run [bold]ouroboros setup[/]."
         )
         raise typer.Exit(1)
 
@@ -392,7 +395,7 @@ def validate() -> None:
     backend_val = data.get("orchestrator", {}).get("runtime_backend")
     if not backend_val:
         issues.append("orchestrator.runtime_backend is not set")
-    elif backend_val not in _SUPPORTED_BACKENDS:
+    elif backend_val not in _VALID_BACKENDS:
         issues.append(f"orchestrator.runtime_backend '{backend_val}' is not supported")
 
     # Check CLI path exists
@@ -404,6 +407,10 @@ def validate() -> None:
         cli = data.get("orchestrator", {}).get("codex_cli_path")
         if cli and not Path(cli).exists():
             issues.append(f"Codex CLI path does not exist: {cli}")
+    elif backend_val == "opencode":
+        cli = data.get("orchestrator", {}).get("opencode_cli_path")
+        if cli and not Path(cli).exists():
+            issues.append(f"OpenCode CLI path does not exist: {cli}")
 
     # Try loading config through the validated schema
     try:
