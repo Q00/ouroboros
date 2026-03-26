@@ -32,6 +32,73 @@ from ouroboros.cli.formatters.panels import (
 )
 from ouroboros.persistence.brownfield import BrownfieldStore
 
+# Canonical MCP args for Claude Code uvx installs — single source of truth.
+_CLAUDE_UVX_ARGS: list[str] = [
+    "--from",
+    "ouroboros-ai[claude]",
+    "ouroboros",
+    "mcp",
+    "serve",
+]
+
+
+def _detect_mcp_entry() -> dict[str, object]:
+    """Build the correct MCP entry based on how ouroboros is installed.
+
+    Priority: uvx > ouroboros binary > python3 -m ouroboros.
+    Matches the contract in install.sh and skills/setup/SKILL.md.
+    """
+    if shutil.which("uvx"):
+        return {"command": "uvx", "args": list(_CLAUDE_UVX_ARGS)}
+    if shutil.which("ouroboros"):
+        return {"command": "ouroboros", "args": ["mcp", "serve"]}
+    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+
+
+def _ensure_claude_mcp_entry() -> None:
+    """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
+
+    Creates the entry if missing (detecting install method), updates stale
+    uvx args (e.g. ouroboros-ai without [claude] extras), and removes the
+    legacy timeout key.  Skips the file write when nothing changed.
+    """
+    mcp_config_path = Path.home() / ".claude" / "mcp.json"
+    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mcp_data: dict = {}
+    if mcp_config_path.exists():
+        mcp_data = json.loads(mcp_config_path.read_text())
+
+    mcp_data.setdefault("mcpServers", {})
+
+    existing = mcp_data["mcpServers"].get("ouroboros")
+    needs_write = False
+
+    if existing is None:
+        mcp_data["mcpServers"]["ouroboros"] = _detect_mcp_entry()
+        needs_write = True
+        print_success("Registered MCP server in ~/.claude/mcp.json")
+    else:
+        # Remove legacy timeout key
+        if "timeout" in existing:
+            del existing["timeout"]
+            needs_write = True
+            print_info("Removed legacy MCP timeout override.")
+
+        # Ensure uvx args match the canonical form (fixes stale ouroboros-ai without [claude])
+        if existing.get("command") == "uvx" and existing.get("args") != _CLAUDE_UVX_ARGS:
+            existing["args"] = list(_CLAUDE_UVX_ARGS)
+            needs_write = True
+            print_info("Updated MCP server args to latest.")
+
+        if not needs_write:
+            print_info("MCP server already registered.")
+
+    if needs_write:
+        with mcp_config_path.open("w") as f:
+            json.dump(mcp_data, f, indent=2)
+
+
 app = typer.Typer(
     name="setup",
     help="Set up Ouroboros for your environment.",
@@ -227,32 +294,9 @@ def _setup_codex(codex_path: str) -> None:
     _register_codex_mcp_server()
     _print_codex_config_guidance(config_path)
 
-    # Also register MCP server for Codex users who also have Claude Code
-    mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    if mcp_config_path.exists() or (Path.home() / ".claude").is_dir():
-        mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        mcp_data: dict = {}
-        if mcp_config_path.exists():
-            mcp_data = json.loads(mcp_config_path.read_text())
-
-        mcp_data.setdefault("mcpServers", {})
-        entry = mcp_data["mcpServers"].get("ouroboros", {})
-        if not entry:
-            entry = {
-                "command": "uvx",
-                "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-            }
-        removed_timeout = entry.pop("timeout", None) is not None
-        mcp_data["mcpServers"]["ouroboros"] = entry
-
-        with mcp_config_path.open("w") as f:
-            json.dump(mcp_data, f, indent=2)
-
-        if removed_timeout:
-            print_info("Removed legacy Claude MCP timeout override.")
-        else:
-            print_info("Updated Claude MCP server config.")
+    # Also register/fix MCP server for Codex users who also have Claude Code
+    if (Path.home() / ".claude").is_dir():
+        _ensure_claude_mcp_entry()
 
 
 def _setup_claude(claude_path: str) -> None:
@@ -279,32 +323,8 @@ def _setup_claude(claude_path: str) -> None:
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    # Register MCP server in ~/.claude/mcp.json
-    mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    mcp_data: dict = {}
-    if mcp_config_path.exists():
-        mcp_data = json.loads(mcp_config_path.read_text())
-
-    mcp_data.setdefault("mcpServers", {})
-    if "ouroboros" not in mcp_data["mcpServers"]:
-        mcp_data["mcpServers"]["ouroboros"] = {
-            "command": "uvx",
-            "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-        }
-        with mcp_config_path.open("w") as f:
-            json.dump(mcp_data, f, indent=2)
-        print_success("Registered MCP server in ~/.claude/mcp.json")
-    else:
-        entry = mcp_data["mcpServers"]["ouroboros"]
-        if "timeout" in entry:
-            del entry["timeout"]
-            with mcp_config_path.open("w") as f:
-                json.dump(mcp_data, f, indent=2)
-            print_info("Removed legacy MCP timeout override.")
-        else:
-            print_info("MCP server already registered.")
+    # Register/fix MCP server in ~/.claude/mcp.json
+    _ensure_claude_mcp_entry()
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")

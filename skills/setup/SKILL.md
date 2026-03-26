@@ -123,16 +123,44 @@ Runtime backend            [✓] Detected
 
 | Environment | Mode | Action |
 |:------------|:-----|:-------|
-| uvx + uv Python >= 3.12 | **Ready** | Proceed to MCP registration |
-| System Python >= 3.12 | **Ready** | Proceed to MCP registration |
+| uvx + Python >= 3.12 | **Ready** | Proceed to MCP registration (uvx mode — extras always included) |
+| No uvx + `ouroboros` binary in PATH | **Check deps** | Verify `[claude]` extras, then proceed (binary mode) |
+| No uvx + Python >= 3.12 + `python3 -m ouroboros` works | **Check deps** | Verify `[claude]` extras, then proceed (pip mode) |
 | uvx + Python < 3.12 only | **Install needed** | Run `uv python install 3.12` then proceed |
-| No uvx | **Install needed** | Run `curl -LsSf https://astral.sh/uv/install.sh \| sh` then `uv python install 3.12` |
+| No uvx + no ouroboros binary + no pip package | **Install needed** | Install uv first, then proceed |
 
-**IMPORTANT**: If Python >= 3.12 is not available, DO NOT skip to "Plugin-Only mode". Guide the user to install the prerequisites. MCP is required for the full Ouroboros experience.
+**For binary/pip modes — verify `[claude]` extras are installed:**
+
+Check method depends on how ouroboros was installed:
+```bash
+# Detect install method
+pipx list 2>/dev/null | grep -q ouroboros && echo "PIPX" || echo "NOT_PIPX"
+```
+
+- **pipx users** (binary mode, installed via pipx):
+  ```bash
+  pipx runpip ouroboros-ai show claude-agent-sdk 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
+  ```
+  If `DEPS_MISSING`: `pipx install --force ouroboros-ai[claude]`
+
+- **pip users** (pip mode):
+  ```bash
+  python3 -c "import claude_agent_sdk" 2>/dev/null && echo "DEPS_OK" || echo "DEPS_MISSING"
+  ```
+  If `DEPS_MISSING`: `python3 -m pip install ouroboros-ai[claude]`
+
+If deps are missing and the user doesn't want to fix manually, recommend uvx:
+```
+Or install uvx (recommended — handles deps automatically):
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+Then re-run: ooo setup
+```
+
+**IMPORTANT**: The MCP server requires one of: (1) uvx, (2) ouroboros binary in PATH, or (3) ouroboros pip-installed. For options 2 and 3, the `[claude]` extra must also be installed. If none are available, guide the user to install uv — do NOT write a non-working fallback to mcp.json.
 
 **If prerequisites are missing, show:**
 ```
-Ouroboros requires Python >= 3.12 for the MCP server.
+Ouroboros requires uvx (recommended) or the ouroboros package installed.
 
 Quick install (< 1 minute):
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -173,12 +201,13 @@ This enables:
 
 **Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects).
 
-Choose the MCP command based on how ouroboros is installed:
-- If `uvx` is available: `{"command": "uvx", "args": ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"], "timeout": 600}`
-- If `ouroboros` binary is in PATH (pipx install): `{"command": "ouroboros", "args": ["mcp", "serve"], "timeout": 600}`
-- Fallback (pip install): `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"], "timeout": 600}`
+Choose the MCP command based on how ouroboros is installed (check in order):
+1. If `which uvx` succeeds: `{"command": "uvx", "args": ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"]}`
+2. If `which ouroboros` succeeds: `{"command": "ouroboros", "args": ["mcp", "serve"]}`
+3. If `python3 -c "import ouroboros"` succeeds: `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}`
+4. If none of the above → **do NOT write to mcp.json**. Instead show the prerequisites message from Step 1 and stop.
 
-If `~/.claude/mcp.json` already exists, merge intelligently (preserve other servers).
+If `~/.claude/mcp.json` already exists, read it, **always overwrite the `ouroboros` key** with the entry above (to fix stale args from older versions), and preserve all other server entries.
 
 **Celebration Checkpoint 2:**
 ```
