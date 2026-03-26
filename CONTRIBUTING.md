@@ -123,7 +123,7 @@ Found a bug? Please open an issue with:
 
 See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for the full bug issue standard.
 
-```markdown
+````markdown
 ## Summary
 [What is broken]
 
@@ -153,7 +153,7 @@ See the [Issue Quality Policy](./docs/contributing/issue-quality-policy.md) for 
 ```
 [paste error output]
 ```
-```
+````
 
 ### Feature Proposals
 

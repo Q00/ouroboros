@@ -45,12 +45,6 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 - [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
 - [Issue Quality Policy](./contributing/issue-quality-policy.md) - Quality bar for actionable issues and PRD-lite feature requests
 
-### Design Documents
-
-- [Execution Deep Dive](./design/execution-deep-dive.md) - Recursive decomposition, atomicity, parallel execution
-- [Evaluation Pipeline Deep Dive](./design/evaluation-pipeline-deep-dive.md) - Three stages, trigger matrix, deliberative consensus
-- [Evaluation Pipeline Flexibility](./design/evaluation-pipeline-flexibility.md) - Supporting non-code workflows
-- [CLI UX Redesign](./design/cli-ux-redesign.md) - v0.8.0 CLI shorthand and orchestrator defaults
 
 ## Key Concepts
 
