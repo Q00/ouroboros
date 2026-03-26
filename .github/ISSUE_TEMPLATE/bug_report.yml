@@ -30,6 +30,7 @@ body:
       label: Environment
       description: Include the environment details needed to reason about the bug.
       placeholder: |
+        - Ouroboros version (ouroboros --version):
         - OS:
         - Python version:
         - Installation method:

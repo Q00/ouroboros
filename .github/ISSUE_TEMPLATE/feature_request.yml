@@ -111,4 +111,4 @@ body:
         - label: I included clear scope boundaries and non-goals.
           required: false
         - label: I listed concrete acceptance criteria.
-          required: false
+          required: true

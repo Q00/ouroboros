@@ -24,9 +24,9 @@ Project maintainers may remove, edit, or reject comments, commits, code, issues,
 
 ## Reporting
 
-If possible, use a private maintainer path for conduct-sensitive reports.
+For conduct-sensitive reports, email **jqyu.lee@gmail.com** directly. This is the private reporting path.
 
-If no private path is available, open a GitHub issue with the `conduct` label and include only the minimum information needed to route the report. Do **not** include private personal details, doxxing content, or anything that would further harm the affected person.
+If no private path is available, open a GitHub issue titled "Conduct report" and include only the minimum information needed to route the report. Do **not** include private personal details, doxxing content, or anything that would further harm the affected person.
 
 ## Scope
 
