@@ -24,7 +24,6 @@ SETUP_BYPASS_SKILLS = [
     "/ouroboros:help",
     "/ouroboros:qa",
     "/ouroboros:cancel",
-    "/ouroboros:brownfield",
 ]
 
 # Keyword → skill mapping
@@ -108,10 +107,10 @@ KEYWORD_MAP = [
     },
     {
         "patterns": [
-            "write PRD",
-            "PM interview",
+            "write prd",
+            "pm interview",
             "product requirements",
-            "create PRD",
+            "create prd",
         ],
         "skill": "/ouroboros:pm",
     },
