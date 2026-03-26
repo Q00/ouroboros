@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 set -euo pipefail
 
-PACKAGE_NAME="ouroboros-ai"
+PACKAGE_NAME="ouroboros-ai[claude]"
 MIN_PYTHON="3.12"
 
 # Auto-detect: if a stable release exists on PyPI, use it. Otherwise allow pre-release.
@@ -184,7 +184,7 @@ if command -v claude &>/dev/null; then
 
   # MCP command matches the installer that actually ran in step 3
   if [ "$INSTALL_METHOD" = "uv" ]; then
-    OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"],"timeout":600}'
+    OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[claude]","ouroboros","mcp","serve"],"timeout":600}'
   elif [ "$INSTALL_METHOD" = "pipx" ]; then
     OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"],"timeout":600}'
   else
