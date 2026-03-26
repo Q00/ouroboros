@@ -376,7 +376,7 @@ Scan complete. 8 repositories registered.
  4. repo-delta                   8. repo-hotel
 ```
 
-Include `*` markers for defaults exactly as they appear in the scan response. Do not reformat, summarize, or truncate it. The user needs to see all repo numbers to pick defaults.
+Include `*` markers for defaults exactly as they appear in the scan response. Do not summarize or truncate the list. The user needs to see all repo numbers to pick defaults.
 
 **If no repos found**, skip the default selection prompt and proceed to Step 6.
 
@@ -393,7 +393,8 @@ Use `AskUserQuestion` with the current default numbers from the scan response.
     "header": "Default Repos",
     "options": [
       {"label": "<current default numbers> (Recommended)", "description": "<current default names>"},
-      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"}
+      {"label": "None", "description": "Clear all defaults — interviews will run in greenfield mode"},
+      {"label": "Select repos", "description": "Type repo numbers to set as default"}
     ],
     "multiSelect": false
   }]
