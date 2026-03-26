@@ -30,11 +30,13 @@ claude plugin uninstall ouroboros         # if using Claude Code plugin
 
 ### Inside Claude Code
 
+Inside an active Claude Code session, type:
+
 ```
-ooo setup --uninstall
+/ouroboros:setup --uninstall
 ```
 
-Removes MCP registration and CLAUDE.md block from within an active session.
+This is a **skill command** (not a CLI flag) that removes MCP registration and the CLAUDE.md block interactively.
 
 ---
 

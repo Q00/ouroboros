@@ -300,9 +300,15 @@ def uninstall(
             print_info("Cancelled.")
             raise typer.Exit()
 
-    # Execute removal
+    # Execute removal — track skipped items for accurate summary
     console.print()
-    _remove_claude_mcp(dry_run=False)
+    skipped: list[str] = []
+
+    if not _remove_claude_mcp(dry_run=False):
+        mcp_path = Path.home() / ".claude" / "mcp.json"
+        if mcp_path.exists():
+            skipped.append("~/.claude/mcp.json (malformed or inaccessible)")
+
     _remove_codex_mcp(dry_run=False)
     _remove_codex_artifacts(dry_run=False)
     _remove_claude_md_block(cwd, dry_run=False)
@@ -312,7 +318,14 @@ def uninstall(
 
     # Final summary
     console.print()
-    console.print("[bold green]Ouroboros has been removed.[/bold green]")
+    if skipped:
+        console.print("[bold yellow]Ouroboros partially removed.[/bold yellow]")
+        console.print("[yellow]Could not clean:[/yellow]")
+        for s in skipped:
+            console.print(f"  [yellow]![/yellow] {s}")
+        console.print()
+    else:
+        console.print("[bold green]Ouroboros has been removed.[/bold green]")
     console.print()
     console.print("[dim]To finish cleanup:[/dim]")
     console.print(
