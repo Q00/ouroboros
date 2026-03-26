@@ -72,11 +72,11 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 
 | Phrase | Triggers |
 |--------|----------|
-| "write PRD", "PM interview", "product requirements" | `ooo pm` |
-| "QA check", "quality assurance", "judge this" | `ooo qa` |
-| "cancel execution", "stop job", "kill stuck" | `ooo cancel` |
-| "update ouroboros", "check for updates", "upgrade" | `ooo update` |
-| "scan repo", "brownfield defaults", "existing codebase" | `ooo brownfield` |
+| "write PRD", "PM interview", "product requirements", "create PRD" | `ooo pm` |
+| "qa check", "quality check" | `ooo qa` |
+| "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
+| "update ouroboros", "upgrade ouroboros" | `ooo update` |
+| "scan repo", "brownfield defaults", "existing codebase", "scan codebase" | `ooo brownfield` |
 
 ### Loop Triggers
 

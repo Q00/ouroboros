@@ -118,6 +118,7 @@ Claude Code 세션 안에서 `ooo setup` 실행.
 ```bash
 pip install ouroboros-ai                # 기본
 pip install ouroboros-ai[claude]        # + Claude Code 의존성
+pip install ouroboros-ai[litellm]       # + LiteLLM 멀티 프로바이더
 pip install ouroboros-ai[all]           # 전부
 ouroboros setup                         # 런타임 설정
 ```

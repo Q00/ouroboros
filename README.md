@@ -94,6 +94,7 @@ Then run `ooo setup` inside a Claude Code session.
 ```bash
 pip install ouroboros-ai                # base
 pip install ouroboros-ai[claude]        # + Claude Code deps
+pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider
 pip install ouroboros-ai[all]           # everything
 ouroboros setup                         # configure runtime
 ```
