@@ -379,7 +379,10 @@ class ClaudeCodeAdapter:
         if os.environ.get("CLAUDECODE"):
             env_overrides["CLAUDECODE"] = ""
 
+        stderr_lines: list[str] = []
+
         def _stderr_callback(line: str) -> None:
+            stderr_lines.append(line[:500])
             log.debug("claude_code_adapter.stderr", line=line[:200])
 
         options_kwargs: dict = {
@@ -504,17 +507,25 @@ class ClaudeCodeAdapter:
 
         # Check for empty response — always an error regardless of session_id
         if not content:
+            # Include captured stderr for diagnostics — helps identify
+            # why the CLI produced no output (rate limits, auth, etc.)
+            stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
             if session_id:
                 log.warning(
                     "claude_code_adapter.empty_response",
                     content_length=0,
                     session_id=session_id,
+                    stderr_lines=len(stderr_lines),
                     hint="CLI started but produced no content",
                 )
                 return Result.err(
                     ProviderError(
                         message="Empty response from CLI - session started but no content produced",
-                        details={"session_id": session_id, "content_length": 0},
+                        details={
+                            "session_id": session_id,
+                            "content_length": 0,
+                            "stderr": stderr_tail,
+                        },
                     )
                 )
             else:
@@ -522,12 +533,17 @@ class ClaudeCodeAdapter:
                     "claude_code_adapter.empty_response",
                     content_length=0,
                     session_id=session_id,
+                    stderr_lines=len(stderr_lines),
                     hint="CLI may still be starting (custom CLI sync, etc.)",
                 )
                 return Result.err(
                     ProviderError(
                         message="Empty response from CLI - may need retry (timeout/startup)",
-                        details={"session_id": session_id, "content_length": 0},
+                        details={
+                            "session_id": session_id,
+                            "content_length": 0,
+                            "stderr": stderr_tail,
+                        },
                     )
                 )
 
