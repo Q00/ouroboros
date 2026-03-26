@@ -379,7 +379,7 @@ class TestExecuteSeedHandler:
         assert result.value.meta["resume_requested"] is False
 
     async def test_handle_rejects_opencode_runtime_at_boundary(self) -> None:
-        """OpenCode is not yet available \u2014 handler should surface a clear error."""
+        """OpenCode is not yet available — handler should surface a clear error."""
         handler = ExecuteSeedHandler(
             agent_runtime_backend="opencode",
             llm_backend="opencode",
@@ -653,8 +653,8 @@ class TestExecuteSeedHandler:
                     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG: ["Read", "mcp__github__issue_read"],
                     # Plus explicit additional_tools with one overlap
                     "additional_tools": [
-                        "mcp__github__issue_read",  # duplicate \u2014 should be deduped
-                        "mcp__context7__query-docs",  # new \u2014 should be added
+                        "mcp__github__issue_read",  # duplicate — should be deduped
+                        "mcp__context7__query-docs",  # new — should be added
                     ],
                 },
             )
@@ -717,6 +717,71 @@ class TestExecuteSeedHandler:
 
         assert result.is_ok
         runner_kwargs = runner_cls.call_args.kwargs
+        assert runner_kwargs["inherited_tools"] is None
+
+    async def test_additional_tools_ignored_on_resume(self) -> None:
+        """Resumed sessions must not pick up additional_tools — preserves original tool set."""
+        handler = ExecuteSeedHandler()
+
+        seed_yaml = (
+            "goal: test\n"
+            "acceptance_criteria:\n"
+            "  - done\n"
+            "metadata:\n"
+            "  seed_id: seed_test\n"
+            "  version: '1.0.0'\n"
+        )
+
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_tracker = MagicMock()
+        mock_tracker.session_id = "orch_existing"
+        mock_tracker.execution_id = "exec_existing"
+        mock_tracker.status = SessionStatus.IN_PROGRESS
+        mock_session_repo = MagicMock()
+        mock_session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(mock_tracker))
+        mock_runner = MagicMock()
+        mock_runner.resume_session = AsyncMock(
+            return_value=Result.ok(MagicMock(success=True, summary={}, final_message="done"))
+        )
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
+                return_value=mock_runner,
+            ) as runner_cls,
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+                return_value=mock_session_repo,
+            ),
+            patch("ouroboros.orchestrator.runtime_factory.resolve_agent_runtime_backend", return_value="claude"),
+            patch("ouroboros.providers.factory.resolve_llm_backend", return_value="claude"),
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": seed_yaml,
+                    "session_id": "orch_existing",  # Resume flag
+                    "additional_tools": [
+                        "mcp__github__issue_read",  # Should be ignored on resume
+                    ],
+                },
+            )
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert result.is_ok
+        runner_kwargs = runner_cls.call_args.kwargs
+        # On resume, both inherited_runtime_handle and inherited_tools must be None
+        assert runner_kwargs["inherited_runtime_handle"] is None
         assert runner_kwargs["inherited_tools"] is None
 
 

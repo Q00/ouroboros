@@ -108,7 +108,7 @@ class ExecuteSeedHandler:
             description=(
                 "Execute a seed (task specification) in Ouroboros. "
                 "A seed defines a task to be executed with acceptance criteria. "
-                "This is the handler for 'ooo run' commands \u2014 "
+                "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=(
@@ -262,7 +262,9 @@ class ExecuteSeedHandler:
         # Merge explicit additional_tools from the caller (issue #181).
         # This allows direct MCP-initiated executions to inherit the parent
         # session's MCP tools without requiring the nested delegation mechanism.
-        additional_tools = arguments.get("additional_tools")
+        # Like delegation context, additional_tools only apply to new executions,
+        # not resumes — resumed sessions must preserve their original tool set.
+        additional_tools = arguments.get("additional_tools") if not is_resume else None
         if isinstance(additional_tools, list) and additional_tools:
             extra = [t for t in additional_tools if isinstance(t, str) and t]
             if extra:
@@ -595,171 +597,3 @@ class StartExecuteSeedHandler:
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
-        self._job_manager = self.job_manager or JobManager(self._event_store)
-        self._execute_handler = self.execute_handler or ExecuteSeedHandler(
-            event_store=self._event_store
-        )
-
-    @property
-    def definition(self) -> MCPToolDefinition:
-        return MCPToolDefinition(
-            name="ouroboros_start_execute_seed",
-            description=(
-                "Start a seed execution in the background and return a job ID immediately. "
-                "Use ouroboros_job_status, ouroboros_job_wait, and ouroboros_job_result "
-                "to monitor progress. "
-                "This is the handler for 'ooo run' commands \u2014 "
-                "do NOT run 'ooo' in the shell; call this MCP tool instead."
-            ),
-            parameters=ExecuteSeedHandler().definition.parameters,
-        )
-
-    async def handle(
-        self,
-        arguments: dict[str, Any],
-    ) -> Result[MCPToolResult, MCPServerError]:
-        seed_content = arguments.get("seed_content")
-        seed_path = arguments.get("seed_path")
-        if not seed_content and seed_path:
-            resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(
-                arguments.get("cwd"),
-            )
-            seed_candidate = Path(str(seed_path)).expanduser()
-            if not seed_candidate.is_absolute():
-                seed_candidate = resolved_cwd / seed_candidate
-
-            # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
-            ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
-            valid_cwd, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                resolved_cwd,
-            )
-            valid_home, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                ouroboros_seeds,
-            )
-            if not valid_cwd and not valid_home:
-                return Result.err(
-                    MCPToolError(
-                        f"Seed path escapes allowed directories: "
-                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-
-            try:
-                seed_content = await asyncio.to_thread(seed_candidate.read_text, encoding="utf-8")
-                arguments = {**arguments, "seed_content": seed_content}
-            except FileNotFoundError:
-                # Per tool contract: treat non-existent path as inline YAML
-                seed_content = str(seed_path)
-                arguments = {**arguments, "seed_content": seed_content}
-            except OSError as e:
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to read seed file: {e}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-
-        if not seed_content:
-            return Result.err(
-                MCPToolError(
-                    "seed_content or seed_path is required",
-                    tool_name="ouroboros_start_execute_seed",
-                )
-            )
-
-        await self._event_store.initialize()
-
-        session_id = arguments.get("session_id")
-        execution_id: str | None = None
-        new_session_id: str | None = None
-        if session_id:
-            repo = SessionRepository(self._event_store)
-            session_result = await repo.reconstruct_session(session_id)
-            if session_result.is_err:
-                return Result.err(
-                    MCPToolError(
-                        f"Session resume failed: {session_result.error.message}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-            tracker = session_result.value
-            if tracker.status in (
-                SessionStatus.COMPLETED,
-                SessionStatus.CANCELLED,
-                SessionStatus.FAILED,
-            ):
-                return Result.err(
-                    MCPToolError(
-                        (
-                            f"Session {tracker.session_id} is already "
-                            f"{tracker.status.value} and cannot be resumed"
-                        ),
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-            execution_id = tracker.execution_id
-        else:
-            execution_id = f"exec_{uuid4().hex[:12]}"
-            new_session_id = f"orch_{uuid4().hex[:12]}"
-
-        async def _runner() -> MCPToolResult:
-            result = await self._execute_handler.handle(
-                arguments,
-                execution_id=execution_id,
-                session_id_override=new_session_id,
-            )
-            if result.is_err:
-                raise RuntimeError(str(result.error))
-            return result.value
-
-        snapshot = await self._job_manager.start_job(
-            job_type="execute_seed",
-            initial_message="Queued seed execution",
-            runner=_runner(),
-            links=JobLinks(
-                session_id=session_id or new_session_id,
-                execution_id=execution_id,
-            ),
-        )
-
-        from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
-        from ouroboros.providers.factory import resolve_llm_backend
-
-        try:
-            runtime_backend = resolve_agent_runtime_backend(
-                self._execute_handler.agent_runtime_backend
-            )
-        except (ValueError, Exception):
-            runtime_backend = "unknown"
-        try:
-            llm_backend = resolve_llm_backend(self._execute_handler.llm_backend)
-        except (ValueError, Exception):
-            llm_backend = "unknown"
-
-        text = (
-            f"Started background execution.\n\n"
-            f"Job ID: {snapshot.job_id}\n"
-            f"Session ID: {snapshot.links.session_id or 'pending'}\n"
-            f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
-            f"Runtime Backend: {runtime_backend}\n"
-            f"LLM Backend: {llm_backend}\n\n"
-            "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
-        )
-        return Result.ok(
-            MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
-                is_error=False,
-                meta={
-                    "job_id": snapshot.job_id,
-                    "session_id": snapshot.links.session_id,
-                    "execution_id": snapshot.links.execution_id,
-                    "status": snapshot.status.value,
-                    "cursor": snapshot.cursor,
-                    "runtime_backend": runtime_backend,
-                    "llm_backend": llm_backend,
-                },
-            )
-        )
