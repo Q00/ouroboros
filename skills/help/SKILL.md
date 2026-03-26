@@ -43,7 +43,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo help` | This reference guide | Plugin |
 | `ooo pm` | PM-focused interview + PRD generation | MCP |
 | `ooo qa` | General-purpose QA verdict for any artifact | Plugin |
-| `ooo cancel` | Cancel stuck or orphaned executions | MCP |
+| `ooo cancel` | Cancel stuck or orphaned executions | CLI |
 | `ooo update` | Check for updates + upgrade to latest | Plugin |
 | `ooo brownfield` | Scan and manage brownfield repo defaults | Plugin |
 
@@ -103,7 +103,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:help` | This guide | Plugin |
 | `/ouroboros:pm` | PM-focused interview + PRD generation | MCP |
 | `/ouroboros:qa` | General-purpose QA verdict for any artifact | Plugin |
-| `/ouroboros:cancel` | Cancel stuck or orphaned executions | MCP |
+| `/ouroboros:cancel` | Cancel stuck or orphaned executions | CLI |
 | `/ouroboros:update` | Check for updates + upgrade to latest | Plugin |
 | `/ouroboros:brownfield` | Scan and manage brownfield repo defaults | Plugin |
 
