@@ -278,7 +278,9 @@ class TestBuildMechanicalConfig:
         assert config.build_command == ("./mvnw", "clean", "compile")
         assert config.test_command == ("./mvnw", "test")
 
-    def test_auto_detect_java_maven_falls_back_when_wrapper_not_executable(self, tmp_path: Path) -> None:
+    def test_auto_detect_java_maven_falls_back_when_wrapper_not_executable(
+        self, tmp_path: Path
+    ) -> None:
         (tmp_path / "pom.xml").touch()
         wrapper = tmp_path / "mvnw"
         wrapper.touch()
