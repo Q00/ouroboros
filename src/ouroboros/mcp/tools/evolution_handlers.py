@@ -300,7 +300,7 @@ class EvolveStepHandler:
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),),
-                is_error=False,
+                is_error=step.action.value in ("failed", "interrupted"),
                 meta=meta,
             )
         )
