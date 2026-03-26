@@ -33,7 +33,17 @@ def _load_config() -> tuple[dict, Path]:
     if not config_path.exists():
         print_error(f"Config not found: {config_path}\nRun [bold]ouroboros setup[/] first.")
         raise typer.Exit(1)
-    return yaml.safe_load(config_path.read_text()) or {}, config_path
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+    except (yaml.YAMLError, OSError) as exc:
+        print_error(f"Cannot parse {config_path}: {exc}")
+        raise typer.Exit(1) from None
+    if not isinstance(data, dict):
+        print_error(
+            f"Invalid config format in {config_path} (expected mapping, got {type(data).__name__})"
+        )
+        raise typer.Exit(1)
+    return data, config_path
 
 
 def _save_config(data: dict, path: Path) -> None:
@@ -207,11 +217,17 @@ def init() -> None:
 
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
-    if config_path.exists():
-        print_warning(f"Config already exists: {config_path}")
+    credentials_path = config_dir / "credentials.yaml"
+    if config_path.exists() and credentials_path.exists():
+        print_info(f"Config already initialized at {config_dir}")
         return
-    create_default_config(config_dir)
-    print_success(f"Created config at {config_path}")
+    try:
+        create_default_config(config_dir, overwrite=False)
+    except Exception:
+        # Partial init — at least one file exists. Re-create with overwrite
+        # to ensure both files are present.
+        create_default_config(config_dir, overwrite=True)
+    print_success(f"Initialized config at {config_dir}")
 
 
 @app.command("set")

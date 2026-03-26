@@ -159,6 +159,31 @@ class TestConfigBackend:
         assert result.exit_code == 0
         mock_setup.assert_called_once_with("/usr/bin/claude")
 
+    def test_switch_warns_on_setup_print_error(self, config_dir: Path) -> None:
+        """config backend should warn when setup emits print_error (non-exception failure)."""
+        from ouroboros.cli.commands import setup as setup_mod
+
+        def _failing_setup(cli_path: str) -> None:
+            setup_mod.print_error("Could not locate packaged Codex rules.")
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("shutil.which", return_value="/usr/bin/codex"),
+            patch("ouroboros.cli.commands.setup._setup_codex", side_effect=_failing_setup),
+        ):
+            result = runner.invoke(app, ["backend", "codex"])
+        assert result.exit_code == 0
+        assert "issues" in result.output or "Warning" in result.output
+
+    def test_malformed_config_yaml(self, tmp_path: Path) -> None:
+        """config commands should handle malformed YAML gracefully."""
+        (tmp_path / "config.yaml").write_text(": invalid: yaml: [")
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
+            result = runner.invoke(app, ["show"])
+        assert result.exit_code == 1
+        assert "Cannot parse" in result.output
+
 
 # ── config validate ──────────────────────────────────────────────
 
@@ -239,8 +264,10 @@ class TestConfigSet:
 class TestConfigInit:
     """Tests for config init command."""
 
-    def test_init_existing_warns(self, config_dir: Path) -> None:
+    def test_init_existing_shows_info(self, config_dir: Path) -> None:
+        # Create both files so init considers it fully initialized
+        (config_dir / "credentials.yaml").write_text("test: true")
         with patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir):
             result = runner.invoke(app, ["init"])
         assert result.exit_code == 0
-        assert "already exists" in result.output
+        assert "already initialized" in result.output

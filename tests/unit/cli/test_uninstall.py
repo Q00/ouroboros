@@ -110,6 +110,55 @@ class TestRemoveCodexMcp:
         assert "[other]" in content
         assert 'model = "gpt-5"' in content
 
+    def test_preserves_user_comments_outside_managed_block(self, tmp_path: Path) -> None:
+        """User comments outside the ouroboros section are preserved."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "# My custom comment at top\n"
+            'model = "gpt-5"\n\n'
+            "# Ouroboros MCP hookup for Codex CLI.\n"
+            "# Keep Ouroboros runtime settings.\n"
+            "\n"
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n\n'
+            "# Comment inside other section\n"
+            "[other]\nfoo = 1\n"
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        assert result is True
+        content = codex_config.read_text()
+        assert "[mcp_servers.ouroboros]" not in content
+        assert "Ouroboros MCP hookup" not in content
+        assert "# My custom comment at top" in content
+        assert "[other]" in content
+
+    def test_managed_comment_block_only_removes_known_prefix(self, tmp_path: Path) -> None:
+        """Comment block removal stops at blank lines (non-# lines)."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "# Ouroboros MCP hookup for Codex CLI.\n"
+            "# Managed line 2\n"
+            "\n"  # blank line breaks comment block
+            "# Unrelated user comment\n"
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n\n'
+            "[other]\nfoo = 1\n"
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        assert result is True
+        content = codex_config.read_text()
+        assert "[mcp_servers.ouroboros]" not in content
+        # Blank line broke the comment block, so this user comment is preserved
+        assert "# Unrelated user comment" in content
+
     def test_no_ouroboros_returns_false(self, tmp_path: Path) -> None:
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
