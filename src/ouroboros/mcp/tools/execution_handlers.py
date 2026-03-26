@@ -108,7 +108,7 @@ class ExecuteSeedHandler:
             description=(
                 "Execute a seed (task specification) in Ouroboros. "
                 "A seed defines a task to be executed with acceptance criteria. "
-                "This is the handler for 'ooo run' commands — "
+                "This is the handler for 'ooo run' commands \u2014 "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=(
@@ -160,6 +160,18 @@ class ExecuteSeedHandler:
                     description="Skip post-execution QA evaluation. Default: false",
                     required=False,
                     default=False,
+                ),
+                MCPToolParameter(
+                    name="additional_tools",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "Optional list of additional tool names to make available during "
+                        "execution. These are merged with the default tool set (Read, Write, "
+                        "Edit, Bash, Glob, Grep). Use this to pass MCP tools from the parent "
+                        "Claude session (e.g. ['mcp__github__issue_read', "
+                        "'mcp__chrome-devtools__click'])."
+                    ),
+                    required=False,
                 ),
             ),
         )
@@ -246,6 +258,24 @@ class ExecuteSeedHandler:
         inherited_effective_tools = (
             None if is_resume else _extract_inherited_effective_tools(arguments)
         )
+
+        # Merge explicit additional_tools from the caller (issue #181).
+        # This allows direct MCP-initiated executions to inherit the parent
+        # session's MCP tools without requiring the nested delegation mechanism.
+        additional_tools = arguments.get("additional_tools")
+        if isinstance(additional_tools, list) and additional_tools:
+            extra = [t for t in additional_tools if isinstance(t, str) and t]
+            if extra:
+                if inherited_effective_tools:
+                    # Merge with delegation-inherited tools, dedup preserving order
+                    seen = set(inherited_effective_tools)
+                    inherited_effective_tools = list(inherited_effective_tools)
+                    for tool in extra:
+                        if tool not in seen:
+                            inherited_effective_tools.append(tool)
+                            seen.add(tool)
+                else:
+                    inherited_effective_tools = extra
 
         log.info(
             "mcp.tool.execute_seed",
@@ -578,7 +608,7 @@ class StartExecuteSeedHandler:
                 "Start a seed execution in the background and return a job ID immediately. "
                 "Use ouroboros_job_status, ouroboros_job_wait, and ouroboros_job_result "
                 "to monitor progress. "
-                "This is the handler for 'ooo run' commands — "
+                "This is the handler for 'ooo run' commands \u2014 "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=ExecuteSeedHandler().definition.parameters,
