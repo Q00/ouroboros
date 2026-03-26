@@ -149,14 +149,21 @@ def backend(
     # Delegate to the full setup flow for the chosen backend.
     # This ensures all side effects (MCP registration, Codex artifacts,
     # config writes) are applied consistently — no partial state.
+    # Suppress setup's verbose output — we show a clean summary instead.
     from ouroboros.cli.commands.setup import _setup_claude, _setup_codex
 
-    if new_backend == "claude":
-        _setup_claude(cli_path)
-    elif new_backend == "codex":
-        _setup_codex(cli_path)
+    prev_quiet = console.quiet
+    try:
+        console.quiet = True
+        if new_backend == "claude":
+            _setup_claude(cli_path)
+        elif new_backend == "codex":
+            _setup_codex(cli_path)
+    finally:
+        console.quiet = prev_quiet
 
     print_success(f"Switched backend: [bold]{current}[/] → [bold]{new_backend}[/]")
+    console.print(f"[dim]CLI: {cli_path}[/dim]\n")
 
 
 @app.command()
