@@ -3,7 +3,7 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.sh | bash
 set -euo pipefail
 
-PACKAGE_NAME="ouroboros-ai[claude]"
+PACKAGE_NAME="ouroboros-ai"
 MIN_PYTHON="3.12"
 
 # Auto-detect: if a stable release exists on PyPI, use it. Otherwise allow pre-release.
