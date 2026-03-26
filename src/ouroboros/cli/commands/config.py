@@ -156,13 +156,24 @@ def backend(
     # Delegate to the full setup flow for the chosen backend.
     # This ensures all side effects (MCP registration, Codex artifacts,
     # config writes) are applied consistently — no partial state.
-    # Suppress setup's verbose output — we show a clean summary instead.
+    # Suppress setup output; detect non-exception failures by monkey-patching
+    # print_error to set a flag.
+    from ouroboros.cli.commands import setup as setup_mod
     from ouroboros.cli.commands.setup import _setup_claude, _setup_codex
+
+    _setup_had_errors = False
+    _orig_print_error = setup_mod.print_error
+
+    def _tracking_print_error(msg: str) -> None:
+        nonlocal _setup_had_errors
+        _setup_had_errors = True
+        _orig_print_error(msg)
 
     prev_quiet = console.quiet
     setup_failed = False
     try:
         console.quiet = True
+        setup_mod.print_error = _tracking_print_error  # type: ignore[assignment]
         if new_backend == "claude":
             _setup_claude(cli_path)
         elif new_backend == "codex":
@@ -174,8 +185,14 @@ def backend(
         print_info("Run [bold]ouroboros setup[/] to complete configuration.")
     finally:
         console.quiet = prev_quiet
+        setup_mod.print_error = _orig_print_error  # type: ignore[assignment]
 
-    if not setup_failed:
+    if setup_failed:
+        pass  # Already warned above
+    elif _setup_had_errors:
+        print_warning("Backend switched but some setup steps had issues.")
+        print_info("Run [bold]ouroboros setup[/] to verify configuration.")
+    else:
         print_success(f"Switched backend: [bold]{current}[/] → [bold]{new_backend}[/]")
         console.print(f"[dim]CLI: {cli_path}[/dim]\n")
 

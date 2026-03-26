@@ -124,36 +124,41 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
 
 
 def _remove_codex_artifacts(dry_run: bool) -> bool:
-    """Remove Codex rules and skills installed by setup."""
-    removed = False
+    """Remove Codex rules and skills installed by setup.
+
+    Returns True only if ALL existing artifacts were removed successfully.
+    Returns False if any artifact could not be removed.
+    """
     rules_path = Path.home() / ".codex" / "rules" / "ouroboros.md"
     skills_path = Path.home() / ".codex" / "skills" / "ouroboros"
+    had_work = False
+    all_ok = True
 
     if rules_path.exists():
+        had_work = True
         if dry_run:
             print_info(f"[dry-run] Would remove {rules_path}")
-            removed = True
         else:
             try:
                 rules_path.unlink()
                 print_success(f"Removed {rules_path}")
-                removed = True
             except OSError:
                 print_warning(f"Could not remove {rules_path} — skipping.")
+                all_ok = False
 
     if skills_path.exists():
+        had_work = True
         if dry_run:
             print_info(f"[dry-run] Would remove {skills_path}/")
-            removed = True
         else:
             try:
                 shutil.rmtree(skills_path)
                 print_success(f"Removed {skills_path}/")
-                removed = True
             except OSError:
                 print_warning(f"Could not remove {skills_path}/ — skipping.")
+                all_ok = False
 
-    return removed
+    return had_work and all_ok
 
 
 def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
