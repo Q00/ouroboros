@@ -345,7 +345,7 @@ class BrownfieldStore:
 
         try:
             async with engine.begin() as conn:
-                stmt = select(literal_column("rowid"), t).order_by(t.c.name)
+                stmt = select(literal_column("rowid"), t).order_by(literal_column("rowid"))
                 if offset > 0:
                     stmt = stmt.offset(offset)
                 if limit is not None:
