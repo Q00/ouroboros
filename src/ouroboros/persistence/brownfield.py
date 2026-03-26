@@ -335,7 +335,7 @@ class BrownfieldStore:
             limit: Maximum number of rows to return. ``None`` means no limit.
 
         Returns:
-            List of BrownfieldRepo instances, ordered by name.
+            List of BrownfieldRepo instances, ordered by insertion order (rowid).
 
         Raises:
             PersistenceError: If the query fails.

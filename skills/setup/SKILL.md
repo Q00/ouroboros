@@ -392,7 +392,8 @@ Use `AskUserQuestion` with the current default numbers from the scan response.
     "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
     "header": "Default Repos",
     "options": [
-      {"label": "<current default numbers> (Recommended)", "description": "<current default names>"}
+      {"label": "<current default numbers> (Recommended)", "description": "<current default names>"},
+      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"}
     ],
     "multiSelect": false
   }]
