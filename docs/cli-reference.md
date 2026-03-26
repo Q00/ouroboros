@@ -420,7 +420,7 @@ ouroboros uninstall [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--keep-data` | Preserve `~/.ouroboros/` data directory (seeds, logs, DB) |
+| `--keep-data` | Keep entire `~/.ouroboros/` directory (config, credentials, seeds, logs, DB) |
 | `--dry-run` | Show what would be removed without actually deleting |
 | `-y, --yes` | Skip confirmation prompt |
 

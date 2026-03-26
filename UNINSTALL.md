@@ -26,7 +26,7 @@ claude plugin uninstall ouroboros         # if using Claude Code plugin
 |:-----|:-------|
 | `-y`, `--yes` | Skip confirmation prompt |
 | `--dry-run` | Preview what would be removed, change nothing |
-| `--keep-data` | Preserve `~/.ouroboros/` (seeds, DB, logs) |
+| `--keep-data` | Keep entire `~/.ouroboros/` (config, credentials, seeds, DB, logs) |
 
 ### Inside Claude Code
 

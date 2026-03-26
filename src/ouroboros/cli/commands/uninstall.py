@@ -207,7 +207,7 @@ def uninstall(
         bool,
         typer.Option(
             "--keep-data",
-            help="Keep ~/.ouroboros/ data directory (seeds, logs, DB).",
+            help="Keep entire ~/.ouroboros/ directory (config, credentials, seeds, logs, DB).",
         ),
     ] = False,
     dry_run: Annotated[
