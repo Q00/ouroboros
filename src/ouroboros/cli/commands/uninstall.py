@@ -36,13 +36,14 @@ app = typer.Typer(
 
 
 # ── Removal helpers ──────────────────────────────────────────────
+# Each returns True on success, False on skip/failure.
+# Failures are reported via print_warning — never raise.
 
 
 def _remove_claude_mcp(dry_run: bool) -> bool:
     """Remove ouroboros entry from ~/.claude/mcp.json."""
     mcp_path = Path.home() / ".claude" / "mcp.json"
     if not mcp_path.exists():
-        print_info("~/.claude/mcp.json not found — skipping.")
         return False
 
     try:
@@ -52,7 +53,6 @@ def _remove_claude_mcp(dry_run: bool) -> bool:
         return False
     servers = data.get("mcpServers", {})
     if "ouroboros" not in servers:
-        print_info("No ouroboros entry in mcp.json — skipping.")
         return False
 
     if dry_run:
@@ -60,7 +60,11 @@ def _remove_claude_mcp(dry_run: bool) -> bool:
         return True
 
     del servers["ouroboros"]
-    mcp_path.write_text(json.dumps(data, indent=2) + "\n")
+    try:
+        mcp_path.write_text(json.dumps(data, indent=2) + "\n")
+    except OSError:
+        print_warning("Could not write ~/.claude/mcp.json — skipping.")
+        return False
     print_success("Removed ouroboros from ~/.claude/mcp.json")
     return True
 
@@ -83,8 +87,6 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
         print_info("[dry-run] Would remove ouroboros from ~/.codex/config.toml")
         return True
 
-    # Remove [mcp_servers.ouroboros] and [mcp_servers.ouroboros.env] sections
-    # plus the preceding comment block
     lines = raw.splitlines()
     output: list[str] = []
     skip = False
@@ -93,7 +95,6 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
     for line in lines:
         stripped = line.strip()
 
-        # Detect managed comment block
         if stripped.startswith("# Ouroboros MCP hookup"):
             in_comment_block = True
             continue
@@ -101,12 +102,10 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
             continue
         in_comment_block = False
 
-        # Detect ouroboros TOML tables
         if stripped == "[mcp_servers.ouroboros]" or stripped.startswith("[mcp_servers.ouroboros."):
             skip = True
             continue
         if skip:
-            # End of ouroboros section when we hit another table header
             if stripped.startswith("[") and stripped.endswith("]"):
                 skip = False
                 output.append(line)
@@ -114,9 +113,12 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
 
         output.append(line)
 
-    # Collapse excessive blank lines
     cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip() + "\n"
-    codex_config.write_text(cleaned)
+    try:
+        codex_config.write_text(cleaned)
+    except OSError:
+        print_warning("Could not write ~/.codex/config.toml — skipping.")
+        return False
     print_success("Removed ouroboros from ~/.codex/config.toml")
     return True
 
@@ -130,18 +132,26 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
     if rules_path.exists():
         if dry_run:
             print_info(f"[dry-run] Would remove {rules_path}")
+            removed = True
         else:
-            rules_path.unlink()
-            print_success(f"Removed {rules_path}")
-        removed = True
+            try:
+                rules_path.unlink()
+                print_success(f"Removed {rules_path}")
+                removed = True
+            except OSError:
+                print_warning(f"Could not remove {rules_path} — skipping.")
 
     if skills_path.exists():
         if dry_run:
             print_info(f"[dry-run] Would remove {skills_path}/")
+            removed = True
         else:
-            shutil.rmtree(skills_path)
-            print_success(f"Removed {skills_path}/")
-        removed = True
+            try:
+                shutil.rmtree(skills_path)
+                print_success(f"Removed {skills_path}/")
+                removed = True
+            except OSError:
+                print_warning(f"Could not remove {skills_path}/ — skipping.")
 
     return removed
 
@@ -152,7 +162,11 @@ def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
     if not claude_md.exists():
         return False
 
-    content = claude_md.read_text()
+    try:
+        content = claude_md.read_text()
+    except OSError:
+        print_warning(f"Could not read {claude_md} — skipping.")
+        return False
     if "<!-- ooo:START -->" not in content:
         return False
 
@@ -166,7 +180,11 @@ def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
         content,
         flags=re.DOTALL,
     )
-    claude_md.write_text(cleaned)
+    try:
+        claude_md.write_text(cleaned)
+    except OSError:
+        print_warning(f"Could not write {claude_md} — skipping.")
+        return False
     print_success(f"Removed Ouroboros block from {claude_md}")
     return True
 
@@ -175,14 +193,17 @@ def _remove_data_dir(dry_run: bool) -> bool:
     """Remove ~/.ouroboros/ directory."""
     data_dir = Path.home() / ".ouroboros"
     if not data_dir.exists():
-        print_info("~/.ouroboros/ not found — skipping.")
         return False
 
     if dry_run:
         print_info("[dry-run] Would remove ~/.ouroboros/")
         return True
 
-    shutil.rmtree(data_dir)
+    try:
+        shutil.rmtree(data_dir)
+    except OSError:
+        print_warning("Could not fully remove ~/.ouroboros/ — partial cleanup.")
+        return False
     print_success("Removed ~/.ouroboros/")
     return True
 
@@ -197,7 +218,11 @@ def _remove_project_dir(project_dir: Path, dry_run: bool) -> bool:
         print_info(f"[dry-run] Would remove {ooo_dir}/")
         return True
 
-    shutil.rmtree(ooo_dir)
+    try:
+        shutil.rmtree(ooo_dir)
+    except OSError:
+        print_warning(f"Could not remove {ooo_dir}/ — skipping.")
+        return False
     print_success(f"Removed {ooo_dir}/")
     return True
 
@@ -253,14 +278,14 @@ def uninstall(
             if "ouroboros" in mcp_data.get("mcpServers", {}):
                 targets.append("MCP server registration (~/.claude/mcp.json)")
         except (json.JSONDecodeError, OSError):
-            pass
+            targets.append("MCP server registration (~/.claude/mcp.json — may be malformed)")
 
     codex_config = Path.home() / ".codex" / "config.toml"
     try:
         if codex_config.exists() and "[mcp_servers.ouroboros]" in codex_config.read_text():
             targets.append("Codex MCP config (~/.codex/config.toml)")
     except OSError:
-        pass
+        targets.append("Codex MCP config (~/.codex/config.toml — may be unreadable)")
 
     codex_rules = Path.home() / ".codex" / "rules" / "ouroboros.md"
     codex_skills = Path.home() / ".codex" / "skills" / "ouroboros"
@@ -297,7 +322,7 @@ def uninstall(
     console.print("  [dim]- Claude Code plugin (run: claude plugin uninstall ouroboros)[/dim]")
     console.print("  [dim]- Your project source code or git history[/dim]")
     if keep_data:
-        console.print("  [dim]- ~/.ouroboros/ data (--keep-data flag)[/dim]")
+        console.print("  [dim]- ~/.ouroboros/ (--keep-data)[/dim]")
     console.print()
 
     if dry_run:
@@ -310,21 +335,28 @@ def uninstall(
             print_info("Cancelled.")
             raise typer.Exit()
 
-    # Execute removal — track skipped items for accurate summary
+    # Execute removal — track all results for accurate summary
     console.print()
     skipped: list[str] = []
 
-    if not _remove_claude_mcp(dry_run=False):
-        mcp_path = Path.home() / ".claude" / "mcp.json"
-        if mcp_path.exists():
-            skipped.append("~/.claude/mcp.json (malformed or inaccessible)")
+    # Each helper returns False on skip/failure and prints its own warning.
+    # We check the return to build the partial-failure summary.
+    if not _remove_claude_mcp(dry_run=False) and (Path.home() / ".claude" / "mcp.json").exists():
+        skipped.append("~/.claude/mcp.json")
 
-    _remove_codex_mcp(dry_run=False)
+    if not _remove_codex_mcp(dry_run=False) and codex_config.exists():
+        try:
+            if "[mcp_servers.ouroboros]" in codex_config.read_text():
+                skipped.append("~/.codex/config.toml")
+        except OSError:
+            skipped.append("~/.codex/config.toml")
+
     _remove_codex_artifacts(dry_run=False)
     _remove_claude_md_block(cwd, dry_run=False)
     _remove_project_dir(cwd, dry_run=False)
     if not keep_data:
-        _remove_data_dir(dry_run=False)
+        if not _remove_data_dir(dry_run=False) and (Path.home() / ".ouroboros").exists():
+            skipped.append("~/.ouroboros/")
 
     # Final summary
     console.print()

@@ -166,6 +166,10 @@ def backend(
             _setup_claude(cli_path)
         elif new_backend == "codex":
             _setup_codex(cli_path)
+    except Exception as exc:
+        console.quiet = prev_quiet
+        print_warning(f"Backend switched but some setup steps failed: {exc}")
+        print_info("Run [bold]ouroboros setup[/] to complete configuration.")
     finally:
         console.quiet = prev_quiet
 
