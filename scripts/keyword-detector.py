@@ -48,6 +48,16 @@ KEYWORD_MAP = [
     {"patterns": ["ooo update", "ooo upgrade"], "skill": "/ouroboros:update"},
     {"patterns": ["ooo brownfield", "ooo scan"], "skill": "/ouroboros:brownfield"},
     # Natural language triggers
+    # PM triggers must precede generic interview to avoid "pm interview" being shadowed
+    {
+        "patterns": [
+            "write prd",
+            "pm interview",
+            "product requirements",
+            "create prd",
+        ],
+        "skill": "/ouroboros:pm",
+    },
     {
         "patterns": [
             "interview me",
@@ -104,15 +114,6 @@ KEYWORD_MAP = [
     {
         "patterns": ["update ouroboros", "upgrade ouroboros"],
         "skill": "/ouroboros:update",
-    },
-    {
-        "patterns": [
-            "write prd",
-            "pm interview",
-            "product requirements",
-            "create prd",
-        ],
-        "skill": "/ouroboros:pm",
     },
     {
         "patterns": [
