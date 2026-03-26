@@ -116,6 +116,17 @@ See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Code
 
 </details>
 
+<details>
+<summary><strong>Uninstall</strong></summary>
+
+```bash
+ouroboros uninstall
+```
+
+Removes all configuration, MCP registration, and data. See [UNINSTALL.md](./UNINSTALL.md) for details.
+
+</details>
+
 > **Python >= 3.12 required.** See [pyproject.toml](./pyproject.toml) for the full dependency list.
 
 ---
