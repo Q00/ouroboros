@@ -11,7 +11,7 @@ import yaml
 
 from ouroboros.cli.commands.config import app
 
-runner = CliRunner()
+runner = CliRunner(env={"COLUMNS": "200"})
 
 
 @pytest.fixture()
@@ -83,11 +83,25 @@ class TestConfigShow:
         assert "/usr/bin/codex" in result.output
 
     def test_show_database_path_from_persistence(self, config_dir: Path) -> None:
-        """config show should use persistence.database_path when set."""
+        """config show should resolve persistence.database_path under config dir."""
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
             result = runner.invoke(app, ["show"])
         assert result.exit_code == 0
         assert "data/ouroboros.db" in result.output
+
+    def test_show_database_path_default(self, tmp_path: Path) -> None:
+        """Without persistence.database_path, default is <config_dir>/ouroboros.db."""
+        config = {
+            "orchestrator": {"runtime_backend": "claude", "cli_path": "/usr/bin/claude"},
+            "llm": {"backend": "claude"},
+            "logging": {"level": "info"},
+        }
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
+            result = runner.invoke(app, ["show"])
+        assert result.exit_code == 0
+        assert "ouroboros.db" in result.output
 
 
 # ── config backend ───────────────────────────────────────────────
