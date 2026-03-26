@@ -379,7 +379,7 @@ class TestExecuteSeedHandler:
         assert result.value.meta["resume_requested"] is False
 
     async def test_handle_rejects_opencode_runtime_at_boundary(self) -> None:
-        """OpenCode is not yet available — handler should surface a clear error."""
+        """OpenCode is not yet available \u2014 handler should surface a clear error."""
         handler = ExecuteSeedHandler(
             agent_runtime_backend="opencode",
             llm_backend="opencode",
@@ -653,8 +653,8 @@ class TestExecuteSeedHandler:
                     DELEGATED_PARENT_EFFECTIVE_TOOLS_ARG: ["Read", "mcp__github__issue_read"],
                     # Plus explicit additional_tools with one overlap
                     "additional_tools": [
-                        "mcp__github__issue_read",  # duplicate — should be deduped
-                        "mcp__context7__query-docs",  # new — should be added
+                        "mcp__github__issue_read",  # duplicate \u2014 should be deduped
+                        "mcp__context7__query-docs",  # new \u2014 should be added
                     ],
                 },
             )
@@ -720,7 +720,7 @@ class TestExecuteSeedHandler:
         assert runner_kwargs["inherited_tools"] is None
 
     async def test_additional_tools_ignored_on_resume(self) -> None:
-        """Resumed sessions must not pick up additional_tools — preserves original tool set."""
+        """Resumed sessions must not pick up additional_tools \u2014 preserves original tool set."""
         handler = ExecuteSeedHandler()
 
         seed_yaml = (
