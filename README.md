@@ -38,26 +38,12 @@
 
 ---
 
-> **Security Notice (2026-03-24): LiteLLM PyPI Supply Chain Attack**
+> **New: PM Mode** — `ooo pm` generates a PRD through a guided PM-focused interview.
+> Ouroboros now supports product management workflows: stakeholder alignment, user story mapping, and structured PRD generation — all driven by the same Socratic engine.
 >
-> LiteLLM versions **1.82.7** and **1.82.8** on PyPI contained a malicious `.pth` file that auto-executes on every Python startup, exfiltrating environment variables, API keys, and credentials to an external server.
->
-> **What we did:** Ouroboros now pins LiteLLM to **`<=1.82.6`** (safe versions only) as an optional dependency. LiteLLM is no longer a core dependency — it is only installed when you explicitly opt in via `pip install ouroboros-ai[litellm]`.
->
-> **If you previously installed litellm 1.82.7 or 1.82.8**, the malicious `.pth` file may still be on your system even after upgrading. Clean up manually:
->
-> ```bash
-> # 1. Find and delete the malicious file
-> find / -name "litellm_init.pth" 2>/dev/null
->
-> # 2. Clean package manager caches
-> uv cache clean litellm    # if using uv
-> pip cache purge            # if using pip
->
-> # 3. Rotate ALL credentials that were on your system during the exposure window
 > ```
->
-> References: [LiteLLM #24512](https://github.com/BerriAI/litellm/issues/24512) · [Ouroboros #195](https://github.com/Q00/ouroboros/issues/195) · [DSPy mitigation](https://github.com/stanfordnlp/dspy/commit/66e33399bf29)
+> > ooo pm "I want to build a notification system"
+> ```
 
 ---
 
@@ -219,6 +205,10 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 | `ooo ralph` | *(via MCP)* | Persistent loop until verified |
 | `ooo tutorial` | *(interactive)* | Interactive hands-on learning |
 | `ooo help` | `ouroboros --help` | Full reference |
+| `ooo pm` | *(via MCP)* | PM-focused interview + PRD generation |
+| `ooo qa` | *(via skill)* | General-purpose QA verdict for any artifact |
+| `ooo update` | `ouroboros update` | Check for updates + upgrade to latest |
+| `ooo brownfield` | *(via skill)* | Scan and manage brownfield repo defaults |
 
 > Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`) are available through agent skills or MCP tools only.
 
