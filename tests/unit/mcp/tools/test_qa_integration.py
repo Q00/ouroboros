@@ -337,7 +337,7 @@ class TestEvolveStepHandlerQA:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(
@@ -378,7 +378,7 @@ class TestEvolveStepHandlerQA:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(
@@ -434,7 +434,7 @@ class TestEvolveStepHandlerQA:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(
@@ -467,7 +467,7 @@ class TestEvolveStepHandlerQA:
 
         with (
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(

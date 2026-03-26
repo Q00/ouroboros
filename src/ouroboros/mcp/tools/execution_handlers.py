@@ -417,6 +417,7 @@ class ExecuteSeedHandler:
                     _seed_content: str,
                     _resume_existing: bool,
                     _skip_qa: bool,
+                    _workspace: TaskWorkspace | None = workspace,
                     _session_repo: SessionRepository = session_repo,
                     _event_store: EventStore = event_store,
                     _owns_event_store: bool = owns_event_store,
@@ -481,6 +482,8 @@ class ExecuteSeedHandler:
                         except Exception:
                             log.exception("mcp.tool.execute_seed.mark_failed_error")
                     finally:
+                        if _workspace is not None:
+                            release_lock(_workspace.lock_path)
                         if _owns_event_store:
                             try:
                                 await _event_store.close()
