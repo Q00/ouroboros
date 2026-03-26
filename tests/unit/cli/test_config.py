@@ -124,7 +124,7 @@ class TestConfigBackend:
 
     def test_switch_unsupported_backend(self, config_dir: Path) -> None:
         with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
-            result = runner.invoke(app, ["backend", "opencode"])
+            result = runner.invoke(app, ["backend", "nonexistent"])
         assert result.exit_code == 1
         assert "Unsupported" in result.output
 
@@ -184,6 +184,26 @@ class TestConfigBackend:
         assert result.exit_code == 1
         assert "Cannot parse" in result.output
 
+    def test_structurally_invalid_section_type(self, tmp_path: Path) -> None:
+        """config commands should handle sections with wrong types (e.g. orchestrator: [])."""
+        config = {"orchestrator": [], "llm": {"backend": "claude"}}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
+            result = runner.invoke(app, ["show"])
+        assert result.exit_code == 1
+        assert "Invalid config section" in result.output
+
+    def test_structurally_invalid_logging_section(self, tmp_path: Path) -> None:
+        """config validate should catch logging: [] instead of crashing."""
+        config = {"orchestrator": {"runtime_backend": "claude"}, "logging": "bad"}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
+            result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 1
+        assert "Invalid config section" in result.output
+
 
 # ── config validate ──────────────────────────────────────────────
 
@@ -203,13 +223,24 @@ class TestConfigValidate:
 
     def test_invalid_backend_exits_nonzero(self, tmp_path: Path) -> None:
         """validate should exit 1 when backend is unsupported."""
-        config = {"orchestrator": {"runtime_backend": "opencode"}, "llm": {"backend": "opencode"}}
+        config = {"orchestrator": {"runtime_backend": "nonexistent"}, "llm": {"backend": "claude"}}
         (tmp_path / "config.yaml").write_text(yaml.dump(config))
 
         with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
             result = runner.invoke(app, ["validate"])
         assert result.exit_code == 1
-        assert "not supported" in result.output
+
+    def test_opencode_backend_is_valid(self, tmp_path: Path) -> None:
+        """validate should accept opencode as a valid runtime backend."""
+        config = {"orchestrator": {"runtime_backend": "opencode"}, "llm": {"backend": "opencode"}}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=tmp_path),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 0
 
     def test_missing_cli_path_exits_nonzero(self, tmp_path: Path) -> None:
         """validate should exit 1 when CLI path doesn't exist."""
@@ -246,16 +277,19 @@ class TestConfigSet:
         data = yaml.safe_load((config_dir / "config.yaml").read_text())
         assert data["logging"]["level"] == "debug"
 
-    def test_set_new_key(self, config_dir: Path) -> None:
-        with (
-            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
-            patch("ouroboros.config.loader.load_config"),
-        ):
-            result = runner.invoke(app, ["set", "logging.new_key", "new_value"])
-        assert result.exit_code == 0
+    def test_set_unknown_top_level_key_rejected(self, config_dir: Path) -> None:
+        """config set should reject unknown top-level keys."""
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["set", "typo.section", "value"])
+        assert result.exit_code == 1
+        assert "Unknown config key" in result.output
 
-        data = yaml.safe_load((config_dir / "config.yaml").read_text())
-        assert data["logging"]["new_key"] == "new_value"
+    def test_set_unknown_nested_key_rejected(self, config_dir: Path) -> None:
+        """config set should reject unknown nested keys like logging.levle."""
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["set", "logging.levle", "debug"])
+        assert result.exit_code == 1
+        assert "Unknown config key" in result.output
 
 
 # ── config init ──────────────────────────────────────────────────
@@ -271,3 +305,36 @@ class TestConfigInit:
             result = runner.invoke(app, ["init"])
         assert result.exit_code == 0
         assert "already initialized" in result.output
+
+    def test_init_partial_preserves_existing_config(self, config_dir: Path) -> None:
+        """config init should NOT overwrite existing config.yaml when only credentials.yaml is missing."""
+        # config_dir already has config.yaml with custom settings
+        original_data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert original_data["orchestrator"]["runtime_backend"] == "claude"
+
+        # No credentials.yaml — partial init state
+        with patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+
+        # config.yaml should be untouched
+        after_data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert after_data == original_data
+        # credentials.yaml should now exist
+        assert (config_dir / "credentials.yaml").exists()
+
+    def test_init_partial_creates_missing_config(self, tmp_path: Path) -> None:
+        """config init should create config.yaml when only credentials.yaml exists."""
+        (tmp_path / "credentials.yaml").write_text(yaml.dump({"providers": {}}))
+
+        with patch("ouroboros.config.loader.ensure_config_dir", return_value=tmp_path):
+            result = runner.invoke(app, ["init"])
+        assert result.exit_code == 0
+
+        # config.yaml should now exist with defaults
+        assert (tmp_path / "config.yaml").exists()
+        data = yaml.safe_load((tmp_path / "config.yaml").read_text())
+        assert "orchestrator" in data
+        # credentials.yaml should be untouched (still has our original content)
+        cred_data = yaml.safe_load((tmp_path / "credentials.yaml").read_text())
+        assert cred_data == {"providers": {}}

@@ -22,11 +22,16 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_SUPPORTED_BACKENDS = ("claude", "codex")
+_SUPPORTED_BACKENDS = ("claude", "codex", "opencode")
 
 
 def _load_config() -> tuple[dict, Path]:
-    """Load config.yaml and return (dict, path)."""
+    """Load config.yaml and return (dict, path).
+
+    All top-level sections that should be mappings are validated to be dicts.
+    Structurally invalid sections (e.g. ``orchestrator: []``) produce a
+    controlled error instead of crashing downstream commands.
+    """
     from ouroboros.config.models import get_config_dir
 
     config_path = get_config_dir() / "config.yaml"
@@ -43,6 +48,22 @@ def _load_config() -> tuple[dict, Path]:
             f"Invalid config format in {config_path} (expected mapping, got {type(data).__name__})"
         )
         raise typer.Exit(1)
+
+    # Guard against sections that should be dicts but aren't (e.g. orchestrator: [])
+    _MAPPING_SECTIONS = (
+        "orchestrator", "llm", "logging", "persistence", "economics",
+        "clarification", "execution", "resilience", "evaluation",
+        "consensus", "drift",
+    )
+    for section in _MAPPING_SECTIONS:
+        val = data.get(section)
+        if val is not None and not isinstance(val, dict):
+            print_error(
+                f"Invalid config section '{section}' in {config_path} "
+                f"(expected mapping, got {type(val).__name__})"
+            )
+            raise typer.Exit(1)
+
     return data, config_path
 
 
@@ -212,6 +233,7 @@ def init() -> None:
     """Initialize Ouroboros configuration.
 
     Creates default configuration files if they don't exist.
+    Only creates missing files — never overwrites existing ones.
     """
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
@@ -221,13 +243,65 @@ def init() -> None:
     if config_path.exists() and credentials_path.exists():
         print_info(f"Config already initialized at {config_dir}")
         return
-    try:
+
+    has_config = config_path.exists()
+    has_credentials = credentials_path.exists()
+
+    if not has_config and not has_credentials:
+        # Fresh init — create both files
         create_default_config(config_dir, overwrite=False)
-    except Exception:
-        # Partial init — at least one file exists. Re-create with overwrite
-        # to ensure both files are present.
-        create_default_config(config_dir, overwrite=True)
+    else:
+        # Partial init — only create the missing file(s)
+        from ouroboros.config.models import get_default_config, get_default_credentials
+
+        if not has_config:
+            default_config = get_default_config()
+            config_dict = default_config.model_dump(mode="json")
+            config_path.write_text(
+                yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
+            )
+        if not has_credentials:
+            default_credentials = get_default_credentials()
+            cred_dict = default_credentials.model_dump(mode="json")
+            credentials_path.write_text(
+                yaml.dump(cred_dict, default_flow_style=False, sort_keys=False)
+            )
+            import os
+            import stat
+
+            os.chmod(credentials_path, stat.S_IRUSR | stat.S_IWUSR)
+
     print_success(f"Initialized config at {config_dir}")
+
+
+def _validate_key_path(keys: list[str]) -> str | None:
+    """Validate that a dot-notation key path matches the config schema.
+
+    Returns an error message if the key is invalid, or None if valid.
+    """
+    from ouroboros.config.models import OuroborosConfig
+
+    model = OuroborosConfig
+    for i, k in enumerate(keys):
+        fields = model.model_fields
+        if k not in fields:
+            path = ".".join(keys[: i + 1])
+            valid = ", ".join(sorted(fields.keys()))
+            return f"Unknown config key '{path}'. Valid keys at this level: {valid}"
+        field_info = fields[k]
+        # If not the last key, drill into the sub-model
+        if i < len(keys) - 1:
+            annotation = field_info.annotation
+            # Unwrap Optional, etc.
+            origin = getattr(annotation, "__origin__", None)
+            if origin is not None:
+                # Not a plain model type — can't drill further
+                break
+            if isinstance(annotation, type) and hasattr(annotation, "model_fields"):
+                model = annotation
+            else:
+                break
+    return None
 
 
 @app.command("set")
@@ -238,7 +312,7 @@ def set_value(
     """Set a configuration value.
 
     Use dot notation for nested keys (e.g., orchestrator.runtime_backend).
-    Values are validated by reloading the full config after writing.
+    Keys are validated against the config schema before writing.
 
     [dim]Examples:[/dim]
     [dim]    ouroboros config set logging.level debug[/dim]
@@ -246,8 +320,14 @@ def set_value(
     """
     data, config_path = _load_config()
 
-    # Navigate dot notation
+    # Validate key path against schema
     keys = key.split(".")
+    error = _validate_key_path(keys)
+    if error:
+        print_error(error)
+        raise typer.Exit(1)
+
+    # Navigate dot notation
     target = data
     for k in keys[:-1]:
         target = target.setdefault(k, {})

@@ -107,8 +107,14 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
             continue
         if skip:
             if stripped.startswith("[") and stripped.endswith("]"):
+                # Next TOML table header — stop skipping
                 skip = False
                 output.append(line)
+            elif stripped.startswith("#"):
+                # Comment after the managed section — preserve it
+                skip = False
+                output.append(line)
+            # else: key=value lines or blank lines inside the table — skip them
             continue
 
         output.append(line)

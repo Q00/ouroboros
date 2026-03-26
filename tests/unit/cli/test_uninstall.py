@@ -159,6 +159,28 @@ class TestRemoveCodexMcp:
         # Blank line broke the comment block, so this user comment is preserved
         assert "# Unrelated user comment" in content
 
+    def test_preserves_trailing_comments_after_ouroboros_section(self, tmp_path: Path) -> None:
+        """User comments placed after the ouroboros table should not be deleted."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "[mcp_servers.ouroboros]\n"
+            'command = "uvx"\n'
+            'args = ["ouroboros"]\n'
+            "\n"
+            "# User note about the next section\n"
+            "[other]\nfoo = 1\n"
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _remove_codex_mcp(dry_run=False)
+
+        assert result is True
+        content = codex_config.read_text()
+        assert "[mcp_servers.ouroboros]" not in content
+        assert "# User note about the next section" in content
+        assert "[other]" in content
+
     def test_no_ouroboros_returns_false(self, tmp_path: Path) -> None:
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
