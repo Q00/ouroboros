@@ -18,6 +18,8 @@ Handler modules:
 
 from __future__ import annotations
 
+from ouroboros.core.worktree import is_git_repo, maybe_restore_task_workspace  # noqa: F401
+from ouroboros.mcp.tools import evolution_handlers as _evolution_handlers
 from ouroboros.mcp.tools.authoring_handlers import (
     GenerateSeedHandler,
     InterviewHandler,
@@ -29,9 +31,11 @@ from ouroboros.mcp.tools.evaluation_handlers import (
 )
 from ouroboros.mcp.tools.evolution_handlers import (
     EvolveRewindHandler,
-    EvolveStepHandler,
     LineageStatusHandler,
     StartEvolveStepHandler,
+)
+from ouroboros.mcp.tools.evolution_handlers import (
+    EvolveStepHandler as _BaseEvolveStepHandler,
 )
 from ouroboros.mcp.tools.execution_handlers import (
     ExecuteSeedHandler,
@@ -54,6 +58,21 @@ from ouroboros.mcp.tools.query_handlers import (
 # ---------------------------------------------------------------------------
 # Convenience factory functions
 # ---------------------------------------------------------------------------
+
+
+class EvolveStepHandler(_BaseEvolveStepHandler):
+    """Compatibility wrapper that respects patched helpers re-exported here."""
+
+    async def handle(self, arguments):
+        original_is_git_repo = _evolution_handlers.is_git_repo
+        original_restore_workspace = _evolution_handlers.maybe_restore_task_workspace
+        _evolution_handlers.is_git_repo = is_git_repo
+        _evolution_handlers.maybe_restore_task_workspace = maybe_restore_task_workspace
+        try:
+            return await super().handle(arguments)
+        finally:
+            _evolution_handlers.is_git_repo = original_is_git_repo
+            _evolution_handlers.maybe_restore_task_workspace = original_restore_workspace
 
 
 def execute_seed_handler(

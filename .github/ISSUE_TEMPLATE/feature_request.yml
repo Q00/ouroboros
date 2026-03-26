@@ -1,0 +1,114 @@
+name: Feature request
+description: Propose a new feature or workflow improvement
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Lightweight structure helps both humans and tooling understand a proposal quickly.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the user, maintainer, or workflow problem that exists today.
+      placeholder: What problem exists right now?
+    validations:
+      required: true
+  - type: textarea
+    id: why-now
+    attributes:
+      label: Why now
+      description: Explain why this is worth doing now.
+      placeholder: Why is this worth doing now?
+    validations:
+      required: false
+  - type: textarea
+    id: persona
+    attributes:
+      label: User / persona
+      description: Describe who is affected by this problem.
+      placeholder: Who is affected?
+    validations:
+      required: false
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+      description: Describe what happens today.
+      placeholder: What happens today?
+    validations:
+      required: false
+  - type: textarea
+    id: desired
+    attributes:
+      label: Desired behavior
+      description: Describe what should happen instead.
+      placeholder: What should happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Explain how you think this should work.
+      placeholder: What is your proposed solution?
+    validations:
+      required: false
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: List technical, UX, policy, cost, or compatibility constraints.
+      placeholder: What boundaries or constraints matter here?
+    validations:
+      required: false
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: Explain what is explicitly out of scope for this issue.
+      placeholder: What is this issue not trying to solve?
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: List other approaches you considered.
+      placeholder: What other approaches did you consider?
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List specific, testable statements that define done.
+      placeholder: |
+        - [ ] 
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Add mockups, examples, related issues, PRs, docs, or screenshots.
+      placeholder: Links, screenshots, references, or related issues
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and discussions first.
+          required: true
+        - label: I explained the problem, not just the solution.
+          required: false
+        - label: I included clear scope boundaries and non-goals.
+          required: false
+        - label: I listed concrete acceptance criteria.
+          required: true

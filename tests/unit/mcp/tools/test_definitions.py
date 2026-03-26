@@ -1692,6 +1692,59 @@ class TestGenerateSeedHandlerAmbiguity:
         generate_call = mock_seed_generator.generate.await_args
         assert generate_call.args[1].overall_score == 0.11
 
+    async def test_generate_seed_ignores_caller_ambiguity_score_override(self) -> None:
+        """Caller-supplied ambiguity_score must be ignored to prevent LLM gate bypass.
+
+        Regression test for https://github.com/Q00/ouroboros/issues/210
+        """
+        state = InterviewState(
+            interview_id="sess-bypass",
+            initial_context="Build something",
+            ambiguity_score=0.35,
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "goal_clarity",
+                    "clarity_score": 0.65,
+                    "weight": 0.4,
+                    "justification": "Vague goal",
+                },
+                "constraint_clarity": {
+                    "name": "constraint_clarity",
+                    "clarity_score": 0.65,
+                    "weight": 0.3,
+                    "justification": "Vague constraints",
+                },
+                "success_criteria_clarity": {
+                    "name": "success_criteria_clarity",
+                    "clarity_score": 0.65,
+                    "weight": 0.3,
+                    "justification": "Vague success criteria",
+                },
+            },
+        )
+        mock_adapter = MagicMock()
+        mock_interview_engine = MagicMock()
+        mock_interview_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_seed_generator = MagicMock()
+        mock_seed_generator.generate = AsyncMock(return_value=Result.err(RuntimeError("boom")))
+        handler = GenerateSeedHandler(
+            llm_adapter=mock_adapter,
+            interview_engine=mock_interview_engine,
+            seed_generator=mock_seed_generator,
+        )
+
+        # LLM tries to pass ambiguity_score=0.18 to bypass the gate
+        await handler.handle(
+            {
+                "session_id": "sess-bypass",
+                "ambiguity_score": 0.18,
+            }
+        )
+
+        # The stored score (0.35) should be used, NOT the caller's 0.18
+        generate_call = mock_seed_generator.generate.await_args
+        assert generate_call.args[1].overall_score == 0.35
+
 
 class TestCancelExecutionHandler:
     """Test CancelExecutionHandler class."""

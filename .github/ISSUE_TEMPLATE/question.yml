@@ -1,0 +1,58 @@
+name: Question or usage help
+description: Ask an actionable question when GitHub Discussions is not a better fit
+title: "[Question] "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For open-ended discussion or general community chat, prefer GitHub Discussions or Discord.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Explain what you are trying to do.
+      placeholder: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include the details needed for someone else to help.
+      placeholder: |
+        - Command or workflow:
+        - Seed or config involved:
+        - Expected outcome:
+        - What you already tried:
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Paste any relevant output, errors, or logs.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: actionable
+    attributes:
+      label: Why this should be a GitHub issue
+      description: Explain why this looks actionable for maintainers rather than a general discussion question.
+      placeholder: Why should maintainers track this as an issue?
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked the README and docs first.
+          required: true
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: I included enough context for someone else to help.
+          required: true
+

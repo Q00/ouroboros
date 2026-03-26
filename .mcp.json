@@ -2,7 +2,7 @@
   "mcpServers": {
     "ouroboros": {
       "command": "uvx",
-      "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
+      "args": ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"]
     }
   }
 }

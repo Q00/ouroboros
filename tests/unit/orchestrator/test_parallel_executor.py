@@ -346,6 +346,86 @@ class TestParallelACExecutor:
         assert executor._ac_runtime_handles == {}
 
     @pytest.mark.asyncio
+    async def test_atomic_ac_skips_memory_gate_for_mocked_backend_runtime(self) -> None:
+        """Mocked runtimes should not block on low-memory gating without explicit opt-in."""
+
+        class _StubRuntime:
+            def __init__(self) -> None:
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                del prompt, tools, system_prompt, resume_session_id
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=RuntimeHandle(
+                        backend="opencode",
+                        kind="implementation_session",
+                        native_session_id="opencode-session-1",
+                        cwd=resume_handle.cwd if resume_handle is not None else "/tmp/project",
+                        approval_mode=(
+                            resume_handle.approval_mode
+                            if resume_handle is not None
+                            else "acceptEdits"
+                        ),
+                        metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+                    ),
+                )
+
+        executor = ParallelACExecutor(
+            adapter=_StubRuntime(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.parallel_executor._get_available_memory_gb",
+                return_value=0.5,
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ) as sleep_mock,
+        ):
+            result = await executor._execute_atomic_ac(
+                ac_index=0,
+                ac_content="Implement AC 1",
+                session_id="orch_123",
+                tools=["Read", "Edit"],
+                system_prompt="system",
+                seed_goal="Ship the feature",
+                depth=0,
+                start_time=datetime.now(UTC),
+            )
+
+        assert result.success is True
+        sleep_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_try_decompose_ac_times_out_and_falls_back_to_atomic(self) -> None:
         """A hung decomposition child should time out and fall back to atomic execution."""
 

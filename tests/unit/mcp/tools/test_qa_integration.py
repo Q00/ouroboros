@@ -524,6 +524,10 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ) as mock_verification,
             patch(
+                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                return_value=None,
+            ),
+            patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
                 new_callable=AsyncMock,
                 return_value=FAKE_QA_RESULT,
@@ -571,6 +575,10 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ) as mock_verification,
             patch(
+                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                return_value=None,
+            ),
+            patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
                 new_callable=AsyncMock,
                 return_value=FAKE_QA_RESULT,
@@ -601,6 +609,10 @@ class TestEvolveStepHandlerQA:
                 "ouroboros.mcp.tools.evolution_handlers.build_verification_artifacts",
                 new_callable=AsyncMock,
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
+            ),
+            patch(
+                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                return_value=None,
             ),
             patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
@@ -659,6 +671,10 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ),
             patch(
+                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                return_value=None,
+            ),
+            patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
                 new_callable=AsyncMock,
                 return_value=FAKE_QA_RESULT,
@@ -689,6 +705,10 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ),
             patch(
+                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                return_value=None,
+            ),
+            patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
                 new_callable=AsyncMock,
                 return_value=FAKE_QA_RESULT,
@@ -717,6 +737,10 @@ class TestEvolveStepHandlerQA:
                 new_callable=AsyncMock,
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ) as mock_verification,
+            patch(
+                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                return_value=None,
+            ),
             patch(
                 "ouroboros.mcp.tools.qa.QAHandler.handle",
                 new_callable=AsyncMock,

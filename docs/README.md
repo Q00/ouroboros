@@ -43,6 +43,8 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 - [Testing Guide](./contributing/testing-guide.md) - Writing and running tests
 - [Key Patterns](./contributing/key-patterns.md) - Result type, immutability, event sourcing, protocols
 - [Findings Registry](./contributing/findings-registry.md) - Documentation audit findings registry
+- [Issue Quality Policy](./contributing/issue-quality-policy.md) - Quality bar for actionable issues and PRD-lite feature requests
+
 
 ## Key Concepts
 

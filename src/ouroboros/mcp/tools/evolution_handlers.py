@@ -19,6 +19,13 @@ from ouroboros.core.project_paths import resolve_path_against_base, resolve_seed
 from ouroboros.core.seed import Seed
 from ouroboros.core.text import truncate_head_tail
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import (
+    TaskWorkspace,
+    WorktreeError,
+    is_git_repo,
+    maybe_restore_task_workspace,
+    release_lock,
+)
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
@@ -213,8 +220,25 @@ class EvolveStepHandler:
         normalized_project_dir = (
             project_dir if isinstance(project_dir, str) and project_dir else None
         )
+        workspace: TaskWorkspace | None = None
+        if execute and (normalized_project_dir is None or is_git_repo(normalized_project_dir)):
+            try:
+                workspace = maybe_restore_task_workspace(
+                    lineage_id,
+                    persisted=None,
+                    fallback_source_cwd=normalized_project_dir or os.getcwd(),
+                )
+            except WorktreeError as e:
+                return Result.err(
+                    MCPToolError(
+                        f"Task workspace error: {e.message}",
+                        tool_name="ouroboros_evolve_step",
+                    )
+                )
 
-        project_dir_token = self.evolutionary_loop.set_project_dir(normalized_project_dir)
+        project_dir_token = self.evolutionary_loop.set_project_dir(
+            workspace.effective_cwd if workspace else normalized_project_dir
+        )
         resolved_verification_working_dir = Path.cwd()
 
         try:
@@ -242,6 +266,8 @@ class EvolveStepHandler:
             )
         finally:
             self.evolutionary_loop.reset_project_dir(project_dir_token)
+            if workspace is not None:
+                release_lock(workspace.lock_path)
 
         if result.is_err:
             return Result.err(
@@ -271,6 +297,13 @@ class EvolveStepHandler:
             f"**Lineage**: {step.lineage.lineage_id} ({step.lineage.current_generation} generations)",
             f"**Next generation**: {step.next_generation}",
         ]
+        if workspace is not None:
+            text_lines.extend(
+                [
+                    f"**Worktree**: {workspace.worktree_path}",
+                    f"**Branch**: {workspace.branch}",
+                ]
+            )
 
         if gen.execution_output:
             text_lines.append("")
@@ -369,13 +402,16 @@ class EvolveStepHandler:
             "executed": execute,
             "has_execution_output": gen.execution_output is not None,
         }
+        if workspace is not None:
+            meta["worktree_path"] = workspace.worktree_path
+            meta["worktree_branch"] = workspace.branch
         if qa_meta:
             meta["qa"] = qa_meta
 
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="\n".join(text_lines)),),
-                is_error=False,
+                is_error=step.action.value in ("failed", "interrupted"),
                 meta=meta,
             )
         )

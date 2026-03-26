@@ -294,6 +294,10 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - ~ expansion: ~/.local/bin/opencode
             - None: Resolve from PATH at runtime
         default_max_turns: Default max turns for agent execution
+        use_worktrees: Whether mutating workflows run in dedicated git worktrees
+        worktree_root: Root directory for managed task worktrees
+        worktree_cleanup: Cleanup policy for managed task worktrees
+        worktree_lock_stale_after_minutes: Staleness threshold for task lock recovery
     """
 
     runtime_backend: Literal["claude", "codex", "opencode"] = "claude"
@@ -305,6 +309,10 @@ class OrchestratorConfig(BaseModel, frozen=True):
     codex_cli_path: str | None = None
     opencode_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
+    use_worktrees: bool = True
+    worktree_root: str = "~/.ouroboros/worktrees"
+    worktree_cleanup: Literal["keep"] = "keep"
+    worktree_lock_stale_after_minutes: int = Field(default=60, ge=1)
 
     @field_validator("cli_path", "codex_cli_path", "opencode_cli_path")
     @classmethod
@@ -312,6 +320,12 @@ class OrchestratorConfig(BaseModel, frozen=True):
         """Expand ~ in cli_path."""
         if v is None:
             return None
+        return str(Path(v).expanduser())
+
+    @field_validator("worktree_root")
+    @classmethod
+    def expand_worktree_root(cls, v: str) -> str:
+        """Expand ~ in worktree_root."""
         return str(Path(v).expanduser())
 
 

@@ -180,6 +180,7 @@ class LevelCoordinator:
         self,
         adapter: AgentRuntime,
         inherited_runtime_handle: RuntimeHandle | None = None,
+        task_cwd: str | None = None,
     ) -> None:
         """Initialize coordinator.
 
@@ -190,6 +191,7 @@ class LevelCoordinator:
         """
         self._adapter = adapter
         self._inherited_runtime_handle = inherited_runtime_handle
+        self._task_cwd = task_cwd
         self._level_runtime_handles: dict[tuple[str, int], RuntimeHandle] = {}
 
     def _build_level_runtime_handle(
@@ -208,7 +210,7 @@ class LevelCoordinator:
             # Fallback: use inherited runtime handle if available
             return self._inherited_runtime_handle
 
-        cwd = self._adapter.working_directory
+        cwd = self._task_cwd or self._adapter.working_directory
         approval_mode = self._adapter.permission_mode
         native_session_id = seeded_handle.native_session_id if seeded_handle is not None else None
         if native_session_id is None and previous_review is not None:

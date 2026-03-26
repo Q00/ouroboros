@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -40,6 +41,7 @@ class GenerationPhase(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 class MutationAction(StrEnum):
@@ -287,6 +289,8 @@ class GenerationRecord(BaseModel, frozen=True):
     seed_json: str | None = None
     execution_output: str | None = None
     failure_error: str | None = None
+    last_completed_phase: str | None = None
+    partial_state: dict[str, Any] | None = None
 
 
 class RewindRecord(BaseModel, frozen=True):
@@ -329,8 +333,15 @@ class OntologyLineage(BaseModel, frozen=True):
         return self.generations[-1].ontology_snapshot if self.generations else None
 
     def with_generation(self, record: GenerationRecord) -> OntologyLineage:
-        """Return new lineage with appended generation."""
-        return self.model_copy(update={"generations": self.generations + (record,)})
+        """Return new lineage with appended or replaced generation.
+
+        If a generation with the same number already exists (e.g., from a
+        failed/interrupted attempt), it is replaced instead of duplicated.
+        """
+        existing = tuple(
+            g for g in self.generations if g.generation_number != record.generation_number
+        )
+        return self.model_copy(update={"generations": existing + (record,)})
 
     def with_status(self, status: LineageStatus) -> OntologyLineage:
         """Return new lineage with updated status."""

@@ -6,6 +6,8 @@ of BaseEvents from the EventStore, it produces an OntologyLineage instance.
 
 from __future__ import annotations
 
+import logging
+
 from ouroboros.core.lineage import (
     EvaluationSummary,
     GenerationPhase,
@@ -20,6 +22,9 @@ from ouroboros.events.base import BaseEvent
 # Sentinel for generations that haven't completed (started/failed).
 # These don't have a real ontology yet, but GenerationRecord requires one.
 _PENDING_ONTOLOGY = OntologySchema(name="(pending)", description="(pending)", fields=())
+
+
+logger = logging.getLogger(__name__)
 
 
 class LineageProjector:
@@ -64,7 +69,7 @@ class LineageProjector:
                     try:
                         phase = GenerationPhase(data.get("phase", "wondering"))
                     except ValueError:
-                        phase = GenerationPhase.WONDERING
+                        continue  # Skip events with invalid/legacy phase values
                     generations[gen_num] = GenerationRecord(
                         generation_number=gen_num,
                         seed_id=data.get("seed_id") or "",
@@ -104,7 +109,7 @@ class LineageProjector:
                     try:
                         phase = GenerationPhase(data.get("phase", "wondering"))
                     except ValueError:
-                        phase = GenerationPhase.WONDERING
+                        continue  # Skip events with invalid/legacy phase values
                     old = generations[gen_num]
                     generations[gen_num] = old.model_copy(update={"phase": phase})
 
@@ -131,6 +136,32 @@ class LineageProjector:
                         phase=phase,
                         created_at=event.timestamp,
                         failure_error=error_msg,
+                    )
+
+            elif event.type == "lineage.generation.interrupted":
+                data = event.data
+                gen_num = data["generation_number"]
+                interrupt_update: dict = {
+                    "phase": GenerationPhase.INTERRUPTED,
+                    "last_completed_phase": data.get("last_completed_phase"),
+                    "partial_state": data.get("partial_state"),
+                }
+                if data.get("seed_json"):
+                    interrupt_update["seed_json"] = data["seed_json"]
+                if gen_num in generations:
+                    old = generations[gen_num]
+                    generations[gen_num] = old.model_copy(update=interrupt_update)
+                else:
+                    logger.warning(
+                        "projector.interrupted_without_started",
+                        extra={"generation_number": gen_num},
+                    )
+                    generations[gen_num] = GenerationRecord(
+                        generation_number=gen_num,
+                        seed_id="",
+                        ontology_snapshot=_PENDING_ONTOLOGY,
+                        created_at=event.timestamp,
+                        **interrupt_update,
                     )
 
             elif event.type == "lineage.converged":
@@ -176,15 +207,18 @@ class LineageProjector:
             }
         )
 
-    def find_resume_point(self, events: list[BaseEvent]) -> tuple[int, GenerationPhase]:
+    def find_resume_point(self, events: list[BaseEvent]) -> tuple[int, GenerationPhase, str | None]:
         """Determine where to resume from event history.
 
         Returns:
-            Tuple of (generation_number, last_completed_phase).
-            Returns (0, COMPLETED) if no generations started.
+            Tuple of (generation_number, terminal_phase, last_completed_phase_within_gen).
+            - last_completed_phase_within_gen is set for INTERRUPTED generations
+              to enable phase-level resume (skip already-completed phases).
+            Returns (0, COMPLETED, None) if no generations started.
         """
         last_gen = 0
         last_phase = GenerationPhase.COMPLETED
+        interrupted_phase: str | None = None
 
         for event in events:
             if event.type == "lineage.generation.started":
@@ -197,6 +231,7 @@ class LineageProjector:
                 if gen > last_gen:
                     last_gen = gen
                     last_phase = phase
+                    interrupted_phase = None
 
             elif event.type == "lineage.generation.phase_changed":
                 gen = event.data.get("generation_number", 0)
@@ -208,17 +243,34 @@ class LineageProjector:
                 if gen >= last_gen:
                     last_gen = gen
                     last_phase = phase
+                    interrupted_phase = None
 
             elif event.type == "lineage.generation.completed":
                 gen = event.data.get("generation_number", 0)
                 if gen >= last_gen:
                     last_gen = gen
                     last_phase = GenerationPhase.COMPLETED
+                    interrupted_phase = None
 
             elif event.type == "lineage.generation.failed":
                 gen = event.data.get("generation_number", 0)
                 if gen >= last_gen:
                     last_gen = gen
                     last_phase = GenerationPhase.FAILED
+                    interrupted_phase = None
 
-        return last_gen, last_phase
+            elif event.type == "lineage.generation.interrupted":
+                gen = event.data.get("generation_number", 0)
+                if gen >= last_gen:
+                    last_gen = gen
+                    last_phase = GenerationPhase.INTERRUPTED
+                    interrupted_phase = event.data.get("last_completed_phase")
+
+            elif event.type == "lineage.rewound":
+                target_gen = event.data.get("to_generation", 0)
+                if target_gen > 0:
+                    last_gen = target_gen
+                    last_phase = GenerationPhase.COMPLETED
+                    interrupted_phase = None
+
+        return last_gen, last_phase, interrupted_phase

@@ -130,6 +130,29 @@ def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None)
     return f"(ambiguity: {score.overall_score:.2f}) {question}"
 
 
+def _ambiguity_warning_for_failed_question(score: AmbiguityScore | None) -> str:
+    """Build an explicit ambiguity warning for question-generation failures.
+
+    When question generation fails mid-interview, the main session must NOT
+    assume the interview is complete.
+    See: https://github.com/Q00/ouroboros/issues/210
+    """
+    if score is None:
+        return (
+            "\n\nWARNING: Ambiguity score is unknown. "
+            "The interview is NOT complete — do NOT generate a Seed. "
+            "Resume the interview to continue clarifying requirements."
+        )
+    if not score.is_ready_for_seed:
+        return (
+            f"\n\nWARNING: Current ambiguity is {score.overall_score:.2f} "
+            f"(threshold: {AMBIGUITY_THRESHOLD}). "
+            f"The interview is NOT complete — do NOT generate a Seed. "
+            f"Resume the interview to continue clarifying requirements."
+        )
+    return ""
+
+
 def _load_state_ambiguity_score(state: InterviewState) -> AmbiguityScore | None:
     """Rebuild a stored ambiguity snapshot from interview state."""
     if state.ambiguity_score is None:
@@ -318,36 +341,44 @@ class GenerateSeedHandler:
 
             state: InterviewState = state_result.value
 
-            # Use provided ambiguity score, a persisted snapshot, or compute on demand.
+            # Always use a trusted ambiguity score: persisted snapshot or
+            # freshly computed.  The caller-supplied ``ambiguity_score``
+            # parameter is intentionally ignored to prevent LLM callers
+            # from overriding the gate with an arbitrary low value.
+            # See: https://github.com/Q00/ouroboros/issues/210
             if ambiguity_score_value is not None:
-                ambiguity_score = self._build_ambiguity_score_from_value(ambiguity_score_value)
-            else:
-                ambiguity_score = self._load_stored_ambiguity_score(state)
-                if ambiguity_score is None:
-                    scorer = AmbiguityScorer(
-                        llm_adapter=llm_adapter,
-                    )
-                    score_result = await scorer.score(state)
-                    if score_result.is_err:
-                        return Result.err(
-                            MCPToolError(
-                                f"Failed to calculate ambiguity: {score_result.error}",
-                                tool_name="ouroboros_generate_seed",
-                            )
-                        )
+                log.warning(
+                    "mcp.tool.generate_seed.ignoring_caller_ambiguity_score",
+                    session_id=session_id,
+                    caller_value=ambiguity_score_value,
+                )
 
-                    ambiguity_score = score_result.value
-                    state.store_ambiguity(
-                        score=ambiguity_score.overall_score,
-                        breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
-                    )
-                    save_result = await interview_engine.save_state(state)
-                    if save_result.is_err:
-                        log.warning(
-                            "mcp.tool.generate_seed.persist_ambiguity_failed",
-                            session_id=session_id,
-                            error=str(save_result.error),
+            ambiguity_score = self._load_stored_ambiguity_score(state)
+            if ambiguity_score is None:
+                scorer = AmbiguityScorer(
+                    llm_adapter=llm_adapter,
+                )
+                score_result = await scorer.score(state)
+                if score_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            f"Failed to calculate ambiguity: {score_result.error}",
+                            tool_name="ouroboros_generate_seed",
                         )
+                    )
+
+                ambiguity_score = score_result.value
+                state.store_ambiguity(
+                    score=ambiguity_score.overall_score,
+                    breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
+                )
+                save_result = await interview_engine.save_state(state)
+                if save_result.is_err:
+                    log.warning(
+                        "mcp.tool.generate_seed.persist_ambiguity_failed",
+                        session_id=session_id,
+                        error=str(save_result.error),
+                    )
 
             # Use injected or create seed generator
             generator = self.seed_generator or SeedGenerator(
@@ -675,15 +706,24 @@ class InterviewHandler:
                     if "empty response" in error_msg.lower():
                         # Persist state so the session can actually be resumed
                         await engine.save_state(state)
+                        amb_warning = _ambiguity_warning_for_failed_question(live_score)
+                        stderr_info = ""
+                        err = question_result.error
+                        if hasattr(err, "details") and isinstance(err.details, dict):
+                            stderr = err.details.get("stderr", "")
+                            if stderr:
+                                stderr_info = f"\n\nDiagnostics (stderr):\n{stderr}"
                         return Result.ok(
                             MCPToolResult(
                                 content=(
                                     MCPContentItem(
                                         type=ContentType.TEXT,
                                         text=(
-                                            f"Interview started but question generation failed after retries. "
+                                            f"Question generation failed (empty response from Agent SDK). "
                                             f"Session ID: {state.interview_id}\n\n"
                                             f'Resume with: session_id="{state.interview_id}"'
+                                            f"{amb_warning}"
+                                            f"{stderr_info}"
                                         ),
                                     ),
                                 ),
@@ -891,15 +931,25 @@ class InterviewHandler:
                         )
                     )
                     if "empty response" in error_msg.lower():
+                        amb_warning = _ambiguity_warning_for_failed_question(live_score)
+                        # Extract stderr from ProviderError details for diagnostics
+                        stderr_info = ""
+                        err = question_result.error
+                        if hasattr(err, "details") and isinstance(err.details, dict):
+                            stderr = err.details.get("stderr", "")
+                            if stderr:
+                                stderr_info = f"\n\nDiagnostics (stderr):\n{stderr}"
                         return Result.ok(
                             MCPToolResult(
                                 content=(
                                     MCPContentItem(
                                         type=ContentType.TEXT,
                                         text=(
-                                            f"Question generation failed after retries. "
+                                            f"Question generation failed (empty response from Agent SDK). "
                                             f"Session ID: {session_id}\n\n"
                                             f'Resume with: session_id="{session_id}"'
+                                            f"{amb_warning}"
+                                            f"{stderr_info}"
                                         ),
                                     ),
                                 ),

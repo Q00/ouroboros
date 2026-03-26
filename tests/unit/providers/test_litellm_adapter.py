@@ -157,6 +157,26 @@ class TestLiteLLMAdapterGetApiKey:
 
         assert result == "cred-openrouter-key"
 
+    def test_placeholder_credentials_are_treated_as_unset(self) -> None:
+        """Template credentials.yaml placeholders should not be treated as real API keys."""
+        adapter = LiteLLMAdapter()
+        credentials = CredentialsConfig(
+            providers={
+                "openrouter": ProviderCredentials(
+                    api_key="YOUR_OPENROUTER_API_KEY",
+                    base_url="https://openrouter.example/v1",
+                )
+            }
+        )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(adapter, "_load_credentials_config", return_value=credentials),
+        ):
+            result = adapter._get_api_key("openrouter/openai/gpt-4")
+
+        assert result is None
+
 
 class TestLiteLLMAdapterBuildCompletionKwargs:
     """Test LiteLLMAdapter._build_completion_kwargs method."""

@@ -1,7 +1,7 @@
 """Unit tests for evolve_step() — single-generation stepping API."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -22,6 +22,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import WorktreeError
 from ouroboros.events.lineage import lineage_created, lineage_generation_completed
 from ouroboros.evolution.convergence import ConvergenceSignal
 from ouroboros.evolution.loop import (
@@ -180,7 +181,8 @@ class TestStepTypes:
         assert StepAction.STAGNATED == "stagnated"
         assert StepAction.EXHAUSTED == "exhausted"
         assert StepAction.FAILED == "failed"
-        assert len(StepAction) == 5
+        assert StepAction.INTERRUPTED == "interrupted"
+        assert len(StepAction) == 6
 
     def test_step_result_is_frozen(self) -> None:
         """StepResult is frozen dataclass."""
@@ -718,13 +720,17 @@ class TestEvolveStepHandler:
 
         import yaml
 
-        result = await handler.handle(
-            {
-                "lineage_id": "lin_handler_test",
-                "seed_content": yaml.dump(seed.to_dict()),
-                "skip_qa": True,
-            }
-        )
+        with patch(
+            "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+            return_value=None,
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_handler_test",
+                    "seed_content": yaml.dump(seed.to_dict()),
+                    "skip_qa": True,
+                }
+            )
 
         assert result.is_ok
         assert "Generation 1" in result.value.text_content
@@ -761,6 +767,76 @@ class TestEvolveStepHandler:
 
         assert result.is_ok
         assert loop.get_project_dir() is None
+
+    @pytest.mark.asyncio
+    async def test_handler_without_project_dir_succeeds_outside_git_repo(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Handler should still run when server cwd is not a git repo."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        monkeypatch.chdir(tmp_path)
+
+        store = await create_event_store()
+        seed = make_seed()
+
+        gen_result = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        loop = make_loop(store, gen_result=gen_result)
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+
+        import yaml
+
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_handler_non_git_cwd",
+                "seed_content": yaml.dump(seed.to_dict()),
+                "skip_qa": True,
+            }
+        )
+
+        assert result.is_ok
+        assert loop.get_project_dir() is None
+
+    @pytest.mark.asyncio
+    async def test_handler_returns_task_workspace_error_for_invalid_lineage_id(self) -> None:
+        """Invalid worktree-backed lineage IDs should fail as structured task workspace errors."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed()
+        gen_result = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        loop = make_loop(store, gen_result=gen_result)
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+
+        with (
+            patch("ouroboros.mcp.tools.definitions.is_git_repo", return_value=True),
+            patch(
+                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                side_effect=WorktreeError("Invalid durable task identifier for git worktree"),
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "lineage_id": "bad id",
+                    "project_dir": "/tmp/test-project",
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_err
+        assert "Task workspace error" in str(result.error)
 
     @pytest.mark.asyncio
     async def test_handler_no_loop_returns_error(self) -> None:

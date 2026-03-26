@@ -53,6 +53,7 @@ def lineage_generation_completed(
     wonder_questions: list[str] | None = None,
     seed_json: str | None = None,
     execution_output: str | None = None,
+    parent_seed_id: str | None = None,
 ) -> BaseEvent:
     """Create event when a generation completes successfully."""
     data = {
@@ -62,6 +63,8 @@ def lineage_generation_completed(
         "evaluation_summary": evaluation_summary,
         "wonder_questions": wonder_questions or [],
     }
+    if parent_seed_id is not None:
+        data["parent_seed_id"] = parent_seed_id
     if seed_json is not None:
         data["seed_json"] = seed_json
     if execution_output is not None:
@@ -104,6 +107,42 @@ def lineage_generation_failed(
             "phase": phase,
             "error": error,
         },
+    )
+
+
+def lineage_generation_interrupted(
+    lineage_id: str,
+    generation_number: int,
+    last_completed_phase: str | None = None,
+    partial_state: dict | None = None,
+    seed_json: str | None = None,
+) -> BaseEvent:
+    """Create event when a generation is gracefully interrupted by SIGINT.
+
+    Distinct from 'failed' — carries partial results and the last phase
+    that completed successfully, enabling phase-level resume.
+
+    Args:
+        last_completed_phase: Must be a valid GenerationPhase value
+            (wondering, reflecting, seeding, executing) or None if
+            no phase completed before interruption.
+        seed_json: JSON-serialized current seed at time of interruption,
+            enabling resume with the evolved seed (not the stale parent).
+    """
+    data: dict = {
+        "generation_number": generation_number,
+    }
+    if last_completed_phase is not None:
+        data["last_completed_phase"] = last_completed_phase
+    if partial_state:
+        data["partial_state"] = partial_state
+    if seed_json:
+        data["seed_json"] = seed_json
+    return BaseEvent(
+        type="lineage.generation.interrupted",
+        aggregate_type="lineage",
+        aggregate_id=lineage_id,
+        data=data,
     )
 
 

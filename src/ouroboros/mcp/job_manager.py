@@ -24,6 +24,7 @@ class JobStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +54,12 @@ class JobSnapshot:
 
     @property
     def is_terminal(self) -> bool:
-        return self.status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+        return self.status in {
+            JobStatus.COMPLETED,
+            JobStatus.FAILED,
+            JobStatus.CANCELLED,
+            JobStatus.INTERRUPTED,
+        }
 
 
 def _safe_meta(value: Any) -> Any:
@@ -154,14 +160,23 @@ class JobManager:
             if snapshot.status == JobStatus.CANCEL_REQUESTED:
                 terminal_type = "mcp.job.cancelled"
                 terminal_status = JobStatus.CANCELLED
+            elif getattr(result, "meta", {}).get("action") == "interrupted":
+                terminal_type = "mcp.job.interrupted"
+                terminal_status = JobStatus.INTERRUPTED
+            elif getattr(result, "is_error", False):
+                terminal_type = "mcp.job.failed"
+                terminal_status = JobStatus.FAILED
             await self._append_event(
                 terminal_type,
                 job_id,
                 {
                     "status": terminal_status.value,
-                    "message": "Job complete"
-                    if terminal_status == JobStatus.COMPLETED
-                    else "Job cancelled",
+                    "message": {
+                        JobStatus.COMPLETED: "Job complete",
+                        JobStatus.CANCELLED: "Job cancelled",
+                        JobStatus.INTERRUPTED: "Job interrupted",
+                        JobStatus.FAILED: "Job failed",
+                    }.get(terminal_status, "Job complete"),
                     "result_text": getattr(result, "text_content", str(result))[:20_000],
                     "result_meta": _safe_meta(getattr(result, "meta", {})),
                     "is_error": bool(getattr(result, "is_error", False)),
@@ -276,6 +291,10 @@ class JobManager:
                     return f"Generation {gen} completed"
                 if latest.type == "lineage.generation.failed":
                     return f"Generation {gen} failed | {phase}"
+                if latest.type == "lineage.generation.interrupted":
+                    gen = data.get("generation_number", "?")
+                    last_phase = data.get("last_completed_phase", "unknown")
+                    return f"Generation {gen} interrupted (last phase: {last_phase})"
                 if latest.type in {
                     "lineage.converged",
                     "lineage.stagnated",

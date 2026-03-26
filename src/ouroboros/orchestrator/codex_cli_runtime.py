@@ -73,6 +73,7 @@ class CodexCliRuntime:
 
     _runtime_handle_backend = "codex_cli"
     _runtime_backend = "codex"
+    _requires_memory_gate = True
     _provider_name = "codex_cli"
     _runtime_error_type = "CodexCliError"
     _log_namespace = "codex_cli_runtime"

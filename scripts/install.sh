@@ -184,7 +184,7 @@ if command -v claude &>/dev/null; then
 
   # MCP command matches the installer that actually ran in step 3
   if [ "$INSTALL_METHOD" = "uv" ]; then
-    OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"],"timeout":600}'
+    OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[claude]","ouroboros","mcp","serve"],"timeout":600}'
   elif [ "$INSTALL_METHOD" = "pipx" ]; then
     OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"],"timeout":600}'
   else

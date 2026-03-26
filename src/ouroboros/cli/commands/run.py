@@ -8,6 +8,7 @@ import asyncio
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
+from uuid import uuid4
 
 import click
 import typer
@@ -21,6 +22,12 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
+from ouroboros.core.worktree import (
+    TaskWorkspace,
+    WorktreeError,
+    maybe_prepare_task_workspace,
+    maybe_restore_task_workspace,
+)
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 
 
@@ -188,6 +195,7 @@ async def _run_orchestrator(
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
+    from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
 
     # Load seed
@@ -219,9 +227,42 @@ async def _run_orchestrator(
     await event_store.initialize()
 
     project_dir = _resolve_cli_project_dir(seed, seed_file)
+    session_repo = SessionRepository(event_store)
+    workspace: TaskWorkspace | None = None
+    execution_id: str | None = None
+    session_id_for_run: str | None = None
+
+    try:
+        if resume_session:
+            reconstructed = await session_repo.reconstruct_session(resume_session)
+            if reconstructed.is_err:
+                print_error(f"Failed to reconstruct session: {reconstructed.error}")
+                raise typer.Exit(1)
+            persisted = TaskWorkspace.from_progress_dict(
+                reconstructed.value.progress.get("workspace")
+            )
+            workspace = maybe_restore_task_workspace(
+                resume_session,
+                persisted,
+                fallback_source_cwd=project_dir,
+            )
+            session_id_for_run = resume_session
+            execution_id = reconstructed.value.execution_id
+        else:
+            session_id_for_run = f"orch_{uuid4().hex[:12]}"
+            execution_id = f"exec_{uuid4().hex[:12]}"
+            workspace = maybe_prepare_task_workspace(project_dir, session_id_for_run)
+    except WorktreeError as e:
+        print_error(f"Task workspace error: {e.message}")
+        raise typer.Exit(1) from e
+
+    if workspace is not None:
+        print_info(f"Task worktree: {workspace.worktree_path}")
+        print_info(f"Task branch: {workspace.branch}")
+
     adapter = create_agent_runtime(
         backend=runtime_backend,
-        cwd=project_dir,
+        cwd=Path(workspace.effective_cwd) if workspace else project_dir,
     )
     runner = OrchestratorRunner(
         adapter,
@@ -230,6 +271,7 @@ async def _run_orchestrator(
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
         debug=debug,
+        task_workspace=workspace,
     )
 
     # Execute
@@ -245,7 +287,12 @@ async def _run_orchestrator(
                 print_info("Parallel mode: independent ACs will run concurrently")
             else:
                 print_info("Sequential mode: ACs will run one at a time")
-            result = await runner.execute_seed(seed, parallel=parallel)
+            result = await runner.execute_seed(
+                seed,
+                execution_id=execution_id,
+                session_id=session_id_for_run,
+                parallel=parallel,
+            )
 
         # Handle result
         if result.is_ok:
@@ -264,11 +311,14 @@ async def _run_orchestrator(
                     qa_handler = QAHandler()
                     quality_bar = _derive_quality_bar(seed)
                     execution_artifact = _get_verification_artifact(res.summary, res.final_message)
+                    verification_working_dir = (
+                        Path(workspace.effective_cwd) if workspace is not None else project_dir
+                    )
                     try:
                         verification = await build_verification_artifacts(
                             res.execution_id,
                             execution_artifact,
-                            project_dir,
+                            verification_working_dir,
                         )
                         artifact = verification.artifact
                         reference = verification.reference

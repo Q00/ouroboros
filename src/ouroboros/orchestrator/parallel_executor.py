@@ -359,6 +359,7 @@ class ParallelACExecutor:
         max_concurrent: int = 3,
         checkpoint_store: Any | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
+        task_cwd: str | None = None,
     ):
         """Initialize executor.
 
@@ -371,15 +372,18 @@ class ParallelACExecutor:
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions.
+            task_cwd: Explicit working directory override for task execution metadata.
         """
         self._adapter = adapter
         self._event_store = event_store
         self._console = console or Console()
         self._enable_decomposition = enable_decomposition
         self._inherited_runtime_handle = inherited_runtime_handle
+        self._task_cwd = task_cwd
         self._coordinator = LevelCoordinator(
             adapter,
             inherited_runtime_handle=inherited_runtime_handle,
+            task_cwd=task_cwd,
         )
         self._semaphore = anyio.Semaphore(max_concurrent)
         self._ac_runtime_handles: dict[str, RuntimeHandle] = {}
@@ -662,7 +666,7 @@ class ParallelACExecutor:
         if not backend:
             return None
 
-        cwd = self._adapter.working_directory
+        cwd = self._task_cwd or self._adapter.working_directory
         approval_mode = self._adapter.permission_mode
         metadata: dict[str, Any] = dict(seeded_handle.metadata) if seeded_handle is not None else {}
         metadata.update(runtime_identity.to_metadata())
@@ -2331,6 +2335,12 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
     async def _wait_for_memory(self, label: str) -> None:
         """Block until system has enough free memory to spawn a subprocess."""
+        requires_memory_gate = getattr(self._adapter, "_requires_memory_gate", None)
+        if not isinstance(requires_memory_gate, bool):
+            requires_memory_gate = False
+        if not requires_memory_gate:
+            return
+
         elapsed = 0.0
         while elapsed < _MEMORY_WAIT_MAX_SECONDS:
             available_gb = _get_available_memory_gb()
@@ -2661,7 +2671,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         # Scan the requested runtime workspace so prompts stay aligned with the actual task cwd.
         import os
 
-        cwd = self._adapter.working_directory
+        cwd = self._task_cwd or self._adapter.working_directory
         if not isinstance(cwd, str) or not cwd:
             cwd = os.getcwd()
         try:
