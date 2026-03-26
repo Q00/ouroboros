@@ -41,6 +41,22 @@ def _save_config(data: dict, path: Path) -> None:
     path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
 
+def _resolve_cli_path(data: dict) -> str | None:
+    """Return the active CLI path based on the current runtime backend."""
+    backend = data.get("orchestrator", {}).get("runtime_backend", "claude")
+    if backend == "codex":
+        return data.get("orchestrator", {}).get("codex_cli_path")
+    return data.get("orchestrator", {}).get("cli_path")
+
+
+def _resolve_db_path(data: dict, config_path: Path) -> str:
+    """Return the actual database path from config or default."""
+    db_path = data.get("persistence", {}).get("database_path")
+    if db_path:
+        return str(db_path)
+    return str(config_path.parent / "ouroboros.db")
+
+
 @app.command()
 def show(
     section: Annotated[
@@ -72,8 +88,8 @@ def show(
             "config_path": str(config_path),
             "runtime_backend": data.get("orchestrator", {}).get("runtime_backend", "?"),
             "llm_backend": data.get("llm", {}).get("backend", "?"),
-            "cli_path": data.get("orchestrator", {}).get("cli_path", "?"),
-            "database": str(config_path.parent / "ouroboros.db"),
+            "cli_path": _resolve_cli_path(data) or "?",
+            "database": _resolve_db_path(data, config_path),
             "log_level": data.get("logging", {}).get("level", "info"),
         }
         table = create_key_value_table(config_summary, "Current Configuration")
@@ -91,6 +107,8 @@ def backend(
 
     Without arguments, shows the current backend.
     With an argument, switches to the specified backend.
+    Delegates to the full setup flow to ensure all side effects
+    (MCP registration, Codex artifacts) are applied consistently.
 
     [dim]Examples:[/dim]
     [dim]    ouroboros config backend           # show current[/dim]
@@ -103,9 +121,7 @@ def backend(
     if new_backend is None:
         # Show current backend
         console.print(f"\n[bold]Current backend:[/bold] [cyan]{current}[/cyan]")
-        cli_path = data.get("orchestrator", {}).get("cli_path") or data.get("orchestrator", {}).get(
-            "codex_cli_path"
-        )
+        cli_path = _resolve_cli_path(data)
         if cli_path:
             console.print(f"[bold]CLI path:[/bold]        [dim]{cli_path}[/dim]")
         console.print("\n[dim]Switch with: ouroboros config backend <claude|codex>[/dim]\n")
@@ -130,27 +146,17 @@ def backend(
         print_error(f"{cli_name} CLI not found in PATH.\nInstall it first, then retry.")
         raise typer.Exit(1)
 
-    # Update config
-    data.setdefault("orchestrator", {})
-    data["orchestrator"]["runtime_backend"] = new_backend
-    data.setdefault("llm", {})
-    data["llm"]["backend"] = new_backend
+    # Delegate to the full setup flow for the chosen backend.
+    # This ensures all side effects (MCP registration, Codex artifacts,
+    # config writes) are applied consistently — no partial state.
+    from ouroboros.cli.commands.setup import _setup_claude, _setup_codex
 
     if new_backend == "claude":
-        data["orchestrator"]["cli_path"] = cli_path
+        _setup_claude(cli_path)
     elif new_backend == "codex":
-        data["orchestrator"]["codex_cli_path"] = cli_path
-
-    _save_config(data, config_path)
-
-    # Re-register MCP for the new backend
-    if new_backend == "codex":
-        from ouroboros.cli.commands.setup import _register_codex_mcp_server
-
-        _register_codex_mcp_server()
+        _setup_codex(cli_path)
 
     print_success(f"Switched backend: [bold]{current}[/] → [bold]{new_backend}[/]")
-    console.print(f"[dim]CLI: {cli_path}[/dim]\n")
 
 
 @app.command()
@@ -178,6 +184,7 @@ def set_value(
     """Set a configuration value.
 
     Use dot notation for nested keys (e.g., orchestrator.runtime_backend).
+    Values are validated by reloading the full config after writing.
 
     [dim]Examples:[/dim]
     [dim]    ouroboros config set logging.level debug[/dim]
@@ -215,6 +222,21 @@ def set_value(
     target[keys[-1]] = parsed_value
     _save_config(data, config_path)
 
+    # Validate the written config loads without errors
+    try:
+        from ouroboros.config.loader import load_config
+
+        load_config()
+    except Exception as exc:
+        # Rollback: restore old value or remove key
+        if old_value is not None:
+            target[keys[-1]] = old_value
+        else:
+            del target[keys[-1]]
+        _save_config(data, config_path)
+        print_error(f"Invalid value — rolled back.\n{exc}")
+        raise typer.Exit(1) from None
+
     if old_value is not None:
         print_success(f"{key}: {old_value} → {parsed_value}")
     else:
@@ -226,6 +248,7 @@ def validate() -> None:
     """Validate current configuration.
 
     Checks configuration files for errors and missing required values.
+    Exits with status 1 if issues are found (scriptable).
     """
     data, config_path = _load_config()
 
@@ -248,13 +271,22 @@ def validate() -> None:
         if cli and not Path(cli).exists():
             issues.append(f"Codex CLI path does not exist: {cli}")
 
+    # Try loading config through the validated schema
+    try:
+        from ouroboros.config.loader import load_config
+
+        load_config()
+    except Exception as exc:
+        issues.append(f"Schema validation failed: {exc}")
+
     if issues:
         console.print("\n[bold red]Issues found:[/bold red]")
         for issue in issues:
             console.print(f"  [red]![/red] {issue}")
         console.print()
-    else:
-        print_success("Configuration is valid.")
+        raise typer.Exit(1)
+
+    print_success("Configuration is valid.")
 
 
 __all__ = ["app"]
