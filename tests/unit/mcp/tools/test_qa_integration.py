@@ -524,7 +524,7 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ) as mock_verification,
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(
@@ -575,7 +575,7 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ) as mock_verification,
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(
@@ -611,7 +611,7 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(
@@ -671,7 +671,7 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(
@@ -705,7 +705,7 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ),
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(
@@ -738,7 +738,7 @@ class TestEvolveStepHandlerQA:
                 return_value=FAKE_VERIFICATION_ARTIFACTS,
             ) as mock_verification,
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 return_value=None,
             ),
             patch(

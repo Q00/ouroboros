@@ -721,7 +721,7 @@ class TestEvolveStepHandler:
         import yaml
 
         with patch(
-            "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+            "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
             return_value=None,
         ):
             result = await handler.handle(
@@ -821,9 +821,9 @@ class TestEvolveStepHandler:
         handler = EvolveStepHandler(evolutionary_loop=loop)
 
         with (
-            patch("ouroboros.mcp.tools.definitions.is_git_repo", return_value=True),
+            patch("ouroboros.mcp.tools.evolution_handlers.is_git_repo", return_value=True),
             patch(
-                "ouroboros.mcp.tools.definitions.maybe_restore_task_workspace",
+                "ouroboros.mcp.tools.evolution_handlers.maybe_restore_task_workspace",
                 side_effect=WorktreeError("Invalid durable task identifier for git worktree"),
             ),
         ):

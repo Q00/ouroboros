@@ -298,8 +298,11 @@ def _pid_is_alive(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
-    except OSError:
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        # Process exists but we lack permission to signal it — still alive.
+        return True
     return True
 
 
