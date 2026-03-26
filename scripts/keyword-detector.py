@@ -23,7 +23,6 @@ SETUP_BYPASS_SKILLS = [
     "/ouroboros:setup",
     "/ouroboros:help",
     "/ouroboros:qa",
-    "/ouroboros:cancel",
 ]
 
 # Keyword → skill mapping
@@ -46,7 +45,7 @@ KEYWORD_MAP = [
     {"patterns": ["ooo qa", "qa check", "quality check"], "skill": "/ouroboros:qa"},
     {"patterns": ["ooo cancel", "ooo abort"], "skill": "/ouroboros:cancel"},
     {"patterns": ["ooo update", "ooo upgrade"], "skill": "/ouroboros:update"},
-    {"patterns": ["ooo brownfield", "ooo scan"], "skill": "/ouroboros:brownfield"},
+    {"patterns": ["ooo brownfield"], "skill": "/ouroboros:brownfield"},
     # Natural language triggers
     # PM triggers must precede generic interview to avoid "pm interview" being shadowed
     {
@@ -126,10 +125,8 @@ KEYWORD_MAP = [
     },
     {
         "patterns": [
-            "scan repo",
             "brownfield defaults",
-            "existing codebase",
-            "scan codebase",
+            "brownfield scan",
         ],
         "skill": "/ouroboros:brownfield",
     },

@@ -76,7 +76,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | "qa check", "quality check" | `ooo qa` |
 | "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
 | "update ouroboros", "upgrade ouroboros" | `ooo update` |
-| "scan repo", "brownfield defaults", "existing codebase", "scan codebase" | `ooo brownfield` |
+| "brownfield defaults", "brownfield scan" | `ooo brownfield` |
 
 ### Loop Triggers
 
