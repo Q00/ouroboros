@@ -416,12 +416,6 @@ class ExecuteSeedHandler:
                         )
                     tracker = prepared.value
 
-                qa_working_dir = (
-                    Path(workspace.effective_cwd)
-                    if workspace is not None
-                    else verification_working_dir
-                )
-
                 # Fire-and-forget: launch execution in a background task and
                 # return the session/execution IDs immediately so the MCP
                 # client is not blocked by Codex's tool-call timeout.
@@ -479,7 +473,7 @@ class ExecuteSeedHandler:
                                 verification = await build_verification_artifacts(
                                     result.value.execution_id,
                                     execution_artifact,
-                                    qa_working_dir,
+                                    verification_working_dir,
                                 )
                                 artifact = verification.artifact
                                 reference = verification.reference
