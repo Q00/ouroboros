@@ -54,6 +54,17 @@ class TestDetectLanguage:
         preset = detect_language(tmp_path)
         assert preset is not None
         assert preset.name == "java-maven"
+        assert preset.build_command == ("mvn", "clean", "compile")
+        assert preset.test_command == ("mvn", "test")
+
+    def test_detect_java_maven_uses_wrapper_when_present(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").touch()
+        (tmp_path / "mvnw").touch()
+        preset = detect_language(tmp_path)
+        assert preset is not None
+        assert preset.name == "java-maven"
+        assert preset.build_command == ("./mvnw", "clean", "compile")
+        assert preset.test_command == ("./mvnw", "test")
 
     def test_detect_node_npm(self, tmp_path: Path) -> None:
         (tmp_path / "package.json").touch()
@@ -162,6 +173,9 @@ class TestParseCommand:
     def test_allowed_executable(self) -> None:
         assert _parse_command("cargo test") == ("cargo", "test")
 
+    def test_allowed_maven_wrapper_executable(self) -> None:
+        assert _parse_command("./mvnw test") == ("./mvnw", "test")
+
 
 class TestBuildMechanicalConfig:
     """Tests for build_mechanical_config()."""
@@ -251,6 +265,13 @@ class TestBuildMechanicalConfig:
         assert config.static_command is None
         assert config.coverage_command is None
         assert config.working_dir == tmp_path
+
+    def test_auto_detect_java_maven_prefers_wrapper(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").touch()
+        (tmp_path / "mvnw").touch()
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command == ("./mvnw", "clean", "compile")
+        assert config.test_command == ("./mvnw", "test")
 
     def test_no_toml_file_no_error(self, tmp_path: Path) -> None:
         """Missing .ouroboros/mechanical.toml is not an error."""

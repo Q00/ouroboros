@@ -9,7 +9,7 @@ Usage:
     verifier = MechanicalVerifier(config)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import shlex
@@ -127,6 +127,8 @@ LANGUAGE_PRESETS: dict[str, LanguagePreset] = {
     ),
 }
 
+_MAVEN_WRAPPER = "./mvnw"
+
 # Ordered list of (marker_file, preset_key) for detection priority.
 # More specific markers come first (e.g. uv.lock before pyproject.toml).
 _DETECTION_RULES: list[tuple[str, str]] = [
@@ -169,7 +171,14 @@ def detect_language(working_dir: Path) -> LanguagePreset | None:
     """
     for marker_file, preset_key in _DETECTION_RULES:
         if (working_dir / marker_file).exists():
-            return LANGUAGE_PRESETS[preset_key]
+            preset = LANGUAGE_PRESETS[preset_key]
+            if preset_key == "java-maven" and (working_dir / "mvnw").exists():
+                return replace(
+                    preset,
+                    build_command=(_MAVEN_WRAPPER, "clean", "compile"),
+                    test_command=(_MAVEN_WRAPPER, "test"),
+                )
+            return preset
     return None
 
 
@@ -237,6 +246,8 @@ _ALLOWED_EXECUTABLES: frozenset[str] = frozenset(
         "cmake",
         "gradle",
         "mvn",
+        "mvnw",
+        "mvnw.cmd",
         "ant",
         # Other languages
         "cabal",
