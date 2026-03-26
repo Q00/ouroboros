@@ -329,14 +329,14 @@ class TestClaudeSetup:
         assert entry["command"] == expected_cmd
         assert entry["args"] == expected_args
 
-    def test_setup_claude_preserves_non_uvx_command(self, tmp_path: Path) -> None:
-        """Custom (non-uvx) MCP command should not have its args overwritten."""
+    def test_setup_claude_preserves_custom_command(self, tmp_path: Path) -> None:
+        """Custom (non-standard) MCP command should not be overwritten."""
         config_dir = tmp_path / ".ouroboros"
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
         config_path.write_text("{}", encoding="utf-8")
 
-        custom_args = ["-m", "ouroboros", "mcp", "serve"]
+        custom_args = ["run", "--rm", "ouroboros-mcp"]
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         claude_config = claude_dir / "mcp.json"
@@ -345,7 +345,7 @@ class TestClaudeSetup:
                 {
                     "mcpServers": {
                         "ouroboros": {
-                            "command": "python3",
+                            "command": "docker",
                             "args": custom_args,
                         }
                     }
@@ -361,9 +361,49 @@ class TestClaudeSetup:
             setup_cmd._setup_claude("/usr/local/bin/claude")
 
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
-        # Non-uvx command should be left untouched
-        assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "python3"
+        # Custom command (docker) should be left untouched
+        assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "docker"
         assert claude_mcp["mcpServers"]["ouroboros"]["args"] == custom_args
+
+    def test_setup_claude_updates_stale_standard_entry(self, tmp_path: Path) -> None:
+        """Stale standard entry (e.g. python3) should be updated to detected method."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        claude_config = claude_dir / "mcp.json"
+        claude_config.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "ouroboros": {
+                            "command": "python3",
+                            "args": ["-m", "ouroboros", "mcp", "serve"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Simulate uvx now being available
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
+            ),
+        ):
+            setup_cmd._setup_claude("/usr/local/bin/claude")
+
+        claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
+        # Should be updated from python3 to uvx
+        assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "uvx"
+        assert "ouroboros-ai[claude]" in str(claude_mcp["mcpServers"]["ouroboros"]["args"])
 
     def test_setup_claude_skips_write_when_args_already_current(self, tmp_path: Path) -> None:
         """No file write when args are already up to date."""

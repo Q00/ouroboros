@@ -42,16 +42,29 @@ _CLAUDE_UVX_ARGS: list[str] = [
 ]
 
 
-def _detect_mcp_entry() -> dict[str, object]:
+def _detect_mcp_entry() -> dict[str, object] | None:
     """Build the correct MCP entry based on how ouroboros is installed.
 
-    Priority: uvx > ouroboros binary > python3 -m ouroboros.
+    Priority: uvx > ouroboros binary > python3 -m ouroboros (verified).
+    Returns None if no working method is found.
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
         return {"command": "uvx", "args": list(_CLAUDE_UVX_ARGS)}
     if shutil.which("ouroboros"):
         return {"command": "ouroboros", "args": ["mcp", "serve"]}
+    # Only use python3 fallback if ouroboros is actually importable
+    import subprocess
+
+    try:
+        subprocess.run(
+            ["python3", "-c", "import ouroboros"],
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return None
     return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
 
 
@@ -72,10 +85,17 @@ def _ensure_claude_mcp_entry() -> None:
     mcp_data.setdefault("mcpServers", {})
 
     existing = mcp_data["mcpServers"].get("ouroboros")
+    detected = _detect_mcp_entry()
     needs_write = False
 
     if existing is None:
-        mcp_data["mcpServers"]["ouroboros"] = _detect_mcp_entry()
+        if detected is None:
+            print_warning(
+                "Cannot register MCP server: no working ouroboros installation found.\n"
+                "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+            )
+            return
+        mcp_data["mcpServers"]["ouroboros"] = detected
         needs_write = True
         print_success("Registered MCP server in ~/.claude/mcp.json")
     else:
@@ -85,11 +105,19 @@ def _ensure_claude_mcp_entry() -> None:
             needs_write = True
             print_info("Removed legacy MCP timeout override.")
 
-        # Ensure uvx args match the canonical form (fixes stale ouroboros-ai without [claude])
-        if existing.get("command") == "uvx" and existing.get("args") != _CLAUDE_UVX_ARGS:
-            existing["args"] = list(_CLAUDE_UVX_ARGS)
-            needs_write = True
-            print_info("Updated MCP server args to latest.")
+        # Update entry to match currently detected install method, but only
+        # for known standard commands. Custom entries (docker, nix, etc.) are
+        # left untouched so we don't break user-managed configurations.
+        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python"}
+        if detected is not None and existing.get("command") in _KNOWN_COMMANDS:
+            if (
+                existing.get("command") != detected["command"]
+                or existing.get("args") != detected["args"]
+            ):
+                existing["command"] = detected["command"]
+                existing["args"] = detected["args"]
+                needs_write = True
+                print_info("Updated MCP server entry to match current install method.")
 
         if not needs_write:
             print_info("MCP server already registered.")
