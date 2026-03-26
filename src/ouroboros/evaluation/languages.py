@@ -127,6 +127,9 @@ LANGUAGE_PRESETS: dict[str, LanguagePreset] = {
     ),
 }
 
+_MAVEN_WRAPPER = "./mvnw"
+_MAVEN_WRAPPER_WINDOWS = "mvnw.cmd"
+
 # Ordered list of (marker_file, preset_key) for detection priority.
 # More specific markers come first (e.g. uv.lock before pyproject.toml).
 _DETECTION_RULES: list[tuple[str, str]] = [
@@ -171,6 +174,25 @@ def detect_language(working_dir: Path) -> LanguagePreset | None:
         if (working_dir / marker_file).exists():
             return LANGUAGE_PRESETS[preset_key]
     return None
+
+
+def _resolve_maven_command(working_dir: Path) -> str:
+    """Resolve the safest Maven launcher for the current project/platform.
+
+    Prefers project-local wrapper scripts when they are runnable on the
+    current platform. Falls back to plain ``mvn`` when no suitable wrapper is
+    available.
+    """
+    if os.name == "nt":
+        wrapper = working_dir / _MAVEN_WRAPPER_WINDOWS
+        if wrapper.is_file():
+            return _MAVEN_WRAPPER_WINDOWS
+        return "mvn"
+
+    wrapper = working_dir / "mvnw"
+    if wrapper.is_file() and os.access(wrapper, os.X_OK):
+        return _MAVEN_WRAPPER
+    return "mvn"
 
 
 def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
@@ -335,11 +357,18 @@ def build_mechanical_config(
     # Start with auto-detected preset
     preset = detect_language(working_dir)
 
+    build_command = preset.build_command if preset else None
+    test_command = preset.test_command if preset else None
+    if preset and preset.name == "java-maven":
+        maven_command = _resolve_maven_command(working_dir)
+        build_command = (maven_command, "clean", "compile")
+        test_command = (maven_command, "test")
+
     # Base command values from preset (or all None)
     current: dict[str, Any] = {
         "lint": preset.lint_command if preset else None,
-        "build": preset.build_command if preset else None,
-        "test": preset.test_command if preset else None,
+        "build": build_command,
+        "test": test_command,
         "static": preset.static_command if preset else None,
         "coverage": preset.coverage_command if preset else None,
         "timeout": 300,
