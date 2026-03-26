@@ -160,6 +160,7 @@ def backend(
     from ouroboros.cli.commands.setup import _setup_claude, _setup_codex
 
     prev_quiet = console.quiet
+    setup_failed = False
     try:
         console.quiet = True
         if new_backend == "claude":
@@ -167,14 +168,16 @@ def backend(
         elif new_backend == "codex":
             _setup_codex(cli_path)
     except Exception as exc:
+        setup_failed = True
         console.quiet = prev_quiet
-        print_warning(f"Backend switched but some setup steps failed: {exc}")
+        print_warning(f"Backend config updated but setup steps failed: {exc}")
         print_info("Run [bold]ouroboros setup[/] to complete configuration.")
     finally:
         console.quiet = prev_quiet
 
-    print_success(f"Switched backend: [bold]{current}[/] → [bold]{new_backend}[/]")
-    console.print(f"[dim]CLI: {cli_path}[/dim]\n")
+    if not setup_failed:
+        print_success(f"Switched backend: [bold]{current}[/] → [bold]{new_backend}[/]")
+        console.print(f"[dim]CLI: {cli_path}[/dim]\n")
 
 
 @app.command()

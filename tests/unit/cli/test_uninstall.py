@@ -217,13 +217,19 @@ class TestUninstallCLI:
         assert "ouroboros" in data["mcpServers"]
 
     def test_yes_flag_skips_prompt(self, tmp_path: Path) -> None:
-        data_dir = tmp_path / ".ouroboros"
+        # Use separate dirs to avoid .ouroboros being both project and home
+        home_dir = tmp_path / "home"
+        home_dir.mkdir()
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+
+        data_dir = home_dir / ".ouroboros"
         data_dir.mkdir()
         (data_dir / "config.yaml").write_text("test")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
-            patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch("pathlib.Path.home", return_value=home_dir),
+            patch("pathlib.Path.cwd", return_value=project_dir),
         ):
             result = runner.invoke(app, ["-y"])
 

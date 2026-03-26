@@ -335,35 +335,43 @@ def uninstall(
             print_info("Cancelled.")
             raise typer.Exit()
 
-    # Execute removal — track all results for accurate summary
+    # Execute removal — track failures only for items we expected to remove.
+    # Each helper returns True on success, False on skip/failure.
     console.print()
-    skipped: list[str] = []
+    failed: list[str] = []
 
-    # Each helper returns False on skip/failure and prints its own warning.
-    # We check the return to build the partial-failure summary.
-    if not _remove_claude_mcp(dry_run=False) and (Path.home() / ".claude" / "mcp.json").exists():
-        skipped.append("~/.claude/mcp.json")
+    if not _remove_claude_mcp(dry_run=False):
+        # Only record as failed if we expected to clean it (was in targets)
+        if any("mcp.json" in t for t in targets):
+            failed.append("~/.claude/mcp.json")
 
-    if not _remove_codex_mcp(dry_run=False) and codex_config.exists():
-        try:
-            if "[mcp_servers.ouroboros]" in codex_config.read_text():
-                skipped.append("~/.codex/config.toml")
-        except OSError:
-            skipped.append("~/.codex/config.toml")
+    if not _remove_codex_mcp(dry_run=False):
+        if any("codex/config.toml" in t for t in targets):
+            failed.append("~/.codex/config.toml")
 
-    _remove_codex_artifacts(dry_run=False)
-    _remove_claude_md_block(cwd, dry_run=False)
-    _remove_project_dir(cwd, dry_run=False)
+    if not _remove_codex_artifacts(dry_run=False):
+        if any("Codex rules" in t for t in targets):
+            failed.append("~/.codex/ rules/skills")
+
+    if not _remove_claude_md_block(cwd, dry_run=False):
+        if any("CLAUDE.md" in t for t in targets):
+            failed.append("CLAUDE.md block")
+
+    if not _remove_project_dir(cwd, dry_run=False):
+        if any("Project config" in t for t in targets):
+            failed.append(f"{cwd}/.ouroboros/")
+
     if not keep_data:
-        if not _remove_data_dir(dry_run=False) and (Path.home() / ".ouroboros").exists():
-            skipped.append("~/.ouroboros/")
+        if not _remove_data_dir(dry_run=False):
+            if any("Data directory" in t for t in targets):
+                failed.append("~/.ouroboros/")
 
     # Final summary
     console.print()
-    if skipped:
+    if failed:
         console.print("[bold yellow]Ouroboros partially removed.[/bold yellow]")
         console.print("[yellow]Could not clean:[/yellow]")
-        for s in skipped:
+        for s in failed:
             console.print(f"  [yellow]![/yellow] {s}")
         console.print()
     else:
