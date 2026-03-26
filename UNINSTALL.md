@@ -11,7 +11,7 @@ This interactively removes all Ouroboros configuration:
 - CLAUDE.md integration block (`<!-- ooo:START -->` ... `<!-- ooo:END -->`)
 - Codex rules and skills (`~/.codex/rules/ouroboros.md`, `~/.codex/skills/ouroboros/`)
 - Project-level config (`.ouroboros/`)
-- Data directory (`~/.ouroboros/` — config, DB, seeds, logs)
+- Data directory (`~/.ouroboros/` — config, credentials, DB, seeds, logs, locks, prefs)
 
 Then finish with:
 

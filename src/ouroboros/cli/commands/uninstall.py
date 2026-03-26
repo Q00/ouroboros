@@ -71,7 +71,11 @@ def _remove_codex_mcp(dry_run: bool) -> bool:
     if not codex_config.exists():
         return False
 
-    raw = codex_config.read_text()
+    try:
+        raw = codex_config.read_text()
+    except OSError:
+        print_warning("~/.codex/config.toml is unreadable — skipping.")
+        return False
     if "[mcp_servers.ouroboros]" not in raw:
         return False
 
@@ -235,7 +239,7 @@ def uninstall(
     [dim]    ouroboros uninstall              # interactive[/dim]
     [dim]    ouroboros uninstall -y           # no prompts[/dim]
     [dim]    ouroboros uninstall --dry-run    # preview only[/dim]
-    [dim]    ouroboros uninstall --keep-data  # preserve seeds and DB[/dim]
+    [dim]    ouroboros uninstall --keep-data  # preserve ~/.ouroboros/[/dim]
     """
     console.print("\n[bold red]Ouroboros Uninstall[/bold red]\n")
 
@@ -252,8 +256,11 @@ def uninstall(
             pass
 
     codex_config = Path.home() / ".codex" / "config.toml"
-    if codex_config.exists() and "[mcp_servers.ouroboros]" in codex_config.read_text():
-        targets.append("Codex MCP config (~/.codex/config.toml)")
+    try:
+        if codex_config.exists() and "[mcp_servers.ouroboros]" in codex_config.read_text():
+            targets.append("Codex MCP config (~/.codex/config.toml)")
+    except OSError:
+        pass
 
     codex_rules = Path.home() / ".codex" / "rules" / "ouroboros.md"
     codex_skills = Path.home() / ".codex" / "skills" / "ouroboros"
@@ -262,8 +269,11 @@ def uninstall(
 
     cwd = Path.cwd()
     claude_md = cwd / "CLAUDE.md"
-    if claude_md.exists() and "<!-- ooo:START -->" in claude_md.read_text():
-        targets.append(f"CLAUDE.md integration block ({claude_md})")
+    try:
+        if claude_md.exists() and "<!-- ooo:START -->" in claude_md.read_text():
+            targets.append(f"CLAUDE.md integration block ({claude_md})")
+    except OSError:
+        pass
 
     ooo_dir = cwd / ".ouroboros"
     if ooo_dir.exists():

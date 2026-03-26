@@ -436,7 +436,7 @@ ouroboros uninstall -y
 # Preview only
 ouroboros uninstall --dry-run
 
-# Remove config but keep seeds and DB
+# Remove MCP/artifacts but keep ~/.ouroboros/
 ouroboros uninstall --keep-data
 ```
 
