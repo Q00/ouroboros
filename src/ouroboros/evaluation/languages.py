@@ -154,23 +154,6 @@ _DETECTION_RULES: list[tuple[str, str]] = [
     ("package.json", "node-npm"),
 ]
 
-_PYTHON_BUILD_EXCLUDED_DIRS: frozenset[str] = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        ".venv",
-        "venv",
-        "node_modules",
-        "build",
-        "dist",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        "__pycache__",
-    }
-)
-
 
 def detect_language(working_dir: Path) -> LanguagePreset | None:
     """Detect project language from marker files in working_dir.
@@ -188,40 +171,6 @@ def detect_language(working_dir: Path) -> LanguagePreset | None:
         if (working_dir / marker_file).exists():
             return LANGUAGE_PRESETS[preset_key]
     return None
-
-
-def _has_python_sources(path: Path) -> bool:
-    if not path.is_dir():
-        return False
-    if (path / "__init__.py").exists():
-        return True
-    return next(path.rglob("*.py"), None) is not None
-
-
-def _discover_python_build_targets(working_dir: Path) -> tuple[str, ...]:
-    src_dir = working_dir / "src"
-    if _has_python_sources(src_dir):
-        return ("src",)
-
-    targets: list[str] = []
-    for child in sorted(working_dir.iterdir(), key=lambda p: p.name):
-        if not child.is_dir():
-            continue
-        if child.name in _PYTHON_BUILD_EXCLUDED_DIRS or child.name.startswith("."):
-            continue
-        if _has_python_sources(child):
-            targets.append(child.name)
-
-    return tuple(targets)
-
-
-def _resolve_python_build_command(working_dir: Path, *, use_uv: bool) -> tuple[str, ...] | None:
-    targets = _discover_python_build_targets(working_dir)
-    if not targets:
-        return None
-
-    prefix = ("uv", "run", "python") if use_uv else ("python",)
-    return prefix + ("-m", "compileall", "-q", *targets)
 
 
 def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
@@ -396,12 +345,6 @@ def build_mechanical_config(
         "timeout": 300,
         "coverage_threshold": 0.7,
     }
-
-    if preset is not None and preset.name in {"python", "python-uv"}:
-        current["build"] = _resolve_python_build_command(
-            working_dir,
-            use_uv=preset.name == "python-uv",
-        )
 
     # Layer on .ouroboros/mechanical.toml
     file_overrides = _load_project_overrides(working_dir)

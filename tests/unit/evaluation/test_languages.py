@@ -183,55 +183,6 @@ class TestBuildMechanicalConfig:
         assert config.build_command == ("cargo", "build")
         assert config.test_command == ("cargo", "test")
 
-    def test_python_build_uses_src_when_present(self, tmp_path: Path) -> None:
-        (tmp_path / "pyproject.toml").touch()
-        src_pkg = tmp_path / "src" / "app"
-        src_pkg.mkdir(parents=True)
-        (src_pkg / "__init__.py").touch()
-
-        config = build_mechanical_config(tmp_path)
-
-        assert config.build_command == ("python", "-m", "compileall", "-q", "src")
-
-    def test_python_build_uses_flat_package_dirs_when_src_is_absent(self, tmp_path: Path) -> None:
-        (tmp_path / "pyproject.toml").touch()
-        pkg = tmp_path / "unified_ledger"
-        tests_dir = tmp_path / "tests"
-        pkg.mkdir()
-        tests_dir.mkdir()
-        (pkg / "__init__.py").touch()
-        (tests_dir / "test_example.py").write_text("def test_ok():\n    assert True\n")
-
-        config = build_mechanical_config(tmp_path)
-
-        assert config.build_command == (
-            "python",
-            "-m",
-            "compileall",
-            "-q",
-            "tests",
-            "unified_ledger",
-        )
-
-    def test_python_uv_build_uses_discovered_targets(self, tmp_path: Path) -> None:
-        (tmp_path / "uv.lock").touch()
-        (tmp_path / "pyproject.toml").touch()
-        pkg = tmp_path / "package_a"
-        pkg.mkdir()
-        (pkg / "__init__.py").touch()
-
-        config = build_mechanical_config(tmp_path)
-
-        assert config.build_command == ("uv", "run", "python", "-m", "compileall", "-q", "package_a")
-
-    def test_python_build_skips_when_no_python_targets_exist(self, tmp_path: Path) -> None:
-        (tmp_path / "pyproject.toml").touch()
-        (tmp_path / "docs").mkdir()
-
-        config = build_mechanical_config(tmp_path)
-
-        assert config.build_command is None
-
     def test_unknown_language_all_none(self, tmp_path: Path) -> None:
         """Unknown project type results in all commands None (all checks skip)."""
         config = build_mechanical_config(tmp_path)
