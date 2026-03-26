@@ -184,12 +184,13 @@ def _resolve_maven_command(working_dir: Path) -> str:
     available.
     """
     if os.name == "nt":
-        if (working_dir / _MAVEN_WRAPPER_WINDOWS).exists():
+        wrapper = working_dir / _MAVEN_WRAPPER_WINDOWS
+        if wrapper.is_file():
             return _MAVEN_WRAPPER_WINDOWS
         return "mvn"
 
     wrapper = working_dir / "mvnw"
-    if wrapper.exists() and os.access(wrapper, os.X_OK):
+    if wrapper.is_file() and os.access(wrapper, os.X_OK):
         return _MAVEN_WRAPPER
     return "mvn"
 

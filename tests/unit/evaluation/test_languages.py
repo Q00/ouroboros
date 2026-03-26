@@ -297,6 +297,25 @@ class TestBuildMechanicalConfig:
         assert config.build_command == ("mvnw.cmd", "clean", "compile")
         assert config.test_command == ("mvnw.cmd", "test")
 
+    def test_auto_detect_java_maven_falls_back_when_wrapper_is_directory(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").touch()
+        wrapper = tmp_path / "mvnw"
+        wrapper.mkdir()
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command == ("mvn", "clean", "compile")
+        assert config.test_command == ("mvn", "test")
+
+    def test_auto_detect_java_maven_falls_back_when_windows_wrapper_is_directory(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        (tmp_path / "pom.xml").touch()
+        wrapper = tmp_path / "mvnw.cmd"
+        wrapper.mkdir()
+        monkeypatch.setattr("ouroboros.evaluation.languages.os.name", "nt")
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command == ("mvn", "clean", "compile")
+        assert config.test_command == ("mvn", "test")
+
     def test_no_toml_file_no_error(self, tmp_path: Path) -> None:
         """Missing .ouroboros/mechanical.toml is not an error."""
         (tmp_path / "build.zig").touch()
