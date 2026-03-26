@@ -9,7 +9,7 @@ Usage:
     verifier = MechanicalVerifier(config)
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import shlex
@@ -128,6 +128,7 @@ LANGUAGE_PRESETS: dict[str, LanguagePreset] = {
 }
 
 _MAVEN_WRAPPER = "./mvnw"
+_MAVEN_WRAPPER_WINDOWS = "mvnw.cmd"
 
 # Ordered list of (marker_file, preset_key) for detection priority.
 # More specific markers come first (e.g. uv.lock before pyproject.toml).
@@ -171,15 +172,26 @@ def detect_language(working_dir: Path) -> LanguagePreset | None:
     """
     for marker_file, preset_key in _DETECTION_RULES:
         if (working_dir / marker_file).exists():
-            preset = LANGUAGE_PRESETS[preset_key]
-            if preset_key == "java-maven" and (working_dir / "mvnw").exists():
-                return replace(
-                    preset,
-                    build_command=(_MAVEN_WRAPPER, "clean", "compile"),
-                    test_command=(_MAVEN_WRAPPER, "test"),
-                )
-            return preset
+            return LANGUAGE_PRESETS[preset_key]
     return None
+
+
+def _resolve_maven_command(working_dir: Path) -> str:
+    """Resolve the safest Maven launcher for the current project/platform.
+
+    Prefers project-local wrapper scripts when they are runnable on the
+    current platform. Falls back to plain ``mvn`` when no suitable wrapper is
+    available.
+    """
+    if os.name == "nt":
+        if (working_dir / _MAVEN_WRAPPER_WINDOWS).exists():
+            return _MAVEN_WRAPPER_WINDOWS
+        return "mvn"
+
+    wrapper = working_dir / "mvnw"
+    if wrapper.exists() and os.access(wrapper, os.X_OK):
+        return _MAVEN_WRAPPER
+    return "mvn"
 
 
 def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
@@ -246,8 +258,6 @@ _ALLOWED_EXECUTABLES: frozenset[str] = frozenset(
         "cmake",
         "gradle",
         "mvn",
-        "mvnw",
-        "mvnw.cmd",
         "ant",
         # Other languages
         "cabal",
@@ -346,11 +356,18 @@ def build_mechanical_config(
     # Start with auto-detected preset
     preset = detect_language(working_dir)
 
+    build_command = preset.build_command if preset else None
+    test_command = preset.test_command if preset else None
+    if preset and preset.name == "java-maven":
+        maven_command = _resolve_maven_command(working_dir)
+        build_command = (maven_command, "clean", "compile")
+        test_command = (maven_command, "test")
+
     # Base command values from preset (or all None)
     current: dict[str, Any] = {
         "lint": preset.lint_command if preset else None,
-        "build": preset.build_command if preset else None,
-        "test": preset.test_command if preset else None,
+        "build": build_command,
+        "test": test_command,
         "static": preset.static_command if preset else None,
         "coverage": preset.coverage_command if preset else None,
         "timeout": 300,
