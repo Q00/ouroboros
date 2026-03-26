@@ -297,7 +297,9 @@ class TestBuildMechanicalConfig:
         assert config.build_command == ("mvnw.cmd", "clean", "compile")
         assert config.test_command == ("mvnw.cmd", "test")
 
-    def test_auto_detect_java_maven_falls_back_when_wrapper_is_directory(self, tmp_path: Path) -> None:
+    def test_auto_detect_java_maven_falls_back_when_wrapper_is_directory(
+        self, tmp_path: Path
+    ) -> None:
         (tmp_path / "pom.xml").touch()
         wrapper = tmp_path / "mvnw"
         wrapper.mkdir()
