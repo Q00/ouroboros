@@ -108,7 +108,7 @@ class ExecuteSeedHandler:
             description=(
                 "Execute a seed (task specification) in Ouroboros. "
                 "A seed defines a task to be executed with acceptance criteria. "
-                "This is the handler for 'ooo run' commands \u2014 "
+                "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=(
@@ -172,6 +172,7 @@ class ExecuteSeedHandler:
                         "'mcp__chrome-devtools__click'])."
                     ),
                     required=False,
+                    items={"type": "string"},
                 ),
             ),
         )
@@ -263,10 +264,12 @@ class ExecuteSeedHandler:
         # This allows direct MCP-initiated executions to inherit the parent
         # session's MCP tools without requiring the nested delegation mechanism.
         # Like delegation context, additional_tools only apply to new executions,
-        # not resumes \u2014 resumed sessions must preserve their original tool set.
+        # not resumes — resumed sessions must preserve their original tool set.
         additional_tools = arguments.get("additional_tools") if not is_resume else None
         if isinstance(additional_tools, list) and additional_tools:
-            extra = [t for t in additional_tools if isinstance(t, str) and t]
+            extra = list(dict.fromkeys(
+                t for t in additional_tools if isinstance(t, str) and t
+            ))
             if extra:
                 if inherited_effective_tools:
                     # Merge with delegation-inherited tools, dedup preserving order
@@ -610,7 +613,7 @@ class StartExecuteSeedHandler:
                 "Start a seed execution in the background and return a job ID immediately. "
                 "Use ouroboros_job_status, ouroboros_job_wait, and ouroboros_job_result "
                 "to monitor progress. "
-                "This is the handler for 'ooo run' commands \u2014 "
+                "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=ExecuteSeedHandler().definition.parameters,
