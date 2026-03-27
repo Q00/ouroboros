@@ -124,7 +124,9 @@ def test_pm_command_uses_backend_safe_default_model() -> None:
             "ouroboros.cli.commands.pm.resolve_llm_permission_mode",
             return_value="bypassPermissions",
         ),
-        patch("ouroboros.cli.commands.pm._run_pm_interview", new=Mock(return_value=object())) as mock_run,
+        patch(
+            "ouroboros.cli.commands.pm._run_pm_interview", new=Mock(return_value=object())
+        ) as mock_run,
         patch("ouroboros.cli.commands.pm.asyncio.run"),
         patch("ouroboros.cli.commands.pm.print_warning") as mock_warning,
     ):
