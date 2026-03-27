@@ -2,7 +2,7 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -44,6 +44,7 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_SESSION_ID_ARG,
 )
 from ouroboros.orchestrator.session import SessionTracker
+from ouroboros.resilience.lateral import ThinkingPersona
 
 
 def create_mock_live_ambiguity_score(
@@ -1013,6 +1014,77 @@ metadata:
   ambiguity_score: 0.1
   interview_id: null
 """
+
+
+class TestLateralThinkHandler:
+    """Test LateralThinkHandler argument normalization."""
+
+    async def test_handle_treats_null_failed_attempts_as_empty(self) -> None:
+        """Explicit null from MCP clients should behave like an omitted optional array."""
+        handler = LateralThinkHandler()
+
+        mock_lateral_result = MagicMock(
+            approach_summary="Try a different angle",
+            prompt="Consider an alternative path",
+            questions=("What assumption can you invert?",),
+            persona=MagicMock(value="contrarian"),
+        )
+        mock_thinker = MagicMock()
+        mock_thinker.generate_alternative.return_value = Result.ok(mock_lateral_result)
+
+        with patch(
+            "ouroboros.resilience.lateral.LateralThinker",
+            return_value=mock_thinker,
+        ):
+            result = await handler.handle(
+                {
+                    "problem_context": "tool crashes when optional arg is null",
+                    "current_approach": "call ouroboros_lateral_think without failed_attempts",
+                    "failed_attempts": None,
+                }
+            )
+
+        assert result.is_ok
+        mock_thinker.generate_alternative.assert_called_once_with(
+            persona=ThinkingPersona.CONTRARIAN,
+            problem_context="tool crashes when optional arg is null",
+            current_approach="call ouroboros_lateral_think without failed_attempts",
+            failed_attempts=(),
+        )
+
+    async def test_handle_filters_falsey_failed_attempts_entries(self) -> None:
+        """Falsy entries should be dropped while valid entries are stringified."""
+        handler = LateralThinkHandler()
+
+        mock_lateral_result = MagicMock(
+            approach_summary="Try a different angle",
+            prompt="Consider an alternative path",
+            questions=("What assumption can you invert?",),
+            persona=MagicMock(value="architect"),
+        )
+        mock_thinker = MagicMock()
+        mock_thinker.generate_alternative.return_value = Result.ok(mock_lateral_result)
+
+        with patch(
+            "ouroboros.resilience.lateral.LateralThinker",
+            return_value=mock_thinker,
+        ):
+            result = await handler.handle(
+                {
+                    "problem_context": "problem",
+                    "current_approach": "approach",
+                    "persona": "architect",
+                    "failed_attempts": ["first", None, "", 7],
+                }
+            )
+
+        assert result.is_ok
+        mock_thinker.generate_alternative.assert_called_once_with(
+            persona=ThinkingPersona.ARCHITECT,
+            problem_context="problem",
+            current_approach="approach",
+            failed_attempts=("first", "7"),
+        )
 
 
 class TestMeasureDriftHandler:

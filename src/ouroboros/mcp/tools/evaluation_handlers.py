@@ -685,7 +685,7 @@ class LateralThinkHandler:
             )
 
         persona_str = arguments.get("persona", "contrarian")
-        failed_attempts_raw = arguments.get("failed_attempts", [])
+        failed_attempts_raw = arguments.get("failed_attempts") or []
 
         # Convert string to ThinkingPersona enum
         try:
