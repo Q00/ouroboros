@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any
 import uuid
 
@@ -170,6 +171,48 @@ def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
+    """Parse QA verdicts from plain-text fallbacks.
+
+    Some providers occasionally ignore structured-output constraints and return
+    readable prose such as ``Score: 0.84`` / ``Verdict: pass`` instead of JSON.
+    When that happens we still want the tool to degrade gracefully rather than
+    failing the whole QA step.
+    """
+    score_match = re.search(r"(?im)^\s*score\s*:\s*([0-9]*\.?[0-9]+)", response_text)
+    if not score_match:
+        score_match = re.search(
+            r"(?im)\bscore\b\s*(?:is|=)?\s*([0-9]*\.?[0-9]+)", response_text
+        )
+    if not score_match:
+        return None
+
+    try:
+        score = float(score_match.group(1))
+    except ValueError:
+        return None
+
+    verdict_match = re.search(r"(?im)^\s*verdict\s*:\s*([a-zA-Z_-]+)", response_text)
+    reasoning_match = re.search(
+        r"(?ims)^\s*reasoning\s*:\s*(.+?)(?:\n\s*[A-Z][A-Za-z _-]*\s*:|\Z)",
+        response_text,
+    )
+
+    differences = [
+        item.strip(" -*\t")
+        for item in re.findall(r"(?im)^\s*(?:[-*]|\d+[.)])\s+(.+)$", response_text)
+    ]
+
+    return {
+        "score": score,
+        "verdict": verdict_match.group(1) if verdict_match else "",
+        "dimensions": {},
+        "differences": differences,
+        "suggestions": [],
+        "reasoning": reasoning_match.group(1).strip() if reasoning_match else "",
+    }
+
+
 def _parse_qa_response(
     response_text: str,
     pass_threshold: float = DEFAULT_PASS_THRESHOLD,
@@ -180,13 +223,15 @@ def _parse_qa_response(
         Result containing QAVerdict or error string.
     """
     json_str = extract_json_payload(response_text)
-    if not json_str:
-        return Result.err("Could not find JSON in QA response")
-
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        return Result.err(f"Invalid JSON in QA response: {e}")
+    if json_str:
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            return Result.err(f"Invalid JSON in QA response: {e}")
+    else:
+        data = _parse_non_json_qa_response(response_text)
+        if data is None:
+            return Result.err("Could not find JSON in QA response")
 
     # Unwrap nested verdict objects (e.g. {"qa_verdict": {...}})
     data = _unwrap_verdict_data(data)
