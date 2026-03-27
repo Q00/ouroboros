@@ -7,6 +7,7 @@ being embedded as XML in the user prompt.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -141,6 +142,30 @@ class TestCompleteSystemPromptExtraction:
         assert "User: User question" in prompt_arg
         assert "Assistant: Previous answer" in prompt_arg
         assert "User: Follow-up" in prompt_arg
+
+
+class TestCompleteTimeout:
+    """Test application-level timeout handling."""
+
+    @pytest.mark.asyncio
+    async def test_complete_returns_timeout_error(self) -> None:
+        """Timeouts are surfaced as ProviderError before transport timeout."""
+        adapter = ClaudeCodeAdapter(timeout=0.01)
+        messages = [Message(role=MessageRole.USER, content="Hello")]
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        async def slow_execute(*args, **kwargs):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(1)
+            return MagicMock(is_ok=True)
+
+        adapter._execute_single_request = AsyncMock(side_effect=slow_execute)
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_err
+        assert "timed out" in result.error.message.lower()
+        assert result.error.details["timed_out"] is True
 
 
 def _make_sdk_mock(mock_options_cls: MagicMock, mock_query: MagicMock) -> MagicMock:

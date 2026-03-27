@@ -53,6 +53,8 @@ log = structlog.get_logger()
 
 
 _DATA_DIR = Path.home() / ".ouroboros" / "data"
+_INTERVIEW_LLM_MAX_TURNS = 5
+_INTERVIEW_LLM_TIMEOUT_SECONDS = 90.0
 
 
 def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
@@ -305,16 +307,20 @@ class PMInterviewHandler:
             ),
         )
 
-    def _get_engine(self) -> PMInterviewEngine:
+    def _get_engine(self, *, cwd: str | None = None) -> PMInterviewEngine:
         """Return the injected engine or create a new one using the server's configured backend."""
         if self.pm_engine is not None:
             return self.pm_engine
-        adapter = self.llm_adapter or create_llm_adapter(
-            backend=self.llm_backend,
-            max_turns=1,
-            use_case="interview",
-            allowed_tools=[],
-        )
+        adapter_kwargs: dict[str, Any] = {
+            "backend": self.llm_backend,
+            "max_turns": _INTERVIEW_LLM_MAX_TURNS,
+            "use_case": "interview",
+            "allowed_tools": [],
+            "timeout": _INTERVIEW_LLM_TIMEOUT_SECONDS,
+        }
+        if cwd is not None:
+            adapter_kwargs["cwd"] = cwd
+        adapter = self.llm_adapter or create_llm_adapter(**adapter_kwargs)
         model = get_clarification_model(self.llm_backend)
         return PMInterviewEngine.create(
             llm_adapter=adapter,
@@ -344,7 +350,15 @@ class PMInterviewHandler:
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
 
-        engine = self._get_engine()
+        if isinstance(initial_context, str) and not initial_context.strip() and action == "start":
+            return Result.err(
+                MCPToolError(
+                    "initial_context must be a non-empty string to start a PM interview",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+
+        engine = self._get_engine(cwd=cwd)
 
         try:
             # ── Generate PM seed ──────────────────────────────────
@@ -763,18 +777,20 @@ class PMInterviewHandler:
         below the threshold (requirements are clear).  User controls when
         to stop.
         """
-        # Load interview state
-        load_result = await engine.load_state(session_id)
-        if load_result.is_err:
-            return Result.err(
-                MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
-            )
-        state = load_result.value
-
-        # Restore PM meta into engine
         meta = _load_pm_meta(session_id, self.data_dir)
         if meta:
             engine.restore_meta(meta)
+
+        # Load interview state
+        load_result = await engine.load_state(session_id)
+        if load_result.is_err:
+            error_msg = str(load_result.error)
+            if meta:
+                error_msg += (
+                    " PM metadata was restored, but the interview state could not be loaded."
+                )
+            return Result.err(MCPToolError(error_msg, tool_name="ouroboros_pm_interview"))
+        state = load_result.value
 
         # If no answer provided, re-display the pending question (retry/reconnect)
         if not answer and state.rounds and state.rounds[-1].user_response is None:

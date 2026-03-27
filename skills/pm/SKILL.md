@@ -58,15 +58,8 @@ After every MCP response, do these three things:
 
 Print the MCP content text to the user first.
 
-Then check: does `meta.ask_user_question` exist?
-
-- **YES** → Pass it directly to `AskUserQuestion`:
-  ```
-  AskUserQuestion(questions=[meta.ask_user_question])
-  ```
-  Do NOT modify it. Do NOT add options. Do NOT rephrase the question.
-
-- **NO** → This is an interview question. Use `AskUserQuestion` with `meta.question` and generate 2-3 suggested answers.
+Then use `AskUserQuestion` with `meta.question` and generate 2-3 suggested answers.
+Do not wait for `meta.ask_user_question` — the PM backend does not emit that field.
 
 **C. Relay answer back:**
 
@@ -94,10 +87,18 @@ Arguments:
 
 ### Step 5: Copy to Clipboard
 
-After generation, read the pm.md file from `meta.pm_path` and copy its contents to the clipboard:
+After generation, read the pm.md file from `meta.pm_path` and copy its contents to the clipboard when a local clipboard tool exists:
 
 ```bash
-cat <meta.pm_path> | pbcopy
+if command -v pbcopy >/dev/null 2>&1; then
+  cat <meta.pm_path> | pbcopy
+elif command -v wl-copy >/dev/null 2>&1; then
+  cat <meta.pm_path> | wl-copy
+elif command -v xclip >/dev/null 2>&1; then
+  cat <meta.pm_path> | xclip -selection clipboard
+else
+  echo "No clipboard tool found; skipping clipboard copy."
+fi
 ```
 
 ### Step 6: Show Result & Next Step

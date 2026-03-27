@@ -17,7 +17,7 @@ from ouroboros.bigbang.interview import (
     InterviewStatus,
 )
 from ouroboros.bigbang.pm_document import generate_pm_markdown
-from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_interview import _MAX_AUTO_ADVANCE_QUESTIONS, PMInterviewEngine
 from ouroboros.bigbang.pm_seed import PMSeed
 from ouroboros.bigbang.question_classifier import (
     ClassificationResult,
@@ -25,6 +25,7 @@ from ouroboros.bigbang.question_classifier import (
     QuestionCategory,
     QuestionClassifier,
 )
+from ouroboros.core.errors import ValidationError
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionResponse,
@@ -249,6 +250,64 @@ class TestDecideLaterItemsList:
         assert result.is_ok
         assert len(engine.decide_later_items) == 3
         assert engine.decide_later_items == [q1, q2, q3]
+
+    @pytest.mark.asyncio
+    async def test_decide_later_auto_response_failure_returns_error(self):
+        """Auto-answer persistence failures are surfaced immediately."""
+        engine = _make_engine()
+        state = _make_state()
+
+        question = "How should we handle data retention?"
+        classification = ClassificationResult(
+            original_question=question,
+            category=QuestionCategory.DECIDE_LATER,
+            reframed_question=question,
+            reasoning="Needs later legal review.",
+            decide_later=True,
+            placeholder_response="To be decided after legal review.",
+        )
+
+        engine.inner.ask_next_question.return_value = Result.ok(question)
+        engine.classifier.classify.return_value = Result.ok(classification)
+        engine.inner.record_response.return_value = Result.err(
+            ValidationError("failed to store placeholder", field="user_response")
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_err
+        assert "failed to store placeholder" in str(result.error)
+
+    @pytest.mark.asyncio
+    async def test_auto_advance_limit_returns_error(self):
+        """Consecutive auto-advanced questions stop at the configured guard."""
+        engine = _make_engine()
+        state = _make_state()
+
+        questions = [f"Technical question {i}?" for i in range(_MAX_AUTO_ADVANCE_QUESTIONS)]
+        classifications = [
+            ClassificationResult(
+                original_question=question,
+                category=QuestionCategory.DECIDE_LATER,
+                reframed_question=question,
+                reasoning="Premature technical detail.",
+                decide_later=True,
+                placeholder_response="TBD later.",
+            )
+            for question in questions
+        ]
+
+        engine.classifier.classify = AsyncMock(side_effect=[Result.ok(c) for c in classifications])
+        engine.inner.ask_next_question = AsyncMock(
+            side_effect=[Result.ok(question) for question in questions]
+        )
+        engine.inner.record_response = AsyncMock(return_value=Result.ok(state))
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_err
+        assert "too many non-pm questions" in str(result.error).lower()
+        assert engine.decide_later_items == questions
 
     def test_decide_later_items_empty_by_default(self):
         """decide_later_items starts as empty list."""

@@ -97,6 +97,7 @@ Respond ONLY with valid JSON in this exact format:
 
 # Model for extraction (uses same as interview for consistency)
 _FALLBACK_MODEL = "claude-opus-4-6"
+_MAX_AUTO_ADVANCE_QUESTIONS = 8
 
 
 @dataclass
@@ -458,93 +459,109 @@ class PMInterviewEngine:
         Returns:
             Result containing the (possibly reframed) question or error.
         """
-        # Generate question via inner engine
-        question_result = await self.inner.ask_next_question(state)
+        auto_advanced_questions = 0
 
-        if question_result.is_err:
-            return question_result
+        while True:
+            # Generate question via inner engine
+            question_result = await self.inner.ask_next_question(state)
 
-        question = question_result.value
+            if question_result.is_err:
+                return question_result
 
-        # Classify the question
-        context = self._build_interview_context(state)
-        classify_result = await self.classifier.classify(
-            question=question,
-            interview_context=context,
-        )
+            question = question_result.value
 
-        if classify_result.is_err:
-            # Classification failed — return original question (safe fallback)
-            log.warning("pm.classification_failed", question=question[:100])
-            return question_result
-
-        classification = classify_result.value
-        self.classifications.append(classification)
-
-        output_type = classification.output_type
-
-        if output_type == ClassifierOutputType.DEFERRED:
-            # Track as deferred item and generate a new question
-            self.deferred_items.append(classification.original_question)
-            log.info(
-                "pm.question_deferred",
-                question=classification.original_question[:100],
-                reasoning=classification.reasoning,
-                output_type=output_type,
+            # Classify the question
+            context = self._build_interview_context(state)
+            classify_result = await self.classifier.classify(
+                question=question,
+                interview_context=context,
             )
-            # Feed an automatic response back to the inner InterviewEngine
-            # so the round is properly recorded and the engine advances.
-            # This prevents the inner engine from re-generating similar
-            # technical questions it doesn't know were already handled.
-            await self.record_response(
-                state,
-                user_response="[Deferred to development phase] "
-                "This technical decision will be addressed during the "
-                "development interview.",
-                question=classification.original_question,
-            )
-            # Recursively ask for the next real question
-            return await self.ask_next_question(state)
 
-        if output_type == ClassifierOutputType.DECIDE_LATER:
-            # Auto-answer with placeholder — no PM interaction needed
-            placeholder = classification.placeholder_response
-            self.decide_later_items.append(classification.original_question)
-            log.info(
-                "pm.question_decide_later",
-                question=classification.original_question[:100],
-                placeholder=placeholder[:100],
-                reasoning=classification.reasoning,
-            )
-            # Record the placeholder as the response so the interview
-            # engine advances its round count
-            await self.record_response(
-                state,
-                user_response=f"[Decide later] {placeholder}",
-                question=classification.original_question,
-            )
-            # Recursively ask for the next real question
-            return await self.ask_next_question(state)
+            if classify_result.is_err:
+                # Classification failed — return original question (safe fallback)
+                log.warning("pm.classification_failed", question=question[:100])
+                return question_result
 
-        if output_type == ClassifierOutputType.REFRAMED:
-            # Use the reframed version and track the mapping
-            reframed = classification.question_for_pm
-            self._reframe_map[reframed] = classification.original_question
-            log.info(
-                "pm.question_reframed",
-                original=classification.original_question[:100],
-                reframed=reframed[:100],
-                output_type=output_type,
-            )
-            return Result.ok(reframed)
+            classification = classify_result.value
+            self.classifications.append(classification)
 
-        # PASSTHROUGH — planning question forwarded unchanged to the PM
-        log.debug(
-            "pm.question_passthrough",
-            question=classification.original_question[:100],
-            output_type=output_type,
-        )
-        return Result.ok(classification.question_for_pm)
+            output_type = classification.output_type
+
+            if output_type == ClassifierOutputType.DEFERRED:
+                self.deferred_items.append(classification.original_question)
+                log.info(
+                    "pm.question_deferred",
+                    question=classification.original_question[:100],
+                    reasoning=classification.reasoning,
+                    output_type=output_type,
+                )
+                record_result = await self.record_response(
+                    state,
+                    user_response="[Deferred to development phase] "
+                    "This technical decision will be addressed during the "
+                    "development interview.",
+                    question=classification.original_question,
+                )
+                if record_result.is_err:
+                    return Result.err(record_result.error)
+                state = record_result.value
+            elif output_type == ClassifierOutputType.DECIDE_LATER:
+                placeholder = classification.placeholder_response
+                self.decide_later_items.append(classification.original_question)
+                log.info(
+                    "pm.question_decide_later",
+                    question=classification.original_question[:100],
+                    placeholder=placeholder[:100],
+                    reasoning=classification.reasoning,
+                )
+                record_result = await self.record_response(
+                    state,
+                    user_response=f"[Decide later] {placeholder}",
+                    question=classification.original_question,
+                )
+                if record_result.is_err:
+                    return Result.err(record_result.error)
+                state = record_result.value
+            elif output_type == ClassifierOutputType.REFRAMED:
+                # Use the reframed version and track the mapping
+                reframed = classification.question_for_pm
+                self._reframe_map[reframed] = classification.original_question
+                log.info(
+                    "pm.question_reframed",
+                    original=classification.original_question[:100],
+                    reframed=reframed[:100],
+                    output_type=output_type,
+                )
+                return Result.ok(reframed)
+            else:
+                # PASSTHROUGH — planning question forwarded unchanged to the PM
+                log.debug(
+                    "pm.question_passthrough",
+                    question=classification.original_question[:100],
+                    output_type=output_type,
+                )
+                return Result.ok(classification.question_for_pm)
+
+            auto_advanced_questions += 1
+            if auto_advanced_questions >= _MAX_AUTO_ADVANCE_QUESTIONS:
+                log.warning(
+                    "pm.question_auto_advance_limit_exceeded",
+                    interview_id=state.interview_id,
+                    auto_advanced_questions=auto_advanced_questions,
+                    deferred_count=len(self.deferred_items),
+                    decide_later_count=len(self.decide_later_items),
+                )
+                return Result.err(
+                    ProviderError(
+                        "PM interview skipped too many non-PM questions without "
+                        "finding a PM-answerable follow-up. Please retry.",
+                        details={
+                            "auto_advanced_questions": auto_advanced_questions,
+                            "deferred_count": len(self.deferred_items),
+                            "decide_later_count": len(self.decide_later_items),
+                        },
+                    )
+                )
 
     async def record_response(
         self,

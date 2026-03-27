@@ -13,6 +13,8 @@ from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.pm_handler import (
     _DATA_DIR,
+    _INTERVIEW_LLM_MAX_TURNS,
+    _INTERVIEW_LLM_TIMEOUT_SECONDS,
     PMInterviewHandler,
     _check_completion,
     _compute_deferred_diff,
@@ -756,14 +758,37 @@ class TestGetEngine:
 
             mock_create.assert_called_once_with(
                 backend=None,
-                max_turns=1,
+                max_turns=_INTERVIEW_LLM_MAX_TURNS,
                 use_case="interview",
                 allowed_tools=[],
+                timeout=_INTERVIEW_LLM_TIMEOUT_SECONDS,
             )
             mock_engine_cls.create.assert_called_once()
             call_kwargs = mock_engine_cls.create.call_args
             assert call_kwargs.kwargs["llm_adapter"] is mock_adapter
             assert call_kwargs.kwargs["model"] == "claude-opus-4-6"
+
+    def test_get_engine_passes_cwd_to_adapter(self, tmp_path: Path) -> None:
+        """Factory-built adapters inherit the current working directory."""
+        with (
+            patch("ouroboros.mcp.tools.pm_handler.create_llm_adapter") as mock_create,
+            patch("ouroboros.mcp.tools.pm_handler.get_clarification_model", return_value="m"),
+            patch("ouroboros.mcp.tools.pm_handler.PMInterviewEngine") as mock_engine_cls,
+        ):
+            mock_create.return_value = MagicMock()
+            mock_engine_cls.create.return_value = MagicMock()
+
+            handler = PMInterviewHandler()
+            handler._get_engine(cwd=str(tmp_path))
+
+            mock_create.assert_called_once_with(
+                backend=None,
+                max_turns=_INTERVIEW_LLM_MAX_TURNS,
+                use_case="interview",
+                allowed_tools=[],
+                timeout=_INTERVIEW_LLM_TIMEOUT_SECONDS,
+                cwd=str(tmp_path),
+            )
 
     def test_uses_custom_data_dir(self, tmp_path: Path) -> None:
         """When data_dir is set, passes it to PMInterviewEngine.create."""
@@ -783,6 +808,22 @@ class TestGetEngine:
 
 class TestHandleStartBrownfield:
     """Test brownfield detection in _handle_start — uses DB default repo."""
+
+    @pytest.mark.asyncio
+    async def test_start_blank_initial_context_returns_specific_error(self, tmp_path: Path) -> None:
+        """Explicit start with blank initial_context gets a targeted validation error."""
+        handler = PMInterviewHandler(pm_engine=make_pm_engine_mock(), data_dir=tmp_path)
+
+        result = await handler.handle(
+            {
+                "action": "start",
+                "initial_context": "   ",
+                "cwd": str(tmp_path),
+            }
+        )
+
+        assert result.is_err
+        assert "initial_context must be a non-empty string" in str(result.error)
 
     @pytest.mark.asyncio
     async def test_start_directly_starts_interview_with_defaults(self, tmp_path: Path) -> None:
@@ -1568,6 +1609,29 @@ class TestResumeMetaFields:
         engine.ask_next_question.assert_called_once()
         # Verify meta was saved after
         assert _load_pm_meta("resume-load", data_dir=tmp_path) is not None
+
+    @pytest.mark.asyncio
+    async def test_resume_load_state_failure_restores_meta_before_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Even on load failure, PM-specific metadata is restored into the engine first."""
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+        engine.restore_meta = MagicMock()
+        engine.load_state = AsyncMock(return_value=Result.err(Exception("state not found")))
+
+        _save_pm_meta("resume-load-fail", engine, cwd="/project", data_dir=tmp_path)
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        result = await handler.handle(
+            {
+                "session_id": "resume-load-fail",
+                "answer": "My answer",
+            }
+        )
+
+        assert result.is_err
+        engine.restore_meta.assert_called_once()
+        assert "PM metadata was restored" in str(result.error)
 
 
 # ── Action auto-detection tests (AC 13) ───────────────────────

@@ -150,6 +150,10 @@ class CodexCliLLMAdapter:
                 "If you need tools, prefer using only the following tools:\n"
                 + "\n".join(f"- {tool}" for tool in self._allowed_tools)
             )
+        elif self._allowed_tools is not None:
+            # Explicit empty list means no tools allowed — text-only response
+            parts.append("## Tool Constraints")
+            parts.append("Do NOT use any tools or MCP calls. Respond with plain text only.")
 
         if self._max_turns > 0:
             parts.append("## Execution Budget")

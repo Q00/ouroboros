@@ -316,7 +316,16 @@ async def _run_pm_interview(
         output_dir: Optional output directory for the generated PM document.
     """
     from ouroboros.bigbang.pm_interview import PMInterviewEngine
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+
+    try:
+        from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    except ImportError:
+        print_error(
+            "litellm is required for the PM command but is not installed.\n"
+            "  Install with: uv tool install --with litellm ouroboros-ai\n"
+            "  Or:           pip install 'ouroboros-ai[litellm]'"
+        )
+        raise typer.Exit(code=1)
 
     adapter = LiteLLMAdapter()
     engine = PMInterviewEngine.create(llm_adapter=adapter, model=model)

@@ -1,6 +1,8 @@
 """Tests for AC 15: Existing pm_seed triggers overwrite confirmation on re-run."""
 
+import builtins
 from pathlib import Path
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -122,3 +124,34 @@ class TestCheckExistingPrdSeeds:
         source = inspect.getsource(_run_pm_interview)
         assert "if not resume_id:" in source
         assert "_check_existing_pm_seeds" in source
+
+    @pytest.mark.asyncio
+    async def test_run_pm_interview_missing_litellm_exits_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The PM CLI prints a helpful error when litellm is unavailable."""
+        from ouroboros.cli.commands import pm as pm_module
+
+        module_name = "ouroboros.providers.litellm_adapter"
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+            if name == module_name:
+                raise ImportError("No module named 'litellm'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        with (
+            patch.object(pm_module, "print_error") as mock_print_error,
+            pytest.raises(pm_module.typer.Exit) as exc_info,
+        ):
+            await pm_module._run_pm_interview(
+                resume_id=None,
+                model="anthropic/claude-sonnet-4-20250514",
+                debug=False,
+            )
+
+        assert exc_info.value.exit_code == 1
+        assert "litellm is required for the PM command" in mock_print_error.call_args.args[0]

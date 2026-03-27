@@ -92,6 +92,7 @@ class ClaudeCodeAdapter:
         allowed_tools: list[str] | None = None,
         max_turns: int = 1,
         on_message: Callable[[str, str], None] | None = None,
+        timeout: float | None = None,
     ) -> None:
         """Initialize Claude Code adapter.
 
@@ -109,16 +110,21 @@ class ClaudeCodeAdapter:
             on_message: Callback for streaming messages. Called with (type, content):
                 - ("thinking", "content") for agent reasoning
                 - ("tool", "tool_name") for tool usage
+            timeout: Optional application-level timeout in seconds for a
+                single completion request. When set, aborts before outer
+                transport timeouts and returns a ProviderError.
         """
         self._permission_mode: str = permission_mode
         self._cli_path: Path | None = self._resolve_cli_path(cli_path)
         self._allowed_tools: list[str] = allowed_tools or []
         self._max_turns: int = max_turns
         self._on_message: Callable[[str, str], None] | None = on_message
+        self._timeout: float | None = timeout if timeout and timeout > 0 else None
         log.info(
             "claude_code_adapter.initialized",
             permission_mode=permission_mode,
             cli_path=str(self._cli_path) if self._cli_path else None,
+            timeout_seconds=self._timeout,
         )
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> Path | None:
@@ -241,9 +247,15 @@ class ClaudeCodeAdapter:
 
         for attempt in range(_MAX_RETRIES):
             try:
-                result = await self._execute_single_request(
-                    prompt, config, system_prompt=system_prompt
-                )
+                if self._timeout is None:
+                    result = await self._execute_single_request(
+                        prompt, config, system_prompt=system_prompt
+                    )
+                else:
+                    async with asyncio.timeout(self._timeout):
+                        result = await self._execute_single_request(
+                            prompt, config, system_prompt=system_prompt
+                        )
 
                 if result.is_ok:
                     if attempt > 0:
@@ -271,6 +283,22 @@ class ClaudeCodeAdapter:
                 # Non-retryable error
                 return result
 
+            except TimeoutError:
+                log.warning(
+                    "claude_code_adapter.request_timed_out",
+                    timeout_seconds=self._timeout,
+                    attempt=attempt + 1,
+                )
+                return Result.err(
+                    ProviderError(
+                        message=f"Claude Code request timed out after {self._timeout:.1f}s",
+                        details={
+                            "timed_out": True,
+                            "timeout_seconds": self._timeout,
+                            "attempt": attempt + 1,
+                        },
+                    )
+                )
             except Exception as e:
                 error_str = str(e)
                 error_type = type(e).__name__
