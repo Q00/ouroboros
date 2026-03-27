@@ -415,12 +415,12 @@ async def _run_pm_interview(
         classification = engine.get_last_classification()
         if classification == "decide_later":
             console.print(
-                '[dim]  💡 This question can be deferred. '
+                "[dim]  💡 This question can be deferred. "
                 'Type "decide later" or "skip" to defer it.[/]\n'
             )
         elif classification == "deferred":
             console.print(
-                '[dim]  💡 This is a technical question that can be deferred to the dev phase. '
+                "[dim]  💡 This is a technical question that can be deferred to the dev phase. "
                 'Type "defer" or "skip" to defer it.[/]\n'
             )
 
@@ -459,7 +459,9 @@ async def _run_pm_interview(
         # Handle user-initiated skip (decide later / defer to dev)
         _lower = user_response.strip().lower()
         if classification == "decide_later" and _lower in (
-            "decide later", "skip", "[decide_later]",
+            "decide later",
+            "skip",
+            "[decide_later]",
         ):
             record_result = await engine.skip_as_decide_later(state, question)
             if isinstance(record_result, Result) and record_result.is_err:
@@ -472,7 +474,9 @@ async def _run_pm_interview(
             _save_cli_pm_meta(state.interview_id, engine)
             continue
         if classification == "deferred" and _lower in (
-            "defer", "skip", "[deferred]",
+            "defer",
+            "skip",
+            "[deferred]",
         ):
             record_result = await engine.skip_as_deferred(state, question)
             if isinstance(record_result, Result) and record_result.is_err:

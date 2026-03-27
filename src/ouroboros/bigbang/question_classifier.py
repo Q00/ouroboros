@@ -51,8 +51,8 @@ class ClassifierOutputType(StrEnum):
 
     PASSTHROUGH: Planning question forwarded unchanged to the PM.
     REFRAMED: Development question rewritten in PM-friendly language.
-    DEFERRED: Deeply technical question deferred to the dev interview phase.
-    DECIDE_LATER: Premature question auto-answered with a placeholder.
+    DEFERRED: Deeply technical question returned to user with defer option.
+    DECIDE_LATER: Premature question returned to user with decide-later option.
     """
 
     PASSTHROUGH = "passthrough"

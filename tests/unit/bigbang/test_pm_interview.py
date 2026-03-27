@@ -562,7 +562,9 @@ class TestAskNextQuestion:
         assert result.value == question
 
     @pytest.mark.asyncio
-    async def test_decide_later_returns_question_without_auto_answering(self, tmp_path: Path) -> None:
+    async def test_decide_later_returns_question_without_auto_answering(
+        self, tmp_path: Path
+    ) -> None:
         """Decide-later questions are returned to the caller for user decision.
 
         The engine no longer auto-answers with a placeholder or recurses.

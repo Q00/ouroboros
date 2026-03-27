@@ -571,6 +571,7 @@ class TestSkipAsDecideLater:
         engine = _make_engine()
         state = _make_state()
         from ouroboros.core.errors import ValidationError as VE
+
         engine.inner.record_response.return_value = Result.err(
             VE("State save failed", field="state")
         )

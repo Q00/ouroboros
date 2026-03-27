@@ -536,15 +536,15 @@ class PMInterviewHandler:
         start_text = f"PM interview started. Session ID: {state.interview_id}\n\n{question}"
         if is_decide_later:
             start_text += (
-                '\n\n💡 This question can be deferred. '
+                "\n\n💡 This question can be deferred. "
                 'The user may answer now, or choose "decide later" to skip it. '
                 "If they choose to decide later, pass "
                 f'answer="[decide_later]" with session_id="{state.interview_id}".'
             )
         elif is_deferred:
             start_text += (
-                '\n\n💡 This is a technical question that can be deferred to the dev phase. '
-                'The user may answer now, or choose to defer it. '
+                "\n\n💡 This is a technical question that can be deferred to the dev phase. "
+                "The user may answer now, or choose to defer it. "
                 "If they choose to defer, pass "
                 f'answer="[deferred]" with session_id="{state.interview_id}".'
             )
@@ -815,15 +815,15 @@ class PMInterviewHandler:
             pending_text = f"Session {session_id}\n\n{pending_question}"
             if is_decide_later:
                 pending_text += (
-                    '\n\n💡 This question can be deferred. '
+                    "\n\n💡 This question can be deferred. "
                     'The user may answer now, or choose "decide later" to skip it. '
                     "If they choose to decide later, pass "
                     f'answer="[decide_later]" with session_id="{session_id}".'
                 )
             elif is_deferred:
                 pending_text += (
-                    '\n\n💡 This is a technical question that can be deferred to the dev phase. '
-                    'The user may answer now, or choose to defer it. '
+                    "\n\n💡 This is a technical question that can be deferred to the dev phase. "
+                    "The user may answer now, or choose to defer it. "
                     "If they choose to defer, pass "
                     f'answer="[deferred]" with session_id="{session_id}".'
                 )
@@ -1067,15 +1067,15 @@ class PMInterviewHandler:
         response_text = f"Session {session_id}\n\n{question}"
         if is_decide_later:
             response_text += (
-                '\n\n💡 This question can be deferred. '
+                "\n\n💡 This question can be deferred. "
                 'The user may answer now, or choose "decide later" to skip it. '
                 "If they choose to decide later, pass "
                 f'answer="[decide_later]" with session_id="{session_id}".'
             )
         elif is_deferred:
             response_text += (
-                '\n\n💡 This is a technical question that can be deferred to the dev phase. '
-                'The user may answer now, or choose to defer it. '
+                "\n\n💡 This is a technical question that can be deferred to the dev phase. "
+                "The user may answer now, or choose to defer it. "
                 "If they choose to defer, pass "
                 f'answer="[deferred]" with session_id="{session_id}".'
             )
@@ -1165,7 +1165,8 @@ class PMInterviewHandler:
                             f"PM seed generated: {seed.product_name}\n"
                             f"Seed: {seed_path}\n"
                             f"PM document: {pm_path}\n\n"
-                            f"Decide-later items: {len(seed.deferred_items) + len(seed.decide_later_items)}"
+                            f"Deferred items: {len(seed.deferred_items)}\n"
+                            f"Decide-later items: {len(seed.decide_later_items)}"
                         ),
                     ),
                 ),
