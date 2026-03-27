@@ -42,7 +42,8 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 | `init` | Start interactive interview to refine requirements |
 | `run` | Execute Ouroboros workflows |
 | `cancel` | Cancel stuck or orphaned executions |
-| `config` | Manage Ouroboros configuration |
+| `config` | Manage Ouroboros configuration (show, switch backend, set values) |
+| `uninstall` | Cleanly remove all Ouroboros configuration from your system |
 | `status` | Check Ouroboros system status |
 | `tui` | Interactive TUI monitor for real-time workflow monitoring |
 | `monitor` | Shorthand for `tui monitor` |
@@ -311,11 +312,9 @@ ouroboros cancel execution orch_abc123 --reason "Stuck for 2 hours"
 
 Manage Ouroboros configuration.
 
-> **Current state:** the `config` subcommands are scaffolding. They currently print placeholder output and do not mutate `~/.ouroboros/config.yaml`. Use `ouroboros setup` for initial runtime setup, then edit `~/.ouroboros/config.yaml` directly for manual changes.
-
 ### `config show`
 
-Display current configuration.
+Display current configuration summary, or a specific section.
 
 ```bash
 ouroboros config show [SECTION]
@@ -325,16 +324,43 @@ ouroboros config show [SECTION]
 
 | Argument | Description |
 |----------|-------------|
-| `SECTION` | Configuration section to display (e.g., `providers`) |
+| `SECTION` | Configuration section to display (e.g., `orchestrator`, `llm`, `consensus`) |
 
 **Examples:**
 
 ```bash
-# Show all configuration
+# Show configuration summary (backend, CLI path, DB, log level)
 ouroboros config show
 
-# Show only providers section
-ouroboros config show providers
+# Show only orchestrator section
+ouroboros config show orchestrator
+```
+
+### `config backend`
+
+Show or switch the runtime backend. This sets both `orchestrator.runtime_backend` and `llm.backend` together — they are always kept in sync for simplicity. Advanced users can decouple them with `config set`.
+
+```bash
+ouroboros config backend [BACKEND]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `BACKEND` | Backend to switch to: `claude` or `codex`. Omit to show current |
+
+**Examples:**
+
+```bash
+# Show current backend
+ouroboros config backend
+
+# Switch to Codex CLI
+ouroboros config backend codex
+
+# Switch to Claude Code
+ouroboros config backend claude
 ```
 
 ### `config init`
@@ -349,7 +375,7 @@ Creates `~/.ouroboros/config.yaml` and `~/.ouroboros/credentials.yaml` with defa
 
 ### `config set`
 
-Set a configuration value.
+Set a configuration value using dot notation.
 
 ```bash
 ouroboros config set KEY VALUE
@@ -365,17 +391,71 @@ ouroboros config set KEY VALUE
 **Examples:**
 
 ```bash
-# Placeholder command surface (does not yet write files)
-ouroboros config set orchestrator.runtime_backend codex
+# Change log level
+ouroboros config set logging.level debug
+
+# Override LLM backend separately from runtime backend
+ouroboros config set llm.backend litellm
 ```
 
 ### `config validate`
 
-Validate current configuration.
+Validate current configuration. Checks that the runtime backend is supported and the CLI binary path exists.
 
 ```bash
 ouroboros config validate
 ```
+
+---
+
+## `ouroboros uninstall`
+
+Cleanly remove all Ouroboros configuration from your system. Reverses everything `ouroboros setup` did.
+
+```bash
+ouroboros uninstall [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--keep-data` | Keep entire `~/.ouroboros/` directory (config, credentials, seeds, logs, DB) |
+| `--dry-run` | Show what would be removed without actually deleting |
+| `-y, --yes` | Skip confirmation prompt |
+
+**Examples:**
+
+```bash
+# Interactive uninstall (shows what will be removed, asks for confirmation)
+ouroboros uninstall
+
+# Non-interactive
+ouroboros uninstall -y
+
+# Preview only
+ouroboros uninstall --dry-run
+
+# Remove MCP/artifacts but keep ~/.ouroboros/
+ouroboros uninstall --keep-data
+```
+
+**What it removes:**
+
+- `ouroboros` entry from `~/.claude/mcp.json`
+- `[mcp_servers.ouroboros]` section from `~/.codex/config.toml`
+- `~/.codex/rules/ouroboros.md` and `~/.codex/skills/ouroboros/`
+- `<!-- ooo:START -->` … `<!-- ooo:END -->` block from `CLAUDE.md`
+- `.ouroboros/` directory in the current project
+- `~/.ouroboros/` directory (unless `--keep-data`)
+
+**What it does NOT remove:**
+
+- The Python package — run `pip uninstall ouroboros-ai` or `uv tool uninstall ouroboros-ai` separately
+- The Claude Code plugin — run `claude plugin uninstall ouroboros` separately
+- Your project source code or git history
+
+See [UNINSTALL.md](../UNINSTALL.md) for the full guide.
 
 ---
 

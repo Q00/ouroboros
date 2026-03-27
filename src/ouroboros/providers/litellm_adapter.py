@@ -23,6 +23,8 @@ from ouroboros.providers.base import (
 
 log = structlog.get_logger()
 _CREDENTIALS_UNSET = object()
+_PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
+_PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 
 # LiteLLM exceptions that should trigger retries
 RETRIABLE_EXCEPTIONS = (
@@ -101,6 +103,21 @@ class LiteLLMAdapter:
         provider_name = self._extract_provider(model)
         return credentials.providers.get(provider_name)
 
+    @staticmethod
+    def _normalize_api_key(value: str | None) -> str | None:
+        """Treat blank and template placeholder API keys as unset."""
+        if value is None:
+            return None
+
+        candidate = value.strip()
+        if not candidate:
+            return None
+        if candidate.startswith(_PLACEHOLDER_API_KEY_PREFIX) and candidate.endswith(
+            _PLACEHOLDER_API_KEY_SUFFIX
+        ):
+            return None
+        return candidate
+
     def _get_api_key(self, model: str) -> str | None:
         """Get the appropriate API key for the model.
 
@@ -115,33 +132,36 @@ class LiteLLMAdapter:
         Returns:
             The API key or None if not found.
         """
-        if self._api_key:
-            return self._api_key
+        explicit_api_key = self._normalize_api_key(self._api_key)
+        if explicit_api_key:
+            return explicit_api_key
 
         # Check environment variables based on model prefix
         if model.startswith("openrouter/"):
-            env_key = os.environ.get("OPENROUTER_API_KEY")
+            env_key = self._normalize_api_key(os.environ.get("OPENROUTER_API_KEY"))
             if env_key:
                 return env_key
         if model.startswith("anthropic/") or model.startswith("claude"):
-            env_key = os.environ.get("ANTHROPIC_API_KEY")
+            env_key = self._normalize_api_key(os.environ.get("ANTHROPIC_API_KEY"))
             if env_key:
                 return env_key
         if model.startswith("openai/") or model.startswith("gpt"):
-            env_key = os.environ.get("OPENAI_API_KEY")
+            env_key = self._normalize_api_key(os.environ.get("OPENAI_API_KEY"))
             if env_key:
                 return env_key
         if model.startswith("google/") or model.startswith("gemini"):
-            env_key = os.environ.get("GOOGLE_API_KEY")
+            env_key = self._normalize_api_key(os.environ.get("GOOGLE_API_KEY"))
             if env_key:
                 return env_key
 
         configured = self._get_configured_provider_credentials(model)
         if configured is not None:
-            return configured.api_key
+            configured_api_key = self._normalize_api_key(configured.api_key)
+            if configured_api_key:
+                return configured_api_key
 
         # Default to OpenRouter for unknown models
-        return os.environ.get("OPENROUTER_API_KEY")
+        return self._normalize_api_key(os.environ.get("OPENROUTER_API_KEY"))
 
     def _get_api_base(self, model: str) -> str | None:
         """Get the appropriate API base URL for the model."""

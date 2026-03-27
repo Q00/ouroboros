@@ -332,6 +332,7 @@ class MockClaudeAgentAdapter:
         prompt: str,
         tools: list[str] | None = None,
         system_prompt: str | None = None,
+        cwd: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
@@ -341,6 +342,7 @@ class MockClaudeAgentAdapter:
                 "prompt": prompt,
                 "tools": tools,
                 "system_prompt": system_prompt,
+                "cwd": cwd,
                 "resume_handle": resume_handle,
                 "resume_session_id": resume_session_id,
             }

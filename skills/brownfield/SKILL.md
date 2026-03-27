@@ -49,7 +49,18 @@ This may take a moment...
 
 The scan response `text` already contains a pre-formatted numbered list with `[default]` markers. **Do NOT make any additional MCP calls to list or query repos.**
 
-**Display the repos in a compact 2-column grid** so the user can scan all repos quickly. Format the scan response `text` as two side-by-side columns. Include `*` markers for defaults exactly as they appear in the response.
+**Display the repos in a plain-text 2-column grid** (NOT a markdown table). Use a code block so columns align. Example:
+
+```
+Scan complete. 8 repositories registered.
+
+ 1. repo-alpha                   5. repo-epsilon
+ 2. repo-bravo *                 6. repo-foxtrot
+ 3. repo-charlie                 7. repo-golf *
+ 4. repo-delta                   8. repo-hotel
+```
+
+Include `*` markers for defaults exactly as they appear in the scan response.
 
 **If no repos found**, show:
 ```
@@ -59,7 +70,9 @@ Then stop.
 
 **Step 2: Default Selection**
 
-**IMMEDIATELY after showing the list**, use `AskUserQuestion` with the current default numbers from the scan response:
+**IMMEDIATELY after showing the list**, use `AskUserQuestion` with the current default numbers from the scan response.
+
+**If defaults exist**, show them as the recommended option:
 
 ```json
 {
@@ -75,7 +88,23 @@ Then stop.
 }
 ```
 
-The user can select the recommended defaults, choose "None", or type custom numbers.
+**If no defaults exist**, do NOT show a "(Recommended)" option — offer "None" and "Select repos" instead:
+
+```json
+{
+  "questions": [{
+    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
+    "header": "Default Repos",
+    "options": [
+      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"},
+      {"label": "Select repos", "description": "Type repo numbers to set as default"}
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+The user can select the recommended defaults (if any), choose "None", or type custom numbers.
 
 After the user responds, use ONE MCP call to update all defaults at once:
 

@@ -15,7 +15,26 @@ PM-focused Socratic interview that produces a Product Requirements Document.
 ToolSearch query: "+ouroboros pm_interview"
 ```
 
-If not found → tell user to run `ooo setup` first. Stop.
+If not found → **diagnose before telling user to run setup**:
+
+1. Check if MCP is already configured:
+   ```bash
+   grep -q '"ouroboros"' ~/.claude/mcp.json 2>/dev/null && echo "CONFIGURED" || echo "NOT_CONFIGURED"
+   ```
+
+2. **If NOT_CONFIGURED** → tell user to run `ooo setup` first. Stop.
+
+3. **If CONFIGURED** → MCP is registered but the server isn't connecting. Do NOT tell the user to run `ooo setup` again. Instead show:
+   ```
+   Ouroboros MCP is configured but not connected.
+
+   Try these steps in order:
+   1. Restart Claude Code (Cmd+Shift+P → "Reload Window" or close/reopen terminal)
+   2. Check MCP status: type /mcp in Claude Code
+   3. If ouroboros shows "error", try: ooo update
+   4. If still failing, re-run: ooo setup
+   ```
+   Stop.
 
 ### Step 2: Start Interview
 

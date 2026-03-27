@@ -10,13 +10,13 @@ runner = CliRunner()
 
 
 def test_version_exists():
-    """Test that __version__ is defined and is a valid semver string."""
+    """Test that __version__ is defined and is a valid PEP 440 version string."""
     import re
 
     assert hasattr(ouroboros, "__version__")
-    # PEP 440: X.Y.Z, X.Y.Z.devN, X.Y.ZbN, X.Y.ZbN.devN, with optional +local
+    # Accept release, prerelease, and dev versions with optional local metadata.
     assert re.match(
-        r"^\d+\.\d+\.\d+((a|b|rc)\d+)?(\.dev\d+)?(\+.+)?$",
+        r"^\d+\.\d+(\.\d+)?((a|b|rc)\d+)?(\.dev\d+)?(\+.+)?$",
         ouroboros.__version__,
     ), f"Invalid PEP 440 version: {ouroboros.__version__}"
 

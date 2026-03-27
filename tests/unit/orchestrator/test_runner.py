@@ -18,6 +18,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
@@ -33,6 +34,19 @@ from ouroboros.orchestrator.runner import (
     build_task_prompt,
 )
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
+
+
+def _task_workspace() -> TaskWorkspace:
+    return TaskWorkspace(
+        durable_id="orch_test",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/worktree/repo/orch_test",
+        worktree_path="/tmp/worktree/repo/orch_test",
+        branch="ooo/orch_test",
+        lock_path="/tmp/worktree/.locks/repo/orch_test.json",
+    )
 
 
 @pytest.fixture
@@ -767,6 +781,104 @@ class TestOrchestratorRunner:
         assert "session" in str(result.error).lower()
 
     @pytest.mark.asyncio
+    async def test_execute_seed_session_creation_failure_releases_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Session creation errors should not leak an acquired workspace lock."""
+        from ouroboros.core.errors import PersistenceError
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "create_session",
+                return_value=Result.err(PersistenceError("DB error")),
+            ),
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.execute_seed(sample_seed)
+
+        assert result.is_err
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_start_event_failure_cleans_up_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Start-event failures should release the workspace lock and unregister the session."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        tracker = SessionTracker.create("exec_setup", sample_seed.metadata.seed_id)
+
+        with (
+            patch.object(runner._session_repo, "create_session", return_value=Result.ok(tracker)),
+            patch.object(
+                runner._event_store,
+                "append",
+                AsyncMock(side_effect=RuntimeError("event append failed")),
+            ),
+            patch.object(runner, "_unregister_session") as unregister_mock,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.execute_seed(sample_seed, execution_id="exec_setup")
+
+        assert result.is_err
+        unregister_mock.assert_called_once_with("exec_setup", tracker.session_id)
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_tool_setup_failure_cleans_up_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Merged-tool setup failures should release the workspace lock and unregister."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        tracker = SessionTracker.create("exec_tools", sample_seed.metadata.seed_id)
+
+        with (
+            patch.object(runner._session_repo, "create_session", return_value=Result.ok(tracker)),
+            patch.object(runner, "_get_merged_tools", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch.object(runner, "_unregister_session") as unregister_mock,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.execute_seed(sample_seed, execution_id="exec_tools")
+
+        assert result.is_err
+        unregister_mock.assert_called_once_with("exec_tools", tracker.session_id)
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
     async def test_resume_session_already_completed(
         self,
         runner: OrchestratorRunner,
@@ -788,6 +900,77 @@ class TestOrchestratorRunner:
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
+
+    @pytest.mark.asyncio
+    async def test_resume_session_already_completed_releases_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Terminal resume attempts should not leak the acquired workspace lock."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        completed_tracker = SessionTracker.create("exec", "seed").with_status(
+            SessionStatus.COMPLETED
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(completed_tracker),
+            ),
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.resume_session("sess_123", sample_seed)
+
+        assert result.is_err
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
+    async def test_resume_session_tool_setup_failure_cleans_up_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Resume setup failures should release the workspace lock and unregister."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.RUNNING
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(running_tracker),
+            ),
+            patch.object(runner, "_get_merged_tools", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch.object(runner, "_unregister_session") as unregister_mock,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_err
+        unregister_mock.assert_called_once_with("exec_resume", "sess_resume")
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
 
     @pytest.mark.asyncio
     async def test_resume_session_not_found(

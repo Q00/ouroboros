@@ -80,37 +80,45 @@ When the user invokes this skill:
 
 4. **Run update** (if user chose to update):
 
-   a. **Update PyPI package** — detect the original install method and use the same one:
+   a. **Update PyPI package** — detect the original install method and preserve `[claude]` extras:
 
-   Check which installer was used (in priority order):
+   Check which installer was used:
    ```bash
    uv tool list 2>/dev/null | grep -q ouroboros && echo "uv"
    pipx list 2>/dev/null | grep -q ouroboros && echo "pipx"
    ```
 
+   > This skill runs inside Claude Code, so always use `ouroboros-ai[claude]`
+   > (includes `claude-agent-sdk` and `anthropic` required for MCP tools).
+
    - If installed via **uv tool** (most common with install.sh):
      ```bash
      # For pre-release targets:
-     uv tool install --upgrade --prerelease=allow ouroboros-ai
+     uv tool install --upgrade --prerelease=allow ouroboros-ai[claude]
      # For stable targets:
-     uv tool install --upgrade ouroboros-ai
+     uv tool install --upgrade ouroboros-ai[claude]
      ```
 
    - If installed via **pipx**:
+     > `pipx upgrade` cannot add extras to an existing venv — use `install --force` to reinstall with extras.
      ```bash
      # For pre-release targets:
-     pipx upgrade --pip-args='--pre' ouroboros-ai
+     pipx install --force --pip-args='--pre' ouroboros-ai[claude]
      # For stable targets:
-     pipx upgrade ouroboros-ai
+     pipx install --force ouroboros-ai[claude]
      ```
 
    - If installed via **pip** (fallback):
      ```bash
      # For pre-release targets:
-     python3 -m pip install --upgrade --pre ouroboros-ai
+     python3 -m pip install --upgrade --pre ouroboros-ai[claude]
      # For stable targets:
-     python3 -m pip install --upgrade ouroboros-ai
+     python3 -m pip install --upgrade ouroboros-ai[claude]
      ```
+
+   > **Note**: The `[claude]` extra is critical — it installs `claude-agent-sdk` and
+   > `anthropic` which are required for MCP tool execution. Omitting it causes MCP
+   > tools to fail silently at call time.
 
    b. **Update runtime integration**:
 
@@ -125,7 +133,21 @@ When the user invokes this skill:
    ouroboros setup --runtime codex --non-interactive
    ```
 
-   c. **Verify and update CLAUDE.md version marker**:
+   c. **Refresh MCP server config** (fixes stale args from older versions):
+
+   Run the same setup command used in step b to ensure MCP config is current:
+
+   For Claude Code:
+   ```bash
+   ouroboros setup --runtime claude --non-interactive
+   ```
+
+   For Codex CLI (already handled by step b above — skip this step).
+
+   This ensures `~/.claude/mcp.json` has the latest MCP command and args
+   (e.g., `ouroboros-ai[claude]` extras). Skips if already up to date.
+
+   d. **Verify and update CLAUDE.md version marker**:
    ```bash
    NEW_VERSION=$(ouroboros --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.]*')
    echo "Installed: v$NEW_VERSION"

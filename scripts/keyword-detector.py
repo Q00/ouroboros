@@ -19,7 +19,11 @@ import sys
 
 # Skills that work without MCP setup (bypass the setup gate)
 # qa has a built-in fallback that adopts the qa-judge agent directly
-SETUP_BYPASS_SKILLS = ["/ouroboros:setup", "/ouroboros:help", "/ouroboros:qa"]
+SETUP_BYPASS_SKILLS = [
+    "/ouroboros:setup",
+    "/ouroboros:help",
+    "/ouroboros:qa",
+]
 
 # Keyword → skill mapping
 # "ooo <cmd>" prefix always works; natural language keywords also supported
@@ -37,9 +41,22 @@ KEYWORD_MAP = [
     {"patterns": ["ooo welcome"], "skill": "/ouroboros:welcome"},
     {"patterns": ["ooo setup"], "skill": "/ouroboros:setup"},
     {"patterns": ["ooo help"], "skill": "/ouroboros:help"},
+    {"patterns": ["ooo pm", "ooo prd"], "skill": "/ouroboros:pm"},
     {"patterns": ["ooo qa", "qa check", "quality check"], "skill": "/ouroboros:qa"},
+    {"patterns": ["ooo cancel", "ooo abort"], "skill": "/ouroboros:cancel"},
     {"patterns": ["ooo update", "ooo upgrade"], "skill": "/ouroboros:update"},
+    {"patterns": ["ooo brownfield"], "skill": "/ouroboros:brownfield"},
     # Natural language triggers
+    # PM triggers must precede generic interview to avoid "pm interview" being shadowed
+    {
+        "patterns": [
+            "write prd",
+            "pm interview",
+            "product requirements",
+            "create prd",
+        ],
+        "skill": "/ouroboros:pm",
+    },
     {
         "patterns": [
             "interview me",
@@ -96,6 +113,22 @@ KEYWORD_MAP = [
     {
         "patterns": ["update ouroboros", "upgrade ouroboros"],
         "skill": "/ouroboros:update",
+    },
+    {
+        "patterns": [
+            "cancel execution",
+            "stop job",
+            "kill stuck",
+            "abort execution",
+        ],
+        "skill": "/ouroboros:cancel",
+    },
+    {
+        "patterns": [
+            "brownfield defaults",
+            "brownfield scan",
+        ],
+        "skill": "/ouroboros:brownfield",
     },
 ]
 

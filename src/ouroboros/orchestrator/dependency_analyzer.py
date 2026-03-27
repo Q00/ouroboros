@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 from ouroboros.config import get_dependency_analysis_model
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
-from ouroboros.providers import create_llm_adapter
 
 if TYPE_CHECKING:
     from ouroboros.providers.base import LLMAdapter
@@ -369,18 +368,23 @@ class DependencyAnalyzer:
         )
 
         dependencies = {index: set(values) for index, values in structured_dependencies.items()}
-        try:
-            llm_dependencies = await self._analyze_with_llm(tuple(spec.content for spec in specs))
-            for index, values in llm_dependencies.items():
-                dependencies.setdefault(index, set()).update(values)
-            method = "llm+structured"
-        except Exception as exc:
-            log.warning(
-                "dependency_analyzer.analysis.failed",
-                error=str(exc),
-                ac_count=count,
-            )
-            method = "structured_fallback"
+        if self._llm is not None:
+            try:
+                llm_dependencies = await self._analyze_with_llm(
+                    tuple(spec.content for spec in specs)
+                )
+                for index, values in llm_dependencies.items():
+                    dependencies.setdefault(index, set()).update(values)
+                method = "llm+structured"
+            except Exception as exc:
+                log.warning(
+                    "dependency_analyzer.analysis.failed",
+                    error=str(exc),
+                    ac_count=count,
+                )
+                method = "structured_fallback"
+        else:
+            method = "structured_only"
 
         nodes = self._build_nodes(specs, dependencies, serialization_reasons)
         levels = _apply_serial_only_constraints(_compute_execution_levels(nodes), nodes)
@@ -502,7 +506,7 @@ class DependencyAnalyzer:
         from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 
         if self._llm is None:
-            self._llm = create_llm_adapter(max_turns=1)
+            raise DependencyAnalysisError("LLM adapter not configured for dependency analysis")
 
         ac_list = "\n".join(f"AC {index}: {content}" for index, content in enumerate(criteria))
         prompt = DEPENDENCY_ANALYSIS_PROMPT.format(ac_list=ac_list)

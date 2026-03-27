@@ -41,6 +41,11 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo welcome` | First-touch welcome guide | Plugin |
 | `ooo tutorial` | Interactive hands-on learning | Plugin |
 | `ooo help` | This reference guide | Plugin |
+| `ooo pm` | PM-focused interview + PRD generation | MCP |
+| `ooo qa` | General-purpose QA verdict for any artifact | Plugin |
+| `ooo cancel` | Cancel stuck or orphaned executions | CLI |
+| `ooo update` | Check for updates + upgrade to latest | Plugin |
+| `ooo brownfield` | Scan and manage brownfield repo defaults | MCP |
 
 ### Evolutionary Loop
 
@@ -62,6 +67,16 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | "evaluate this", "3-stage check", "verify execution" | `ooo evaluate` |
 | "think sideways", "i'm stuck", "break through", "lateral thinking" | `ooo unstuck` |
 | "am I drifting?", "drift check", "session status" | `ooo status` |
+
+### Utility Triggers
+
+| Phrase | Triggers |
+|--------|----------|
+| "write prd", "pm interview", "product requirements", "create prd" | `ooo pm` |
+| "qa check", "quality check" | `ooo qa` |
+| "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
+| "update ouroboros", "upgrade ouroboros" | `ooo update` |
+| "brownfield defaults", "brownfield scan" | `ooo brownfield` |
 
 ### Loop Triggers
 
@@ -86,6 +101,11 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:setup` | Installation wizard | Plugin |
 | `/ouroboros:tutorial` | Interactive hands-on learning | Plugin |
 | `/ouroboros:help` | This guide | Plugin |
+| `/ouroboros:pm` | PM-focused interview + PRD generation | MCP |
+| `/ouroboros:qa` | General-purpose QA verdict for any artifact | Plugin |
+| `/ouroboros:cancel` | Cancel stuck or orphaned executions | CLI |
+| `/ouroboros:update` | Check for updates + upgrade to latest | Plugin |
+| `/ouroboros:brownfield` | Scan and manage brownfield repo defaults | MCP |
 
 ### Loop Skills
 

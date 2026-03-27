@@ -17,9 +17,18 @@ import structlog
 import yaml
 
 from ouroboros.core.errors import ValidationError
+from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import (
+    TaskWorkspace,
+    WorktreeError,
+    maybe_prepare_task_workspace,
+    maybe_restore_task_workspace,
+    release_lock,
+)
+from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.types import (
@@ -251,6 +260,8 @@ class ExecuteSeedHandler:
         session_id = session_id or session_id_override
         model_tier = arguments.get("model_tier", "medium")
         max_iterations = arguments.get("max_iterations", 10)
+        if not is_resume and session_id is None:
+            session_id = f"orch_{uuid4().hex[:12]}"
 
         # Extract delegation context (only for new executions, not resumes)
         inherited_runtime_handle = (
@@ -313,209 +324,281 @@ class ExecuteSeedHandler:
                 )
             )
 
+        verification_working_dir = self._resolve_verification_working_dir(
+            seed,
+            resolved_cwd,
+            arguments.get("cwd"),
+            arguments.get(DELEGATED_PARENT_CWD_ARG),
+        )
+
         # Use injected or create orchestrator dependencies
         try:
-            from ouroboros.orchestrator.runtime_factory import resolve_agent_runtime_backend
-            from ouroboros.providers.factory import resolve_llm_backend
-
-            delegated_permission_mode = (
-                inherited_runtime_handle.approval_mode
-                if inherited_runtime_handle and inherited_runtime_handle.approval_mode
-                else None
-            )
-            agent_adapter = create_agent_runtime(
-                backend=self.agent_runtime_backend,
-                cwd=resolved_cwd,
-                llm_backend=self.llm_backend,
-                **(
-                    {"permission_mode": delegated_permission_mode}
-                    if delegated_permission_mode
-                    else {}
-                ),
-            )
-            runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
-            resolved_llm_backend = resolve_llm_backend(self.llm_backend)
+            runtime_backend = self.agent_runtime_backend
+            resolved_llm_backend = self.llm_backend or "default"
             event_store = self.event_store or EventStore()
             owns_event_store = self.event_store is None
             await event_store.initialize()
             # Use stderr: in MCP stdio mode, stdout is the JSON-RPC channel.
             console = Console(stderr=True)
-
-            # Create orchestrator runner
-            runner = OrchestratorRunner(
-                adapter=agent_adapter,
-                event_store=event_store,
-                console=console,
-                debug=False,
-                enable_decomposition=True,
-                inherited_runtime_handle=inherited_runtime_handle,
-                inherited_tools=inherited_effective_tools,
-            )
             session_repo = SessionRepository(event_store)
+            workspace: TaskWorkspace | None = None
+            launched = False
 
-            skip_qa = arguments.get("skip_qa", False)
-            if is_resume and session_id:
-                tracker_result = await session_repo.reconstruct_session(session_id)
-                if tracker_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            f"Session resume failed: {tracker_result.error.message}",
-                            tool_name="ouroboros_execute_seed",
+            try:
+                if is_resume and session_id:
+                    tracker_result = await session_repo.reconstruct_session(session_id)
+                    if tracker_result.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                f"Session resume failed: {tracker_result.error.message}",
+                                tool_name="ouroboros_execute_seed",
+                            )
                         )
-                    )
-                tracker = tracker_result.value
-                if tracker.status in (
-                    SessionStatus.COMPLETED,
-                    SessionStatus.CANCELLED,
-                    SessionStatus.FAILED,
-                ):
-                    return Result.err(
-                        MCPToolError(
-                            (
-                                f"Session {tracker.session_id} is already "
-                                f"{tracker.status.value} and cannot be resumed"
-                            ),
-                            tool_name="ouroboros_execute_seed",
-                        )
-                    )
-            else:
-                prepared = await runner.prepare_session(
-                    seed,
-                    execution_id=execution_id,
-                    session_id=session_id_override,
-                )
-                if prepared.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            f"Execution failed: {prepared.error.message}",
-                            tool_name="ouroboros_execute_seed",
-                        )
-                    )
-                tracker = prepared.value
-
-            # Fire-and-forget: launch execution in a background task and
-            # return the session/execution IDs immediately so the MCP
-            # client is not blocked by Codex's tool-call timeout.
-            async def _run_in_background(
-                _runner: OrchestratorRunner,
-                _seed: Seed,
-                _tracker,
-                _seed_content: str,
-                _resume_existing: bool,
-                _skip_qa: bool,
-                _session_repo: SessionRepository = session_repo,
-                _event_store: EventStore = event_store,
-                _owns_event_store: bool = owns_event_store,
-            ) -> None:
-                try:
-                    if _resume_existing:
-                        result = await _runner.resume_session(_tracker.session_id, _seed)
-                    else:
-                        result = await _runner.execute_precreated_session(
-                            seed=_seed,
-                            tracker=_tracker,
-                            parallel=True,
-                        )
-                    if result.is_err:
-                        log.error(
-                            "mcp.tool.execute_seed.background_failed",
-                            session_id=_tracker.session_id,
-                            error=str(result.error),
-                        )
-                        await _session_repo.mark_failed(
-                            _tracker.session_id,
-                            error_message=str(result.error),
-                        )
-                        return
-                    if not result.value.success:
-                        log.warning(
-                            "mcp.tool.execute_seed.background_unsuccessful",
-                            session_id=_tracker.session_id,
-                            message=result.value.final_message,
-                        )
-                        return
-                    if not _skip_qa:
-                        from ouroboros.mcp.tools.qa import QAHandler
-
-                        qa_handler = QAHandler(
-                            llm_adapter=self.llm_adapter,
-                            llm_backend=self.llm_backend,
-                        )
-                        quality_bar = self._derive_quality_bar(_seed)
-                        await qa_handler.handle(
-                            {
-                                "artifact": self._get_verification_artifact(
-                                    result.value.summary,
-                                    result.value.final_message,
+                    tracker = tracker_result.value
+                    if tracker.status in (
+                        SessionStatus.COMPLETED,
+                        SessionStatus.CANCELLED,
+                        SessionStatus.FAILED,
+                    ):
+                        return Result.err(
+                            MCPToolError(
+                                (
+                                    f"Session {tracker.session_id} is already "
+                                    f"{tracker.status.value} and cannot be resumed"
                                 ),
-                                "artifact_type": "test_output",
-                                "quality_bar": quality_bar,
-                                "seed_content": _seed_content,
-                                "pass_threshold": 0.80,
-                            }
+                                tool_name="ouroboros_execute_seed",
+                            )
                         )
-                except Exception:
-                    log.exception(
-                        "mcp.tool.execute_seed.background_error",
-                        session_id=_tracker.session_id,
-                    )
+                    persisted = TaskWorkspace.from_progress_dict(tracker.progress.get("workspace"))
                     try:
-                        await _session_repo.mark_failed(
-                            _tracker.session_id,
-                            error_message="Unexpected error in background execution",
+                        workspace = maybe_restore_task_workspace(
+                            session_id,
+                            persisted,
+                            fallback_source_cwd=resolved_cwd,
+                            allow_dirty=inherited_runtime_handle is not None,
                         )
-                    except Exception:
-                        log.exception("mcp.tool.execute_seed.mark_failed_error")
-                finally:
-                    if _owns_event_store:
-                        try:
-                            await _event_store.close()
-                        except Exception:
-                            log.exception("mcp.tool.execute_seed.event_store_close_error")
+                    except WorktreeError as e:
+                        return Result.err(
+                            MCPToolError(
+                                f"Task workspace error: {e.message}",
+                                tool_name="ouroboros_execute_seed",
+                            )
+                        )
+                else:
+                    try:
+                        workspace = maybe_prepare_task_workspace(
+                            resolved_cwd,
+                            session_id,
+                            allow_dirty=inherited_runtime_handle is not None,
+                        )
+                    except WorktreeError as e:
+                        return Result.err(
+                            MCPToolError(
+                                f"Task workspace error: {e.message}",
+                                tool_name="ouroboros_execute_seed",
+                            )
+                        )
 
-            task = asyncio.create_task(
-                _run_in_background(runner, seed, tracker, seed_content, bool(session_id), skip_qa)
-            )
-            # Prevent the task from being garbage-collected.
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
-
-            # Return immediately with the seed ID.  The execution runs
-            # in the background and progress can be tracked via
-            # ouroboros_session_status / ouroboros_query_events.
-            return Result.ok(
-                MCPToolResult(
-                    content=(
-                        MCPContentItem(
-                            type=ContentType.TEXT,
-                            text=(
-                                f"Seed Execution LAUNCHED\n"
-                                f"{'=' * 60}\n"
-                                f"Seed ID: {seed.metadata.seed_id}\n"
-                                f"Session ID: {tracker.session_id}\n"
-                                f"Execution ID: {tracker.execution_id}\n"
-                                f"Goal: {seed.goal}\n\n"
-                                f"Runtime Backend: {runtime_backend}\n"
-                                f"LLM Backend: {resolved_llm_backend}\n\n"
-                                f"Execution is running in the background.\n"
-                                f"Use ouroboros_session_status to track progress.\n"
-                                f"Use ouroboros_query_events for detailed event history.\n"
-                            ),
-                        ),
-                    ),
-                    is_error=False,
-                    meta={
-                        "seed_id": seed.metadata.seed_id,
-                        "session_id": tracker.session_id,
-                        "execution_id": tracker.execution_id,
-                        "launched": True,
-                        "status": "running",
-                        "runtime_backend": runtime_backend,
-                        "llm_backend": resolved_llm_backend,
-                        "resume_requested": bool(session_id),
-                    },
+                delegated_permission_mode = (
+                    inherited_runtime_handle.approval_mode
+                    if inherited_runtime_handle and inherited_runtime_handle.approval_mode
+                    else None
                 )
-            )
+                agent_adapter = create_agent_runtime(
+                    backend=self.agent_runtime_backend,
+                    cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,
+                    llm_backend=self.llm_backend,
+                    **(
+                        {"permission_mode": delegated_permission_mode}
+                        if delegated_permission_mode
+                        else {}
+                    ),
+                )
+                runtime_backend_attr = getattr(agent_adapter, "runtime_backend", None)
+                if not (isinstance(runtime_backend_attr, str) and runtime_backend_attr):
+                    runtime_backend_attr = getattr(agent_adapter, "_runtime_backend", None)
+                effective_runtime_backend = (
+                    runtime_backend_attr
+                    if isinstance(runtime_backend_attr, str) and runtime_backend_attr
+                    else runtime_backend or "unknown"
+                )
+
+                # Create orchestrator runner
+                runner = OrchestratorRunner(
+                    adapter=agent_adapter,
+                    event_store=event_store,
+                    console=console,
+                    debug=False,
+                    enable_decomposition=True,
+                    inherited_runtime_handle=inherited_runtime_handle,
+                    inherited_tools=inherited_effective_tools,
+                    task_workspace=workspace,
+                )
+
+                skip_qa = arguments.get("skip_qa", False)
+                if not is_resume:
+                    prepared = await runner.prepare_session(
+                        seed,
+                        execution_id=execution_id,
+                        session_id=session_id,
+                    )
+                    if prepared.is_err:
+                        return Result.err(
+                            MCPToolError(
+                                f"Execution failed: {prepared.error.message}",
+                                tool_name="ouroboros_execute_seed",
+                            )
+                        )
+                    tracker = prepared.value
+
+                # Fire-and-forget: launch execution in a background task and
+                # return the session/execution IDs immediately so the MCP
+                # client is not blocked by Codex's tool-call timeout.
+                async def _run_in_background(
+                    _runner: OrchestratorRunner,
+                    _seed: Seed,
+                    _tracker,
+                    _seed_content: str,
+                    _resume_existing: bool,
+                    _skip_qa: bool,
+                    _workspace: TaskWorkspace | None = workspace,
+                    _session_repo: SessionRepository = session_repo,
+                    _event_store: EventStore = event_store,
+                    _owns_event_store: bool = owns_event_store,
+                ) -> None:
+                    try:
+                        if _resume_existing:
+                            result = await _runner.resume_session(_tracker.session_id, _seed)
+                        else:
+                            result = await _runner.execute_precreated_session(
+                                seed=_seed,
+                                tracker=_tracker,
+                                parallel=True,
+                            )
+                        if result.is_err:
+                            log.error(
+                                "mcp.tool.execute_seed.background_failed",
+                                session_id=_tracker.session_id,
+                                error=str(result.error),
+                            )
+                            await _session_repo.mark_failed(
+                                _tracker.session_id,
+                                error_message=str(result.error),
+                            )
+                            return
+                        if not result.value.success:
+                            log.warning(
+                                "mcp.tool.execute_seed.background_unsuccessful",
+                                session_id=_tracker.session_id,
+                                message=result.value.final_message,
+                            )
+                            return
+                        if not _skip_qa:
+                            from ouroboros.mcp.tools.qa import QAHandler
+
+                            qa_handler = QAHandler(
+                                llm_adapter=self.llm_adapter,
+                                llm_backend=self.llm_backend,
+                            )
+                            quality_bar = self._derive_quality_bar(_seed)
+                            execution_artifact = self._get_verification_artifact(
+                                result.value.summary,
+                                result.value.final_message,
+                            )
+                            try:
+                                verification = await build_verification_artifacts(
+                                    result.value.execution_id,
+                                    execution_artifact,
+                                    verification_working_dir,
+                                )
+                                artifact = verification.artifact
+                                reference = verification.reference
+                            except Exception as e:
+                                artifact = execution_artifact
+                                reference = f"Verification artifact generation failed: {e}"
+                            await qa_handler.handle(
+                                {
+                                    "artifact": artifact,
+                                    "artifact_type": "test_output",
+                                    "quality_bar": quality_bar,
+                                    "reference": reference,
+                                    "seed_content": _seed_content,
+                                    "pass_threshold": 0.80,
+                                }
+                            )
+                    except Exception:
+                        log.exception(
+                            "mcp.tool.execute_seed.background_error",
+                            session_id=_tracker.session_id,
+                        )
+                        try:
+                            await _session_repo.mark_failed(
+                                _tracker.session_id,
+                                error_message="Unexpected error in background execution",
+                            )
+                        except Exception:
+                            log.exception("mcp.tool.execute_seed.mark_failed_error")
+                    finally:
+                        if _workspace is not None:
+                            release_lock(_workspace.lock_path)
+                        if _owns_event_store:
+                            try:
+                                await _event_store.close()
+                            except Exception:
+                                log.exception("mcp.tool.execute_seed.event_store_close_error")
+
+                task = asyncio.create_task(
+                    _run_in_background(runner, seed, tracker, seed_content, is_resume, skip_qa)
+                )
+                launched = True
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+
+                message = (
+                    f"Seed Execution LAUNCHED\n"
+                    f"{'=' * 60}\n"
+                    f"Seed ID: {seed.metadata.seed_id}\n"
+                    f"Session ID: {tracker.session_id}\n"
+                    f"Execution ID: {tracker.execution_id}\n"
+                    f"Goal: {seed.goal}\n\n"
+                    f"Runtime Backend: {effective_runtime_backend}\n"
+                    f"LLM Backend: {resolved_llm_backend}\n"
+                )
+                if workspace is not None:
+                    message += (
+                        f"Task Worktree: {workspace.worktree_path}\n"
+                        f"Task Branch: {workspace.branch}\n"
+                    )
+                message += (
+                    "\nExecution is running in the background.\n"
+                    "Use ouroboros_session_status to track progress.\n"
+                    "Use ouroboros_query_events for detailed event history.\n"
+                )
+
+                meta = {
+                    "seed_id": seed.metadata.seed_id,
+                    "session_id": tracker.session_id,
+                    "execution_id": tracker.execution_id,
+                    "launched": True,
+                    "status": "running",
+                    "runtime_backend": effective_runtime_backend,
+                    "llm_backend": resolved_llm_backend,
+                    "resume_requested": is_resume,
+                }
+                if workspace is not None:
+                    meta["worktree_path"] = workspace.worktree_path
+                    meta["worktree_branch"] = workspace.branch
+
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text=message),),
+                        is_error=False,
+                        meta=meta,
+                    )
+                )
+            finally:
+                if workspace is not None and not launched:
+                    release_lock(workspace.lock_path)
         except Exception as e:
             log.error("mcp.tool.execute_seed.error", error=str(e))
             return Result.err(
@@ -537,6 +620,26 @@ class ExecuteSeedHandler:
         """Derive a quality bar string from seed acceptance criteria."""
         ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
         return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
+
+    @staticmethod
+    def _resolve_verification_working_dir(
+        seed: Seed,
+        dispatch_cwd: Path,
+        raw_cwd: Any,
+        delegated_parent_cwd: Any,
+    ) -> Path:
+        """Resolve the best project directory for post-run verification."""
+        if isinstance(raw_cwd, str) and raw_cwd.strip():
+            return dispatch_cwd
+
+        if isinstance(delegated_parent_cwd, str) and delegated_parent_cwd.strip():
+            return Path(delegated_parent_cwd).expanduser().resolve()
+
+        seed_project_dir = resolve_seed_project_path(seed, stable_base=dispatch_cwd)
+        if seed_project_dir is not None:
+            return seed_project_dir
+
+        return dispatch_cwd
 
     @staticmethod
     def _get_verification_artifact(summary: dict[str, Any], final_message: str) -> str:

@@ -32,6 +32,101 @@ from ouroboros.cli.formatters.panels import (
 )
 from ouroboros.persistence.brownfield import BrownfieldStore
 
+# Canonical MCP args for Claude Code uvx installs — single source of truth.
+_CLAUDE_UVX_ARGS: list[str] = [
+    "--from",
+    "ouroboros-ai[claude]",
+    "ouroboros",
+    "mcp",
+    "serve",
+]
+
+
+def _detect_mcp_entry() -> dict[str, object] | None:
+    """Build the correct MCP entry based on how ouroboros is installed.
+
+    Priority: uvx > ouroboros binary > python3 -m ouroboros (verified).
+    Returns None if no working method is found.
+    Matches the contract in install.sh and skills/setup/SKILL.md.
+    """
+    if shutil.which("uvx"):
+        return {"command": "uvx", "args": list(_CLAUDE_UVX_ARGS)}
+    if shutil.which("ouroboros"):
+        return {"command": "ouroboros", "args": ["mcp", "serve"]}
+    # Only use python3 fallback if ouroboros is actually importable
+    import subprocess
+
+    try:
+        subprocess.run(
+            ["python3", "-c", "import ouroboros"],
+            capture_output=True,
+            timeout=10,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+
+
+def _ensure_claude_mcp_entry() -> None:
+    """Ensure ~/.claude/mcp.json has a correct ouroboros MCP entry.
+
+    Creates the entry if missing (detecting install method), updates stale
+    uvx args (e.g. ouroboros-ai without [claude] extras), and removes the
+    legacy timeout key.  Skips the file write when nothing changed.
+    """
+    mcp_config_path = Path.home() / ".claude" / "mcp.json"
+    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mcp_data: dict = {}
+    if mcp_config_path.exists():
+        mcp_data = json.loads(mcp_config_path.read_text())
+
+    mcp_data.setdefault("mcpServers", {})
+
+    existing = mcp_data["mcpServers"].get("ouroboros")
+    detected = _detect_mcp_entry()
+    needs_write = False
+
+    if existing is None:
+        if detected is None:
+            print_warning(
+                "Cannot register MCP server: no working ouroboros installation found.\n"
+                "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+            )
+            return
+        mcp_data["mcpServers"]["ouroboros"] = detected
+        needs_write = True
+        print_success("Registered MCP server in ~/.claude/mcp.json")
+    else:
+        # Remove legacy timeout key
+        if "timeout" in existing:
+            del existing["timeout"]
+            needs_write = True
+            print_info("Removed legacy MCP timeout override.")
+
+        # Update entry to match currently detected install method, but only
+        # for known standard commands. Custom entries (docker, nix, etc.) are
+        # left untouched so we don't break user-managed configurations.
+        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python"}
+        if detected is not None and existing.get("command") in _KNOWN_COMMANDS:
+            if (
+                existing.get("command") != detected["command"]
+                or existing.get("args") != detected["args"]
+            ):
+                existing["command"] = detected["command"]
+                existing["args"] = detected["args"]
+                needs_write = True
+                print_info("Updated MCP server entry to match current install method.")
+
+        if not needs_write:
+            print_info("MCP server already registered.")
+
+    if needs_write:
+        with mcp_config_path.open("w") as f:
+            json.dump(mcp_data, f, indent=2)
+
+
 app = typer.Typer(
     name="setup",
     help="Set up Ouroboros for your environment.",
@@ -40,6 +135,18 @@ app = typer.Typer(
 
 
 # ── Runtime detection helpers ────────────────────────────────────
+
+
+def _get_current_backend() -> str | None:
+    """Read the current runtime backend from config, if configured."""
+    config_path = Path.home() / ".ouroboros" / "config.yaml"
+    if not config_path.exists():
+        return None
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+        return data.get("orchestrator", {}).get("runtime_backend")
+    except Exception:
+        return None
 
 
 def _detect_runtimes() -> dict[str, str | None]:
@@ -227,32 +334,9 @@ def _setup_codex(codex_path: str) -> None:
     _register_codex_mcp_server()
     _print_codex_config_guidance(config_path)
 
-    # Also register MCP server for Codex users who also have Claude Code
-    mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    if mcp_config_path.exists() or (Path.home() / ".claude").is_dir():
-        mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        mcp_data: dict = {}
-        if mcp_config_path.exists():
-            mcp_data = json.loads(mcp_config_path.read_text())
-
-        mcp_data.setdefault("mcpServers", {})
-        entry = mcp_data["mcpServers"].get("ouroboros", {})
-        if not entry:
-            entry = {
-                "command": "uvx",
-                "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-            }
-        removed_timeout = entry.pop("timeout", None) is not None
-        mcp_data["mcpServers"]["ouroboros"] = entry
-
-        with mcp_config_path.open("w") as f:
-            json.dump(mcp_data, f, indent=2)
-
-        if removed_timeout:
-            print_info("Removed legacy Claude MCP timeout override.")
-        else:
-            print_info("Updated Claude MCP server config.")
+    # Also register/fix MCP server for Codex users who also have Claude Code
+    if (Path.home() / ".claude").is_dir():
+        _ensure_claude_mcp_entry()
 
 
 def _setup_claude(claude_path: str) -> None:
@@ -279,32 +363,8 @@ def _setup_claude(claude_path: str) -> None:
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    # Register MCP server in ~/.claude/mcp.json
-    mcp_config_path = Path.home() / ".claude" / "mcp.json"
-    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
-
-    mcp_data: dict = {}
-    if mcp_config_path.exists():
-        mcp_data = json.loads(mcp_config_path.read_text())
-
-    mcp_data.setdefault("mcpServers", {})
-    if "ouroboros" not in mcp_data["mcpServers"]:
-        mcp_data["mcpServers"]["ouroboros"] = {
-            "command": "uvx",
-            "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
-        }
-        with mcp_config_path.open("w") as f:
-            json.dump(mcp_data, f, indent=2)
-        print_success("Registered MCP server in ~/.claude/mcp.json")
-    else:
-        entry = mcp_data["mcpServers"]["ouroboros"]
-        if "timeout" in entry:
-            del entry["timeout"]
-            with mcp_config_path.open("w") as f:
-                json.dump(mcp_data, f, indent=2)
-            print_info("Removed legacy MCP timeout override.")
-        else:
-            print_info("MCP server already registered.")
+    # Register/fix MCP server in ~/.claude/mcp.json
+    _ensure_claude_mcp_entry()
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")
@@ -504,6 +564,12 @@ def setup(
 
     console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
+    # Show current backend if already configured
+    current_backend = _get_current_backend()
+    if current_backend:
+        console.print(f"[bold]Current backend:[/bold] [cyan]{current_backend}[/cyan]")
+        console.print()
+
     # Detect available runtimes
     detected = _detect_runtimes()
     available = {k: v for k, v in detected.items() if v is not None}
@@ -511,7 +577,8 @@ def setup(
     if available:
         console.print("[bold]Detected runtimes:[/bold]")
         for name, path in available.items():
-            console.print(f"  [green]✓[/green] {name} → {path}")
+            marker = " [yellow](current)[/yellow]" if name == current_backend else ""
+            console.print(f"  [green]✓[/green] {name} → {path}{marker}")
     else:
         console.print("[yellow]No runtimes detected in PATH.[/yellow]")
 
@@ -533,10 +600,14 @@ def setup(
                 print_info(f"Non-interactive mode, selected: {selected}")
             else:
                 choices = list(available.keys())
+                default_idx = "1"
                 for i, name in enumerate(choices, 1):
-                    console.print(f"  [{i}] {name}")
+                    current_mark = " [yellow](current)[/yellow]" if name == current_backend else ""
+                    console.print(f"  [{i}] {name}{current_mark}")
+                    if name == current_backend:
+                        default_idx = str(i)
                 console.print()
-                choice = typer.prompt("Select runtime", default="1")
+                choice = typer.prompt("Select runtime", default=default_idx)
                 try:
                     idx = int(choice) - 1
                     selected = choices[idx]

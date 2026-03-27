@@ -140,11 +140,9 @@ if [ "$HAS_UV" = true ]; then
 elif [ "$HAS_PIPX" = true ]; then
   INSTALL_METHOD="pipx"
   if [ -n "$PRE_FLAG" ]; then
-    pipx install --pip-args='--pre' "$INSTALL_SPEC" 2>/dev/null \
-      || pipx upgrade --pip-args='--pre' "$INSTALL_SPEC"
+    pipx install --force --pip-args='--pre' "$INSTALL_SPEC"
   else
-    pipx install "$INSTALL_SPEC" 2>/dev/null \
-      || pipx upgrade "$INSTALL_SPEC"
+    pipx install --force "$INSTALL_SPEC"
   fi
 else
   INSTALL_METHOD="pip"
@@ -184,11 +182,11 @@ if command -v claude &>/dev/null; then
 
   # MCP command matches the installer that actually ran in step 3
   if [ "$INSTALL_METHOD" = "uv" ]; then
-    OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[claude]","ouroboros","mcp","serve"],"timeout":600}'
+    OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[claude]","ouroboros","mcp","serve"]}'
   elif [ "$INSTALL_METHOD" = "pipx" ]; then
-    OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"],"timeout":600}'
+    OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"]}'
   else
-    OUROBOROS_ENTRY='{"command":"python3","args":["-m","ouroboros","mcp","serve"],"timeout":600}'
+    OUROBOROS_ENTRY='{"command":"python3","args":["-m","ouroboros","mcp","serve"]}'
   fi
 
   # Find a working Python: system python3, or uv-managed python
