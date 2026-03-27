@@ -72,6 +72,12 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, ClaudeCodeAdapter)
         assert adapter._timeout == 42.0
 
+    def test_passes_cwd_to_claude_code_adapter(self) -> None:
+        """Claude backend forwards cwd to the SDK adapter."""
+        adapter = create_llm_adapter(backend="claude_code", cwd="/tmp/project")
+        assert isinstance(adapter, ClaudeCodeAdapter)
+        assert adapter._cwd == "/tmp/project"
+
     def test_creates_litellm_adapter(self) -> None:
         """LiteLLM backend returns LiteLLMAdapter."""
         adapter = create_llm_adapter(backend="litellm")

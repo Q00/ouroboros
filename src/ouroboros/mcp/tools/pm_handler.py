@@ -320,7 +320,11 @@ class PMInterviewHandler:
         }
         if cwd is not None:
             adapter_kwargs["cwd"] = cwd
-        adapter = self.llm_adapter or create_llm_adapter(**adapter_kwargs)
+        if self.llm_backend is not None:
+            adapter_kwargs["backend"] = self.llm_backend
+            adapter = create_llm_adapter(**adapter_kwargs)
+        else:
+            adapter = self.llm_adapter or create_llm_adapter(**adapter_kwargs)
         model = get_clarification_model(self.llm_backend)
         return PMInterviewEngine.create(
             llm_adapter=adapter,
@@ -777,20 +781,17 @@ class PMInterviewHandler:
         below the threshold (requirements are clear).  User controls when
         to stop.
         """
-        meta = _load_pm_meta(session_id, self.data_dir)
-        if meta:
-            engine.restore_meta(meta)
-
         # Load interview state
         load_result = await engine.load_state(session_id)
         if load_result.is_err:
-            error_msg = str(load_result.error)
-            if meta:
-                error_msg += (
-                    " PM metadata was restored, but the interview state could not be loaded."
-                )
-            return Result.err(MCPToolError(error_msg, tool_name="ouroboros_pm_interview"))
+            return Result.err(
+                MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
+            )
         state = load_result.value
+
+        meta = _load_pm_meta(session_id, self.data_dir)
+        if meta:
+            engine.restore_meta(meta)
 
         # If no answer provided, re-display the pending question (retry/reconnect)
         if not answer and state.rounds and state.rounds[-1].user_response is None:

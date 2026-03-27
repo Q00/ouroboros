@@ -89,6 +89,7 @@ class ClaudeCodeAdapter:
         self,
         permission_mode: str = "default",
         cli_path: str | Path | None = None,
+        cwd: str | Path | None = None,
         allowed_tools: list[str] | None = None,
         max_turns: int = 1,
         on_message: Callable[[str, str], None] | None = None,
@@ -103,8 +104,10 @@ class ClaudeCodeAdapter:
             cli_path: Path to the Claude CLI binary. If not provided,
                 checks OUROBOROS_CLI_PATH env var, then falls back to
                 SDK's bundled CLI.
-            allowed_tools: List of tools to allow. None means no tools.
-                For interview mode with codebase access, use ["Read", "Glob", "Grep"].
+            cwd: Working directory passed to the Claude Agent SDK.
+            allowed_tools: Explicit allow-list for Claude tools. ``None`` keeps
+                the default permissive mode while still blocking dangerous tools.
+                Use ``[]`` to forbid all Claude tools.
             max_turns: Maximum turns for the conversation. Default 1 for
                 single-response completions (most MCP use cases).
             on_message: Callback for streaming messages. Called with (type, content):
@@ -116,7 +119,10 @@ class ClaudeCodeAdapter:
         """
         self._permission_mode: str = permission_mode
         self._cli_path: Path | None = self._resolve_cli_path(cli_path)
-        self._allowed_tools: list[str] = allowed_tools or []
+        self._cwd: str = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._allowed_tools: list[str] | None = (
+            list(allowed_tools) if allowed_tools is not None else None
+        )
         self._max_turns: int = max_turns
         self._on_message: Callable[[str, str], None] | None = on_message
         self._timeout: float | None = timeout if timeout and timeout > 0 else None
@@ -124,6 +130,7 @@ class ClaudeCodeAdapter:
             "claude_code_adapter.initialized",
             permission_mode=permission_mode,
             cli_path=str(self._cli_path) if self._cli_path else None,
+            cwd=self._cwd,
             timeout_seconds=self._timeout,
         )
 
@@ -414,16 +421,17 @@ class ClaudeCodeAdapter:
             log.debug("claude_code_adapter.stderr", line=line[:200])
 
         options_kwargs: dict = {
-            "allowed_tools": self._allowed_tools if self._allowed_tools is not None else [],
             "disallowed_tools": disallowed,
             "max_turns": self._max_turns,
             # Allow MCP and other ~/.claude/ settings to be inherited
             "permission_mode": self._permission_mode,
-            "cwd": os.getcwd(),
+            "cwd": self._cwd,
             "cli_path": self._cli_path,
             "stderr": _stderr_callback,
             "env": env_overrides,
         }
+        if self._allowed_tools is not None:
+            options_kwargs["allowed_tools"] = self._allowed_tools
 
         # Pass model from CompletionConfig if specified
         # "default" is not a valid SDK model — treat it as None (use SDK default)

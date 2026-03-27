@@ -94,6 +94,7 @@ def create_llm_adapter(
         return ClaudeCodeAdapter(
             permission_mode=resolved_permission_mode,
             cli_path=cli_path,
+            cwd=cwd,
             allowed_tools=allowed_tools,
             max_turns=max_turns,
             on_message=on_message,

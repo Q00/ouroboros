@@ -107,7 +107,8 @@ Show the following to the user:
 
 ```
 PM document saved: <meta.pm_path>
-(Clipboard에 복사되었습니다)
+If Step 5 copied successfully, also show:
+  (Copied to clipboard)
 
 Next step:
   ooo interview <meta.pm_path>
