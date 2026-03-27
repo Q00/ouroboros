@@ -452,6 +452,81 @@ class TestPMHandlerDiffIntegration:
         assert result.is_ok
         assert result.value.meta["interview_complete"] is False
 
+    @pytest.mark.asyncio
+    async def test_handle_answer_decide_later_skips_and_records(self, tmp_path: Path) -> None:
+        """When answer='[decide_later]', skip_as_decide_later is called instead of record_response."""
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+
+        question = "What caching strategy should we use?"
+        state = _make_state(
+            rounds=[
+                InterviewRound(round_number=1, question=question, user_response=None),
+            ],
+        )
+
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+
+        # skip_as_decide_later should be called (not record_response)
+        async def mock_skip(s: Any, q: str) -> Result:
+            engine.decide_later_items.append(q)
+            return Result.ok(s)
+
+        engine.skip_as_decide_later = AsyncMock(side_effect=mock_skip)
+        engine.record_response = AsyncMock(return_value=Result.ok(state))
+
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
+        _save_pm_meta("sess-dl", engine, cwd="/tmp/proj", data_dir=tmp_path)
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-dl",
+                "answer": "[decide_later]",
+            }
+        )
+
+        assert result.is_ok
+        # skip_as_decide_later was called
+        engine.skip_as_decide_later.assert_called_once_with(state, question)
+        # record_response was NOT called (skip_as_decide_later handles it internally)
+        engine.record_response.assert_not_called()
+        # The question was recorded in decide_later_items
+        assert question in engine.decide_later_items
+
+    @pytest.mark.asyncio
+    async def test_handle_answer_decide_later_with_whitespace(self, tmp_path: Path) -> None:
+        """Whitespace-padded '[decide_later]' is still recognized."""
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+
+        question = "What rate limiting approach?"
+        state = _make_state(
+            rounds=[
+                InterviewRound(round_number=1, question=question, user_response=None),
+            ],
+        )
+
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        engine.skip_as_decide_later = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
+        _save_pm_meta("sess-dl2", engine, cwd="/tmp/proj", data_dir=tmp_path)
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-dl2",
+                "answer": "  [decide_later]  ",
+            }
+        )
+
+        assert result.is_ok
+        engine.skip_as_decide_later.assert_called_once()
+
 
 # ── Unit tests for _check_completion (AC 12) ─────────────────────
 

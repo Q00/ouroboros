@@ -158,7 +158,8 @@ class PMInterviewEngine:
     """Original question text for questions classified as DECIDE_LATER.
 
     These are questions that are premature or unknowable at the PM stage.
-    They are auto-answered with a placeholder and stored here so the PMSeed
+    The main session presents the question to the user with a "decide later"
+    option; when chosen, the caller records the item here so the PMSeed
     and PM document can surface them as explicit "decide later" decisions.
     """
     classifications: list[ClassificationResult] = field(default_factory=list)
@@ -507,24 +508,21 @@ class PMInterviewEngine:
             return await self.ask_next_question(state)
 
         if output_type == ClassifierOutputType.DECIDE_LATER:
-            # Auto-answer with placeholder — no PM interaction needed
-            placeholder = classification.placeholder_response
-            self.decide_later_items.append(classification.original_question)
+            # Return the question to the caller (main session) so the user
+            # can choose "decide later" themselves.  The main session detects
+            # classification == "decide_later" via response_meta and offers
+            # the option.  If the user picks it, the caller calls
+            # skip_as_decide_later() which records the placeholder and
+            # appends to decide_later_items.
+            #
+            # Previously this branch auto-answered and recursed, which could
+            # trigger MCP 120s timeouts on consecutive DECIDE_LATER runs.
             log.info(
                 "pm.question_decide_later",
                 question=classification.original_question[:100],
-                placeholder=placeholder[:100],
                 reasoning=classification.reasoning,
             )
-            # Record the placeholder as the response so the interview
-            # engine advances its round count
-            await self.record_response(
-                state,
-                user_response=f"[Decide later] {placeholder}",
-                question=classification.original_question,
-            )
-            # Recursively ask for the next real question
-            return await self.ask_next_question(state)
+            return Result.ok(classification.original_question)
 
         if output_type == ClassifierOutputType.REFRAMED:
             # Use the reframed version and track the mapping
@@ -594,6 +592,42 @@ class PMInterviewEngine:
             return await self.inner.record_response(state, bundled_response, bundled_question)
 
         return await self.inner.record_response(state, user_response, question)
+
+    async def skip_as_decide_later(
+        self,
+        state: InterviewState,
+        question: str,
+    ) -> Result[InterviewState, ValidationError]:
+        """Skip a question as "decide later" at the user's explicit request.
+
+        Records the question in ``decide_later_items`` and feeds a placeholder
+        response to the inner InterviewEngine so the round is properly recorded
+        and the engine advances.
+
+        This is called when the main session detects that the user chose the
+        "decide later" option for a DECIDE_LATER-classified question, instead
+        of the old auto-skip behavior inside ``ask_next_question``.
+
+        Args:
+            state: Current interview state.
+            question: The question the user chose to decide later.
+
+        Returns:
+            Result containing updated state or ValidationError.
+        """
+        if question not in self.decide_later_items:
+            self.decide_later_items.append(question)
+
+        log.info(
+            "pm.question_decide_later_by_user",
+            question=question[:100],
+        )
+
+        return await self.record_response(
+            state,
+            user_response="[Decide later] To be determined — user chose to decide later.",
+            question=question,
+        )
 
     async def complete_interview(
         self,

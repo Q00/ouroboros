@@ -88,8 +88,12 @@ class TestDecideLaterItemsList:
     """Tests for decide-later items stored as original question text in list."""
 
     @pytest.mark.asyncio
-    async def test_decide_later_stores_original_question_text(self):
-        """DECIDE_LATER stores original question text in decide_later_items list."""
+    async def test_decide_later_returns_question_to_caller(self):
+        """DECIDE_LATER returns the question to the caller without auto-answering.
+
+        The caller (main session) is responsible for presenting the decide-later
+        option and recording the item in decide_later_items when chosen.
+        """
         engine = _make_engine()
         state = _make_state()
 
@@ -97,7 +101,6 @@ class TestDecideLaterItemsList:
 
         # Inner engine generates the question
         engine.inner.ask_next_question.return_value = Result.ok(original_q)
-        engine.inner.record_response.return_value = Result.ok(state)
 
         # Classifier says DECIDE_LATER
         classification = ClassificationResult(
@@ -110,40 +113,32 @@ class TestDecideLaterItemsList:
         )
         assert classification.output_type == ClassifierOutputType.DECIDE_LATER
 
-        # First call returns DECIDE_LATER, second call returns a PASSTHROUGH
-        passthrough_q = "Who are the primary users?"
-        passthrough_classification = ClassificationResult(
-            original_question=passthrough_q,
-            category=QuestionCategory.PLANNING,
-            reframed_question=passthrough_q,
-            reasoning="Planning question.",
-        )
-
-        engine.classifier.classify = AsyncMock(
-            side_effect=[Result.ok(classification), Result.ok(passthrough_classification)]
-        )
-        engine.inner.ask_next_question = AsyncMock(
-            side_effect=[Result.ok(original_q), Result.ok(passthrough_q)]
-        )
+        engine.classifier.classify = AsyncMock(return_value=Result.ok(classification))
 
         result = await engine.ask_next_question(state)
 
         assert result.is_ok
-        # The decide-later question is stored in decide_later_items
-        assert original_q in engine.decide_later_items
-        # It should NOT be in deferred_items
-        assert original_q not in engine.deferred_items
+        # The question is returned to the caller (not auto-answered)
+        assert result.value == original_q
+        # decide_later_items is NOT populated here — caller handles that
+        assert engine.decide_later_items == []
+        # No recursive call — inner engine asked only once
+        assert engine.inner.ask_next_question.call_count == 1
+        # No auto-response recorded
+        engine.inner.record_response.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_decide_later_items_list_is_separate_from_deferred(self):
-        """decide_later_items and deferred_items are independent lists."""
+    async def test_decide_later_does_not_recurse(self):
+        """DECIDE_LATER returns immediately — no recursive ask_next_question call.
+
+        Unlike DEFERRED (which auto-skips and recurses), DECIDE_LATER returns
+        the question to the caller so the user can choose decide-later.
+        """
         engine = _make_engine()
         state = _make_state()
 
         decide_later_q = "How should we handle data migration?"
-        deferred_q = "Which ORM should we use for the database layer?"
 
-        # Set up two rounds: first DECIDE_LATER, then DEFERRED, then PASSTHROUGH
         decide_later_class = ClassificationResult(
             original_question=decide_later_q,
             category=QuestionCategory.DECIDE_LATER,
@@ -152,103 +147,50 @@ class TestDecideLaterItemsList:
             decide_later=True,
             placeholder_response="TBD after schema design.",
         )
-        deferred_class = ClassificationResult(
-            original_question=deferred_q,
-            category=QuestionCategory.DEVELOPMENT,
-            reframed_question=deferred_q,
-            reasoning="Deeply technical.",
-            defer_to_dev=True,
-        )
-        passthrough_q = "What are the success metrics?"
-        passthrough_class = ClassificationResult(
-            original_question=passthrough_q,
-            category=QuestionCategory.PLANNING,
-            reframed_question=passthrough_q,
-            reasoning="Planning.",
-        )
 
-        engine.classifier.classify = AsyncMock(
-            side_effect=[
-                Result.ok(decide_later_class),
-                Result.ok(deferred_class),
-                Result.ok(passthrough_class),
-            ]
-        )
-        engine.inner.ask_next_question = AsyncMock(
-            side_effect=[
-                Result.ok(decide_later_q),
-                Result.ok(deferred_q),
-                Result.ok(passthrough_q),
-            ]
-        )
-        engine.inner.record_response = AsyncMock(return_value=Result.ok(state))
+        engine.classifier.classify = AsyncMock(return_value=Result.ok(decide_later_class))
+        engine.inner.ask_next_question = AsyncMock(return_value=Result.ok(decide_later_q))
 
         result = await engine.ask_next_question(state)
 
         assert result.is_ok
-        assert result.value == passthrough_q
-
-        # Verify separation
-        assert decide_later_q in engine.decide_later_items
-        assert decide_later_q not in engine.deferred_items
-        assert deferred_q in engine.deferred_items
-        assert deferred_q not in engine.decide_later_items
+        # Returns the decide-later question directly
+        assert result.value == decide_later_q
+        # No auto-recording — caller handles decide-later flow
+        engine.inner.record_response.assert_not_called()
+        # Only one call to inner engine (no recursion)
+        assert engine.inner.ask_next_question.call_count == 1
+        # decide_later_items not populated by engine (caller responsibility)
+        assert engine.decide_later_items == []
 
     @pytest.mark.asyncio
-    async def test_multiple_decide_later_items_accumulate(self):
-        """Multiple DECIDE_LATER questions all accumulate in the list."""
+    async def test_decide_later_classification_recorded(self):
+        """DECIDE_LATER classification is recorded so caller can detect it."""
         engine = _make_engine()
         state = _make_state()
 
         q1 = "What rate limiting strategy should we use?"
-        q2 = "How should we handle GDPR data retention?"
-        q3 = "What's the target latency for API responses?"
-        passthrough_q = "What is the core problem?"
 
-        classifications = [
-            ClassificationResult(
-                original_question=q1,
-                category=QuestionCategory.DECIDE_LATER,
-                reframed_question=q1,
-                reasoning="Premature.",
-                decide_later=True,
-                placeholder_response="TBD.",
-            ),
-            ClassificationResult(
-                original_question=q2,
-                category=QuestionCategory.DECIDE_LATER,
-                reframed_question=q2,
-                reasoning="Needs legal review.",
-                decide_later=True,
-                placeholder_response="Needs legal input.",
-            ),
-            ClassificationResult(
-                original_question=q3,
-                category=QuestionCategory.DECIDE_LATER,
-                reframed_question=q3,
-                reasoning="Depends on infra.",
-                decide_later=True,
-                placeholder_response="After infra decision.",
-            ),
-            ClassificationResult(
-                original_question=passthrough_q,
-                category=QuestionCategory.PLANNING,
-                reframed_question=passthrough_q,
-                reasoning="Planning.",
-            ),
-        ]
-
-        engine.classifier.classify = AsyncMock(side_effect=[Result.ok(c) for c in classifications])
-        engine.inner.ask_next_question = AsyncMock(
-            side_effect=[Result.ok(q1), Result.ok(q2), Result.ok(q3), Result.ok(passthrough_q)]
+        classification = ClassificationResult(
+            original_question=q1,
+            category=QuestionCategory.DECIDE_LATER,
+            reframed_question=q1,
+            reasoning="Premature.",
+            decide_later=True,
+            placeholder_response="TBD.",
         )
-        engine.inner.record_response = AsyncMock(return_value=Result.ok(state))
+
+        engine.classifier.classify = AsyncMock(return_value=Result.ok(classification))
+        engine.inner.ask_next_question = AsyncMock(return_value=Result.ok(q1))
 
         result = await engine.ask_next_question(state)
 
         assert result.is_ok
-        assert len(engine.decide_later_items) == 3
-        assert engine.decide_later_items == [q1, q2, q3]
+        assert result.value == q1
+        # Classification is recorded so get_last_classification works
+        assert len(engine.classifications) == 1
+        assert engine.classifications[0].output_type == ClassifierOutputType.DECIDE_LATER
+        assert engine.get_last_classification() == "decide_later"
 
     def test_decide_later_items_empty_by_default(self):
         """decide_later_items starts as empty list."""
@@ -531,3 +473,109 @@ class TestDecideLaterSummary:
         summary = engine.format_decide_later_summary()
 
         assert original_text in summary
+
+
+class TestSkipAsDecideLater:
+    """Tests for user-initiated decide-later skip via skip_as_decide_later()."""
+
+    @pytest.mark.asyncio
+    async def test_skip_records_question_in_decide_later_items(self):
+        """skip_as_decide_later records the question in decide_later_items."""
+        engine = _make_engine()
+        state = _make_state()
+        engine.inner.record_response.return_value = Result.ok(state)
+
+        question = "What caching strategy should we use?"
+        result = await engine.skip_as_decide_later(state, question)
+
+        assert result.is_ok
+        assert question in engine.decide_later_items
+
+    @pytest.mark.asyncio
+    async def test_skip_does_not_duplicate_existing_item(self):
+        """skip_as_decide_later does not duplicate if question already in list."""
+        engine = _make_engine()
+        state = _make_state()
+        engine.inner.record_response.return_value = Result.ok(state)
+
+        question = "What caching strategy should we use?"
+        engine.decide_later_items = [question]
+
+        result = await engine.skip_as_decide_later(state, question)
+
+        assert result.is_ok
+        assert engine.decide_later_items.count(question) == 1
+
+    @pytest.mark.asyncio
+    async def test_skip_records_placeholder_response_in_inner_engine(self):
+        """skip_as_decide_later feeds a placeholder response to inner engine."""
+        engine = _make_engine()
+        state = _make_state()
+        engine.inner.record_response.return_value = Result.ok(state)
+
+        question = "What deployment model should we use?"
+        await engine.skip_as_decide_later(state, question)
+
+        engine.inner.record_response.assert_called_once()
+        call_args = engine.inner.record_response.call_args
+        recorded_response = call_args[0][1]
+        assert "[Decide later]" in recorded_response
+
+    @pytest.mark.asyncio
+    async def test_skip_advances_interview_state(self):
+        """skip_as_decide_later returns the updated state from record_response."""
+        engine = _make_engine()
+        state = _make_state(current_round=3)
+        updated_state = _make_state(current_round=4)
+        engine.inner.record_response.return_value = Result.ok(updated_state)
+
+        question = "What rate limiting approach?"
+        result = await engine.skip_as_decide_later(state, question)
+
+        assert result.is_ok
+        assert result.value == updated_state
+
+    @pytest.mark.asyncio
+    async def test_skip_does_not_add_to_deferred_items(self):
+        """skip_as_decide_later does not affect deferred_items."""
+        engine = _make_engine()
+        state = _make_state()
+        engine.inner.record_response.return_value = Result.ok(state)
+
+        question = "What caching strategy?"
+        await engine.skip_as_decide_later(state, question)
+
+        assert engine.deferred_items == []
+        assert question in engine.decide_later_items
+
+    @pytest.mark.asyncio
+    async def test_skip_multiple_questions_accumulate(self):
+        """Multiple skip_as_decide_later calls accumulate items."""
+        engine = _make_engine()
+        state = _make_state()
+        engine.inner.record_response.return_value = Result.ok(state)
+
+        q1 = "What caching strategy?"
+        q2 = "What rate limiting?"
+        q3 = "What deployment model?"
+
+        await engine.skip_as_decide_later(state, q1)
+        await engine.skip_as_decide_later(state, q2)
+        await engine.skip_as_decide_later(state, q3)
+
+        assert engine.decide_later_items == [q1, q2, q3]
+
+    @pytest.mark.asyncio
+    async def test_skip_propagates_record_response_error(self):
+        """skip_as_decide_later propagates errors from record_response."""
+        engine = _make_engine()
+        state = _make_state()
+        from ouroboros.core.errors import ValidationError as VE
+        engine.inner.record_response.return_value = Result.err(
+            VE("State save failed", field="state")
+        )
+
+        question = "What caching strategy?"
+        result = await engine.skip_as_decide_later(state, question)
+
+        assert result.is_err
