@@ -128,6 +128,17 @@ ouroboros setup                         # 런타임 설정
 </details>
 
 <details>
+<summary><strong>완전 삭제</strong></summary>
+
+```bash
+ouroboros uninstall
+```
+
+모든 설정, MCP 등록, 데이터를 제거합니다. 자세한 내용은 [UNINSTALL.md](./UNINSTALL.md)를 참고하세요.
+
+</details>
+
+<details>
 <summary><strong>무슨 일이 일어났나요?</strong></summary>
 
 ```text

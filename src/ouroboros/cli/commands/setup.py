@@ -137,6 +137,18 @@ app = typer.Typer(
 # ── Runtime detection helpers ────────────────────────────────────
 
 
+def _get_current_backend() -> str | None:
+    """Read the current runtime backend from config, if configured."""
+    config_path = Path.home() / ".ouroboros" / "config.yaml"
+    if not config_path.exists():
+        return None
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+        return data.get("orchestrator", {}).get("runtime_backend")
+    except Exception:
+        return None
+
+
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH."""
     runtimes: dict[str, str | None] = {}
@@ -552,6 +564,12 @@ def setup(
 
     console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
+    # Show current backend if already configured
+    current_backend = _get_current_backend()
+    if current_backend:
+        console.print(f"[bold]Current backend:[/bold] [cyan]{current_backend}[/cyan]")
+        console.print()
+
     # Detect available runtimes
     detected = _detect_runtimes()
     available = {k: v for k, v in detected.items() if v is not None}
@@ -559,7 +577,8 @@ def setup(
     if available:
         console.print("[bold]Detected runtimes:[/bold]")
         for name, path in available.items():
-            console.print(f"  [green]✓[/green] {name} → {path}")
+            marker = " [yellow](current)[/yellow]" if name == current_backend else ""
+            console.print(f"  [green]✓[/green] {name} → {path}{marker}")
     else:
         console.print("[yellow]No runtimes detected in PATH.[/yellow]")
 
@@ -581,10 +600,14 @@ def setup(
                 print_info(f"Non-interactive mode, selected: {selected}")
             else:
                 choices = list(available.keys())
+                default_idx = "1"
                 for i, name in enumerate(choices, 1):
-                    console.print(f"  [{i}] {name}")
+                    current_mark = " [yellow](current)[/yellow]" if name == current_backend else ""
+                    console.print(f"  [{i}] {name}{current_mark}")
+                    if name == current_backend:
+                        default_idx = str(i)
                 console.print()
-                choice = typer.prompt("Select runtime", default="1")
+                choice = typer.prompt("Select runtime", default=default_idx)
                 try:
                     idx = int(choice) - 1
                     selected = choices[idx]
