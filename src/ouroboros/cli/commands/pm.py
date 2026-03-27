@@ -410,6 +410,15 @@ async def _run_pm_interview(
 
         console.print(f"\n[bold yellow]?[/] {question}\n")
 
+        # Check if this question was classified as decide_later —
+        # if so, show a hint that the user can defer it.
+        classification = engine.get_last_classification()
+        if classification == "decide_later":
+            console.print(
+                '[dim]  💡 This question can be deferred. '
+                'Type "decide later" or "skip" to defer it.[/]\n'
+            )
+
         # Persist state + meta AFTER displaying the question but BEFORE
         # waiting for input so that an interruption preserves the pending
         # question and --resume shows the same question.

@@ -192,8 +192,8 @@ class TestClassificationResultQuestionForPM:
         )
         assert result.question_for_pm == ""
 
-    def test_decide_later_returns_empty_string(self) -> None:
-        """DECIDE_LATER returns empty string — auto-answered, not shown to PM."""
+    def test_decide_later_returns_original_question(self) -> None:
+        """DECIDE_LATER returns original question — shown to user for decision."""
         result = ClassificationResult(
             original_question="How will this scale to millions of users?",
             category=QuestionCategory.DECIDE_LATER,
@@ -202,7 +202,7 @@ class TestClassificationResultQuestionForPM:
             decide_later=True,
             placeholder_response="To be determined post-launch.",
         )
-        assert result.question_for_pm == ""
+        assert result.question_for_pm == "How will this scale to millions of users?"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -418,5 +418,5 @@ class TestQuestionClassifierDecideLater:
         assert cr.category == QuestionCategory.DECIDE_LATER
         assert cr.decide_later is True
         assert cr.output_type == ClassifierOutputType.DECIDE_LATER
-        assert cr.question_for_pm == ""
+        assert cr.question_for_pm == question  # returned to user for decision
         assert "initial deployment" in cr.placeholder_response

@@ -503,6 +503,10 @@ class PMInterviewHandler:
         # Include pending_reframe in response meta if a reframe occurred
         pending_reframe = engine.get_pending_reframe()
 
+        # Check classification to signal decide-later eligibility
+        classification = _last_classification(engine)
+        is_decide_later = classification == "decide_later"
+
         meta = {
             "session_id": state.interview_id,
             "status": "interview_started",
@@ -510,6 +514,8 @@ class PMInterviewHandler:
             "response_param": "answer",
             "question": question,
             "is_brownfield": state.is_brownfield,
+            "classification": classification,
+            "decide_later_eligible": is_decide_later,
             "pending_reframe": pending_reframe,
             **diff,
         }
@@ -518,18 +524,28 @@ class PMInterviewHandler:
             "pm_handler.started",
             session_id=state.interview_id,
             is_brownfield=state.is_brownfield,
+            classification=classification,
+            decide_later_eligible=is_decide_later,
             has_pending_reframe=pending_reframe is not None,
             **diff,
         )
+
+        # Build response text — include decide-later hint when applicable
+        start_text = f"PM interview started. Session ID: {state.interview_id}\n\n{question}"
+        if is_decide_later:
+            start_text += (
+                '\n\n💡 This question can be deferred. '
+                'The user may answer now, or choose "decide later" to skip it. '
+                "If they choose to decide later, pass "
+                f'answer="decide_later" with session_id="{state.interview_id}".'
+            )
 
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=(
-                            f"PM interview started. Session ID: {state.interview_id}\n\n{question}"
-                        ),
+                        text=start_text,
                     ),
                 ),
                 is_error=False,
@@ -780,15 +796,26 @@ class PMInterviewHandler:
         if not answer and state.rounds and state.rounds[-1].user_response is None:
             pending_question = state.rounds[-1].question
             classification = _last_classification(engine)
+            is_decide_later = classification == "decide_later"
 
             pending_reframe = engine.get_pending_reframe()
+
+            # Include decide-later hint in re-displayed question
+            pending_text = f"Session {session_id}\n\n{pending_question}"
+            if is_decide_later:
+                pending_text += (
+                    '\n\n💡 This question can be deferred. '
+                    'The user may answer now, or choose "decide later" to skip it. '
+                    "If they choose to decide later, pass "
+                    f'answer="decide_later" with session_id="{session_id}".'
+                )
 
             return Result.ok(
                 MCPToolResult(
                     content=(
                         MCPContentItem(
                             type=ContentType.TEXT,
-                            text=f"Session {session_id}\n\n{pending_question}",
+                            text=pending_text,
                         ),
                     ),
                     is_error=False,
@@ -799,6 +826,7 @@ class PMInterviewHandler:
                         "question": pending_question,
                         "is_complete": False,
                         "classification": classification,
+                        "decide_later_eligible": is_decide_later,
                         "deferred_this_round": [],
                         "decide_later_this_round": [],
                         "interview_complete": False,
@@ -824,16 +852,35 @@ class PMInterviewHandler:
             if state.rounds[-1].user_response is None:
                 state.rounds.pop()
 
-            record_result = await engine.record_response(state, answer, last_question)
-            if record_result.is_err:
-                return Result.err(
-                    MCPToolError(
-                        str(record_result.error),
-                        tool_name="ouroboros_pm_interview",
+            # ── User chose "decide later" ─────────────────────────
+            # When the main session detects classification == "decide_later"
+            # and the user selects the decide-later option, it sends
+            # answer="[decide_later]".  We skip normal recording and
+            # delegate to the engine's skip_as_decide_later() method
+            # which records the question in decide_later_items and
+            # feeds a placeholder response to the inner engine.
+            if answer.strip() == "[decide_later]":
+                skip_result = await engine.skip_as_decide_later(state, last_question)
+                if skip_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(skip_result.error),
+                            tool_name="ouroboros_pm_interview",
+                        )
                     )
-                )
-            state = record_result.value
-            state.clear_stored_ambiguity()
+                state = skip_result.value
+                state.clear_stored_ambiguity()
+            else:
+                record_result = await engine.record_response(state, answer, last_question)
+                if record_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(record_result.error),
+                            tool_name="ouroboros_pm_interview",
+                        )
+                    )
+                state = record_result.value
+                state.clear_stored_ambiguity()
 
         # ── Completion check (AC 12) ─────────────────────────────
         # Completion is determined by engine ambiguity scoring.
@@ -958,6 +1005,11 @@ class PMInterviewHandler:
         # Extract classification from the last classify call
         classification = _last_classification(engine)
 
+        # When classification is decide_later, signal to the caller
+        # that the user should be offered a "decide later" option
+        # instead of being forced to answer now.
+        is_decide_later = classification == "decide_later"
+
         response_meta = {
             "session_id": session_id,
             "input_type": "freeText",
@@ -965,6 +1017,7 @@ class PMInterviewHandler:
             "question": question,
             "is_complete": False,
             "classification": classification,
+            "decide_later_eligible": is_decide_later,
             "deferred_this_round": diff["new_deferred"],
             "decide_later_this_round": diff["new_decide_later"],
             # Keep backward-compat fields from AC 8
@@ -977,16 +1030,27 @@ class PMInterviewHandler:
             "pm_handler.question_asked",
             session_id=session_id,
             classification=classification,
+            decide_later_eligible=is_decide_later,
             has_pending_reframe=pending_reframe is not None,
             **diff,
         )
+
+        # Build response text — include decide-later hint when applicable
+        response_text = f"Session {session_id}\n\n{question}"
+        if is_decide_later:
+            response_text += (
+                '\n\n💡 This question can be deferred. '
+                'The user may answer now, or choose "decide later" to skip it. '
+                "If they choose to decide later, pass "
+                f'answer="decide_later" with session_id="{session_id}".'
+            )
 
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=f"Session {session_id}\n\n{question}",
+                        text=response_text,
                     ),
                 ),
                 is_error=False,

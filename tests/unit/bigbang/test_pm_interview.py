@@ -652,18 +652,22 @@ class TestAskNextQuestion:
         assert result.value == question
 
     @pytest.mark.asyncio
-    async def test_decide_later_auto_responds_with_placeholder(self, tmp_path: Path) -> None:
-        """Decide-later questions are auto-answered with a placeholder and skipped."""
+    async def test_decide_later_returns_question_without_auto_answering(self, tmp_path: Path) -> None:
+        """Decide-later questions are returned to the caller for user decision.
+
+        The engine no longer auto-answers with a placeholder or recurses.
+        The caller (main session) detects classification == "decide_later"
+        and presents the user with a decide-later option.
+        """
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
         decide_later_q = "How should we handle scaling when we reach 1M users?"
         placeholder = "This will be determined after MVP launch and initial user metrics. Marking as a decision point for later."
-        planning_q = "Who are the target users?"
 
         adapter.complete = AsyncMock(
             side_effect=[
-                # First question generation: decide-later question
+                # Question generation: decide-later question
                 Result.ok(_mock_completion(decide_later_q)),
                 # Classification: decide_later
                 Result.ok(
@@ -680,22 +684,7 @@ class TestAskNextQuestion:
                         )
                     )
                 ),
-                # Second question generation (recursive call): planning question
-                Result.ok(_mock_completion(planning_q)),
-                # Classification: planning
-                Result.ok(
-                    _mock_completion(
-                        json.dumps(
-                            {
-                                "category": "planning",
-                                "reframed_question": planning_q,
-                                "reasoning": "User question",
-                                "defer_to_dev": False,
-                                "decide_later": False,
-                            }
-                        )
-                    )
-                ),
+                # No second question generation — no recursion
             ]
         )
 
@@ -707,14 +696,14 @@ class TestAskNextQuestion:
         result = await engine.ask_next_question(state)
 
         assert result.is_ok
-        # The PM sees the next real question, not the decide-later one
-        assert result.value == planning_q
-        # The decide-later question is tracked in decide_later_items
-        assert decide_later_q in engine.decide_later_items
-        # A placeholder response was auto-recorded in the interview state
-        assert len(state.rounds) == 1
-        assert "[Decide later]" in state.rounds[0].user_response
-        assert placeholder in state.rounds[0].user_response
+        # The decide-later question is returned to the caller
+        assert result.value == decide_later_q
+        # decide_later_items is NOT populated — caller handles that
+        assert engine.decide_later_items == []
+        # No auto-response recorded — state has no rounds
+        assert len(state.rounds) == 0
+        # Classification is recorded for caller to detect
+        assert engine.get_last_classification() == "decide_later"
 
     @pytest.mark.asyncio
     async def test_decide_later_classification_result_properties(self) -> None:
@@ -729,7 +718,8 @@ class TestAskNextQuestion:
         )
 
         assert result.output_type == ClassifierOutputType.DECIDE_LATER
-        assert result.question_for_pm == ""  # Should not be shown to PM
+        # Returned to user so they can choose to answer or defer
+        assert result.question_for_pm == "How should we handle scaling?"
 
 
 class TestRecordResponse:
