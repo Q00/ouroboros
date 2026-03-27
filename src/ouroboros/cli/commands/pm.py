@@ -19,8 +19,13 @@ import typer
 from ouroboros.bigbang.interview import InterviewRound
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.types import Result
-from ouroboros.providers.factory import create_llm_adapter
+from ouroboros.providers.factory import (
+    create_llm_adapter,
+    resolve_llm_backend,
+    resolve_llm_permission_mode,
+)
 
 app = typer.Typer(
     name="pm",
@@ -50,13 +55,13 @@ def pm_command(
         ),
     ] = None,
     model: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--model",
             "-m",
             help="LLM model to use for the PM interview.",
         ),
-    ] = "anthropic/claude-sonnet-4-20250514",
+    ] = None,
     debug: Annotated[
         bool,
         typer.Option(
@@ -90,17 +95,33 @@ def pm_command(
     else:
         print_info("Starting new PM interview session...")
 
-    console.print(f"  Model: [dim]{model}[/]\n")
+    resolved_backend = resolve_llm_backend(get_llm_backend())
+    resolved_model = model or get_clarification_model(resolved_backend)
+    permission_mode = resolve_llm_permission_mode(
+        backend=resolved_backend,
+        use_case="interview",
+    )
+
+    console.print(f"  Model: [dim]{resolved_model}[/]\n")
+    if permission_mode == "bypassPermissions":
+        print_warning(
+            "Interview backend "
+            f"'{resolved_backend}' uses bypassPermissions for question generation."
+        )
 
     try:
         asyncio.run(
             _run_pm_interview(
                 resume_id=resume,
-                model=model,
+                model=resolved_model,
+                backend=resolved_backend,
                 debug=debug,
                 output_dir=output,
             )
         )
+    except ValueError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1) from exc
     except KeyboardInterrupt:
         print_info("\nPM interview interrupted. Progress has been saved.")
         raise typer.Exit(code=0)
@@ -299,10 +320,28 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _make_message_callback(debug: bool):
+    """Create a debug callback for streaming local agent status."""
+    if not debug:
+        return None
+
+    def callback(msg_type: str, content: str) -> None:
+        if msg_type == "thinking":
+            first_line = content.split("\n")[0].strip()
+            display = first_line[:100] + "..." if len(first_line) > 100 else first_line
+            if display:
+                console.print(f"  [dim]thinking:[/] {display}")
+        elif msg_type == "tool":
+            console.print(f"  [yellow]tool:[/] {content}")
+
+    return callback
+
+
 async def _run_pm_interview(
     resume_id: str | None,
     model: str,
-    debug: bool,  # noqa: ARG001
+    backend: str | None,
+    debug: bool,
     output_dir: str | None = None,
 ) -> None:
     """Run the PM interview loop.
@@ -313,12 +352,20 @@ async def _run_pm_interview(
     Args:
         resume_id: Optional session ID to resume.
         model: LLM model identifier.
+        backend: Resolved LLM backend name.
         debug: Enable debug output.
         output_dir: Optional output directory for the generated PM document.
     """
     from ouroboros.bigbang.pm_interview import PMInterviewEngine
 
-    adapter = create_llm_adapter(use_case="interview")
+    adapter = create_llm_adapter(
+        backend=backend,
+        use_case="interview",
+        allowed_tools=None,
+        max_turns=5,
+        on_message=_make_message_callback(debug),
+        cwd=Path.cwd(),
+    )
     engine = PMInterviewEngine.create(llm_adapter=adapter, model=model)
 
     # Check for existing PM seeds before starting a new session
