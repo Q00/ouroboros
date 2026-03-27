@@ -431,17 +431,16 @@ class TestAskNextQuestion:
         assert engine.classifications[0].category == QuestionCategory.DEVELOPMENT
 
     @pytest.mark.asyncio
-    async def test_deferred_question_skipped(self, tmp_path: Path) -> None:
-        """DEV-only questions marked as defer_to_dev are skipped and tracked."""
+    async def test_deferred_question_returned_to_user(self, tmp_path: Path) -> None:
+        """DEV-only questions marked as defer_to_dev are returned to the user."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
         dev_q = "Should we use gRPC or REST for inter-service communication?"
-        planning_q = "Who are the end users?"
 
         adapter.complete = AsyncMock(
             side_effect=[
-                # First question generation: dev question
+                # Question generation: dev question
                 Result.ok(_mock_completion(dev_q)),
                 # Classification: defer to dev
                 Result.ok(
@@ -452,21 +451,6 @@ class TestAskNextQuestion:
                                 "reframed_question": dev_q,
                                 "reasoning": "Purely technical protocol choice",
                                 "defer_to_dev": True,
-                            }
-                        )
-                    )
-                ),
-                # Second question generation (recursive call): planning question
-                Result.ok(_mock_completion(planning_q)),
-                # Classification: planning
-                Result.ok(
-                    _mock_completion(
-                        json.dumps(
-                            {
-                                "category": "planning",
-                                "reframed_question": planning_q,
-                                "reasoning": "User question",
-                                "defer_to_dev": False,
                             }
                         )
                     )
@@ -482,85 +466,46 @@ class TestAskNextQuestion:
         result = await engine.ask_next_question(state)
 
         assert result.is_ok
-        assert result.value == planning_q
-        assert dev_q in engine.deferred_items
-        # The deferred question gets an automatic response fed back to the
-        # inner InterviewEngine so it knows the question was handled
-        assert len(state.rounds) == 1
-        assert "[Deferred to development phase]" in state.rounds[0].user_response
-        assert state.rounds[0].question == dev_q
+        # The user sees the deferred question directly
+        assert result.value == dev_q
+        # deferred_items NOT populated yet (user hasn't chosen to skip)
+        assert dev_q not in engine.deferred_items
+        # No rounds auto-recorded
+        assert len(state.rounds) == 0
 
     @pytest.mark.asyncio
-    async def test_deferred_auto_response_content(self, tmp_path: Path) -> None:
-        """DEV-classified deferred questions get an automatic response fed back
-        to the InterviewEngine with appropriate marker text."""
+    async def test_user_can_skip_as_deferred(self, tmp_path: Path) -> None:
+        """User can defer a technical question via skip_as_deferred()."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
         dev_q = "What container orchestration platform should we use — Kubernetes or ECS?"
-        planning_q = "What are the key business goals?"
-
-        adapter.complete = AsyncMock(
-            side_effect=[
-                Result.ok(_mock_completion(dev_q)),
-                Result.ok(
-                    _mock_completion(
-                        json.dumps(
-                            {
-                                "category": "development",
-                                "reframed_question": dev_q,
-                                "reasoning": "Infrastructure choice is purely technical",
-                                "defer_to_dev": True,
-                            }
-                        )
-                    )
-                ),
-                Result.ok(_mock_completion(planning_q)),
-                Result.ok(
-                    _mock_completion(
-                        json.dumps(
-                            {
-                                "category": "planning",
-                                "reframed_question": planning_q,
-                                "reasoning": "Business question",
-                                "defer_to_dev": False,
-                            }
-                        )
-                    )
-                ),
-            ]
-        )
 
         state = InterviewState(
             interview_id="test_auto_response",
             initial_context="Build a SaaS platform",
         )
 
-        result = await engine.ask_next_question(state)
+        # User chooses to defer
+        adapter.complete = AsyncMock(return_value=Result.ok(_mock_completion("ok")))
+        result = await engine.skip_as_deferred(state, dev_q)
 
         assert result.is_ok
-        assert result.value == planning_q
-
-        # Verify the auto-response was properly recorded
-        deferred_round = state.rounds[0]
-        assert deferred_round.question == dev_q
-        assert "[Deferred to development phase]" in deferred_round.user_response
-        assert "development interview" in deferred_round.user_response
-        assert deferred_round.round_number == 1
+        assert dev_q in engine.deferred_items
+        # Verify the deferral response was properly recorded
+        assert len(state.rounds) == 1
+        assert "[Deferred to development phase]" in state.rounds[0].user_response
 
     @pytest.mark.asyncio
-    async def test_multiple_deferred_questions_all_auto_responded(self, tmp_path: Path) -> None:
-        """Multiple consecutive deferred questions each get auto-responses."""
+    async def test_deferred_question_returned_not_auto_skipped(self, tmp_path: Path) -> None:
+        """DEFERRED questions are returned to user, not auto-skipped."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
         dev_q1 = "Should we use gRPC or REST?"
-        dev_q2 = "Which CI/CD pipeline tool should we use?"
-        planning_q = "Who are the target users?"
 
         adapter.complete = AsyncMock(
             side_effect=[
-                # First dev question
                 Result.ok(_mock_completion(dev_q1)),
                 Result.ok(
                     _mock_completion(
@@ -570,34 +515,6 @@ class TestAskNextQuestion:
                                 "reframed_question": dev_q1,
                                 "reasoning": "Protocol choice",
                                 "defer_to_dev": True,
-                            }
-                        )
-                    )
-                ),
-                # Second dev question
-                Result.ok(_mock_completion(dev_q2)),
-                Result.ok(
-                    _mock_completion(
-                        json.dumps(
-                            {
-                                "category": "development",
-                                "reframed_question": dev_q2,
-                                "reasoning": "CI/CD is infra",
-                                "defer_to_dev": True,
-                            }
-                        )
-                    )
-                ),
-                # Finally a planning question
-                Result.ok(_mock_completion(planning_q)),
-                Result.ok(
-                    _mock_completion(
-                        json.dumps(
-                            {
-                                "category": "planning",
-                                "reframed_question": planning_q,
-                                "reasoning": "User question",
-                                "defer_to_dev": False,
                             }
                         )
                     )
@@ -613,18 +530,11 @@ class TestAskNextQuestion:
         result = await engine.ask_next_question(state)
 
         assert result.is_ok
-        assert result.value == planning_q
-
-        # Both dev questions should be tracked as deferred
-        assert dev_q1 in engine.deferred_items
-        assert dev_q2 in engine.deferred_items
-
-        # Both should have auto-responses recorded in the inner engine
-        assert len(state.rounds) == 2
-        assert "[Deferred to development phase]" in state.rounds[0].user_response
-        assert "[Deferred to development phase]" in state.rounds[1].user_response
-        assert state.rounds[0].question == dev_q1
-        assert state.rounds[1].question == dev_q2
+        # First deferred question returned directly — no recursion
+        assert result.value == dev_q1
+        # Not yet in deferred_items (user hasn't chosen to skip)
+        assert dev_q1 not in engine.deferred_items
+        assert len(state.rounds) == 0
 
     @pytest.mark.asyncio
     async def test_classification_failure_returns_original(self, tmp_path: Path) -> None:

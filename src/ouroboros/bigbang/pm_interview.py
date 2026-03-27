@@ -485,27 +485,22 @@ class PMInterviewEngine:
         output_type = classification.output_type
 
         if output_type == ClassifierOutputType.DEFERRED:
-            # Track as deferred item and generate a new question
-            self.deferred_items.append(classification.original_question)
+            # Return the question to the caller (main session) so the user
+            # can choose to defer it themselves.  The main session detects
+            # classification == "deferred" via response_meta and offers
+            # a "skip / defer to dev" option.  If the user picks it, the
+            # caller calls skip_as_deferred() which records the deferral
+            # and appends to deferred_items.
+            #
+            # Previously this branch auto-answered and recursed, which could
+            # trigger MCP 120s timeouts on consecutive DEFERRED runs.
             log.info(
-                "pm.question_deferred",
+                "pm.question_deferred_candidate",
                 question=classification.original_question[:100],
                 reasoning=classification.reasoning,
                 output_type=output_type,
             )
-            # Feed an automatic response back to the inner InterviewEngine
-            # so the round is properly recorded and the engine advances.
-            # This prevents the inner engine from re-generating similar
-            # technical questions it doesn't know were already handled.
-            await self.record_response(
-                state,
-                user_response="[Deferred to development phase] "
-                "This technical decision will be addressed during the "
-                "development interview.",
-                question=classification.original_question,
-            )
-            # Recursively ask for the next real question
-            return await self.ask_next_question(state)
+            return Result.ok(classification.original_question)
 
         if output_type == ClassifierOutputType.DECIDE_LATER:
             # Return the question to the caller (main session) so the user
@@ -626,6 +621,40 @@ class PMInterviewEngine:
         return await self.record_response(
             state,
             user_response="[Decide later] To be determined — user chose to decide later.",
+            question=question,
+        )
+
+    async def skip_as_deferred(
+        self,
+        state: InterviewState,
+        question: str,
+    ) -> Result[InterviewState, ValidationError]:
+        """Skip a question as "deferred to dev" at the user's explicit request.
+
+        Records the question in ``deferred_items`` and feeds a deferral
+        response to the inner InterviewEngine so the round is properly recorded
+        and the engine advances.
+
+        Args:
+            state: Current interview state.
+            question: The question the user chose to defer.
+
+        Returns:
+            Result containing updated state or ValidationError.
+        """
+        if question not in self.deferred_items:
+            self.deferred_items.append(question)
+
+        log.info(
+            "pm.question_deferred_by_user",
+            question=question[:100],
+        )
+
+        return await self.record_response(
+            state,
+            user_response="[Deferred to development phase] "
+            "This technical decision will be addressed during the "
+            "development interview.",
             question=question,
         )
 

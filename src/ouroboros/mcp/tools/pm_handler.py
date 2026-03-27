@@ -503,9 +503,11 @@ class PMInterviewHandler:
         # Include pending_reframe in response meta if a reframe occurred
         pending_reframe = engine.get_pending_reframe()
 
-        # Check classification to signal decide-later eligibility
+        # Check classification to signal skip eligibility
         classification = _last_classification(engine)
         is_decide_later = classification == "decide_later"
+        is_deferred = classification == "deferred"
+        skip_eligible = is_decide_later or is_deferred
 
         meta = {
             "session_id": state.interview_id,
@@ -515,7 +517,7 @@ class PMInterviewHandler:
             "question": question,
             "is_brownfield": state.is_brownfield,
             "classification": classification,
-            "decide_later_eligible": is_decide_later,
+            "skip_eligible": skip_eligible,
             "pending_reframe": pending_reframe,
             **diff,
         }
@@ -525,19 +527,26 @@ class PMInterviewHandler:
             session_id=state.interview_id,
             is_brownfield=state.is_brownfield,
             classification=classification,
-            decide_later_eligible=is_decide_later,
+            skip_eligible=skip_eligible,
             has_pending_reframe=pending_reframe is not None,
             **diff,
         )
 
-        # Build response text — include decide-later hint when applicable
+        # Build response text — include skip hint when applicable
         start_text = f"PM interview started. Session ID: {state.interview_id}\n\n{question}"
         if is_decide_later:
             start_text += (
                 '\n\n💡 This question can be deferred. '
                 'The user may answer now, or choose "decide later" to skip it. '
                 "If they choose to decide later, pass "
-                f'answer="decide_later" with session_id="{state.interview_id}".'
+                f'answer="[decide_later]" with session_id="{state.interview_id}".'
+            )
+        elif is_deferred:
+            start_text += (
+                '\n\n💡 This is a technical question that can be deferred to the dev phase. '
+                'The user may answer now, or choose to defer it. '
+                "If they choose to defer, pass "
+                f'answer="[deferred]" with session_id="{state.interview_id}".'
             )
 
         return Result.ok(
@@ -797,17 +806,26 @@ class PMInterviewHandler:
             pending_question = state.rounds[-1].question
             classification = _last_classification(engine)
             is_decide_later = classification == "decide_later"
+            is_deferred = classification == "deferred"
+            skip_eligible = is_decide_later or is_deferred
 
             pending_reframe = engine.get_pending_reframe()
 
-            # Include decide-later hint in re-displayed question
+            # Include skip hint in re-displayed question
             pending_text = f"Session {session_id}\n\n{pending_question}"
             if is_decide_later:
                 pending_text += (
                     '\n\n💡 This question can be deferred. '
                     'The user may answer now, or choose "decide later" to skip it. '
                     "If they choose to decide later, pass "
-                    f'answer="decide_later" with session_id="{session_id}".'
+                    f'answer="[decide_later]" with session_id="{session_id}".'
+                )
+            elif is_deferred:
+                pending_text += (
+                    '\n\n💡 This is a technical question that can be deferred to the dev phase. '
+                    'The user may answer now, or choose to defer it. '
+                    "If they choose to defer, pass "
+                    f'answer="[deferred]" with session_id="{session_id}".'
                 )
 
             return Result.ok(
@@ -826,7 +844,7 @@ class PMInterviewHandler:
                         "question": pending_question,
                         "is_complete": False,
                         "classification": classification,
-                        "decide_later_eligible": is_decide_later,
+                        "skip_eligible": skip_eligible,
                         "deferred_this_round": [],
                         "decide_later_this_round": [],
                         "interview_complete": False,
@@ -852,15 +870,25 @@ class PMInterviewHandler:
             if state.rounds[-1].user_response is None:
                 state.rounds.pop()
 
-            # ── User chose "decide later" ─────────────────────────
-            # When the main session detects classification == "decide_later"
-            # and the user selects the decide-later option, it sends
-            # answer="[decide_later]".  We skip normal recording and
-            # delegate to the engine's skip_as_decide_later() method
-            # which records the question in decide_later_items and
-            # feeds a placeholder response to the inner engine.
-            if answer.strip() == "[decide_later]":
+            # ── User chose to skip (decide later / defer to dev) ───
+            # The main session detects classification via response_meta
+            # and offers skip options.  The user's choice arrives as:
+            #   answer="[decide_later]" → skip_as_decide_later()
+            #   answer="[deferred]"     → skip_as_deferred()
+            stripped = answer.strip()
+            if stripped == "[decide_later]":
                 skip_result = await engine.skip_as_decide_later(state, last_question)
+                if skip_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(skip_result.error),
+                            tool_name="ouroboros_pm_interview",
+                        )
+                    )
+                state = skip_result.value
+                state.clear_stored_ambiguity()
+            elif stripped == "[deferred]":
+                skip_result = await engine.skip_as_deferred(state, last_question)
                 if skip_result.is_err:
                     return Result.err(
                         MCPToolError(
@@ -1005,10 +1033,10 @@ class PMInterviewHandler:
         # Extract classification from the last classify call
         classification = _last_classification(engine)
 
-        # When classification is decide_later, signal to the caller
-        # that the user should be offered a "decide later" option
-        # instead of being forced to answer now.
+        # Signal to the caller that the user can skip this question
         is_decide_later = classification == "decide_later"
+        is_deferred = classification == "deferred"
+        skip_eligible = is_decide_later or is_deferred
 
         response_meta = {
             "session_id": session_id,
@@ -1017,7 +1045,7 @@ class PMInterviewHandler:
             "question": question,
             "is_complete": False,
             "classification": classification,
-            "decide_later_eligible": is_decide_later,
+            "skip_eligible": skip_eligible,
             "deferred_this_round": diff["new_deferred"],
             "decide_later_this_round": diff["new_decide_later"],
             # Keep backward-compat fields from AC 8
@@ -1030,19 +1058,26 @@ class PMInterviewHandler:
             "pm_handler.question_asked",
             session_id=session_id,
             classification=classification,
-            decide_later_eligible=is_decide_later,
+            skip_eligible=skip_eligible,
             has_pending_reframe=pending_reframe is not None,
             **diff,
         )
 
-        # Build response text — include decide-later hint when applicable
+        # Build response text — include skip hint when applicable
         response_text = f"Session {session_id}\n\n{question}"
         if is_decide_later:
             response_text += (
                 '\n\n💡 This question can be deferred. '
                 'The user may answer now, or choose "decide later" to skip it. '
                 "If they choose to decide later, pass "
-                f'answer="decide_later" with session_id="{session_id}".'
+                f'answer="[decide_later]" with session_id="{session_id}".'
+            )
+        elif is_deferred:
+            response_text += (
+                '\n\n💡 This is a technical question that can be deferred to the dev phase. '
+                'The user may answer now, or choose to defer it. '
+                "If they choose to defer, pass "
+                f'answer="[deferred]" with session_id="{session_id}".'
             )
 
         return Result.ok(
