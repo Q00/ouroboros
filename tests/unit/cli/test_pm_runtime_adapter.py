@@ -19,8 +19,12 @@ def test_run_pm_interview_uses_factory_for_interview_adapter() -> None:
     )
 
     with (
-        patch("ouroboros.cli.commands.pm.create_llm_adapter", return_value=sentinel_adapter) as mock_factory,
-        patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine) as mock_create,
+        patch(
+            "ouroboros.cli.commands.pm.create_llm_adapter", return_value=sentinel_adapter
+        ) as mock_factory,
+        patch(
+            "ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine
+        ) as mock_create,
     ):
         try:
             asyncio.run(
