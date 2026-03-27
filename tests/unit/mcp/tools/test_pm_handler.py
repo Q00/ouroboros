@@ -527,6 +527,46 @@ class TestPMHandlerDiffIntegration:
         assert result.is_ok
         engine.skip_as_decide_later.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_handle_answer_deferred_skips_and_records(self, tmp_path: Path) -> None:
+        """When answer='[deferred]', skip_as_deferred is called instead of record_response."""
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+
+        question = "Should we use gRPC or REST for inter-service communication?"
+        state = _make_state(
+            rounds=[
+                InterviewRound(round_number=1, question=question, user_response=None),
+            ],
+        )
+
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+
+        async def mock_skip(s: Any, q: str) -> Result:
+            engine.deferred_items.append(q)
+            return Result.ok(s)
+
+        engine.skip_as_deferred = AsyncMock(side_effect=mock_skip)
+        engine.record_response = AsyncMock(return_value=Result.ok(state))
+
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
+        _save_pm_meta("sess-def", engine, cwd="/tmp/proj", data_dir=tmp_path)
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-def",
+                "answer": "[deferred]",
+            }
+        )
+
+        assert result.is_ok
+        engine.skip_as_deferred.assert_called_once_with(state, question)
+        engine.record_response.assert_not_called()
+        assert question in engine.deferred_items
+
 
 # ── Unit tests for _check_completion (AC 12) ─────────────────────
 

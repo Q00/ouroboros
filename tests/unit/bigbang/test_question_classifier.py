@@ -181,8 +181,8 @@ class TestClassificationResultQuestionForPM:
         )
         assert result.question_for_pm == "How do you expect users to interact with data?"
 
-    def test_deferred_returns_empty_string(self) -> None:
-        """DEFERRED returns empty string — question should not be shown to PM."""
+    def test_deferred_returns_original_question(self) -> None:
+        """DEFERRED returns original question — shown to user for defer/answer choice."""
         result = ClassificationResult(
             original_question="Should we use gRPC or REST?",
             category=QuestionCategory.DEVELOPMENT,
@@ -190,7 +190,7 @@ class TestClassificationResultQuestionForPM:
             reasoning="Purely technical",
             defer_to_dev=True,
         )
-        assert result.question_for_pm == ""
+        assert result.question_for_pm == "Should we use gRPC or REST?"
 
     def test_decide_later_returns_original_question(self) -> None:
         """DECIDE_LATER returns original question — shown to user for decision."""

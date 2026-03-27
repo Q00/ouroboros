@@ -109,7 +109,8 @@ class ClassificationResult:
 
         For PASSTHROUGH: returns original_question unchanged.
         For REFRAMED: returns the reframed_question.
-        For DEFERRED: returns empty string (should not be shown).
+        For DEFERRED: returns original_question (shown to user
+            so they can choose to answer or defer to dev).
         For DECIDE_LATER: returns original_question (shown to user
             so they can choose to answer or defer).
         """
@@ -117,7 +118,10 @@ class ClassificationResult:
             return self.original_question
         if self.output_type == ClassifierOutputType.REFRAMED:
             return self.reframed_question
-        if self.output_type == ClassifierOutputType.DECIDE_LATER:
+        if self.output_type in (
+            ClassifierOutputType.DECIDE_LATER,
+            ClassifierOutputType.DEFERRED,
+        ):
             return self.original_question
         return ""
 
