@@ -108,7 +108,7 @@ class ExecuteSeedHandler:
             description=(
                 "Execute a seed (task specification) in Ouroboros. "
                 "A seed defines a task to be executed with acceptance criteria. "
-                "This is the handler for 'ooo run' commands — "
+                "This is the handler for 'ooo run' commands \u2014 "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=(
@@ -264,7 +264,7 @@ class ExecuteSeedHandler:
         # This allows direct MCP-initiated executions to inherit the parent
         # session's MCP tools without requiring the nested delegation mechanism.
         # Like delegation context, additional_tools only apply to new executions,
-        # not resumes — resumed sessions must preserve their original tool set.
+        # not resumes \u2014 resumed sessions must preserve their original tool set.
         additional_tools = arguments.get("additional_tools") if not is_resume else None
         if isinstance(additional_tools, list) and additional_tools:
             extra = list(dict.fromkeys(
@@ -613,7 +613,7 @@ class StartExecuteSeedHandler:
                 "Start a seed execution in the background and return a job ID immediately. "
                 "Use ouroboros_job_status, ouroboros_job_wait, and ouroboros_job_result "
                 "to monitor progress. "
-                "This is the handler for 'ooo run' commands — "
+                "This is the handler for 'ooo run' commands \u2014 "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
             parameters=ExecuteSeedHandler().definition.parameters,
