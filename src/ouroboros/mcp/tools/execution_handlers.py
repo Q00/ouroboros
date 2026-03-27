@@ -170,6 +170,19 @@ class ExecuteSeedHandler:
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    name="additional_tools",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "Optional list of additional tool names to make available during "
+                        "execution. These are merged with the default tool set (Read, Write, "
+                        "Edit, Bash, Glob, Grep). Use this to pass MCP tools from the parent "
+                        "Claude session (e.g. ['mcp__github__issue_read', "
+                        "'mcp__chrome-devtools__click'])."
+                    ),
+                    required=False,
+                    items={"type": "string"},
+                ),
             ),
         )
 
@@ -257,6 +270,21 @@ class ExecuteSeedHandler:
         inherited_effective_tools = (
             None if is_resume else _extract_inherited_effective_tools(arguments)
         )
+
+        # Merge caller-supplied additional_tools (only for new executions)
+        additional_tools = arguments.get("additional_tools") if not is_resume else None
+        if isinstance(additional_tools, list) and additional_tools:
+            extra = list(dict.fromkeys(t for t in additional_tools if isinstance(t, str) and t))
+            if extra:
+                if inherited_effective_tools:
+                    seen = set(inherited_effective_tools)
+                    inherited_effective_tools = list(inherited_effective_tools)
+                    for tool in extra:
+                        if tool not in seen:
+                            inherited_effective_tools.append(tool)
+                            seen.add(tool)
+                else:
+                    inherited_effective_tools = extra
 
         log.info(
             "mcp.tool.execute_seed",
