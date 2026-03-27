@@ -19,6 +19,7 @@ import typer
 from ouroboros.bigbang.interview import InterviewRound
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.config import get_clarification_model
 from ouroboros.core.types import Result
 
 app = typer.Typer(
@@ -49,13 +50,13 @@ def pm_command(
         ),
     ] = None,
     model: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--model",
             "-m",
             help="LLM model to use for the PM interview.",
         ),
-    ] = "anthropic/claude-sonnet-4-20250514",
+    ] = None,
     debug: Annotated[
         bool,
         typer.Option(
@@ -81,6 +82,9 @@ def pm_command(
     """
     if ctx.invoked_subcommand is not None:
         return
+
+    if model is None:
+        model = get_clarification_model()
 
     console.print("\n[bold cyan]Ouroboros PM Generator[/] - Product Requirements Document\n")
 
