@@ -20,6 +20,7 @@ from ouroboros.bigbang.interview import InterviewRound
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.core.types import Result
+from ouroboros.providers.factory import create_llm_adapter
 
 app = typer.Typer(
     name="pm",
@@ -316,9 +317,8 @@ async def _run_pm_interview(
         output_dir: Optional output directory for the generated PM document.
     """
     from ouroboros.bigbang.pm_interview import PMInterviewEngine
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
-    adapter = LiteLLMAdapter()
+    adapter = create_llm_adapter(use_case="interview")
     engine = PMInterviewEngine.create(llm_adapter=adapter, model=model)
 
     # Check for existing PM seeds before starting a new session
