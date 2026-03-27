@@ -171,6 +171,32 @@ def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+_LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
+_BOLD_RE = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
+_KV_RE = re.compile(r"(?im)^(\w[\w ]*?)[ \t]*[:=][ \t]*(.+)$")
+_SCORE_FALLBACK_RE = re.compile(
+    r"(?im)\bscore\b[ \t]*(?:is|-)[ \t]*([0-9]*\.?[0-9]+)"
+)
+
+
+def _strip_line_decorations(text: str) -> str:
+    """Strip markdown/bullet formatting so downstream parsing stays simple."""
+    lines = []
+    for line in text.splitlines():
+        line = _LINE_DECORATION_RE.sub("", line)
+        line = _BOLD_RE.sub(r"\1", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _extract_kv_fields(text: str) -> dict[str, str]:
+    """Extract ``Key: Value`` or ``Key = Value`` pairs from cleaned text."""
+    fields: dict[str, str] = {}
+    for m in _KV_RE.finditer(text):
+        fields.setdefault(m.group(1).strip().lower(), m.group(2).strip())
+    return fields
+
+
 def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
     """Parse QA verdicts from plain-text fallbacks.
 
@@ -179,37 +205,35 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
     When that happens we still want the tool to degrade gracefully rather than
     failing the whole QA step.
     """
-    score_match = re.search(r"(?im)^\s*score\s*:\s*([0-9]*\.?[0-9]+)", response_text)
-    if not score_match:
-        score_match = re.search(
-            r"(?im)\bscore\b\s*(?:is|=)?\s*([0-9]*\.?[0-9]+)", response_text
-        )
-    if not score_match:
-        return None
+    cleaned = _strip_line_decorations(response_text)
+    fields = _extract_kv_fields(cleaned)
 
+    raw_score = fields.get("score")
+    if raw_score:
+        score_num = re.match(r"([0-9]*\.?[0-9]+)", raw_score)
+    else:
+        # Fallback: "score is 0.85" / "score - 0.85" (word-bounded, not in KV)
+        score_num = _SCORE_FALLBACK_RE.search(cleaned)
+
+    if not score_num:
+        return None
     try:
-        score = float(score_match.group(1))
+        score = float(score_num.group(1))
     except ValueError:
         return None
 
-    verdict_match = re.search(r"(?im)^\s*verdict\s*:\s*([a-zA-Z_-]+)", response_text)
-    reasoning_match = re.search(
-        r"(?ims)^\s*reasoning\s*:\s*(.+?)(?:\n\s*[A-Z][A-Za-z _-]*\s*:|\Z)",
-        response_text,
-    )
-
     differences = [
-        item.strip(" -*\t")
+        item.strip()
         for item in re.findall(r"(?im)^\s*(?:[-*]|\d+[.)])\s+(.+)$", response_text)
     ]
 
     return {
         "score": score,
-        "verdict": verdict_match.group(1) if verdict_match else "",
+        "verdict": fields.get("verdict", ""),
         "dimensions": {},
         "differences": differences,
         "suggestions": [],
-        "reasoning": reasoning_match.group(1).strip() if reasoning_match else "",
+        "reasoning": fields.get("reasoning", ""),
     }
 
 
