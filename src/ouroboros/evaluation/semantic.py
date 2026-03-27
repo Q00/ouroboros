@@ -173,7 +173,6 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
         "drift_score",
         "uncertainty",
         "reasoning",
-        "reward_hacking_risk",
     ]
     missing = [f for f in required_fields if f not in data]
     if missing:
@@ -184,6 +183,9 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
                 details={"missing_fields": missing},
             )
         )
+
+    if "reward_hacking_risk" not in data:
+        data["reward_hacking_risk"] = 0.0
 
     # Validate and clamp numeric ranges
     try:

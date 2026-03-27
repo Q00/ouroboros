@@ -229,3 +229,67 @@ class TestExecuteSingleRequestSystemPrompt:
 
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert "system_prompt" not in options_call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_json_schema_is_enforced_via_prompt_not_output_format(self) -> None:
+        """json_schema requests should augment the prompt, not SDK output_format."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Score this artifact")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        mock_execute = AsyncMock()
+        mock_execute.return_value = MagicMock(is_ok=True)
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            await adapter.complete(messages, config)
+
+        prompt_arg = mock_execute.call_args.args[0]
+        assert "Respond with ONLY a valid JSON object" in prompt_arg
+        assert '"score"' in prompt_arg
+
+    @pytest.mark.asyncio
+    async def test_execute_single_request_omits_output_format(self) -> None:
+        """SDK options should not include output_format for json_schema requests."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = '{"score": 0.9}'
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request(
+                "test prompt",
+                config,
+                system_prompt="Return JSON",
+            )
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert "output_format" not in options_call_kwargs
