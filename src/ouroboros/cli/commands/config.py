@@ -52,9 +52,17 @@ def _load_config() -> tuple[dict, Path]:
 
     # Guard against sections that should be dicts but aren't (e.g. orchestrator: [])
     _MAPPING_SECTIONS = (
-        "orchestrator", "llm", "logging", "persistence", "economics",
-        "clarification", "execution", "resilience", "evaluation",
-        "consensus", "drift",
+        "orchestrator",
+        "llm",
+        "logging",
+        "persistence",
+        "economics",
+        "clarification",
+        "execution",
+        "resilience",
+        "evaluation",
+        "consensus",
+        "drift",
     )
     for section in _MAPPING_SECTIONS:
         val = data.get(section)
