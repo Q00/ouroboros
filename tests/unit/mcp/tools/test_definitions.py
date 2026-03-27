@@ -1015,6 +1015,173 @@ metadata:
 """
 
 
+class TestAdditionalToolsParameter:
+    """Tests for the additional_tools parameter on ExecuteSeedHandler."""
+
+    def test_definition_includes_additional_tools_parameter(self) -> None:
+        """ExecuteSeedHandler exposes additional_tools in its tool schema."""
+        handler = ExecuteSeedHandler()
+        param_names = {p.name for p in handler.definition.parameters}
+        assert "additional_tools" in param_names
+
+        at_param = next(p for p in handler.definition.parameters if p.name == "additional_tools")
+        assert at_param.required is False
+        assert at_param.type == ToolInputType.ARRAY
+        assert at_param.items == {"type": "string"}
+
+    async def test_additional_tools_merged_into_inherited_tools(self) -> None:
+        """additional_tools from arguments are passed as inherited_tools to OrchestratorRunner."""
+        handler = ExecuteSeedHandler()
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_exec_result = MagicMock(
+            success=True,
+            session_id="s",
+            execution_id="e",
+            messages_processed=1,
+            duration_seconds=0.1,
+            final_message="done",
+            summary={},
+        )
+        mock_runner = MagicMock()
+        prepared_tracker = SessionTracker.create("exec-at", "seed-at", session_id="sess-at")
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(mock_exec_result))
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
+                return_value=mock_runner,
+            ) as runner_cls,
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": VALID_SEED_YAML,
+                    "skip_qa": True,
+                    "additional_tools": [
+                        "mcp__github__issue_read",
+                        "mcp__chrome-devtools__click",
+                    ],
+                }
+            )
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert result.is_ok
+        runner_kwargs = runner_cls.call_args.kwargs
+        assert runner_kwargs["inherited_tools"] == [
+            "mcp__github__issue_read",
+            "mcp__chrome-devtools__click",
+        ]
+
+    async def test_no_additional_tools_preserves_default_behavior(self) -> None:
+        """When additional_tools is absent, inherited_tools is None (default behavior)."""
+        handler = ExecuteSeedHandler()
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_exec_result = MagicMock(
+            success=True,
+            session_id="s",
+            execution_id="e",
+            messages_processed=1,
+            duration_seconds=0.1,
+            final_message="done",
+            summary={},
+        )
+        mock_runner = MagicMock()
+        prepared_tracker = SessionTracker.create("exec-def", "seed-def", session_id="sess-def")
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
+        mock_runner.execute_precreated_session = AsyncMock(return_value=Result.ok(mock_exec_result))
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
+                return_value=mock_runner,
+            ) as runner_cls,
+        ):
+            result = await handler.handle({"seed_content": VALID_SEED_YAML, "skip_qa": True})
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert result.is_ok
+        runner_kwargs = runner_cls.call_args.kwargs
+        assert runner_kwargs["inherited_tools"] is None
+
+    async def test_additional_tools_ignored_on_resume(self) -> None:
+        """Resumed sessions must not pick up additional_tools — preserves original tool set."""
+        handler = ExecuteSeedHandler()
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_exec_result = MagicMock(
+            success=True,
+            session_id="s",
+            execution_id="e",
+            messages_processed=1,
+            duration_seconds=0.1,
+            final_message="done",
+            summary={},
+        )
+        resumed_tracker = SessionTracker.create("exec-res", "seed-res", session_id="sess-res")
+        mock_session_repo = MagicMock()
+        mock_session_repo.reconstruct_session = AsyncMock(return_value=Result.ok(resumed_tracker))
+        mock_runner = MagicMock()
+        mock_runner.resume_session = AsyncMock(return_value=Result.ok(mock_exec_result))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
+                return_value=mock_runner,
+            ) as runner_cls,
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+                return_value=mock_session_repo,
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": VALID_SEED_YAML,
+                    "session_id": "sess-res",
+                    "additional_tools": ["mcp__github__issue_read"],
+                }
+            )
+            background_tasks = tuple(handler._background_tasks)
+            await asyncio.gather(*background_tasks)
+
+        assert result.is_ok
+        runner_kwargs = runner_cls.call_args.kwargs
+        assert runner_kwargs["inherited_runtime_handle"] is None
+        assert runner_kwargs["inherited_tools"] is None
+
+
 class TestMeasureDriftHandler:
     """Test MeasureDriftHandler class."""
 
