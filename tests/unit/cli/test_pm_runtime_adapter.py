@@ -156,13 +156,6 @@ def test_pm_command_formats_factory_errors() -> None:
     with (
         patch("ouroboros.cli.commands.pm.get_llm_backend", return_value="opencode"),
         patch("ouroboros.cli.commands.pm.get_clarification_model", return_value="default"),
-        patch("ouroboros.cli.commands.pm.resolve_llm_backend", return_value="opencode"),
-        patch("ouroboros.cli.commands.pm.resolve_llm_permission_mode", return_value="acceptEdits"),
-        patch("ouroboros.cli.commands.pm._run_pm_interview", new=Mock(return_value=object())),
-        patch(
-            "ouroboros.cli.commands.pm.asyncio.run",
-            side_effect=ValueError("Unsupported LLM backend: opencode"),
-        ),
         patch("ouroboros.cli.commands.pm.print_error") as mock_error,
     ):
         try:
@@ -178,4 +171,6 @@ def test_pm_command_formats_factory_errors() -> None:
         else:
             raise AssertionError("Expected typer.Exit for backend configuration errors")
 
-    mock_error.assert_called_once_with("Unsupported LLM backend: opencode")
+    mock_error.assert_called_once_with(
+        "OpenCode LLM adapter is not yet available. Supported backends: claude_code, codex, litellm"
+    )

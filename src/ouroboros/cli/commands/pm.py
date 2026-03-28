@@ -95,21 +95,21 @@ def pm_command(
     else:
         print_info("Starting new PM interview session...")
 
-    resolved_backend = resolve_llm_backend(get_llm_backend())
-    resolved_model = model or get_clarification_model(resolved_backend)
-    permission_mode = resolve_llm_permission_mode(
-        backend=resolved_backend,
-        use_case="interview",
-    )
-
-    console.print(f"  Model: [dim]{resolved_model}[/]\n")
-    if permission_mode == "bypassPermissions":
-        print_warning(
-            "Interview backend "
-            f"'{resolved_backend}' uses bypassPermissions for question generation."
+    try:
+        resolved_backend = resolve_llm_backend(get_llm_backend())
+        resolved_model = model or get_clarification_model(resolved_backend)
+        permission_mode = resolve_llm_permission_mode(
+            backend=resolved_backend,
+            use_case="interview",
         )
 
-    try:
+        console.print(f"  Model: [dim]{resolved_model}[/]\n")
+        if permission_mode == "bypassPermissions":
+            print_warning(
+                "Interview backend "
+                f"'{resolved_backend}' uses bypassPermissions for question generation."
+            )
+
         asyncio.run(
             _run_pm_interview(
                 resume_id=resume,
