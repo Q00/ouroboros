@@ -862,9 +862,13 @@ class TestPMSeedGeneration:
 
     @pytest.mark.asyncio
     async def test_includes_deferred_items(self, tmp_path: Path) -> None:
-        """Deferred items from classifier are included in PMSeed."""
+        """LLM-extracted deferred items are used in PMSeed (raw engine items not merged)."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
+        # Raw engine items are passed to the extraction prompt as context,
+        # so the LLM should summarise them.  Only LLM-extracted items appear
+        # in the final seed — raw items are NOT merged back in to avoid
+        # verbose multi-paragraph duplicates.
         engine.deferred_items = ["Should we use gRPC or REST?"]
 
         extraction_response = json.dumps(
@@ -895,7 +899,8 @@ class TestPMSeedGeneration:
         assert result.is_ok
         seed = result.value
         assert "Database selection" in seed.deferred_items
-        assert "Should we use gRPC or REST?" in seed.deferred_items
+        # Raw engine item is NOT merged — LLM extraction is trusted
+        assert "Should we use gRPC or REST?" not in seed.deferred_items
 
     @pytest.mark.asyncio
     async def test_empty_interview_returns_error(self, tmp_path: Path) -> None:
