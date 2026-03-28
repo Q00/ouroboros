@@ -596,7 +596,6 @@ class TestPMHandlerDiffIntegration:
         engine.record_response.assert_not_called()
         assert question in engine.deferred_items
 
-
     @pytest.mark.asyncio
     async def test_decide_later_sentinel_for_passthrough_treated_as_normal_answer(
         self, tmp_path: Path
@@ -908,13 +907,16 @@ class TestHandlerCompletionIntegration:
             "ambiguity_score": 0.18,
         }
 
-        with patch(
-            "ouroboros.mcp.tools.pm_handler._check_completion",
-            new_callable=AsyncMock,
-            return_value=completion_meta,
-        ), patch(
-            "ouroboros.mcp.tools.pm_handler.save_pm_document",
-            return_value=tmp_path / "pm.md",
+        with (
+            patch(
+                "ouroboros.mcp.tools.pm_handler._check_completion",
+                new_callable=AsyncMock,
+                return_value=completion_meta,
+            ),
+            patch(
+                "ouroboros.mcp.tools.pm_handler.save_pm_document",
+                return_value=tmp_path / "pm.md",
+            ),
         ):
             result = await handler.handle(
                 {
