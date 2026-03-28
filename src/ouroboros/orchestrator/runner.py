@@ -2044,8 +2044,7 @@ Note: This is a resumed session. Please continue from where execution was interr
                     session_id,
                     reason=final_message,
                     resume_hint=(
-                        "Retry the same --resume session after fixing the "
-                        "runtime/tooling issue."
+                        "Retry the same --resume session after fixing the runtime/tooling issue."
                     ),
                 )
                 self._console.print(
