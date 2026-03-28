@@ -767,6 +767,14 @@ class TestHandlerCompletionIntegration:
 
         _save_pm_meta("sess-complete", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
+        # Mock auto-generate on completion
+        seed_mock = MagicMock()
+        seed_mock.product_name = "Test Product"
+        seed_mock.deferred_items = ["d1"]
+        seed_mock.decide_later_items = ["dl1"]
+        engine.generate_pm_seed = AsyncMock(return_value=Result.ok(seed_mock))
+        engine.save_pm_seed = MagicMock(return_value=tmp_path / "seed.json")
+
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
         # Mock _check_completion to return completion
@@ -781,6 +789,9 @@ class TestHandlerCompletionIntegration:
             "ouroboros.mcp.tools.pm_handler._check_completion",
             new_callable=AsyncMock,
             return_value=completion_meta,
+        ), patch(
+            "ouroboros.mcp.tools.pm_handler.save_pm_document",
+            return_value=tmp_path / "pm.md",
         ):
             result = await handler.handle(
                 {
@@ -799,10 +810,10 @@ class TestHandlerCompletionIntegration:
         # Verify complete_interview was called
         engine.complete_interview.assert_called_once()
 
-        # Verify response text includes generate instructions
+        # Verify response text includes completion and PM document info
         text = result.value.content[0].text
         assert "Interview complete" in text
-        assert "generate" in text
+        assert "PM document" in text
 
     @pytest.mark.asyncio
     async def test_no_done_signal_processing(self, tmp_path: Path) -> None:
@@ -1619,17 +1630,28 @@ class TestResumeMetaFields:
                 "ambiguity_score": 0.15,
             }
         )
+        # Mock auto-generate on completion
+        seed_mock = MagicMock()
+        seed_mock.product_name = "Test Product"
+        seed_mock.deferred_items = ["d1"]
+        seed_mock.decide_later_items = ["dl1"]
+        engine.generate_pm_seed = AsyncMock(return_value=Result.ok(seed_mock))
+        engine.save_pm_seed = MagicMock(return_value=tmp_path / "seed.json")
 
         _save_pm_meta("resume-complete", engine, cwd="/tmp", data_dir=tmp_path)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle(
-            {
-                "session_id": "resume-complete",
-                "answer": "Final answer",
-            }
-        )
+        with patch(
+            "ouroboros.mcp.tools.pm_handler.save_pm_document",
+            return_value=tmp_path / "pm.md",
+        ):
+            result = await handler.handle(
+                {
+                    "session_id": "resume-complete",
+                    "answer": "Final answer",
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
@@ -1643,6 +1665,9 @@ class TestResumeMetaFields:
         assert meta["decide_later_this_round"] == []
         # Also has completion details
         assert meta["interview_complete"] is True
+        # Auto-generated PM document
+        assert "pm_path" in meta
+        assert "seed_path" in meta
 
     @pytest.mark.asyncio
     async def test_resume_loads_state_and_meta(self, tmp_path: Path) -> None:

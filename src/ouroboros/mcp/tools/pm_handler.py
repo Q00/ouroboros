@@ -912,7 +912,8 @@ class PMInterviewHandler:
 
         # ── Completion check (AC 12) ─────────────────────────────
         # Completion is determined by engine ambiguity scoring.
-        # User controls when to stop.
+        # When complete, auto-generate the PM document immediately
+        # (no separate "generate" call needed from the skill).
         completion = await _check_completion(state, engine)
         if completion is not None:
             # Mark interview as complete
@@ -927,21 +928,58 @@ class PMInterviewHandler:
                 )
             _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
+            log.info(
+                "pm_handler.interview_complete",
+                session_id=session_id,
+                **completion,
+            )
+
+            # Auto-generate PM document on completion
+            seed_result = await engine.generate_pm_seed(state)
+            if seed_result.is_err:
+                # Generation failed — still report completion but without document
+                summary_text = (
+                    f"Interview complete but PM generation failed: {seed_result.error}\n"
+                    f"Session ID: {session_id}\n"
+                    f'Retry with: action="generate", session_id="{session_id}"'
+                )
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(type=ContentType.TEXT, text=summary_text),
+                        ),
+                        is_error=False,
+                        meta={
+                            "session_id": session_id,
+                            "is_complete": True,
+                            "generation_failed": True,
+                            **completion,
+                        },
+                    )
+                )
+
+            seed = seed_result.value
+            seed_path = engine.save_pm_seed(seed)
+            pm_output_dir = Path(cwd) / ".ouroboros"
+            pm_path = save_pm_document(seed, output_dir=pm_output_dir)
+
             decide_later_summary = engine.format_decide_later_summary()
             summary_text = (
-                f"Interview complete. Session ID: {session_id}\n"
+                f"Interview complete. PM document generated.\n\n"
+                f"Session ID: {session_id}\n"
                 f"Rounds completed: {completion['rounds_completed']}\n"
                 f"Completion reason: {completion['completion_reason']}\n"
             )
             if completion.get("ambiguity_score") is not None:
                 summary_text += f"Ambiguity score: {completion['ambiguity_score']:.2f}\n"
             summary_text += (
-                f"\nDeferred items: {len(engine.deferred_items)}\n"
-                f"Decide-later items: {len(engine.decide_later_items)}\n"
+                f"\nPM document: {pm_path}\n"
+                f"Seed: {seed_path}\n"
+                f"\nDeferred items: {len(seed.deferred_items)}\n"
+                f"Decide-later items: {len(seed.decide_later_items)}\n"
             )
             if decide_later_summary:
                 summary_text += f"\n{decide_later_summary}\n"
-            summary_text += f'\nGenerate PM with: action="generate", session_id="{session_id}"'
 
             response_meta = {
                 "session_id": session_id,
@@ -953,13 +991,9 @@ class PMInterviewHandler:
                 **completion,
                 "deferred_count": len(engine.deferred_items),
                 "decide_later_count": len(engine.decide_later_items),
+                "seed_path": str(seed_path),
+                "pm_path": str(pm_path),
             }
-
-            log.info(
-                "pm_handler.interview_complete",
-                session_id=session_id,
-                **completion,
-            )
 
             return Result.ok(
                 MCPToolResult(
