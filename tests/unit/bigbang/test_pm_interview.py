@@ -867,8 +867,8 @@ class TestPMSeedGeneration:
         engine = _make_engine(adapter, tmp_path)
         # Raw engine items are passed to the extraction prompt as context,
         # so the LLM should summarise them.  Only LLM-extracted items appear
-        # in the final seed — raw items are NOT merged back in to avoid
-        # verbose multi-paragraph duplicates.
+        # in the final seed — engine-tracked items are merged with LLM output
+        # and deduplicated to ensure no user-selected skip is lost.
         engine.deferred_items = ["Should we use gRPC or REST?"]
 
         extraction_response = json.dumps(
@@ -899,8 +899,8 @@ class TestPMSeedGeneration:
         assert result.is_ok
         seed = result.value
         assert "Database selection" in seed.deferred_items
-        # Raw engine item is NOT merged — LLM extraction is trusted
-        assert "Should we use gRPC or REST?" not in seed.deferred_items
+        # Engine-tracked item is merged back to prevent data loss
+        assert "Should we use gRPC or REST?" in seed.deferred_items
 
     @pytest.mark.asyncio
     async def test_empty_interview_returns_error(self, tmp_path: Path) -> None:

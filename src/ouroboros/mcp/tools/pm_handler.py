@@ -338,11 +338,21 @@ class PMInterviewHandler:
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
-        cwd = arguments.get("cwd") or os.getcwd()
+        cwd_arg = arguments.get("cwd")
         selected_repos: list[str] | None = arguments.get("selected_repos")
 
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
+
+        # For resume/generate, prefer persisted session cwd over os.getcwd()
+        # so artifacts land in the workspace where the interview started.
+        if cwd_arg:
+            cwd = cwd_arg
+        elif session_id and action in ("resume", "generate"):
+            meta = _load_pm_meta(session_id, self.data_dir)
+            cwd = (meta.get("cwd") if meta else None) or os.getcwd()
+        else:
+            cwd = os.getcwd()
 
         engine = self._get_engine()
 
@@ -977,9 +987,29 @@ class PMInterviewHandler:
                 )
 
             seed = seed_result.value
-            seed_path = engine.save_pm_seed(seed)
-            pm_output_dir = Path(cwd) / ".ouroboros"
-            pm_path = save_pm_document(seed, output_dir=pm_output_dir)
+            try:
+                seed_path = engine.save_pm_seed(seed)
+                pm_output_dir = Path(cwd) / ".ouroboros"
+                pm_path = save_pm_document(seed, output_dir=pm_output_dir)
+            except Exception as e:
+                log.error("pm_handler.save_failed", error=str(e), session_id=session_id)
+                summary_text = (
+                    f"Interview complete but saving PM artifacts failed: {e}\n"
+                    f"Session ID: {session_id}\n"
+                    f'Retry with: action="generate", session_id="{session_id}"'
+                )
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text=summary_text),),
+                        is_error=False,
+                        meta={
+                            "session_id": session_id,
+                            "is_complete": True,
+                            "generation_failed": True,
+                            **completion,
+                        },
+                    )
+                )
 
             decide_later_summary = engine.format_decide_later_summary()
             summary_text = (
@@ -1196,12 +1226,33 @@ class PMInterviewHandler:
 
         seed = seed_result.value
 
-        # Save seed to ~/.ouroboros/seeds/ (idempotent — overwrites on retry)
-        seed_path = engine.save_pm_seed(seed)
-
-        # Save human-readable pm.md to {cwd}/.ouroboros/ (consistent with CLI path)
-        pm_output_dir = Path(cwd) / ".ouroboros"
-        pm_path = save_pm_document(seed, output_dir=pm_output_dir)
+        # Save seed and PM document with recovery contract
+        try:
+            seed_path = engine.save_pm_seed(seed)
+            pm_output_dir = Path(cwd) / ".ouroboros"
+            pm_path = save_pm_document(seed, output_dir=pm_output_dir)
+        except Exception as e:
+            log.error("pm_handler.generate_save_failed", error=str(e), session_id=session_id)
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                f"PM generation succeeded but saving artifacts failed: {e}\n"
+                                f"Session ID: {session_id}\n"
+                                f'Retry with: action="generate", session_id="{session_id}"'
+                            ),
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "session_id": session_id,
+                        "is_complete": True,
+                        "generation_failed": True,
+                    },
+                )
+            )
 
         return Result.ok(
             MCPToolResult(

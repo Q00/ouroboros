@@ -1181,12 +1181,18 @@ Include them as original question text in "decide_later_items":
             for s in data.get("user_stories", [])
         )
 
-        # Use LLM-extracted items only — the extraction prompt already
-        # includes raw deferred/decide-later items as context, so the LLM
-        # produces clean summaries.  Merging raw engine items back in would
-        # duplicate them as verbose multi-paragraph text.
+        # Merge LLM-extracted items with engine-tracked items, deduplicating.
+        # The extraction prompt includes raw items as context so the LLM may
+        # already emit them, but engine-tracked items are authoritative and
+        # must survive even if the extractor omits them.
         all_deferred = list(data.get("deferred_items", []))
+        for item in self.deferred_items:
+            if item not in all_deferred:
+                all_deferred.append(item)
         all_decide_later = list(data.get("decide_later_items", []))
+        for item in self.decide_later_items:
+            if item not in all_decide_later:
+                all_decide_later.append(item)
 
         # Include brownfield repos — use session-stored repos, not DB
         brownfield_repos = tuple(dict(r) for r in self._selected_brownfield_repos)
