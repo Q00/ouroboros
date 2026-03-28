@@ -55,18 +55,7 @@ _SEED_DIR = Path.home() / ".ouroboros" / "seeds"
 _PM_SYSTEM_PROMPT_PREFIX = """\
 You are a Product Requirements interviewer helping a PM define their product.
 
-Focus on PRODUCT-LEVEL questions:
-- What problem does this solve and for whom?
-- What are the business goals and success metrics?
-- What are the user stories and workflows?
-- What constraints exist (timeline, budget, compliance)?
-- What is in scope vs out of scope?
-- What are the acceptance criteria?
-
-Do NOT ask about:
-- Implementation details (databases, frameworks, APIs)
-- Architecture decisions (microservices, deployment)
-- Code-level patterns or testing strategies
+Focus on: goal, user stories, constraints, success criteria, assumptions.
 
 """
 
