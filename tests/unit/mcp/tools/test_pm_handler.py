@@ -10,6 +10,11 @@ import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.question_classifier import (
+    ClassificationResult,
+    ClassifierOutputType,
+    QuestionCategory,
+)
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.pm_handler import (
     _DATA_DIR,
@@ -25,6 +30,24 @@ from ouroboros.mcp.tools.pm_handler import (
 from tests.unit.mcp.tools.conftest import make_pm_engine_mock
 
 # ── Helpers ──────────────────────────────────────────────────────
+
+
+def _make_classification(output_type: ClassifierOutputType) -> ClassificationResult:
+    """Create a minimal ClassificationResult stub for a given output type."""
+    category_map = {
+        ClassifierOutputType.PASSTHROUGH: QuestionCategory.PLANNING,
+        ClassifierOutputType.REFRAMED: QuestionCategory.DEVELOPMENT,
+        ClassifierOutputType.DEFERRED: QuestionCategory.DEVELOPMENT,
+        ClassifierOutputType.DECIDE_LATER: QuestionCategory.DECIDE_LATER,
+    }
+    return ClassificationResult(
+        original_question="stub question",
+        category=category_map[output_type],
+        reframed_question="stub question",
+        reasoning="stub",
+        defer_to_dev=(output_type == ClassifierOutputType.DEFERRED),
+        decide_later=(output_type == ClassifierOutputType.DECIDE_LATER),
+    )
 
 
 def _make_engine_stub(
@@ -456,6 +479,8 @@ class TestPMHandlerDiffIntegration:
     async def test_handle_answer_decide_later_skips_and_records(self, tmp_path: Path) -> None:
         """When answer='[decide_later]', skip_as_decide_later is called instead of record_response."""
         engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+        # Set up classification so the guard accepts the sentinel
+        engine.classifications = [_make_classification(ClassifierOutputType.DECIDE_LATER)]
 
         question = "What caching strategy should we use?"
         state = _make_state(
@@ -500,6 +525,8 @@ class TestPMHandlerDiffIntegration:
     async def test_handle_answer_decide_later_with_whitespace(self, tmp_path: Path) -> None:
         """Whitespace-padded '[decide_later]' is still recognized."""
         engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+        # Set up classification so the guard accepts the sentinel
+        engine.classifications = [_make_classification(ClassifierOutputType.DECIDE_LATER)]
 
         question = "What rate limiting approach?"
         state = _make_state(
@@ -531,6 +558,8 @@ class TestPMHandlerDiffIntegration:
     async def test_handle_answer_deferred_skips_and_records(self, tmp_path: Path) -> None:
         """When answer='[deferred]', skip_as_deferred is called instead of record_response."""
         engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+        # Set up classification so the guard accepts the sentinel
+        engine.classifications = [_make_classification(ClassifierOutputType.DEFERRED)]
 
         question = "Should we use gRPC or REST for inter-service communication?"
         state = _make_state(
@@ -566,6 +595,100 @@ class TestPMHandlerDiffIntegration:
         engine.skip_as_deferred.assert_called_once_with(state, question)
         engine.record_response.assert_not_called()
         assert question in engine.deferred_items
+
+
+    @pytest.mark.asyncio
+    async def test_decide_later_sentinel_for_passthrough_treated_as_normal_answer(
+        self, tmp_path: Path
+    ) -> None:
+        """[decide_later] sent for a passthrough question is recorded as a normal answer.
+
+        Guards against clients blindly sending sentinels regardless of question type.
+        When the last classification is not 'decide_later', the sentinel must not
+        trigger skip_as_decide_later — it should fall through to record_response.
+        """
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+        # Last classification is PASSTHROUGH, not DECIDE_LATER
+        engine.classifications = [_make_classification(ClassifierOutputType.PASSTHROUGH)]
+
+        question = "What is the primary goal of the product?"
+        state = _make_state(
+            rounds=[
+                InterviewRound(round_number=1, question=question, user_response=None),
+            ],
+        )
+
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+        engine.skip_as_decide_later = AsyncMock(return_value=Result.ok(state))
+        engine.record_response = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
+        _save_pm_meta("sess-passthrough-guard", engine, cwd="/tmp/proj", data_dir=tmp_path)
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-passthrough-guard",
+                "answer": "[decide_later]",
+            }
+        )
+
+        assert result.is_ok
+        # Must NOT call skip_as_decide_later — the sentinel is treated as a normal answer
+        engine.skip_as_decide_later.assert_not_called()
+        # Must record the literal string as a normal response
+        engine.record_response.assert_called_once_with(state, "[decide_later]", question)
+
+    @pytest.mark.asyncio
+    async def test_decide_later_skip_populates_per_round_diff(self, tmp_path: Path) -> None:
+        """Skipping via [decide_later] populates new_decide_later in response metadata.
+
+        Verifies that the per-round diff snapshot is taken BEFORE the skip call
+        so that items added inside skip_as_decide_later() appear in the diff.
+        """
+        engine = make_pm_engine_mock(deferred_items=[], decide_later_items=[])
+        # Set up classification so the guard accepts the sentinel
+        engine.classifications = [_make_classification(ClassifierOutputType.DECIDE_LATER)]
+
+        question = "What scaling approach suits future traffic?"
+        state = _make_state(
+            rounds=[
+                InterviewRound(round_number=1, question=question, user_response=None),
+            ],
+        )
+
+        engine.load_state = AsyncMock(return_value=Result.ok(state))
+
+        async def mock_skip(s: Any, q: str) -> Result:
+            engine.decide_later_items.append(q)
+            return Result.ok(s)
+
+        engine.skip_as_decide_later = AsyncMock(side_effect=mock_skip)
+        engine.record_response = AsyncMock(return_value=Result.ok(state))
+        engine.ask_next_question = AsyncMock(return_value=Result.ok("Next question?"))
+        engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
+
+        _save_pm_meta("sess-diff-skip", engine, cwd="/tmp/proj", data_dir=tmp_path)
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        result = await handler.handle(
+            {
+                "session_id": "sess-diff-skip",
+                "answer": "[decide_later]",
+            }
+        )
+
+        assert result.is_ok
+        meta = result.value.meta
+        # The skipped question must appear in new_decide_later (per-round diff)
+        assert question in meta["new_decide_later"], (
+            f"Expected '{question}' in new_decide_later, got {meta['new_decide_later']}"
+        )
+        assert meta["decide_later_this_round"] == meta["new_decide_later"]
+        assert meta["decide_later_count"] == 1
 
 
 # ── Unit tests for _check_completion (AC 12) ─────────────────────

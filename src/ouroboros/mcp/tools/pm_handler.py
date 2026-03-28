@@ -750,6 +750,12 @@ class PMInterviewHandler:
             else (state.rounds[-1].question if state.rounds else "No question available.")
         )
 
+        engine.restore_meta(meta)
+        classification = _last_classification(engine)
+        is_decide_later = classification == "decide_later"
+        is_deferred = classification == "deferred"
+        skip_eligible = is_decide_later or is_deferred
+
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -767,6 +773,8 @@ class PMInterviewHandler:
                     "question": first_question,
                     "is_brownfield": state.is_brownfield,
                     "idempotent": True,
+                    "classification": classification,
+                    "skip_eligible": skip_eligible,
                 },
             )
         )
@@ -857,6 +865,13 @@ class PMInterviewHandler:
                 )
             )
 
+        # ── Per-round diff snapshot — must be BEFORE any skip/record call ──
+        # Snapshot list lengths here so that items appended inside
+        # skip_as_decide_later() / skip_as_deferred() are captured in the
+        # per-round diff returned at the end of this call.
+        deferred_before = len(engine.deferred_items)
+        decide_later_before = len(engine.decide_later_items)
+
         # Record answer if provided
         if answer and not state.rounds:
             return Result.err(
@@ -875,8 +890,13 @@ class PMInterviewHandler:
             # and offers skip options.  The user's choice arrives as:
             #   answer="[decide_later]" → skip_as_decide_later()
             #   answer="[deferred]"     → skip_as_deferred()
+            # Guard: only honour the sentinel when the last question was
+            # actually classified as that type.  If a client sends
+            # "[decide_later]" for a passthrough/reframed question, treat
+            # it as a normal answer so no data is silently discarded.
             stripped = answer.strip()
-            if stripped == "[decide_later]":
+            last_classification = _last_classification(engine)
+            if stripped == "[decide_later]" and last_classification == "decide_later":
                 skip_result = await engine.skip_as_decide_later(state, last_question)
                 if skip_result.is_err:
                     return Result.err(
@@ -887,7 +907,7 @@ class PMInterviewHandler:
                     )
                 state = skip_result.value
                 state.clear_stored_ambiguity()
-            elif stripped == "[deferred]":
+            elif stripped == "[deferred]" and last_classification == "deferred":
                 skip_result = await engine.skip_as_deferred(state, last_question)
                 if skip_result.is_err:
                     return Result.err(
@@ -945,9 +965,7 @@ class PMInterviewHandler:
                 )
                 return Result.ok(
                     MCPToolResult(
-                        content=(
-                            MCPContentItem(type=ContentType.TEXT, text=summary_text),
-                        ),
+                        content=(MCPContentItem(type=ContentType.TEXT, text=summary_text),),
                         is_error=False,
                         meta={
                             "session_id": session_id,
@@ -1007,11 +1025,6 @@ class PMInterviewHandler:
                     meta=response_meta,
                 )
             )
-
-        # ── Core diff computation (AC 8) ──────────────────────────
-        # Snapshot list lengths BEFORE ask_next_question
-        deferred_before = len(engine.deferred_items)
-        decide_later_before = len(engine.decide_later_items)
 
         question_result = await engine.ask_next_question(state)
         if question_result.is_err:
