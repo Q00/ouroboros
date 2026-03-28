@@ -53,6 +53,7 @@ def _make_state(
     state.current_round_number = len(state.rounds) + 1
     state.is_complete = False
     state.is_brownfield = is_brownfield
+    state.ambiguity_score = None
     state.mark_updated = MagicMock()
     state.clear_stored_ambiguity = MagicMock()
     return state
@@ -654,7 +655,6 @@ class TestHandlerCompletionIntegration:
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        # Mock _check_completion to return completion
         completion_meta = {
             "interview_complete": True,
             "completion_reason": "ambiguity_resolved",
@@ -663,10 +663,10 @@ class TestHandlerCompletionIntegration:
         }
 
         with patch(
-            "ouroboros.mcp.tools.pm_handler._check_completion",
+            "ouroboros.mcp.tools.pm_handler.maybe_complete_pm_interview",
             new_callable=AsyncMock,
-            return_value=completion_meta,
-        ):
+            return_value=Result.ok((state, completion_meta)),
+        ) as mock_complete:
             result = await handler.handle(
                 {
                     "session_id": "sess-complete",
@@ -681,8 +681,8 @@ class TestHandlerCompletionIntegration:
         assert meta["ambiguity_score"] == 0.18
         assert meta["session_id"] == "sess-complete"
 
-        # Verify complete_interview was called
-        engine.complete_interview.assert_called_once()
+        # Verify the shared completion helper was used
+        mock_complete.assert_awaited_once_with(state, engine)
 
         # Verify response text includes generate instructions
         text = result.value.content[0].text
@@ -1495,26 +1495,28 @@ class TestResumeMetaFields:
         engine.record_response = AsyncMock(return_value=Result.ok(state))
         engine.complete_interview = AsyncMock(return_value=Result.ok(state))
         engine.save_state = AsyncMock(return_value=Result.ok(tmp_path / "state.json"))
-        # Mock ambiguity-based completion so the test doesn't need llm_adapter
-        engine.check_completion = AsyncMock(
-            return_value={
-                "interview_complete": True,
-                "completion_reason": "ambiguity_resolved",
-                "rounds_completed": 5,
-                "ambiguity_score": 0.15,
-            }
-        )
+        completion_meta = {
+            "interview_complete": True,
+            "completion_reason": "ambiguity_resolved",
+            "rounds_completed": 5,
+            "ambiguity_score": 0.15,
+        }
 
         _save_pm_meta("resume-complete", engine, cwd="/tmp", data_dir=tmp_path)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
-        result = await handler.handle(
-            {
-                "session_id": "resume-complete",
-                "answer": "Final answer",
-            }
-        )
+        with patch(
+            "ouroboros.mcp.tools.pm_handler.maybe_complete_pm_interview",
+            new_callable=AsyncMock,
+            return_value=Result.ok((state, completion_meta)),
+        ):
+            result = await handler.handle(
+                {
+                    "session_id": "resume-complete",
+                    "answer": "Final answer",
+                }
+            )
 
         assert result.is_ok
         meta = result.value.meta
