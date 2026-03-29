@@ -1267,7 +1267,6 @@ class PMInterviewHandler:
                             f"PM seed generated: {seed.product_name}\n"
                             f"Seed: {seed_path}\n"
                             f"PM document: {pm_path}\n\n"
-                            f"Deferred items: {len(seed.deferred_items)}\n"
                             f"Decide-later items: {len(seed.decide_later_items)}"
                         ),
                     ),

@@ -1,7 +1,7 @@
 """PM Seed — immutable specification for product requirements.
 
 A PMSeed captures PM-level product requirements: goals, user stories,
-constraints, success criteria, and deferred items. It is produced by the
+constraints, success criteria, and decide-later items. It is produced by the
 PM interview flow and can be serialized to YAML for handoff to a
 development interview via initial_context.
 """
@@ -10,11 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 from uuid import uuid4
-
-if TYPE_CHECKING:
-    from ouroboros.core.seed import Seed
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,15 +45,11 @@ class PMSeed:
         user_stories: Captured user stories.
         constraints: Product constraints (budget, timeline, compliance, etc.).
         success_criteria: Measurable success criteria.
-        deferred_items: Items explicitly deferred to later phases.
         assumptions: Assumptions made during the interview.
+        decide_later_items: Questions deferred or identified as premature.
         interview_id: Reference to the source PM interview.
         codebase_context: Shared codebase exploration context (brownfield).
         brownfield_repos: Registered brownfield repositories.
-        seed: Optional reference to the generated dev Seed.
-        deferred_decisions: Decisions deferred during PM interview
-            (architectural, technical, or strategic choices postponed).
-        referenced_repos: Repos referenced during PM interview for context.
         created_at: When this seed was generated.
     """
 
@@ -67,38 +59,17 @@ class PMSeed:
     user_stories: tuple[UserStory, ...] = ()
     constraints: tuple[str, ...] = ()
     success_criteria: tuple[str, ...] = ()
-    deferred_items: tuple[str, ...] = ()
     decide_later_items: tuple[str, ...] = ()
-    """Original question text for items classified as decide-later.
+    """Items deferred or identified as premature during the PM interview.
 
-    These are questions that were premature or unknowable during the PM
-    interview. Stored as the original question text so they can be surfaced
-    later when enough context exists to answer them.
+    Includes both feature-level deferrals and questions that were premature
+    or unknowable. Stored as the original question/item text so they can be
+    surfaced later when enough context exists to address them.
     """
     assumptions: tuple[str, ...] = ()
     interview_id: str = ""
     codebase_context: str = ""
     brownfield_repos: tuple[dict[str, str], ...] = ()
-    seed: Seed | None = None
-    """Optional reference to the generated dev Seed.
-
-    Populated after the dev interview produces a Seed from the PM
-    requirements. None while in the PM-only phase.
-    """
-    deferred_decisions: tuple[str, ...] = ()
-    """Decisions deferred during the PM interview.
-
-    These are architectural, technical, or strategic decisions that the PM
-    chose to postpone. Distinct from decide_later_items (which are questions
-    the classifier auto-deferred) and deferred_items (feature-level deferrals).
-    """
-    referenced_repos: tuple[dict[str, str], ...] = ()
-    """Repos referenced during the PM interview for brownfield context.
-
-    Each entry is a dict with keys: path, name, desc. This captures which
-    repositories were consulted during codebase exploration, providing
-    traceability for the PM requirements.
-    """
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat(),
     )
@@ -115,23 +86,21 @@ class PMSeed:
             ],
             "constraints": list(self.constraints),
             "success_criteria": list(self.success_criteria),
-            "deferred_items": list(self.deferred_items),
             "decide_later_items": list(self.decide_later_items),
             "assumptions": list(self.assumptions),
             "interview_id": self.interview_id,
             "codebase_context": self.codebase_context,
             "brownfield_repos": [dict(r) for r in self.brownfield_repos],
-            "seed": self.seed.to_dict() if self.seed is not None else None,
-            "deferred_decisions": list(self.deferred_decisions),
-            "referenced_repos": [dict(r) for r in self.referenced_repos],
             "created_at": self.created_at,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> PMSeed:
-        """Create a PMSeed from a dictionary (e.g., loaded from YAML)."""
-        from ouroboros.core.seed import Seed
+        """Create a PMSeed from a dictionary (e.g., loaded from YAML).
 
+        Handles backward compatibility: if the dict contains ``deferred_items``
+        (removed field), those items are merged into ``decide_later_items``.
+        """
         stories = tuple(
             UserStory(
                 persona=s.get("persona", ""),
@@ -141,9 +110,11 @@ class PMSeed:
             for s in data.get("user_stories", [])
         )
 
-        # Deserialize seed if present
-        seed_data = data.get("seed")
-        seed = Seed.from_dict(seed_data) if seed_data is not None else None
+        # Backward compat: merge legacy deferred_items into decide_later_items
+        decide_later = list(data.get("decide_later_items", []))
+        for item in data.get("deferred_items", []):
+            if item not in decide_later:
+                decide_later.append(item)
 
         return cls(
             pm_id=data.get("pm_id", ""),
@@ -152,15 +123,11 @@ class PMSeed:
             user_stories=stories,
             constraints=tuple(data.get("constraints", [])),
             success_criteria=tuple(data.get("success_criteria", [])),
-            deferred_items=tuple(data.get("deferred_items", [])),
-            decide_later_items=tuple(data.get("decide_later_items", [])),
+            decide_later_items=tuple(decide_later),
             assumptions=tuple(data.get("assumptions", [])),
             interview_id=data.get("interview_id", ""),
             codebase_context=data.get("codebase_context", ""),
             brownfield_repos=tuple(dict(r) for r in data.get("brownfield_repos", [])),
-            seed=seed,
-            deferred_decisions=tuple(data.get("deferred_decisions", [])),
-            referenced_repos=tuple(dict(r) for r in data.get("referenced_repos", [])),
             created_at=data.get("created_at", ""),
         )
 

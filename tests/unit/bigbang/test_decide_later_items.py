@@ -290,13 +290,12 @@ class TestDecideLaterInPMDocument:
         md = generate_pm_markdown(seed)
         assert "## Decide Later" not in md
 
-    def test_pm_document_merges_deferred_and_decide_later(self):
-        """PM document merges deferred and decide-later into single Decide Later section."""
+    def test_pm_document_renders_multiple_decide_later_items(self):
+        """PM document renders all decide-later items in a single section."""
         seed = PMSeed(
             product_name="Test Product",
             goal="Test goal",
-            deferred_items=("Which ORM to use?",),
-            decide_later_items=("What rate limiting strategy?",),
+            decide_later_items=("Which ORM to use?", "What rate limiting strategy?"),
         )
         md = generate_pm_markdown(seed)
 
@@ -349,7 +348,7 @@ class TestDecideLaterExtractionFlow:
                 "user_stories": [],
                 "constraints": [],
                 "success_criteria": [],
-                "deferred_items": [],
+                "deferred_items": ["DB selection"],
                 "decide_later_items": ["What deployment model?"],
                 "assumptions": [],
             }
@@ -357,10 +356,11 @@ class TestDecideLaterExtractionFlow:
 
         seed = engine._parse_pm_seed(response_json, interview_id="test-1")
 
-        # Both LLM-extracted and classifier items should be present
+        # All items merged into decide_later_items
         assert "What deployment model?" in seed.decide_later_items
+        assert "DB selection" in seed.decide_later_items
         assert "What caching strategy?" in seed.decide_later_items
-        assert len(seed.decide_later_items) == 2
+        assert len(seed.decide_later_items) == 3
 
     @pytest.mark.asyncio
     async def test_parse_pm_seed_deduplicates_decide_later_items(self):

@@ -1,4 +1,10 @@
-"""Tests for AC 12: PMSeed frozen dataclass with seed, deferred_decisions, referenced_repos."""
+"""Tests for PMSeed field alignment with prd.md sections.
+
+Verifies that PMSeed contains only the fields that map to prd.md sections:
+Goal, User Stories, Constraints, Success Criteria, Assumptions, Decide Later,
+Existing Codebase Context. Removed fields (seed, deferred_decisions,
+referenced_repos, deferred_items) must not be present.
+"""
 
 from __future__ import annotations
 
@@ -8,219 +14,130 @@ import pytest
 import yaml
 
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
-from ouroboros.core.seed import (
-    EvaluationPrinciple,
-    ExitCondition,
-    OntologyField,
-    OntologySchema,
-    Seed,
-    SeedMetadata,
-)
 
 
-def _make_seed(**overrides) -> Seed:
-    """Create a minimal valid Seed for testing."""
-    defaults = {
-        "goal": "Build a test widget",
-        "ontology_schema": OntologySchema(
-            name="TestSchema",
-            description="Test schema",
-            fields=(
-                OntologyField(
-                    name="output",
-                    field_type="string",
-                    description="Test output",
-                ),
-            ),
-        ),
-        "metadata": SeedMetadata(ambiguity_score=0.1),
-        "constraints": ("Python 3.12+",),
-        "acceptance_criteria": ("Widget works",),
-        "evaluation_principles": (
-            EvaluationPrinciple(
-                name="correctness",
-                description="Output is correct",
-            ),
-        ),
-        "exit_conditions": (
-            ExitCondition(
-                name="done",
-                description="All done",
-                evaluation_criteria="100%",
-            ),
-        ),
-    }
-    defaults.update(overrides)
-    return Seed(**defaults)
+class TestPMSeedRemovedFields:
+    """Tests that removed fields are no longer on PMSeed."""
+
+    def test_no_seed_field(self):
+        """PMSeed no longer has a 'seed' field."""
+        assert not hasattr(PMSeed(), "seed") or "seed" not in {
+            f.name for f in dataclasses.fields(PMSeed)
+        }
+
+    def test_no_deferred_decisions_field(self):
+        """PMSeed no longer has a 'deferred_decisions' field."""
+        assert "deferred_decisions" not in {
+            f.name for f in dataclasses.fields(PMSeed)
+        }
+
+    def test_no_referenced_repos_field(self):
+        """PMSeed no longer has a 'referenced_repos' field."""
+        assert "referenced_repos" not in {
+            f.name for f in dataclasses.fields(PMSeed)
+        }
+
+    def test_no_deferred_items_field(self):
+        """PMSeed no longer has a 'deferred_items' field."""
+        assert "deferred_items" not in {
+            f.name for f in dataclasses.fields(PMSeed)
+        }
 
 
-class TestPMSeedNewFields:
-    """Tests that PMSeed has the three AC 12 fields."""
+class TestPMSeedRetainedFields:
+    """Tests that retained fields still work correctly."""
 
-    def test_has_seed_field(self):
-        """PMSeed has a 'seed' field typed Seed | None."""
+    def test_has_decide_later_items(self):
+        """PMSeed has decide_later_items field."""
+        pm = PMSeed(decide_later_items=("Q1?", "Q2?"))
+        assert pm.decide_later_items == ("Q1?", "Q2?")
+
+    def test_decide_later_items_default_empty(self):
+        """decide_later_items defaults to empty tuple."""
         pm = PMSeed()
-        assert pm.seed is None
+        assert pm.decide_later_items == ()
 
-    def test_seed_field_accepts_seed(self):
-        """PMSeed.seed accepts a Seed instance."""
-        seed = _make_seed()
-        pm = PMSeed(seed=seed)
-        assert pm.seed is seed
-        assert pm.seed.goal == "Build a test widget"
-
-    def test_has_deferred_decisions_field(self):
-        """PMSeed has a 'deferred_decisions' field defaulting to empty tuple."""
-        pm = PMSeed()
-        assert pm.deferred_decisions == ()
-
-    def test_deferred_decisions_accepts_tuple(self):
-        """PMSeed.deferred_decisions stores tuple of strings."""
-        decisions = ("Use SQL vs NoSQL", "Cloud provider choice")
-        pm = PMSeed(deferred_decisions=decisions)
-        assert pm.deferred_decisions == decisions
-        assert len(pm.deferred_decisions) == 2
-
-    def test_has_referenced_repos_field(self):
-        """PMSeed has a 'referenced_repos' field defaulting to empty tuple."""
-        pm = PMSeed()
-        assert pm.referenced_repos == ()
-
-    def test_referenced_repos_accepts_tuple_of_dicts(self):
-        """PMSeed.referenced_repos stores tuple of dicts."""
-        repos = (
-            {"path": "/code/api", "name": "api", "desc": "API service"},
-            {"path": "/code/web", "name": "web", "desc": "Web frontend"},
-        )
-        pm = PMSeed(referenced_repos=repos)
-        assert pm.referenced_repos == repos
-        assert pm.referenced_repos[0]["name"] == "api"
-
-
-class TestPMSeedFrozen:
-    """Tests that new fields are frozen (immutable)."""
-
-    def test_seed_is_frozen(self):
-        """Cannot reassign seed on a frozen PMSeed."""
-        pm = PMSeed()
+    def test_decide_later_items_frozen(self):
+        """Cannot reassign decide_later_items on a frozen PMSeed."""
+        pm = PMSeed(decide_later_items=("Q1?",))
         with pytest.raises(dataclasses.FrozenInstanceError):
-            pm.seed = _make_seed()  # type: ignore[misc]
-
-    def test_deferred_decisions_is_frozen(self):
-        """Cannot reassign deferred_decisions on a frozen PMSeed."""
-        pm = PMSeed(deferred_decisions=("Choice A",))
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            pm.deferred_decisions = ("Choice B",)  # type: ignore[misc]
-
-    def test_referenced_repos_is_frozen(self):
-        """Cannot reassign referenced_repos on a frozen PMSeed."""
-        pm = PMSeed(referenced_repos=({"path": "/x", "name": "x", "desc": "x"},))
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            pm.referenced_repos = ()  # type: ignore[misc]
+            pm.decide_later_items = ("Q2?",)  # type: ignore[misc]
 
 
 class TestPMSeedSerialization:
-    """Tests for to_dict / from_dict with new fields."""
+    """Tests for to_dict / from_dict without removed fields."""
 
-    def test_to_dict_includes_seed_none(self):
-        """to_dict includes seed as None when not set."""
+    def test_to_dict_excludes_removed_fields(self):
+        """to_dict does not include removed fields."""
         pm = PMSeed()
         d = pm.to_dict()
-        assert "seed" in d
-        assert d["seed"] is None
+        assert "seed" not in d
+        assert "deferred_decisions" not in d
+        assert "referenced_repos" not in d
+        assert "deferred_items" not in d
 
-    def test_to_dict_includes_seed_data(self):
-        """to_dict serializes Seed via to_dict()."""
-        seed = _make_seed()
-        pm = PMSeed(seed=seed)
+    def test_to_dict_includes_decide_later_items(self):
+        """to_dict includes decide_later_items."""
+        pm = PMSeed(decide_later_items=("DB choice?", "Auth strategy?"))
         d = pm.to_dict()
-        assert d["seed"] is not None
-        assert d["seed"]["goal"] == "Build a test widget"
-        assert isinstance(d["seed"], dict)
+        assert d["decide_later_items"] == ["DB choice?", "Auth strategy?"]
 
-    def test_to_dict_includes_deferred_decisions(self):
-        """to_dict includes deferred_decisions as a list."""
-        pm = PMSeed(deferred_decisions=("DB choice", "Auth strategy"))
-        d = pm.to_dict()
-        assert d["deferred_decisions"] == ["DB choice", "Auth strategy"]
-
-    def test_to_dict_includes_referenced_repos(self):
-        """to_dict includes referenced_repos as a list of dicts."""
-        repos = ({"path": "/a", "name": "a", "desc": "repo a"},)
-        pm = PMSeed(referenced_repos=repos)
-        d = pm.to_dict()
-        assert d["referenced_repos"] == [{"path": "/a", "name": "a", "desc": "repo a"}]
-
-    def test_from_dict_without_seed(self):
-        """from_dict handles missing seed gracefully."""
-        data = {"product_name": "Widget", "goal": "Build widget"}
-        pm = PMSeed.from_dict(data)
-        assert pm.seed is None
-        assert pm.product_name == "Widget"
-
-    def test_from_dict_with_seed(self):
-        """from_dict deserializes seed via Seed.from_dict."""
-        seed = _make_seed()
-        data = PMSeed(seed=seed, product_name="Widget").to_dict()
-        restored = PMSeed.from_dict(data)
-        assert restored.seed is not None
-        assert restored.seed.goal == "Build a test widget"
-        assert restored.seed.constraints == ("Python 3.12+",)
-
-    def test_from_dict_with_deferred_decisions(self):
-        """from_dict restores deferred_decisions."""
-        data = {"deferred_decisions": ["Choice X", "Choice Y"]}
-        pm = PMSeed.from_dict(data)
-        assert pm.deferred_decisions == ("Choice X", "Choice Y")
-
-    def test_from_dict_without_deferred_decisions(self):
-        """from_dict defaults deferred_decisions to empty tuple."""
-        pm = PMSeed.from_dict({})
-        assert pm.deferred_decisions == ()
-
-    def test_from_dict_with_referenced_repos(self):
-        """from_dict restores referenced_repos."""
+    def test_from_dict_ignores_removed_fields(self):
+        """from_dict gracefully ignores removed fields in input data."""
         data = {
-            "referenced_repos": [
-                {"path": "/r", "name": "r", "desc": "repo r"},
-            ],
+            "product_name": "Widget",
+            "goal": "Build widget",
+            "seed": {"goal": "dev goal"},
+            "deferred_decisions": ["Choice X"],
+            "referenced_repos": [{"path": "/x", "name": "x", "desc": "x"}],
         }
         pm = PMSeed.from_dict(data)
-        assert len(pm.referenced_repos) == 1
-        assert pm.referenced_repos[0]["name"] == "r"
+        assert pm.product_name == "Widget"
+        # Removed fields are not present on the instance
+        assert "seed" not in {f.name for f in dataclasses.fields(pm)}
 
-    def test_from_dict_without_referenced_repos(self):
-        """from_dict defaults referenced_repos to empty tuple."""
-        pm = PMSeed.from_dict({})
-        assert pm.referenced_repos == ()
+    def test_from_dict_merges_legacy_deferred_items(self):
+        """from_dict merges legacy deferred_items into decide_later_items."""
+        data = {
+            "deferred_items": ["DB selection", "CI/CD pipeline"],
+            "decide_later_items": ["What caching?"],
+        }
+        pm = PMSeed.from_dict(data)
+        assert "What caching?" in pm.decide_later_items
+        assert "DB selection" in pm.decide_later_items
+        assert "CI/CD pipeline" in pm.decide_later_items
+
+    def test_from_dict_deduplicates_merged_items(self):
+        """from_dict deduplicates when same item in both legacy and current."""
+        data = {
+            "deferred_items": ["DB selection"],
+            "decide_later_items": ["DB selection", "What caching?"],
+        }
+        pm = PMSeed.from_dict(data)
+        assert pm.decide_later_items.count("DB selection") == 1
 
 
 class TestPMSeedYAMLRoundtrip:
-    """Tests that new fields survive YAML serialization roundtrip."""
+    """Tests that fields survive YAML serialization roundtrip."""
 
-    def test_roundtrip_without_seed(self):
-        """YAML roundtrip preserves PMSeed when seed is None."""
+    def test_roundtrip_preserves_decide_later_items(self):
+        """YAML roundtrip preserves decide_later_items."""
         pm = PMSeed(
             product_name="Test",
-            deferred_decisions=("Choice A",),
-            referenced_repos=({"path": "/x", "name": "x", "desc": "x"},),
+            decide_later_items=("Choice A?", "Choice B?"),
         )
         yaml_str = pm.to_initial_context()
         loaded = yaml.safe_load(yaml_str)
         restored = PMSeed.from_dict(loaded)
-        assert restored.seed is None
-        assert restored.deferred_decisions == ("Choice A",)
-        assert restored.referenced_repos == ({"path": "/x", "name": "x", "desc": "x"},)
+        assert restored.decide_later_items == ("Choice A?", "Choice B?")
 
-    def test_roundtrip_all_fields(self):
-        """YAML roundtrip preserves all three new fields."""
-        seed = _make_seed()
+    def test_roundtrip_all_retained_fields(self):
+        """YAML roundtrip preserves all retained fields."""
         pm = PMSeed(
             product_name="Full Test",
             goal="Test everything",
-            seed=seed,
-            deferred_decisions=("DB choice", "Hosting provider"),
-            referenced_repos=(
+            decide_later_items=("DB choice?", "Hosting?"),
+            brownfield_repos=(
                 {"path": "/api", "name": "api", "desc": "API"},
                 {"path": "/web", "name": "web", "desc": "Web"},
             ),
@@ -228,19 +145,16 @@ class TestPMSeedYAMLRoundtrip:
         yaml_str = pm.to_initial_context()
         loaded = yaml.safe_load(yaml_str)
         restored = PMSeed.from_dict(loaded)
-        assert restored.seed is not None
-        assert restored.seed.goal == "Build a test widget"
-        assert restored.deferred_decisions == ("DB choice", "Hosting provider")
-        assert len(restored.referenced_repos) == 2
-        assert restored.referenced_repos[1]["name"] == "web"
+        assert restored.decide_later_items == ("DB choice?", "Hosting?")
+        assert len(restored.brownfield_repos) == 2
+        assert restored.brownfield_repos[1]["name"] == "web"
 
 
 class TestPMSeedWithAllFields:
-    """Tests that new fields coexist with existing fields."""
+    """Tests that PMSeed can be constructed with all retained fields."""
 
     def test_full_pm_seed_construction(self):
-        """PMSeed can be constructed with all fields including new ones."""
-        seed = _make_seed()
+        """PMSeed can be constructed with all retained fields."""
         pm = PMSeed(
             pm_id="pm_seed_test123",
             product_name="My Product",
@@ -248,18 +162,12 @@ class TestPMSeedWithAllFields:
             user_stories=(UserStory(persona="PM", action="create PMs", benefit="ship faster"),),
             constraints=("Budget < $10k",),
             success_criteria=("Users adopt",),
-            deferred_items=("Phase 2 feature",),
-            decide_later_items=("What DB?",),
+            decide_later_items=("What DB?", "Phase 2 feature"),
             assumptions=("Users have internet",),
             interview_id="int_abc",
             codebase_context="existing monolith",
             brownfield_repos=({"path": "/mono", "name": "mono", "desc": "monolith"},),
-            seed=seed,
-            deferred_decisions=("Cloud provider",),
-            referenced_repos=({"path": "/mono", "name": "mono", "desc": "monolith"},),
         )
         assert pm.pm_id == "pm_seed_test123"
-        assert pm.seed is seed
-        assert pm.deferred_decisions == ("Cloud provider",)
-        assert pm.referenced_repos[0]["name"] == "mono"
+        assert pm.decide_later_items == ("What DB?", "Phase 2 feature")
         assert len(pm.user_stories) == 1

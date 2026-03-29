@@ -67,8 +67,7 @@ def _make_seed(**overrides) -> PMSeed:
         ),
         "constraints": ("Must launch within 3 months",),
         "success_criteria": ("80% user adoption in first quarter",),
-        "deferred_items": ("API rate limiting",),
-        "decide_later_items": ("Which database to use?",),
+        "decide_later_items": ("API rate limiting", "Which database to use?"),
         "assumptions": ("Team has access to cloud infra",),
         "interview_id": "int_abc",
     }

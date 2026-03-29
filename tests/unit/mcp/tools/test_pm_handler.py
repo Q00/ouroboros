@@ -893,8 +893,7 @@ class TestHandlerCompletionIntegration:
         # Mock auto-generate on completion
         seed_mock = MagicMock()
         seed_mock.product_name = "Test Product"
-        seed_mock.deferred_items = ["d1"]
-        seed_mock.decide_later_items = ["dl1"]
+        seed_mock.decide_later_items = ["d1", "dl1"]
         engine.generate_pm_seed = AsyncMock(return_value=Result.ok(seed_mock))
         engine.save_pm_seed = MagicMock(return_value=tmp_path / "seed.json")
 
@@ -1755,8 +1754,7 @@ class TestResumeMetaFields:
         # Mock auto-generate on completion
         seed_mock = MagicMock()
         seed_mock.product_name = "Test Product"
-        seed_mock.deferred_items = ["d1"]
-        seed_mock.decide_later_items = ["dl1"]
+        seed_mock.decide_later_items = ["d1", "dl1"]
         engine.generate_pm_seed = AsyncMock(return_value=Result.ok(seed_mock))
         engine.save_pm_seed = MagicMock(return_value=tmp_path / "seed.json")
 

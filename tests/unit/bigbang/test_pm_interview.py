@@ -861,14 +861,14 @@ class TestPMSeedGeneration:
         assert seed.interview_id == "test_001"
 
     @pytest.mark.asyncio
-    async def test_includes_deferred_items(self, tmp_path: Path) -> None:
-        """LLM-extracted deferred items are used in PMSeed (raw engine items not merged)."""
+    async def test_includes_deferred_items_in_decide_later(self, tmp_path: Path) -> None:
+        """LLM-extracted deferred items are merged into decide_later_items on PMSeed."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
         # Raw engine items are passed to the extraction prompt as context,
-        # so the LLM should summarise them.  Only LLM-extracted items appear
-        # in the final seed — engine-tracked items are merged with LLM output
-        # and deduplicated to ensure no user-selected skip is lost.
+        # so the LLM should summarise them.  Both LLM-extracted deferred_items
+        # and engine-tracked deferred_items are merged into decide_later_items
+        # on the PMSeed.
         engine.deferred_items = ["Should we use gRPC or REST?"]
 
         extraction_response = json.dumps(
@@ -898,9 +898,9 @@ class TestPMSeedGeneration:
 
         assert result.is_ok
         seed = result.value
-        assert "Database selection" in seed.deferred_items
+        assert "Database selection" in seed.decide_later_items
         # Engine-tracked item is merged back to prevent data loss
-        assert "Should we use gRPC or REST?" in seed.deferred_items
+        assert "Should we use gRPC or REST?" in seed.decide_later_items
 
     @pytest.mark.asyncio
     async def test_empty_interview_returns_error(self, tmp_path: Path) -> None:
@@ -962,7 +962,7 @@ class TestPMSeed:
             user_stories=(UserStory(persona="PM", action="create tasks", benefit="efficiency"),),
             constraints=("offline",),
             success_criteria=("fast creation",),
-            deferred_items=("db choice",),
+            decide_later_items=("db choice",),
             assumptions=("internet for sync",),
         )
 

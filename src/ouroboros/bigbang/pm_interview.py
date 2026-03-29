@@ -1009,7 +1009,7 @@ class PMInterviewEngine:
                 pm_id=seed.pm_id,
                 product_name=seed.product_name,
                 story_count=len(seed.user_stories),
-                deferred_count=len(seed.deferred_items),
+                decide_later_count=len(seed.decide_later_items),
             )
             return Result.ok(seed)
         except (ValueError, KeyError, json.JSONDecodeError) as e:
@@ -1185,11 +1185,15 @@ Include them as original question text in "decide_later_items":
         # The extraction prompt includes raw items as context so the LLM may
         # already emit them, but engine-tracked items are authoritative and
         # must survive even if the extractor omits them.
-        all_deferred = list(data.get("deferred_items", []))
-        for item in self.deferred_items:
-            if item not in all_deferred:
-                all_deferred.append(item)
+        # Both deferred_items (from LLM) and engine.deferred_items are merged
+        # into decide_later_items on the PMSeed.
         all_decide_later = list(data.get("decide_later_items", []))
+        for item in data.get("deferred_items", []):
+            if item not in all_decide_later:
+                all_decide_later.append(item)
+        for item in self.deferred_items:
+            if item not in all_decide_later:
+                all_decide_later.append(item)
         for item in self.decide_later_items:
             if item not in all_decide_later:
                 all_decide_later.append(item)
@@ -1204,7 +1208,6 @@ Include them as original question text in "decide_later_items":
             user_stories=stories,
             constraints=tuple(data.get("constraints", [])),
             success_criteria=tuple(data.get("success_criteria", [])),
-            deferred_items=tuple(all_deferred),
             decide_later_items=tuple(all_decide_later),
             assumptions=tuple(data.get("assumptions", [])),
             interview_id=interview_id,

@@ -41,8 +41,7 @@ def _make_seed(
         user_stories=(UserStory(persona="User", action="do stuff", benefit="save time"),),
         constraints=("Timeline: 3 months",),
         success_criteria=("100 users",),
-        deferred_items=("DB choice",),
-        decide_later_items=("Auth provider",),
+        decide_later_items=("DB choice", "Auth provider"),
         assumptions=("Users have internet",),
         interview_id=interview_id,
     )

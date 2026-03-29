@@ -272,7 +272,6 @@ class TestLoadPrdSeedAsContext:
             "constraints": ["Must be fast"],
             "success_criteria": ["All tests pass"],
             "user_stories": [],
-            "deferred_items": [],
             "decide_later_items": ["Database choice?"],
         }
         seed_path = tmp_path / "pm_seed_test123.yaml"
@@ -299,12 +298,9 @@ class TestLoadPrdSeedAsContext:
             ],
             "constraints": ["Fast", "Cheap"],
             "success_criteria": ["Works"],
-            "deferred_items": ["Auth"],
-            "decide_later_items": ["DB?"],
+            "decide_later_items": ["DB?", "Auth"],
             "assumptions": ["Internet available"],
             "brownfield_repos": [{"path": "/app", "name": "app", "desc": "main"}],
-            "deferred_decisions": ["Microservices?"],
-            "referenced_repos": [{"path": "/lib", "name": "lib", "desc": "shared"}],
         }
         seed_path = tmp_path / "pm_seed_rt.yaml"
         with open(seed_path, "w") as f:
@@ -316,7 +312,8 @@ class TestLoadPrdSeedAsContext:
         assert parsed["product_name"] == "Roundtrip"
         assert parsed["constraints"] == ["Fast", "Cheap"]
         assert len(parsed["user_stories"]) == 1
-        assert parsed["deferred_decisions"] == ["Microservices?"]
+        assert "DB?" in parsed["decide_later_items"]
+        assert "Auth" in parsed["decide_later_items"]
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +389,6 @@ class TestPrdSeedConfirmationFlow:
                     "user_stories": [],
                     "constraints": [],
                     "success_criteria": [],
-                    "deferred_items": [],
                     "decide_later_items": [],
                 },
                 f,
@@ -440,7 +436,6 @@ class TestPrdSeedConfirmationFlow:
                     "user_stories": [],
                     "constraints": [],
                     "success_criteria": [],
-                    "deferred_items": [],
                     "decide_later_items": [],
                 },
                 f,
@@ -526,8 +521,7 @@ class TestPrdSeedConfirmationFlow:
             "user_stories": [{"persona": "PM", "action": "define reqs", "benefit": "clarity"}],
             "constraints": ["Budget: $10k"],
             "success_criteria": ["Tests pass"],
-            "deferred_items": ["Analytics"],
-            "decide_later_items": ["Hosting provider"],
+            "decide_later_items": ["Hosting provider", "Analytics"],
         }
         seed_path = seeds_dir / "pm_seed_e2e_test.yaml"
         with open(seed_path, "w") as f:
@@ -548,5 +542,5 @@ class TestPrdSeedConfirmationFlow:
         parsed = yaml.safe_load(context)
         assert parsed["product_name"] == "E2E App"
         assert parsed["goal"] == "End-to-end testing"
-        assert "Analytics" in parsed["deferred_items"]
         assert "Hosting provider" in parsed["decide_later_items"]
+        assert "Analytics" in parsed["decide_later_items"]
