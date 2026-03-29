@@ -17,6 +17,10 @@ from rich.prompt import Confirm, Prompt
 import typer
 
 from ouroboros.bigbang.interview import InterviewRound
+from ouroboros.bigbang.pm_completion import (
+    build_pm_completion_summary,
+    maybe_complete_pm_interview,
+)
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
@@ -479,15 +483,30 @@ async def _run_pm_interview(
             # so extraction never sees a question the user didn't answer.
             if state.rounds and state.rounds[-1].user_response is None:
                 state.rounds.pop()
+
+            completion = await engine.check_completion(state)
             complete_result = await engine.complete_interview(state)
-            if isinstance(complete_result, Result) and complete_result.is_err:
+            if complete_result.is_err:
                 print_error(f"Failed to complete interview: {complete_result.error}")
-            elif isinstance(complete_result, Result):
-                state = complete_result.value
+                break
+
+            state = complete_result.value
             save_result = await engine.save_state(state)
-            if isinstance(save_result, Result) and save_result.is_err:
+            if save_result.is_err:
                 print_error(f"Failed to save completed state: {save_result.error}")
+                break
             _save_cli_pm_meta(state.interview_id, engine)
+
+            decide_later_summary = engine.format_decide_later_summary()
+            summary_text = build_pm_completion_summary(
+                session_id=state.interview_id,
+                completion=completion,
+                stored_ambiguity_score=state.ambiguity_score,
+                deferred_count=len(engine.deferred_items),
+                decide_later_count=len(engine.decide_later_items),
+                decide_later_summary=decide_later_summary,
+            )
+            console.print(f"\n[bold green]{summary_text}[/]\n")
             break
 
         # Pop the unanswered round before recording so record_response
@@ -534,6 +553,33 @@ async def _run_pm_interview(
             break
         if isinstance(record_result, Result):
             state = record_result.value
+
+        state.clear_stored_ambiguity()
+        completion_result = await maybe_complete_pm_interview(state, engine)
+        if completion_result.is_err:
+            print_error(f"Failed to complete interview: {completion_result.error}")
+            break
+
+        state, completion = completion_result.value
+        if completion is not None:
+            save_result = await engine.save_state(state)
+            if save_result.is_err:
+                print_error(f"Failed to save completed state: {save_result.error}")
+                break
+            _save_cli_pm_meta(state.interview_id, engine)
+
+            decide_later_summary = engine.format_decide_later_summary()
+            summary_text = build_pm_completion_summary(
+                session_id=state.interview_id,
+                completion=completion,
+                stored_ambiguity_score=state.ambiguity_score,
+                deferred_count=len(engine.deferred_items),
+                decide_later_count=len(engine.decide_later_items),
+                decide_later_summary=decide_later_summary,
+            )
+            console.print(f"\n[bold green]{summary_text}[/]\n")
+            break
+
         save_result = await engine.save_state(state)
         if isinstance(save_result, Result) and save_result.is_err:
             print_error(f"Failed to save state: {save_result.error}")

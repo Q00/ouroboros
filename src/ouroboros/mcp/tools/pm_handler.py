@@ -30,6 +30,10 @@ from ouroboros.bigbang.interview import (
     InterviewRound,
     InterviewState,
 )
+from ouroboros.bigbang.pm_completion import (
+    build_pm_completion_summary,
+    maybe_complete_pm_interview,
+)
 from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.config import get_clarification_model
@@ -944,10 +948,17 @@ class PMInterviewHandler:
         # Completion is determined by engine ambiguity scoring.
         # When complete, auto-generate the PM document immediately
         # (no separate "generate" call needed from the skill).
-        completion = await _check_completion(state, engine)
+        completion_result = await maybe_complete_pm_interview(state, engine)
+        if completion_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to complete interview: {completion_result.error}",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+
+        state, completion = completion_result.value
         if completion is not None:
-            # Mark interview as complete
-            await engine.complete_interview(state)
             save_result = await engine.save_state(state)
             if isinstance(save_result, Result) and save_result.is_err:
                 return Result.err(
@@ -1012,22 +1023,15 @@ class PMInterviewHandler:
                 )
 
             decide_later_summary = engine.format_decide_later_summary()
-            summary_text = (
-                f"Interview complete. PM document generated.\n\n"
-                f"Session ID: {session_id}\n"
-                f"Rounds completed: {completion['rounds_completed']}\n"
-                f"Completion reason: {completion['completion_reason']}\n"
+            summary_text = build_pm_completion_summary(
+                session_id=session_id,
+                completion=completion,
+                stored_ambiguity_score=getattr(state, "ambiguity_score", None),
+                deferred_count=len(engine.deferred_items),
+                decide_later_count=len(engine.decide_later_items),
+                decide_later_summary=decide_later_summary,
             )
-            if completion.get("ambiguity_score") is not None:
-                summary_text += f"Ambiguity score: {completion['ambiguity_score']:.2f}\n"
-            summary_text += (
-                f"\nPM document: {pm_path}\n"
-                f"Seed: {seed_path}\n"
-                f"\nDeferred items: {len(seed.deferred_items)}\n"
-                f"Decide-later items: {len(seed.decide_later_items)}\n"
-            )
-            if decide_later_summary:
-                summary_text += f"\n{decide_later_summary}\n"
+            summary_text += f"\n\nPM document: {pm_path}\nSeed: {seed_path}"
 
             response_meta = {
                 "session_id": session_id,
