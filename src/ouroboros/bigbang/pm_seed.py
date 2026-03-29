@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 
@@ -83,7 +84,12 @@ class PMSeed:
     # ── Deprecated fields (backward compat, merged via __post_init__) ──
     deferred_items: tuple[str, ...] = ()
     deferred_decisions: tuple[str, ...] = ()
-    seed: str = ""
+    seed: Any = ""
+    """Legacy dev seed reference. Accepts str, dict, or Seed-like objects.
+
+    Preserved on round-trip: if the value has a ``to_dict()`` method it is
+    serialized via that; dicts and strings are passed through as-is.
+    """
     referenced_repos: tuple[dict[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -129,9 +135,13 @@ class PMSeed:
             "brownfield_repos": [dict(r) for r in self.brownfield_repos],
             "created_at": self.created_at,
         }
-        # Preserve legacy seed for round-trip safety
+        # Preserve legacy seed for round-trip safety.
+        # Handles Seed objects (via to_dict()), raw dicts, and strings.
         if self.seed:
-            d["seed"] = self.seed
+            if hasattr(self.seed, "to_dict"):
+                d["seed"] = self.seed.to_dict()
+            else:
+                d["seed"] = self.seed
         return d
 
     @classmethod

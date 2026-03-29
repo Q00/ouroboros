@@ -38,10 +38,30 @@ class TestPMSeedDeprecatedFields:
         assert pm.brownfield_repos == repos
         assert pm.referenced_repos == ()
 
-    def test_seed_field_preserved(self):
-        """Passing seed preserves it for round-trip compatibility."""
+    def test_seed_string_preserved(self):
+        """Passing seed as string preserves it for round-trip compatibility."""
         pm = PMSeed(seed="dev_seed_abc")
         assert pm.seed == "dev_seed_abc"
+        d = pm.to_dict()
+        assert d["seed"] == "dev_seed_abc"
+
+    def test_seed_dict_preserved(self):
+        """Passing seed as dict (legacy Seed.to_dict() output) is preserved."""
+        seed_data = {"goal": "dev goal", "constraints": ["budget"]}
+        pm = PMSeed(seed=seed_data)
+        d = pm.to_dict()
+        assert d["seed"] == seed_data
+
+    def test_seed_object_with_to_dict(self):
+        """Passing seed as object with to_dict() serializes correctly."""
+
+        class MockSeed:
+            def to_dict(self):
+                return {"goal": "dev goal"}
+
+        pm = PMSeed(seed=MockSeed())
+        d = pm.to_dict()
+        assert d["seed"] == {"goal": "dev goal"}
 
 
 class TestPMSeedRetainedFields:
