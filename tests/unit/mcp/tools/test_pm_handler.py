@@ -895,7 +895,6 @@ class TestHandlerCompletionIntegration:
         seed_mock.deferred_items = ["d1"]
         seed_mock.decide_later_items = ["dl1"]
         engine.generate_pm_seed = AsyncMock(return_value=Result.ok(seed_mock))
-        engine.save_pm_seed = MagicMock(return_value=tmp_path / "seed.json")
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
@@ -1761,7 +1760,6 @@ class TestResumeMetaFields:
         seed_mock.deferred_items = ["d1"]
         seed_mock.decide_later_items = ["dl1"]
         engine.generate_pm_seed = AsyncMock(return_value=Result.ok(seed_mock))
-        engine.save_pm_seed = MagicMock(return_value=tmp_path / "seed.json")
 
         _save_pm_meta("resume-complete", engine, cwd="/tmp", data_dir=tmp_path)
 
