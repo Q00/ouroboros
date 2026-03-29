@@ -121,7 +121,12 @@ def test_pm_command_uses_backend_safe_default_model() -> None:
 
     with (
         patch("ouroboros.cli.commands.pm.get_llm_backend", return_value="codex"),
-        patch("ouroboros.cli.commands.pm.get_clarification_model", return_value="default"),
+        patch(
+            "ouroboros.cli.commands.pm.get_clarification_model",
+            side_effect=lambda backend=None: (
+                "backend-safe-default" if backend == "codex" else "generic-default"
+            ),
+        ) as mock_get_model,
         patch("ouroboros.cli.commands.pm.resolve_llm_backend", return_value="codex"),
         patch(
             "ouroboros.cli.commands.pm.resolve_llm_permission_mode",
@@ -143,11 +148,12 @@ def test_pm_command_uses_backend_safe_default_model() -> None:
 
     mock_run.assert_called_once_with(
         resume_id=None,
-        model="default",
+        model="backend-safe-default",
         backend="codex",
         debug=False,
         output_dir=None,
     )
+    mock_get_model.assert_called_once_with("codex")
     mock_warning.assert_called_once()
     assert "bypassPermissions" in mock_warning.call_args.args[0]
 
@@ -176,4 +182,45 @@ def test_pm_command_formats_factory_errors() -> None:
 
     mock_error.assert_called_once_with(
         "OpenCode LLM adapter is not yet available. Supported backends: claude_code, codex, litellm"
+    )
+
+
+def test_pm_command_formats_missing_litellm_dependency() -> None:
+    """LiteLLM installs should fail with actionable guidance instead of a traceback."""
+    ctx = SimpleNamespace(invoked_subcommand=None)
+
+    with (
+        patch("ouroboros.cli.commands.pm.get_llm_backend", return_value="litellm"),
+        patch(
+            "ouroboros.cli.commands.pm.get_clarification_model",
+            side_effect=lambda backend=None: "litellm-model" if backend else "generic-default",
+        ),
+        patch("ouroboros.cli.commands.pm.resolve_llm_backend", return_value="litellm"),
+        patch(
+            "ouroboros.cli.commands.pm.resolve_llm_permission_mode",
+            return_value="default",
+        ),
+        patch(
+            "ouroboros.cli.commands.pm.create_llm_adapter",
+            side_effect=ModuleNotFoundError("No module named 'litellm'"),
+        ),
+        patch("ouroboros.cli.commands.pm.print_error") as mock_error,
+    ):
+        try:
+            pm_command(
+                ctx=ctx,
+                resume=None,
+                output=None,
+                model=None,
+                debug=False,
+            )
+        except typer.Exit as exc:
+            assert exc.exit_code == 1
+        else:
+            raise AssertionError("Expected typer.Exit for missing optional litellm dependency")
+
+    mock_error.assert_called_once_with(
+        "PM interviews require the optional LiteLLM dependency. "
+        "Reinstall with `ouroboros-ai[litellm]`, or if you use uv tool: "
+        "`uv tool install --force --with litellm ouroboros-ai`."
     )

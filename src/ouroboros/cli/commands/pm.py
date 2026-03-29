@@ -59,6 +59,18 @@ def _create_pm_litellm_adapter() -> Any:
     return LiteLLMAdapter()
 
 
+def _raise_missing_litellm_dependency(exc: ModuleNotFoundError) -> None:
+    """Convert a missing optional LiteLLM import into install guidance."""
+    if exc.name == "litellm" or "litellm" in str(exc):
+        msg = (
+            "PM interviews require the optional LiteLLM dependency. "
+            "Reinstall with `ouroboros-ai[litellm]`, or if you use uv tool: "
+            "`uv tool install --force --with litellm ouroboros-ai`."
+        )
+        raise RuntimeError(msg) from exc
+    raise exc
+
+
 @app.callback(invoke_without_command=True)
 def pm_command(
     ctx: typer.Context,
@@ -112,9 +124,6 @@ def pm_command(
     if ctx.invoked_subcommand is not None:
         return
 
-    if model is None:
-        model = get_clarification_model()
-
     if debug:
         configure_logging(LoggingConfig(log_level="DEBUG"))
         print_info("Debug mode enabled - showing verbose logs")
@@ -151,6 +160,9 @@ def pm_command(
             )
         )
     except ValueError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1) from exc
+    except RuntimeError as exc:
         print_error(str(exc))
         raise typer.Exit(code=1) from exc
     except KeyboardInterrupt:
@@ -389,14 +401,19 @@ async def _run_pm_interview(
     """
     from ouroboros.bigbang.pm_interview import PMInterviewEngine
 
-    adapter = create_llm_adapter(
-        backend=backend,
-        use_case="interview",
-        allowed_tools=None,
-        max_turns=5,
-        on_message=_make_message_callback(debug),
-        cwd=Path.cwd(),
-    )
+    try:
+        adapter = create_llm_adapter(
+            backend=backend,
+            use_case="interview",
+            allowed_tools=None,
+            max_turns=5,
+            on_message=_make_message_callback(debug),
+            cwd=Path.cwd(),
+        )
+    except ModuleNotFoundError as exc:
+        if backend == "litellm":
+            _raise_missing_litellm_dependency(exc)
+        raise
     engine = PMInterviewEngine.create(llm_adapter=adapter, model=model)
 
     # Check for existing PM seeds before starting a new session
