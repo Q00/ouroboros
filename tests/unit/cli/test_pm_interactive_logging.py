@@ -95,7 +95,7 @@ async def test_run_pm_interview_new_session_uses_multiline_prompt_and_shows_prog
 
     with (
         patch.object(Path, "home", return_value=tmp_path),
-        patch("ouroboros.providers.litellm_adapter.LiteLLMAdapter", return_value=object()),
+        patch("ouroboros.cli.commands.pm.create_llm_adapter", return_value=object()),
         patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine),
         patch("ouroboros.cli.commands.pm._check_existing_pm_seeds", return_value=True),
         patch("ouroboros.cli.commands.pm._load_brownfield_from_db", return_value=[]),
@@ -108,7 +108,7 @@ async def test_run_pm_interview_new_session_uses_multiline_prompt_and_shows_prog
         patch("ouroboros.cli.commands.pm.print_info") as mock_print_info,
         patch("ouroboros.cli.commands.pm.print_success"),
     ):
-        await _run_pm_interview(resume_id=None, model="test-model", debug=False)
+        await _run_pm_interview(resume_id=None, model="test-model", backend="codex", debug=False)
 
     engine.ask_opening_and_start.assert_awaited_once()
     engine.ask_next_question.assert_awaited_once_with(initial_state)
@@ -145,7 +145,7 @@ async def test_run_pm_interview_resume_with_pending_question_skips_generation_me
 
     with (
         patch.object(Path, "home", return_value=tmp_path),
-        patch("ouroboros.providers.litellm_adapter.LiteLLMAdapter", return_value=object()),
+        patch("ouroboros.cli.commands.pm.create_llm_adapter", return_value=object()),
         patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine),
         patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
         patch(
@@ -154,7 +154,12 @@ async def test_run_pm_interview_resume_with_pending_question_skips_generation_me
         patch("ouroboros.cli.commands.pm.print_info") as mock_print_info,
         patch("ouroboros.cli.commands.pm.print_success"),
     ):
-        await _run_pm_interview(resume_id="resume_123", model="test-model", debug=False)
+        await _run_pm_interview(
+            resume_id="resume_123",
+            model="test-model",
+            backend="codex",
+            debug=False,
+        )
 
     engine.ask_next_question.assert_not_awaited()
     engine._install_pm_steering.assert_called_once()
@@ -187,7 +192,7 @@ async def test_run_pm_interview_preserves_pending_question_across_interrupt_and_
 
     with (
         patch.object(Path, "home", return_value=tmp_path),
-        patch("ouroboros.providers.litellm_adapter.LiteLLMAdapter", return_value=object()),
+        patch("ouroboros.cli.commands.pm.create_llm_adapter", return_value=object()),
         patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine),
         patch("ouroboros.cli.commands.pm._check_existing_pm_seeds", return_value=True),
         patch("ouroboros.cli.commands.pm._load_brownfield_from_db", return_value=[]),
@@ -200,13 +205,23 @@ async def test_run_pm_interview_preserves_pending_question_across_interrupt_and_
         patch("ouroboros.cli.commands.pm.print_success"),
     ):
         with pytest.raises(KeyboardInterrupt):
-            await _run_pm_interview(resume_id=None, model="test-model", debug=False)
+            await _run_pm_interview(
+                resume_id=None,
+                model="test-model",
+                backend="codex",
+                debug=False,
+            )
 
         saved_question_state = engine.save_state.await_args_list[0].args[0]
         assert saved_question_state.rounds[-1].question == "What is the first workflow?"
         assert saved_question_state.rounds[-1].user_response is None
 
-        await _run_pm_interview(resume_id="resume_123", model="test-model", debug=False)
+        await _run_pm_interview(
+            resume_id="resume_123",
+            model="test-model",
+            backend="codex",
+            debug=False,
+        )
 
     engine.ask_next_question.assert_awaited_once_with(interrupted_state)
     engine.load_state.assert_awaited_once_with("resume_123")
