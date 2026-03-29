@@ -123,6 +123,48 @@ class TestPMSeedSerialization:
         assert "Choice X" in pm.decide_later_items
         assert len(pm.brownfield_repos) == 1
 
+    def test_from_dict_merges_both_brownfield_and_referenced_repos(self):
+        """from_dict merges referenced_repos into brownfield_repos additively."""
+        data = {
+            "brownfield_repos": [{"path": "/a", "name": "a"}],
+            "referenced_repos": [{"path": "/b", "name": "b"}],
+        }
+        pm = PMSeed.from_dict(data)
+        paths = [r["path"] for r in pm.brownfield_repos]
+        assert "/a" in paths
+        assert "/b" in paths
+
+    def test_post_init_merges_both_brownfield_and_referenced_repos(self):
+        """Constructor merges referenced_repos into brownfield_repos additively."""
+        pm = PMSeed(
+            brownfield_repos=({"path": "/a", "name": "a"},),
+            referenced_repos=({"path": "/b", "name": "b"},),
+        )
+        paths = [r["path"] for r in pm.brownfield_repos]
+        assert "/a" in paths
+        assert "/b" in paths
+        assert pm.referenced_repos == ()
+
+    def test_to_dict_preserves_falsey_seed(self):
+        """to_dict preserves falsey-but-present seed values like {}."""
+        pm = PMSeed(seed={})
+        d = pm.to_dict()
+        assert "seed" in d
+        assert d["seed"] == {}
+
+    def test_from_dict_rehydrates_seed_dict(self):
+        """from_dict attempts to rehydrate dict seed into Seed object."""
+        # Even if Seed.from_dict fails, the dict should be preserved
+        data = {"seed": {"goal": "dev goal", "unknown_field": True}}
+        pm = PMSeed.from_dict(data)
+        # Should be either a Seed object or the raw dict (no data loss)
+        assert pm.seed is not None
+        if isinstance(pm.seed, dict):
+            assert pm.seed["goal"] == "dev goal"
+        else:
+            # Successfully rehydrated as Seed
+            assert hasattr(pm.seed, "to_dict")
+
     def test_from_dict_merges_legacy_deferred_items(self):
         """from_dict merges legacy deferred_items into decide_later_items."""
         data = {

@@ -107,9 +107,17 @@ class PMSeed:
             object.__setattr__(self, "deferred_items", ())
             object.__setattr__(self, "deferred_decisions", ())
 
-        # Merge referenced_repos → brownfield_repos
-        if self.referenced_repos and not self.brownfield_repos:
-            object.__setattr__(self, "brownfield_repos", self.referenced_repos)
+        # Merge referenced_repos → brownfield_repos (additive, not replacement)
+        if self.referenced_repos:
+            if self.brownfield_repos:
+                merged = list(self.brownfield_repos)
+                existing_paths = {r.get("path") for r in merged}
+                for r in self.referenced_repos:
+                    if r.get("path") not in existing_paths:
+                        merged.append(r)
+                object.__setattr__(self, "brownfield_repos", tuple(merged))
+            else:
+                object.__setattr__(self, "brownfield_repos", self.referenced_repos)
             object.__setattr__(self, "referenced_repos", ())
 
     def to_dict(self) -> dict:
@@ -137,7 +145,8 @@ class PMSeed:
         }
         # Preserve legacy seed for round-trip safety.
         # Handles Seed objects (via to_dict()), raw dicts, and strings.
-        if self.seed:
+        # Explicit None check: falsey-but-present values ({}, 0) are preserved.
+        if self.seed is not None and self.seed != "":
             if hasattr(self.seed, "to_dict"):
                 d["seed"] = self.seed.to_dict()
             else:
@@ -170,10 +179,21 @@ class PMSeed:
                 if item not in decide_later:
                     decide_later.append(item)
 
-        # Backward compat: referenced_repos → brownfield_repos
-        brownfield_raw = data.get("brownfield_repos", [])
-        if not brownfield_raw:
-            brownfield_raw = data.get("referenced_repos", [])
+        # Backward compat: merge referenced_repos into brownfield_repos (additive)
+        brownfield_raw = list(data.get("brownfield_repos", []))
+        for r in data.get("referenced_repos", []):
+            if r not in brownfield_raw:
+                brownfield_raw.append(r)
+
+        # Rehydrate legacy seed: dict → Seed object if possible
+        seed_raw = data.get("seed", "")
+        if isinstance(seed_raw, dict):
+            try:
+                from ouroboros.core.seed import Seed as DevSeed
+
+                seed_raw = DevSeed.from_dict(seed_raw)
+            except Exception:
+                pass  # Preserve as raw dict if Seed import/parse fails
 
         return cls(
             pm_id=data.get("pm_id", ""),
@@ -188,7 +208,7 @@ class PMSeed:
             codebase_context=data.get("codebase_context", ""),
             brownfield_repos=tuple(dict(r) for r in brownfield_raw),
             created_at=data.get("created_at", ""),
-            seed=data.get("seed", ""),
+            seed=seed_raw,
         )
 
     def to_initial_context(self) -> str:
