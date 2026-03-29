@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Annotated
 
 import click
-from prompt_toolkit import PromptSession
-from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from rich.prompt import Confirm, Prompt
 import typer
 import yaml
@@ -26,6 +24,7 @@ from ouroboros.bigbang.interview import (
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.config import get_clarification_model
 from ouroboros.core.initial_context import (
     load_pm_seed_as_context as _load_pm_seed_as_context_result,
@@ -110,46 +109,6 @@ def _make_message_callback(debug: bool):
     return callback
 
 
-async def _multiline_prompt_async(prompt_text: str) -> str:
-    """Get multiline input with proper paste handling.
-
-    Behavior:
-    - Enter: Submit input
-    - Ctrl+J: Insert newline
-    - Paste: Multiline text is preserved (via bracketed paste mode)
-
-    Args:
-        prompt_text: The prompt to display.
-
-    Returns:
-        The user's input (may contain newlines from paste).
-
-    Raises:
-        EOFError: If end-of-file is reached (e.g., stdin closed).
-        KeyboardInterrupt: If user presses Ctrl+C.
-    """
-    bindings = KeyBindings()
-
-    @bindings.add("c-j")
-    def insert_newline(event: KeyPressEvent) -> None:
-        event.current_buffer.insert_text("\n")
-
-    @bindings.add("c-m")
-    def submit(event: KeyPressEvent) -> None:
-        event.current_buffer.validate_and_handle()
-
-    console.print(f"[bold green]{prompt_text}[/] [dim](Enter: submit, Ctrl+J: newline)[/]")
-
-    session: PromptSession[str] = PromptSession(
-        message="> ",
-        multiline=True,
-        prompt_continuation="  ",
-        key_bindings=bindings,
-    )
-
-    return await session.prompt_async()
-
-
 def _get_adapter(
     use_orchestrator: bool,
     backend: str | None = None,
@@ -225,7 +184,7 @@ async def _run_interview_loop(
         console.print()
 
         # Get user response (multiline-safe for paste)
-        response = await _multiline_prompt_async("Your response")
+        response = await multiline_prompt_async("Your response")
 
         if not response.strip():
             print_error("Response cannot be empty. Please try again.")
@@ -794,7 +753,7 @@ def start(
             )
             console.print()
 
-            context = asyncio.run(_multiline_prompt_async("What would you like to build?"))
+            context = asyncio.run(multiline_prompt_async("What would you like to build?"))
 
         if context:
             resolved_context = resolve_initial_context_input(context, cwd=Path.cwd())
