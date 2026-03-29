@@ -62,7 +62,7 @@ async def test_run_pm_interview_auto_completes_after_answer(tmp_path: Path) -> N
         patch("ouroboros.cli.commands.pm.console.print") as mock_print,
         patch("ouroboros.cli.commands.pm.print_success"),
     ):
-        await _run_pm_interview(resume_id="sess-123", model="test-model", debug=False)
+        await _run_pm_interview(resume_id="sess-123", model="test-model", backend=None, debug=False)
 
     updated_state.clear_stored_ambiguity.assert_called_once()
     mock_complete.assert_awaited_once_with(updated_state, engine)
@@ -106,7 +106,7 @@ async def test_run_pm_interview_done_path_persists_stored_ambiguity(tmp_path: Pa
         patch("ouroboros.cli.commands.pm.console.print") as mock_print,
         patch("ouroboros.cli.commands.pm.print_success"),
     ):
-        await _run_pm_interview(resume_id="sess-123", model="test-model", debug=False)
+        await _run_pm_interview(resume_id="sess-123", model="test-model", backend=None, debug=False)
 
     engine.complete_interview.assert_awaited_once_with(state)
     assert engine.save_state.await_count == 2
