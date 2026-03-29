@@ -1792,7 +1792,7 @@ class TestResumeMetaFields:
         assert meta["interview_complete"] is True
         # Auto-generated PM document
         assert "pm_path" in meta
-        assert "seed_path" in meta
+        assert "seed_path" not in meta
 
     @pytest.mark.asyncio
     async def test_resume_loads_state_and_meta(self, tmp_path: Path) -> None:

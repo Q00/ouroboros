@@ -155,40 +155,32 @@ def _load_brownfield_from_db() -> list[dict[str, str]]:
     return repos
 
 
-def _check_existing_pm_seeds() -> bool:
-    """Check for existing PM seeds and prompt for overwrite confirmation.
+def _check_existing_pm_document() -> bool:
+    """Check for an existing PM document and prompt for overwrite confirmation.
 
-    Scans ``~/.ouroboros/seeds/`` for any ``pm_seed_*.json`` files.
-    If found, displays the existing seeds and asks the user whether to
-    overwrite or abort.
+    Scans the default output directory for ``pm.md``.
+    If found, asks the user whether to overwrite or abort.
 
     Returns:
         True if the user wants to proceed (overwrite), False to abort.
-        Also returns True if no existing seeds are found.
+        Also returns True if no existing document is found.
     """
-    seeds_dir = Path.home() / ".ouroboros" / "seeds"
+    pm_path = Path.cwd() / ".ouroboros" / "pm.md"
 
-    if not seeds_dir.is_dir():
+    if not pm_path.exists():
         return True
 
-    existing = sorted(seeds_dir.glob("pm_*.json"))
-
-    if not existing:
-        return True
-
-    # Display existing seeds
-    console.print("\n[bold yellow]Existing PM seed(s) found:[/]\n")
-    for seed_path in existing:
-        console.print(f"  • [dim]{seed_path.name}[/]")
+    console.print("\n[bold yellow]Existing PM document found:[/]\n")
+    console.print(f"  • [dim]{pm_path}[/]")
 
     console.print()
     should_overwrite = Confirm.ask(
-        "Starting a new PM interview may overwrite existing seed(s). Continue?",
+        "Starting a new PM interview may overwrite the existing PM document. Continue?",
         default=False,
     )
 
     if not should_overwrite:
-        print_info("Aborted. Existing PM seed(s) preserved.")
+        print_info("Aborted. Existing PM document preserved.")
 
     return should_overwrite
 
@@ -358,7 +350,7 @@ async def _run_pm_interview(
 
     # Check for existing PM seeds before starting a new session
     if not resume_id:
-        if not _check_existing_pm_seeds():
+        if not _check_existing_pm_document():
             raise typer.Exit(code=0)
 
     # Load brownfield repos from DB (registered via ooo setup)
@@ -552,15 +544,13 @@ async def _run_pm_interview(
         seed_result = await engine.generate_pm_seed(state)
         if seed_result.is_ok:
             seed = seed_result.value
-            seed_path = engine.save_pm_seed(seed)
-            print_success(f"PM seed saved: {seed_path}")
 
-            # Save human-readable pm.md alongside the seed
             from ouroboros.bigbang.pm_document import save_pm_document
 
             pm_dir = Path(output_dir) if output_dir else Path.cwd() / ".ouroboros"
             pm_path = save_pm_document(seed, output_dir=pm_dir)
             print_success(f"PM document saved: {pm_path}")
+            print_info(f"Next: ooo interview {pm_path}")
         else:
             print_error(f"Failed to generate PM: {seed_result.error}")
     elif state.rounds and not state.is_complete:

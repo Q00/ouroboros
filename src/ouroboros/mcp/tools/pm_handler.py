@@ -988,7 +988,6 @@ class PMInterviewHandler:
 
             seed = seed_result.value
             try:
-                seed_path = engine.save_pm_seed(seed)
                 pm_output_dir = Path(cwd) / ".ouroboros"
                 pm_path = save_pm_document(seed, output_dir=pm_output_dir)
             except Exception as e:
@@ -1022,7 +1021,6 @@ class PMInterviewHandler:
                 summary_text += f"Ambiguity score: {completion['ambiguity_score']:.2f}\n"
             summary_text += (
                 f"\nPM document: {pm_path}\n"
-                f"Seed: {seed_path}\n"
                 f"\nDeferred items: {len(seed.deferred_items)}\n"
                 f"Decide-later items: {len(seed.decide_later_items)}\n"
             )
@@ -1039,7 +1037,6 @@ class PMInterviewHandler:
                 **completion,
                 "deferred_count": len(engine.deferred_items),
                 "decide_later_count": len(engine.decide_later_items),
-                "seed_path": str(seed_path),
                 "pm_path": str(pm_path),
             }
 
@@ -1226,9 +1223,8 @@ class PMInterviewHandler:
 
         seed = seed_result.value
 
-        # Save seed and PM document with recovery contract
+        # Save PM document
         try:
-            seed_path = engine.save_pm_seed(seed)
             pm_output_dir = Path(cwd) / ".ouroboros"
             pm_path = save_pm_document(seed, output_dir=pm_output_dir)
         except Exception as e:
@@ -1260,8 +1256,7 @@ class PMInterviewHandler:
                     MCPContentItem(
                         type=ContentType.TEXT,
                         text=(
-                            f"PM seed generated: {seed.product_name}\n"
-                            f"Seed: {seed_path}\n"
+                            f"PM document generated: {seed.product_name}\n"
                             f"PM document: {pm_path}\n\n"
                             f"Deferred items: {len(seed.deferred_items)}\n"
                             f"Decide-later items: {len(seed.decide_later_items)}"
@@ -1271,9 +1266,8 @@ class PMInterviewHandler:
                 is_error=False,
                 meta={
                     "session_id": session_id,
-                    "seed_path": str(seed_path),
                     "pm_path": str(pm_path),
-                    "next_step": f"Run 'ooo interview' to start a dev interview using {pm_path} as context",
+                    "next_step": f"Run 'ooo interview {pm_path}' to start a dev interview",
                 },
             )
         )

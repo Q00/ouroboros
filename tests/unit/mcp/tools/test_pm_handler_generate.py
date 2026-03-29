@@ -4,8 +4,8 @@ Verifies that _handle_generate:
 - Loads InterviewState and pm_meta
 - Restores engine via restore_meta() (not _restore_engine_meta)
 - Runs generate_pm_seed
-- Saves PM seed to ~/.ouroboros/seeds/
-- Returns meta with session_id, seed_path
+- Saves PM document to {cwd}/.ouroboros/pm.md
+- Returns meta with session_id, pm_path
 - Is idempotent (same result on retry)
 """
 
@@ -135,29 +135,8 @@ class TestHandleGenerate:
         assert pm_path.name == "pm.md"
 
     @pytest.mark.asyncio
-    async def test_generate_returns_seed_path_in_meta(self, tmp_path: Path) -> None:
-        """Generate returns seed_path in response meta."""
-        seed = _make_seed()
-        state = _make_state()
-        seed_path = Path.home() / ".ouroboros" / "seeds" / "pm_seed_test123.json"
-        engine = _make_engine_for_generate(state, seed, seed_path=seed_path)
-
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        result = await handler.handle(
-            {
-                "action": "generate",
-                "session_id": "test-session-gen",
-                "cwd": str(tmp_path),
-            }
-        )
-
-        assert result.is_ok
-        meta = result.value.meta
-        assert meta["seed_path"] == str(seed_path)
-
-    @pytest.mark.asyncio
-    async def test_generate_meta_has_exactly_two_keys(self, tmp_path: Path) -> None:
-        """Generate meta contains session_id, seed_path, and pm_path."""
+    async def test_generate_meta_contains_pm_path_and_next_step(self, tmp_path: Path) -> None:
+        """Generate meta contains session_id, pm_path, and next_step."""
         seed = _make_seed()
         state = _make_state()
         engine = _make_engine_for_generate(state, seed)
@@ -173,7 +152,8 @@ class TestHandleGenerate:
 
         assert result.is_ok
         meta = result.value.meta
-        assert set(meta.keys()) == {"session_id", "seed_path", "pm_path", "next_step"}
+        assert set(meta.keys()) == {"session_id", "pm_path", "next_step"}
+        assert "seed_path" not in meta
 
     @pytest.mark.asyncio
     async def test_generate_loads_interview_state(self, tmp_path: Path) -> None:
@@ -266,8 +246,8 @@ class TestHandleGenerate:
         engine.generate_pm_seed.assert_awaited_once_with(state)
 
     @pytest.mark.asyncio
-    async def test_generate_saves_seed_to_seeds_dir(self, tmp_path: Path) -> None:
-        """Generate saves seed via engine.save_pm_seed."""
+    async def test_generate_does_not_save_pm_seed_json(self, tmp_path: Path) -> None:
+        """Generate should not write pm_seed JSON files (deprecated)."""
         seed = _make_seed()
         state = _make_state()
         engine = _make_engine_for_generate(state, seed)
@@ -281,7 +261,7 @@ class TestHandleGenerate:
             }
         )
 
-        engine.save_pm_seed.assert_called_once_with(seed)
+        engine.save_pm_seed.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_generate_does_not_call_save_pm_document(self, tmp_path: Path) -> None:
@@ -390,8 +370,7 @@ class TestHandleGenerate:
         """Generate is idempotent — calling twice with same session_id yields same meta keys."""
         seed = _make_seed()
         state = _make_state()
-        seed_path = Path.home() / ".ouroboros" / "seeds" / "pm_seed_test123.json"
-        engine = _make_engine_for_generate(state, seed, seed_path=seed_path)
+        engine = _make_engine_for_generate(state, seed)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
 
