@@ -80,3 +80,30 @@ class TestResolveInitialContextInput:
 
         assert result.is_ok
         assert result.value == "# Product Requirements\n\nBuild a task manager."
+
+    def test_invalid_pm_seed_artifact_fails_closed(self, tmp_path: Path) -> None:
+        seed_path = tmp_path / "pm_seed_invalid.json"
+        seed_path.write_text(
+            """{
+  "pm_id": "pm_seed_invalid",
+  "product_name": "",
+  "goal": ""
+}
+""",
+            encoding="utf-8",
+        )
+
+        result = resolve_initial_context_input(str(seed_path))
+
+        assert result.is_err
+        assert "non-empty product_name" in str(result.error)
+
+    def test_generic_json_context_loads_verbatim(self, tmp_path: Path) -> None:
+        context_path = tmp_path / "context.json"
+        raw_context = '{\n  "idea": "Build a task manager",\n  "notes": ["CLI", "Offline"]\n}'
+        context_path.write_text(raw_context, encoding="utf-8")
+
+        result = resolve_initial_context_input(str(context_path))
+
+        assert result.is_ok
+        assert result.value == raw_context
