@@ -132,6 +132,26 @@ class TestCodexCliLLMAdapter:
         assert "## Execution Budget" in prompt
         assert "5 tool-assisted turns" in prompt
 
+    def test_build_prompt_omits_tool_constraints_when_tools_unspecified(self) -> None:
+        """Default adapters keep tool policy unspecified for non-interview flows."""
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+
+        prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Summarize this.")])
+
+        assert "## Tool Constraints" not in prompt
+        assert "Do NOT use any tools or MCP calls" not in prompt
+
+    def test_build_prompt_explicit_empty_tools_forbids_tool_use(self) -> None:
+        """An explicit empty tool list requests a text-only response."""
+        adapter = CodexCliLLMAdapter(cli_path="codex", allowed_tools=[], max_turns=5)
+
+        prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Summarize this.")])
+
+        assert "## Tool Constraints" in prompt
+        assert "Do NOT use any tools or MCP calls" in prompt
+        assert "tool-assisted turns" not in prompt
+        assert "avoid turning this into a multi-step tool workflow" in prompt
+
     def test_normalize_model_omits_default_sentinel(self) -> None:
         """The backend-safe default sentinel is translated to no explicit model."""
         adapter = CodexCliLLMAdapter(cli_path="codex")

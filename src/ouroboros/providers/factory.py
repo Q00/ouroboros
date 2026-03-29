@@ -94,9 +94,11 @@ def create_llm_adapter(
         return ClaudeCodeAdapter(
             permission_mode=resolved_permission_mode,
             cli_path=cli_path,
+            cwd=cwd,
             allowed_tools=allowed_tools,
             max_turns=max_turns,
             on_message=on_message,
+            timeout=timeout,
         )
     if resolved_backend == "codex":
         return CodexCliLLMAdapter(
@@ -110,7 +112,14 @@ def create_llm_adapter(
             max_retries=max_retries,
         )
     # opencode is rejected at resolve time; this is a defensive fallback
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    try:
+        from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    except ImportError as exc:
+        msg = (
+            "litellm backend requested but litellm is not installed. "
+            "Install with: pip install 'ouroboros-ai[litellm]'"
+        )
+        raise RuntimeError(msg) from exc
 
     return LiteLLMAdapter(
         api_key=api_key,
