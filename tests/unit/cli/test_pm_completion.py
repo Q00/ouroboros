@@ -48,7 +48,11 @@ async def test_run_pm_interview_auto_completes_after_answer(tmp_path: Path) -> N
     with (
         patch("ouroboros.providers.litellm_adapter.LiteLLMAdapter", return_value=object()),
         patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine),
-        patch("ouroboros.cli.commands.pm.multiline_prompt_async", new_callable=AsyncMock, return_value="Final answer"),
+        patch(
+            "ouroboros.cli.commands.pm.multiline_prompt_async",
+            new_callable=AsyncMock,
+            return_value="Final answer",
+        ),
         patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
         patch(
             "ouroboros.cli.commands.pm.maybe_complete_pm_interview",
@@ -93,7 +97,11 @@ async def test_run_pm_interview_done_path_persists_stored_ambiguity(tmp_path: Pa
     with (
         patch("ouroboros.providers.litellm_adapter.LiteLLMAdapter", return_value=object()),
         patch("ouroboros.bigbang.pm_interview.PMInterviewEngine.create", return_value=engine),
-        patch("ouroboros.cli.commands.pm.multiline_prompt_async", new_callable=AsyncMock, return_value="done"),
+        patch(
+            "ouroboros.cli.commands.pm.multiline_prompt_async",
+            new_callable=AsyncMock,
+            return_value="done",
+        ),
         patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
         patch("ouroboros.cli.commands.pm.console.print") as mock_print,
         patch("ouroboros.cli.commands.pm.print_success"),
