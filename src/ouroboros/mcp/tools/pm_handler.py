@@ -48,6 +48,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
+from ouroboros.pm.handoff import build_pm_dev_handoff_next_step
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger()
@@ -1259,10 +1260,7 @@ class PMInterviewHandler:
                 )
             )
 
-        next_step = (
-            f"Run 'ooo interview {seed_path}' to continue into the dev interview. "
-            "The runnable Seed is generated after that dev interview completes."
-        )
+        next_step = build_pm_dev_handoff_next_step(seed_path)
 
         return Result.ok(
             MCPToolResult(

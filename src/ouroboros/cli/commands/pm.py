@@ -27,6 +27,7 @@ from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.types import Result
 from ouroboros.observability import LoggingConfig, configure_logging
+from ouroboros.pm.handoff import build_pm_dev_handoff_command
 from ouroboros.providers.factory import (
     create_llm_adapter,
     resolve_llm_backend,
@@ -684,7 +685,7 @@ async def _run_pm_interview(
             print_info(
                 "The PM seed is a handoff artifact for the dev interview, not the runnable Seed."
             )
-            print_info(f"Next: ouroboros init start {seed_path}")
+            print_info(f"Next: {build_pm_dev_handoff_command(seed_path)}")
 
             continue_to_dev = Confirm.ask(
                 "Continue into the dev interview now?",

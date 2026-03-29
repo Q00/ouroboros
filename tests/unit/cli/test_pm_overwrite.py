@@ -177,7 +177,7 @@ class TestPmCliHandoff:
             ) as mock_resolve_initial_context,
             patch("ouroboros.cli.commands.init._run_interview", new_callable=AsyncMock) as mock_run,
             patch("ouroboros.cli.commands.pm.print_error"),
-            patch("ouroboros.cli.commands.pm.print_info"),
+            patch("ouroboros.cli.commands.pm.print_info") as mock_info,
             patch("ouroboros.cli.commands.pm.print_success"),
         ):
             await _run_pm_interview(
@@ -190,3 +190,7 @@ class TestPmCliHandoff:
 
         mock_resolve_initial_context.assert_called_once_with(str(seed_path), cwd=Path.cwd())
         mock_run.assert_awaited_once_with("resolved PM seed context")
+        assert any(
+            call.args and call.args[0] == f"Next: ouroboros init start {seed_path}"
+            for call in mock_info.call_args_list
+        )
