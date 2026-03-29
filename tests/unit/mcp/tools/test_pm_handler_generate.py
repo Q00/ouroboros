@@ -68,18 +68,15 @@ def _make_state(
 def _make_engine_for_generate(
     state: InterviewState,
     seed: PMSeed,
-    seed_path: Path | None = None,
 ) -> PMInterviewEngine:
     """Create a mock PMInterviewEngine for generate tests."""
-    if seed_path is None:
-        seed_path = Path.home() / ".ouroboros" / "seeds" / "pm_seed_test123.json"
     from tests.unit.mcp.tools.conftest import make_pm_engine_mock
 
     engine = make_pm_engine_mock()
 
     engine.load_state = AsyncMock(return_value=Result.ok(state))
     engine.generate_pm_seed = AsyncMock(return_value=Result.ok(seed))
-    engine.save_pm_seed = MagicMock(return_value=seed_path)
+    engine.save_pm_seed = MagicMock()
     engine.restore_meta = MagicMock()
 
     return engine

@@ -348,7 +348,7 @@ async def _run_pm_interview(
         raise typer.Exit(code=1) from exc
     engine = PMInterviewEngine.create(llm_adapter=adapter, model=model)
 
-    # Check for existing PM seeds before starting a new session
+    # Check for existing PM document before starting a new session
     if not resume_id:
         if not _check_existing_pm_document():
             raise typer.Exit(code=0)
