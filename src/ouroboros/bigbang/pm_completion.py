@@ -49,8 +49,7 @@ def build_pm_completion_summary(
         lines.append(f"Ambiguity score: {ambiguity_score:.2f}")
 
     lines.append("")
-    lines.append(f"Deferred items: {deferred_count}")
-    lines.append(f"Decide-later items: {decide_later_count}")
+    lines.append(f"Decide-later items: {deferred_count + decide_later_count}")
 
     if decide_later_summary:
         lines.append("")
