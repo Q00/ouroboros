@@ -95,8 +95,8 @@ class TestComputeDeferredDiff:
 
         assert diff["new_deferred"] == []
         assert diff["new_decide_later"] == []
-        assert diff["deferred_count"] == 1
-        assert diff["decide_later_count"] == 1
+        assert diff["deferred_count"] == 0
+        assert diff["decide_later_count"] == 2  # combined: 1 deferred + 1 decide_later
 
     def test_one_new_deferred(self) -> None:
         """Diff captures a single newly deferred item."""
@@ -105,7 +105,7 @@ class TestComputeDeferredDiff:
 
         assert diff["new_deferred"] == ["new_deferred_q"]
         assert diff["new_decide_later"] == []
-        assert diff["deferred_count"] == 2
+        assert diff["deferred_count"] == 0
 
     def test_one_new_decide_later(self) -> None:
         """Diff captures a single newly decide-later item."""
@@ -130,8 +130,8 @@ class TestComputeDeferredDiff:
 
         assert diff["new_deferred"] == ["new_d1", "new_d2"]
         assert diff["new_decide_later"] == ["new_dl1", "new_dl2", "new_dl3"]
-        assert diff["deferred_count"] == 3
-        assert diff["decide_later_count"] == 4
+        assert diff["deferred_count"] == 0
+        assert diff["decide_later_count"] == 7  # combined: 3 deferred + 4 decide_later
 
     def test_empty_lists_with_zero_before(self) -> None:
         """Handles empty lists with zero snapshot gracefully."""
@@ -173,8 +173,8 @@ class TestPrdMetaPersistence:
         meta = _load_pm_meta("sess-1", data_dir=tmp_path)
 
         assert meta is not None
-        assert meta["deferred_items"] == ["q1", "q2"]
-        assert meta["decide_later_items"] == ["dl1"]
+        assert meta["deferred_items"] == []  # Deprecated: merged into decide_later_items
+        assert meta["decide_later_items"] == ["dl1", "q1", "q2"]
         assert meta["codebase_context"] == "some context"
         assert meta["cwd"] == "/tmp/proj"
 
@@ -196,8 +196,9 @@ class TestPrdMetaPersistence:
 
         _restore_engine_meta(engine, meta)
 
-        assert engine.deferred_items == ["d1", "d2"]
-        assert engine.decide_later_items == ["dl1"]
+        # Legacy deferred_items are merged into decide_later_items on restore
+        assert engine.deferred_items == []
+        assert engine.decide_later_items == ["dl1", "d1", "d2"]
         assert engine.codebase_context == "ctx"
         assert engine._reframe_map["simple q"] == "technical q"
         assert engine._selected_brownfield_repos == [{"path": "/repo", "name": "repo"}]
@@ -324,7 +325,10 @@ class TestPrdMetaFileLocation:
 
         meta = _load_pm_meta("sess-over", data_dir=tmp_path)
         assert meta is not None
-        assert meta["deferred_items"] == ["q1", "q2", "q3"]
+        assert meta["deferred_items"] == []  # Deprecated: merged into decide_later_items
+        assert "q1" in meta["decide_later_items"]
+        assert "q2" in meta["decide_later_items"]
+        assert "q3" in meta["decide_later_items"]
         assert meta["codebase_context"] == "updated context"
         assert meta["cwd"] == "/v2"
 
@@ -407,8 +411,8 @@ class TestPMHandlerDiffIntegration:
 
         assert meta["new_deferred"] == ["new_tech_q"]
         assert meta["new_decide_later"] == ["new_premature_q"]
-        assert meta["deferred_count"] == 2
-        assert meta["decide_later_count"] == 1
+        assert meta["deferred_count"] == 0
+        assert meta["decide_later_count"] == 3  # combined: 2 deferred + 1 decide_later
 
     @pytest.mark.asyncio
     async def test_handle_answer_no_new_items(self, tmp_path: Path) -> None:
@@ -443,8 +447,8 @@ class TestPMHandlerDiffIntegration:
         meta = result.value.meta
         assert meta["new_deferred"] == []
         assert meta["new_decide_later"] == []
-        assert meta["deferred_count"] == 1
-        assert meta["decide_later_count"] == 1
+        assert meta["deferred_count"] == 0
+        assert meta["decide_later_count"] == 2  # combined: 1 deferred + 1 decide_later
 
     @pytest.mark.asyncio
     async def test_handle_answer_includes_interview_complete_false(self, tmp_path: Path) -> None:
@@ -1289,7 +1293,8 @@ class TestHandleStartBrownfield:
         meta = _load_pm_meta("meta-sess", data_dir=tmp_path)
         assert meta is not None
         assert meta["cwd"] == "/my/project"
-        assert meta["deferred_items"] == ["deferred_q"]
+        assert meta["deferred_items"] == []  # Deprecated: merged into decide_later_items
+        assert "deferred_q" in meta["decide_later_items"]
         assert meta["codebase_context"] == "some context"
 
     @pytest.mark.asyncio
@@ -1322,7 +1327,8 @@ class TestHandleStartBrownfield:
         meta = result.value.meta
         assert meta["new_deferred"] == ["tech_q_deferred"]
         assert meta["new_decide_later"] == []
-        assert meta["deferred_count"] == 1
+        assert meta["deferred_count"] == 0
+        assert meta["decide_later_count"] == 1  # combined total
 
     @pytest.mark.asyncio
     async def test_start_engine_error_returns_err(self, tmp_path: Path) -> None:

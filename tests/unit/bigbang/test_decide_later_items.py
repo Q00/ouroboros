@@ -333,7 +333,7 @@ class TestDecideLaterExtractionFlow:
         assert "decide_later_items" in prompt
         assert "What caching strategy?" in prompt
         assert "What rate limiting?" in prompt
-        assert "premature or unknowable" in prompt
+        assert "deferred or identified as premature" in prompt
 
     @pytest.mark.asyncio
     async def test_parse_pm_seed_merges_decide_later_items(self):

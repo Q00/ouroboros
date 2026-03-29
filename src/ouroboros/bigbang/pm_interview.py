@@ -730,7 +730,7 @@ class PMInterviewEngine:
     def restore_meta(self, meta: dict[str, Any]) -> None:
         """Restore PM-specific metadata into this engine from a loaded dict.
 
-        Sets ``deferred_items``, ``decide_later_items``, ``codebase_context``,
+        Sets ``decide_later_items``, ``codebase_context``,
         ``pending_reframe`` (via ``_reframe_map``), and syncs the classifier's
         ``codebase_context`` so that subsequent classification calls use the
         brownfield context.
@@ -740,12 +740,19 @@ class PMInterviewEngine:
 
         Args:
             meta: Dictionary previously persisted as ``pm_meta_{session_id}.json``.
-                  Expected keys: ``deferred_items``, ``decide_later_items``,
+                  Expected keys: ``decide_later_items``,
                   ``codebase_context``, ``pending_reframe``.
+                  Legacy key ``deferred_items`` is merged into
+                  ``decide_later_items`` for backward compatibility.
         """
-        # Full state reset — clear all session-scoped fields before restoring
-        self.deferred_items = list(meta.get("deferred_items", []))
+        # Full state reset — clear all session-scoped fields before restoring.
+        # Legacy metadata may still have separate deferred_items; merge them
+        # into decide_later_items (canonical field since v0.25).
         self.decide_later_items = list(meta.get("decide_later_items", []))
+        for item in meta.get("deferred_items", []):
+            if item not in self.decide_later_items:
+                self.decide_later_items.append(item)
+        self.deferred_items = []
         self.codebase_context = meta.get("codebase_context", "") or ""
         self.classifications = []  # Reset before restoring
         self._reframe_map = {}  # Reset before restoring
@@ -803,8 +810,8 @@ class PMInterviewEngine:
         new items were added during classification.  Returns a dict with:
             new_deferred: list of newly deferred question texts
             new_decide_later: list of newly decide-later question texts
-            deferred_count: total deferred items
-            decide_later_count: total decide-later items
+            deferred_count: always 0 (deprecated; merged into decide_later_count)
+            decide_later_count: combined total of deferred + decide-later items
 
         Args:
             deferred_len_before: Length of deferred_items before the call.
@@ -819,8 +826,8 @@ class PMInterviewEngine:
         return {
             "new_deferred": list(new_deferred),
             "new_decide_later": list(new_decide_later),
-            "deferred_count": len(self.deferred_items),
-            "decide_later_count": len(self.decide_later_items),
+            "deferred_count": 0,
+            "decide_later_count": len(self.deferred_items) + len(self.decide_later_items),
         }
 
     def get_pending_reframe(self) -> dict[str, str] | None:
@@ -1115,22 +1122,21 @@ class PMInterviewEngine:
 ---
 """
 
-        if self.deferred_items:
-            deferred_text = "\n".join(f"- {item}" for item in self.deferred_items)
+        # Combine deferred and decide-later items under one canonical key
+        # so the LLM output schema matches PMSeed (which only has
+        # decide_later_items).
+        all_decide_later: list[str] = list(self.deferred_items)
+        for item in self.decide_later_items:
+            if item not in all_decide_later:
+                all_decide_later.append(item)
+
+        if all_decide_later:
+            items_text = "\n".join(f"- {item}" for item in all_decide_later)
             prompt += f"""
 
-The following technical questions were deferred during the interview.
-Include them in "deferred_items":
-{deferred_text}
-"""
-
-        if self.decide_later_items:
-            decide_later_text = "\n".join(f"- {item}" for item in self.decide_later_items)
-            prompt += f"""
-
-The following questions were identified as premature or unknowable at this stage.
+The following questions were deferred or identified as premature during the interview.
 Include them as original question text in "decide_later_items":
-{decide_later_text}
+{items_text}
 """
 
         # Note: brownfield codebase context is already included in

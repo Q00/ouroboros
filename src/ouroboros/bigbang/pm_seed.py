@@ -110,11 +110,18 @@ class PMSeed:
             for s in data.get("user_stories", [])
         )
 
-        # Backward compat: merge legacy deferred_items into decide_later_items
+        # Backward compat: merge legacy deferred_items / deferred_decisions
+        # into decide_later_items (canonical field since v0.25).
         decide_later = list(data.get("decide_later_items", []))
-        for item in data.get("deferred_items", []):
-            if item not in decide_later:
-                decide_later.append(item)
+        for key in ("deferred_items", "deferred_decisions"):
+            for item in data.get(key, []):
+                if item not in decide_later:
+                    decide_later.append(item)
+
+        # Backward compat: referenced_repos → brownfield_repos
+        brownfield_raw = data.get("brownfield_repos", [])
+        if not brownfield_raw:
+            brownfield_raw = data.get("referenced_repos", [])
 
         return cls(
             pm_id=data.get("pm_id", ""),
@@ -127,7 +134,7 @@ class PMSeed:
             assumptions=tuple(data.get("assumptions", [])),
             interview_id=data.get("interview_id", ""),
             codebase_context=data.get("codebase_context", ""),
-            brownfield_repos=tuple(dict(r) for r in data.get("brownfield_repos", [])),
+            brownfield_repos=tuple(dict(r) for r in brownfield_raw),
             created_at=data.get("created_at", ""),
         )
 

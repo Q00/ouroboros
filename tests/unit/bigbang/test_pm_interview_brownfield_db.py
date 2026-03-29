@@ -424,5 +424,6 @@ class TestBrownfieldContextInInterviewFlow:
 
         assert engine.codebase_context == "Django project with REST API"
         assert engine.classifier.codebase_context == "Django project with REST API"
-        assert engine.deferred_items == ["tech q1"]
-        assert engine.decide_later_items == ["dl q1"]
+        # Legacy deferred_items are merged into decide_later_items on restore
+        assert engine.deferred_items == []
+        assert engine.decide_later_items == ["dl q1", "tech q1"]

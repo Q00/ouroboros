@@ -1137,8 +1137,9 @@ class TestRestoreMeta:
 
         engine.restore_meta(meta)
 
-        assert engine.deferred_items == ["item1", "item2"]
-        assert engine.decide_later_items == ["dl1"]
+        # Legacy deferred_items are merged into decide_later_items on restore
+        assert engine.deferred_items == []
+        assert engine.decide_later_items == ["dl1", "item1", "item2"]
         assert engine.codebase_context == "some context"
         assert engine._reframe_map["q_reframed"] == "q_original"
 
