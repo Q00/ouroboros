@@ -881,7 +881,8 @@ class PMInterviewHandler:
                         "new_deferred": [],
                         "new_decide_later": [],
                         "deferred_count": 0,
-                        "decide_later_count": len(engine.deferred_items) + len(engine.decide_later_items),
+                        "decide_later_count": len(engine.deferred_items)
+                        + len(engine.decide_later_items),
                     },
                 )
             )

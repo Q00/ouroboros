@@ -27,21 +27,15 @@ class TestPMSeedRemovedFields:
 
     def test_no_deferred_decisions_field(self):
         """PMSeed no longer has a 'deferred_decisions' field."""
-        assert "deferred_decisions" not in {
-            f.name for f in dataclasses.fields(PMSeed)
-        }
+        assert "deferred_decisions" not in {f.name for f in dataclasses.fields(PMSeed)}
 
     def test_no_referenced_repos_field(self):
         """PMSeed no longer has a 'referenced_repos' field."""
-        assert "referenced_repos" not in {
-            f.name for f in dataclasses.fields(PMSeed)
-        }
+        assert "referenced_repos" not in {f.name for f in dataclasses.fields(PMSeed)}
 
     def test_no_deferred_items_field(self):
         """PMSeed no longer has a 'deferred_items' field."""
-        assert "deferred_items" not in {
-            f.name for f in dataclasses.fields(PMSeed)
-        }
+        assert "deferred_items" not in {f.name for f in dataclasses.fields(PMSeed)}
 
 
 class TestPMSeedRetainedFields:
