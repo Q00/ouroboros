@@ -165,7 +165,10 @@ class TestPmCliHandoff:
             patch("ouroboros.cli.commands.pm._check_existing_pm_seeds", return_value=True),
             patch("ouroboros.cli.commands.pm._load_brownfield_from_db", return_value=[]),
             patch("ouroboros.cli.commands.pm._select_repos", return_value=[]),
-            patch("ouroboros.cli.commands.pm.console.input", return_value="Build a task app"),
+            patch(
+                "ouroboros.cli.commands.pm.multiline_prompt_async",
+                new=AsyncMock(return_value="Build a task app"),
+            ),
             patch("ouroboros.cli.commands.pm.Confirm.ask", return_value=True),
             patch("ouroboros.bigbang.pm_document.save_pm_document", return_value=pm_path),
             patch(
