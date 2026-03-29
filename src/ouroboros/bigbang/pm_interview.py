@@ -55,18 +55,7 @@ _SEED_DIR = Path.home() / ".ouroboros" / "seeds"
 _PM_SYSTEM_PROMPT_PREFIX = """\
 You are a Product Requirements interviewer helping a PM define their product.
 
-Focus on PRODUCT-LEVEL questions:
-- What problem does this solve and for whom?
-- What are the business goals and success metrics?
-- What are the user stories and workflows?
-- What constraints exist (timeline, budget, compliance)?
-- What is in scope vs out of scope?
-- What are the acceptance criteria?
-
-Do NOT ask about:
-- Implementation details (databases, frameworks, APIs)
-- Architecture decisions (microservices, deployment)
-- Code-level patterns or testing strategies
+Focus on: goal, user stories, constraints, success criteria, assumptions.
 
 """
 
@@ -158,7 +147,8 @@ class PMInterviewEngine:
     """Original question text for questions classified as DECIDE_LATER.
 
     These are questions that are premature or unknowable at the PM stage.
-    They are auto-answered with a placeholder and stored here so the PMSeed
+    The main session presents the question to the user with a "decide later"
+    option; when chosen, the caller records the item here so the PMSeed
     and PM document can surface them as explicit "decide later" decisions.
     """
     classifications: list[ClassificationResult] = field(default_factory=list)
@@ -484,47 +474,39 @@ class PMInterviewEngine:
         output_type = classification.output_type
 
         if output_type == ClassifierOutputType.DEFERRED:
-            # Track as deferred item and generate a new question
-            self.deferred_items.append(classification.original_question)
+            # Return the question to the caller (main session) so the user
+            # can choose to defer it themselves.  The main session detects
+            # classification == "deferred" via response_meta and offers
+            # a "skip / defer to dev" option.  If the user picks it, the
+            # caller calls skip_as_deferred() which records the deferral
+            # and appends to deferred_items.
+            #
+            # Previously this branch auto-answered and recursed, which could
+            # trigger MCP 120s timeouts on consecutive DEFERRED runs.
             log.info(
-                "pm.question_deferred",
+                "pm.question_deferred_candidate",
                 question=classification.original_question[:100],
                 reasoning=classification.reasoning,
                 output_type=output_type,
             )
-            # Feed an automatic response back to the inner InterviewEngine
-            # so the round is properly recorded and the engine advances.
-            # This prevents the inner engine from re-generating similar
-            # technical questions it doesn't know were already handled.
-            await self.record_response(
-                state,
-                user_response="[Deferred to development phase] "
-                "This technical decision will be addressed during the "
-                "development interview.",
-                question=classification.original_question,
-            )
-            # Recursively ask for the next real question
-            return await self.ask_next_question(state)
+            return Result.ok(classification.original_question)
 
         if output_type == ClassifierOutputType.DECIDE_LATER:
-            # Auto-answer with placeholder — no PM interaction needed
-            placeholder = classification.placeholder_response
-            self.decide_later_items.append(classification.original_question)
+            # Return the question to the caller (main session) so the user
+            # can choose "decide later" themselves.  The main session detects
+            # classification == "decide_later" via response_meta and offers
+            # the option.  If the user picks it, the caller calls
+            # skip_as_decide_later() which records the placeholder and
+            # appends to decide_later_items.
+            #
+            # Previously this branch auto-answered and recursed, which could
+            # trigger MCP 120s timeouts on consecutive DECIDE_LATER runs.
             log.info(
                 "pm.question_decide_later",
                 question=classification.original_question[:100],
-                placeholder=placeholder[:100],
                 reasoning=classification.reasoning,
             )
-            # Record the placeholder as the response so the interview
-            # engine advances its round count
-            await self.record_response(
-                state,
-                user_response=f"[Decide later] {placeholder}",
-                question=classification.original_question,
-            )
-            # Recursively ask for the next real question
-            return await self.ask_next_question(state)
+            return Result.ok(classification.original_question)
 
         if output_type == ClassifierOutputType.REFRAMED:
             # Use the reframed version and track the mapping
@@ -594,6 +576,76 @@ class PMInterviewEngine:
             return await self.inner.record_response(state, bundled_response, bundled_question)
 
         return await self.inner.record_response(state, user_response, question)
+
+    async def skip_as_decide_later(
+        self,
+        state: InterviewState,
+        question: str,
+    ) -> Result[InterviewState, ValidationError]:
+        """Skip a question as "decide later" at the user's explicit request.
+
+        Records the question in ``decide_later_items`` and feeds a placeholder
+        response to the inner InterviewEngine so the round is properly recorded
+        and the engine advances.
+
+        This is called when the main session detects that the user chose the
+        "decide later" option for a DECIDE_LATER-classified question, instead
+        of the old auto-skip behavior inside ``ask_next_question``.
+
+        Args:
+            state: Current interview state.
+            question: The question the user chose to decide later.
+
+        Returns:
+            Result containing updated state or ValidationError.
+        """
+        if question not in self.decide_later_items:
+            self.decide_later_items.append(question)
+
+        log.info(
+            "pm.question_decide_later_by_user",
+            question=question[:100],
+        )
+
+        return await self.record_response(
+            state,
+            user_response="[Decide later] To be determined — user chose to decide later.",
+            question=question,
+        )
+
+    async def skip_as_deferred(
+        self,
+        state: InterviewState,
+        question: str,
+    ) -> Result[InterviewState, ValidationError]:
+        """Skip a question as "deferred to dev" at the user's explicit request.
+
+        Records the question in ``deferred_items`` and feeds a deferral
+        response to the inner InterviewEngine so the round is properly recorded
+        and the engine advances.
+
+        Args:
+            state: Current interview state.
+            question: The question the user chose to defer.
+
+        Returns:
+            Result containing updated state or ValidationError.
+        """
+        if question not in self.deferred_items:
+            self.deferred_items.append(question)
+
+        log.info(
+            "pm.question_deferred_by_user",
+            question=question[:100],
+        )
+
+        return await self.record_response(
+            state,
+            user_response="[Deferred to development phase] "
+            "This technical decision will be addressed during the "
+            "development interview.",
+            question=question,
+        )
 
     async def complete_interview(
         self,
@@ -1129,13 +1181,14 @@ Include them as original question text in "decide_later_items":
             for s in data.get("user_stories", [])
         )
 
-        # Merge deferred items from classifier with extraction
+        # Merge LLM-extracted items with engine-tracked items, deduplicating.
+        # The extraction prompt includes raw items as context so the LLM may
+        # already emit them, but engine-tracked items are authoritative and
+        # must survive even if the extractor omits them.
         all_deferred = list(data.get("deferred_items", []))
         for item in self.deferred_items:
             if item not in all_deferred:
                 all_deferred.append(item)
-
-        # Merge decide-later items — stored as original question text
         all_decide_later = list(data.get("decide_later_items", []))
         for item in self.decide_later_items:
             if item not in all_decide_later:

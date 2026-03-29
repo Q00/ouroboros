@@ -23,7 +23,10 @@ from ouroboros.bigbang.pm_completion import (
 )
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.cli.formatters.prompting import multiline_prompt_async
+from ouroboros.config import get_clarification_model
 from ouroboros.core.types import Result
+from ouroboros.observability import LoggingConfig, configure_logging
 
 app = typer.Typer(
     name="pm",
@@ -31,6 +34,28 @@ app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
+
+
+def _create_pm_litellm_adapter() -> Any:
+    """Construct the PM interview adapter or raise actionable guidance.
+
+    The PM CLI currently relies on the LiteLLM-backed path. On base installs
+    without the optional ``litellm`` extra, importing the adapter crashes with
+    ``ModuleNotFoundError``. Convert that into a user-facing error instead.
+    """
+    try:
+        from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    except ModuleNotFoundError as exc:
+        if exc.name == "litellm":
+            msg = (
+                "PM interviews require the optional LiteLLM dependency. "
+                "Reinstall with `ouroboros-ai[litellm]`, or if you use uv tool: "
+                "`uv tool install --force --with litellm ouroboros-ai`."
+            )
+            raise RuntimeError(msg) from exc
+        raise
+
+    return LiteLLMAdapter()
 
 
 @app.callback(invoke_without_command=True)
@@ -53,13 +78,13 @@ def pm_command(
         ),
     ] = None,
     model: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--model",
             "-m",
             help="LLM model to use for the PM interview.",
         ),
-    ] = "anthropic/claude-sonnet-4-20250514",
+    ] = None,
     debug: Annotated[
         bool,
         typer.Option(
@@ -85,6 +110,13 @@ def pm_command(
     """
     if ctx.invoked_subcommand is not None:
         return
+
+    if model is None:
+        model = get_clarification_model()
+
+    if debug:
+        configure_logging(LoggingConfig(log_level="DEBUG"))
+        print_info("Debug mode enabled - showing verbose logs")
 
     console.print("\n[bold cyan]Ouroboros PM Generator[/] - Product Requirements Document\n")
 
@@ -320,9 +352,12 @@ async def _run_pm_interview(
         output_dir: Optional output directory for the generated PM document.
     """
     from ouroboros.bigbang.pm_interview import PMInterviewEngine
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
-    adapter = LiteLLMAdapter()
+    try:
+        adapter = _create_pm_litellm_adapter()
+    except RuntimeError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1) from exc
     engine = PMInterviewEngine.create(llm_adapter=adapter, model=model)
 
     # Check for existing PM seeds before starting a new session
@@ -367,12 +402,13 @@ async def _run_pm_interview(
         opening = engine.get_opening_question()
         console.print(f"\n[bold yellow]?[/] {opening}\n")
 
-        user_answer = console.input("[bold green]> [/]")
+        user_answer = await multiline_prompt_async("Your response")
 
         if not user_answer.strip():
             print_error("No response provided. Exiting.")
             raise typer.Exit(code=1)
 
+        print_info("Starting interview...")
         state_result = await engine.ask_opening_and_start(
             user_response=user_answer,
             brownfield_repos=brownfield_repos if brownfield_repos else None,
@@ -392,6 +428,7 @@ async def _run_pm_interview(
         if state.rounds and state.rounds[-1].user_response is None:
             question = state.rounds[-1].question
         else:
+            print_info("Generating next question...")
             q_result = await engine.ask_next_question(state)
             if q_result.is_err:
                 print_error(f"Question generation failed: {q_result.error}")
@@ -414,6 +451,20 @@ async def _run_pm_interview(
 
         console.print(f"\n[bold yellow]?[/] {question}\n")
 
+        # Check if this question was classified as skippable —
+        # if so, show a hint that the user can defer it.
+        classification = engine.get_last_classification()
+        if classification == "decide_later":
+            console.print(
+                "[dim]  💡 This question can be deferred. "
+                'Type "decide later" or "skip" to defer it.[/]\n'
+            )
+        elif classification == "deferred":
+            console.print(
+                "[dim]  💡 This is a technical question that can be deferred to the dev phase. "
+                'Type "defer" or "skip" to defer it.[/]\n'
+            )
+
         # Persist state + meta AFTER displaying the question but BEFORE
         # waiting for input so that an interruption preserves the pending
         # question and --resume shows the same question.
@@ -423,7 +474,7 @@ async def _run_pm_interview(
             break
         _save_cli_pm_meta(state.interview_id, engine)
 
-        user_response = console.input("[bold green]> [/]")
+        user_response = await multiline_prompt_async("Your response")
 
         # Allow early exit
         if user_response.strip().lower() in ("done", "exit", "quit", "/done"):
@@ -463,6 +514,39 @@ async def _run_pm_interview(
         if state.rounds and state.rounds[-1].user_response is None:
             state.rounds.pop()
 
+        # Handle user-initiated skip (decide later / defer to dev)
+        _lower = user_response.strip().lower()
+        if classification == "decide_later" and _lower in (
+            "decide later",
+            "skip",
+            "[decide_later]",
+        ):
+            record_result = await engine.skip_as_decide_later(state, question)
+            if isinstance(record_result, Result) and record_result.is_err:
+                print_error(f"Failed to skip question: {record_result.error}")
+                break
+            save_result = await engine.save_state(state)
+            if isinstance(save_result, Result) and save_result.is_err:
+                print_error(f"Failed to save state: {save_result.error}")
+                break
+            _save_cli_pm_meta(state.interview_id, engine)
+            continue
+        if classification == "deferred" and _lower in (
+            "defer",
+            "skip",
+            "[deferred]",
+        ):
+            record_result = await engine.skip_as_deferred(state, question)
+            if isinstance(record_result, Result) and record_result.is_err:
+                print_error(f"Failed to defer question: {record_result.error}")
+                break
+            save_result = await engine.save_state(state)
+            if isinstance(save_result, Result) and save_result.is_err:
+                print_error(f"Failed to save state: {save_result.error}")
+                break
+            _save_cli_pm_meta(state.interview_id, engine)
+            continue
+
         record_result = await engine.record_response(state, user_response, question)
         if isinstance(record_result, Result) and record_result.is_err:
             print_error(f"Failed to record response: {record_result.error}")
@@ -495,7 +579,6 @@ async def _run_pm_interview(
             )
             console.print(f"\n[bold green]{summary_text}[/]\n")
             break
-
         save_result = await engine.save_state(state)
         if isinstance(save_result, Result) and save_result.is_err:
             print_error(f"Failed to save state: {save_result.error}")

@@ -342,11 +342,21 @@ class PMInterviewHandler:
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
-        cwd = arguments.get("cwd") or os.getcwd()
+        cwd_arg = arguments.get("cwd")
         selected_repos: list[str] | None = arguments.get("selected_repos")
 
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
+
+        # For resume/generate, prefer persisted session cwd over os.getcwd()
+        # so artifacts land in the workspace where the interview started.
+        if cwd_arg:
+            cwd = cwd_arg
+        elif session_id and action in ("resume", "generate"):
+            meta = _load_pm_meta(session_id, self.data_dir)
+            cwd = (meta.get("cwd") if meta else None) or os.getcwd()
+        else:
+            cwd = os.getcwd()
 
         engine = self._get_engine()
 
@@ -507,6 +517,12 @@ class PMInterviewHandler:
         # Include pending_reframe in response meta if a reframe occurred
         pending_reframe = engine.get_pending_reframe()
 
+        # Check classification to signal skip eligibility
+        classification = _last_classification(engine)
+        is_decide_later = classification == "decide_later"
+        is_deferred = classification == "deferred"
+        skip_eligible = is_decide_later or is_deferred
+
         meta = {
             "session_id": state.interview_id,
             "status": "interview_started",
@@ -514,6 +530,8 @@ class PMInterviewHandler:
             "response_param": "answer",
             "question": question,
             "is_brownfield": state.is_brownfield,
+            "classification": classification,
+            "skip_eligible": skip_eligible,
             "pending_reframe": pending_reframe,
             **diff,
         }
@@ -522,18 +540,35 @@ class PMInterviewHandler:
             "pm_handler.started",
             session_id=state.interview_id,
             is_brownfield=state.is_brownfield,
+            classification=classification,
+            skip_eligible=skip_eligible,
             has_pending_reframe=pending_reframe is not None,
             **diff,
         )
+
+        # Build response text — include skip hint when applicable
+        start_text = f"PM interview started. Session ID: {state.interview_id}\n\n{question}"
+        if is_decide_later:
+            start_text += (
+                "\n\n💡 This question can be deferred. "
+                'The user may answer now, or choose "decide later" to skip it. '
+                "If they choose to decide later, pass "
+                f'answer="[decide_later]" with session_id="{state.interview_id}".'
+            )
+        elif is_deferred:
+            start_text += (
+                "\n\n💡 This is a technical question that can be deferred to the dev phase. "
+                "The user may answer now, or choose to defer it. "
+                "If they choose to defer, pass "
+                f'answer="[deferred]" with session_id="{state.interview_id}".'
+            )
 
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=(
-                            f"PM interview started. Session ID: {state.interview_id}\n\n{question}"
-                        ),
+                        text=start_text,
                     ),
                 ),
                 is_error=False,
@@ -729,6 +764,12 @@ class PMInterviewHandler:
             else (state.rounds[-1].question if state.rounds else "No question available.")
         )
 
+        engine.restore_meta(meta)
+        classification = _last_classification(engine)
+        is_decide_later = classification == "decide_later"
+        is_deferred = classification == "deferred"
+        skip_eligible = is_decide_later or is_deferred
+
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -746,6 +787,8 @@ class PMInterviewHandler:
                     "question": first_question,
                     "is_brownfield": state.is_brownfield,
                     "idempotent": True,
+                    "classification": classification,
+                    "skip_eligible": skip_eligible,
                 },
             )
         )
@@ -784,15 +827,35 @@ class PMInterviewHandler:
         if not answer and state.rounds and state.rounds[-1].user_response is None:
             pending_question = state.rounds[-1].question
             classification = _last_classification(engine)
+            is_decide_later = classification == "decide_later"
+            is_deferred = classification == "deferred"
+            skip_eligible = is_decide_later or is_deferred
 
             pending_reframe = engine.get_pending_reframe()
+
+            # Include skip hint in re-displayed question
+            pending_text = f"Session {session_id}\n\n{pending_question}"
+            if is_decide_later:
+                pending_text += (
+                    "\n\n💡 This question can be deferred. "
+                    'The user may answer now, or choose "decide later" to skip it. '
+                    "If they choose to decide later, pass "
+                    f'answer="[decide_later]" with session_id="{session_id}".'
+                )
+            elif is_deferred:
+                pending_text += (
+                    "\n\n💡 This is a technical question that can be deferred to the dev phase. "
+                    "The user may answer now, or choose to defer it. "
+                    "If they choose to defer, pass "
+                    f'answer="[deferred]" with session_id="{session_id}".'
+                )
 
             return Result.ok(
                 MCPToolResult(
                     content=(
                         MCPContentItem(
                             type=ContentType.TEXT,
-                            text=f"Session {session_id}\n\n{pending_question}",
+                            text=pending_text,
                         ),
                     ),
                     is_error=False,
@@ -803,6 +866,7 @@ class PMInterviewHandler:
                         "question": pending_question,
                         "is_complete": False,
                         "classification": classification,
+                        "skip_eligible": skip_eligible,
                         "deferred_this_round": [],
                         "decide_later_this_round": [],
                         "interview_complete": False,
@@ -814,6 +878,13 @@ class PMInterviewHandler:
                     },
                 )
             )
+
+        # ── Per-round diff snapshot — must be BEFORE any skip/record call ──
+        # Snapshot list lengths here so that items appended inside
+        # skip_as_decide_later() / skip_as_deferred() are captured in the
+        # per-round diff returned at the end of this call.
+        deferred_before = len(engine.deferred_items)
+        decide_later_before = len(engine.decide_later_items)
 
         # Record answer if provided
         if answer and not state.rounds:
@@ -828,20 +899,53 @@ class PMInterviewHandler:
             if state.rounds[-1].user_response is None:
                 state.rounds.pop()
 
-            record_result = await engine.record_response(state, answer, last_question)
-            if record_result.is_err:
-                return Result.err(
-                    MCPToolError(
-                        str(record_result.error),
-                        tool_name="ouroboros_pm_interview",
+            # ── User chose to skip (decide later / defer to dev) ───
+            # The main session detects classification via response_meta
+            # and offers skip options.  The user's choice arrives as:
+            #   answer="[decide_later]" → skip_as_decide_later()
+            #   answer="[deferred]"     → skip_as_deferred()
+            # Guard: only honour the sentinel when the last question was
+            # actually classified as that type.  If a client sends
+            # "[decide_later]" for a passthrough/reframed question, treat
+            # it as a normal answer so no data is silently discarded.
+            stripped = answer.strip()
+            last_classification = _last_classification(engine)
+            if stripped == "[decide_later]" and last_classification == "decide_later":
+                skip_result = await engine.skip_as_decide_later(state, last_question)
+                if skip_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(skip_result.error),
+                            tool_name="ouroboros_pm_interview",
+                        )
                     )
-                )
-            state = record_result.value
-            state.clear_stored_ambiguity()
+                state = skip_result.value
+                state.clear_stored_ambiguity()
+            elif stripped == "[deferred]" and last_classification == "deferred":
+                skip_result = await engine.skip_as_deferred(state, last_question)
+                if skip_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(skip_result.error),
+                            tool_name="ouroboros_pm_interview",
+                        )
+                    )
+                state = skip_result.value
+                state.clear_stored_ambiguity()
+            else:
+                record_result = await engine.record_response(state, answer, last_question)
+                if record_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(record_result.error),
+                            tool_name="ouroboros_pm_interview",
+                        )
+                    )
+                state = record_result.value
+                state.clear_stored_ambiguity()
 
         # ── Completion check (AC 12) ─────────────────────────────
         # Completion is determined by engine ambiguity scoring.
-        # User controls when to stop.
         completion_result = await maybe_complete_pm_interview(state, engine)
         if completion_result.is_err:
             return Result.err(
@@ -863,6 +967,59 @@ class PMInterviewHandler:
                 )
             _save_pm_meta(session_id, engine, cwd=cwd, data_dir=self.data_dir)
 
+            log.info(
+                "pm_handler.interview_complete",
+                session_id=session_id,
+                **completion,
+            )
+
+            # Auto-generate PM document on completion
+            seed_result = await engine.generate_pm_seed(state)
+            if seed_result.is_err:
+                # Generation failed — still report completion but without document
+                summary_text = (
+                    f"Interview complete but PM generation failed: {seed_result.error}\n"
+                    f"Session ID: {session_id}\n"
+                    f'Retry with: action="generate", session_id="{session_id}"'
+                )
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text=summary_text),),
+                        is_error=False,
+                        meta={
+                            "session_id": session_id,
+                            "is_complete": True,
+                            "generation_failed": True,
+                            **completion,
+                        },
+                    )
+                )
+
+            seed = seed_result.value
+            try:
+                seed_path = engine.save_pm_seed(seed)
+                pm_output_dir = Path(cwd) / ".ouroboros"
+                pm_path = save_pm_document(seed, output_dir=pm_output_dir)
+            except Exception as e:
+                log.error("pm_handler.save_failed", error=str(e), session_id=session_id)
+                summary_text = (
+                    f"Interview complete but saving PM artifacts failed: {e}\n"
+                    f"Session ID: {session_id}\n"
+                    f'Retry with: action="generate", session_id="{session_id}"'
+                )
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text=summary_text),),
+                        is_error=False,
+                        meta={
+                            "session_id": session_id,
+                            "is_complete": True,
+                            "generation_failed": True,
+                            **completion,
+                        },
+                    )
+                )
+
             decide_later_summary = engine.format_decide_later_summary()
             summary_text = build_pm_completion_summary(
                 session_id=session_id,
@@ -872,6 +1029,7 @@ class PMInterviewHandler:
                 decide_later_count=len(engine.decide_later_items),
                 decide_later_summary=decide_later_summary,
             )
+            summary_text += f"\n\nPM document: {pm_path}\nSeed: {seed_path}"
 
             response_meta = {
                 "session_id": session_id,
@@ -883,13 +1041,9 @@ class PMInterviewHandler:
                 **completion,
                 "deferred_count": len(engine.deferred_items),
                 "decide_later_count": len(engine.decide_later_items),
+                "seed_path": str(seed_path),
+                "pm_path": str(pm_path),
             }
-
-            log.info(
-                "pm_handler.interview_complete",
-                session_id=session_id,
-                **completion,
-            )
 
             return Result.ok(
                 MCPToolResult(
@@ -903,11 +1057,6 @@ class PMInterviewHandler:
                     meta=response_meta,
                 )
             )
-
-        # ── Core diff computation (AC 8) ──────────────────────────
-        # Snapshot list lengths BEFORE ask_next_question
-        deferred_before = len(engine.deferred_items)
-        decide_later_before = len(engine.decide_later_items)
 
         question_result = await engine.ask_next_question(state)
         if question_result.is_err:
@@ -963,6 +1112,11 @@ class PMInterviewHandler:
         # Extract classification from the last classify call
         classification = _last_classification(engine)
 
+        # Signal to the caller that the user can skip this question
+        is_decide_later = classification == "decide_later"
+        is_deferred = classification == "deferred"
+        skip_eligible = is_decide_later or is_deferred
+
         response_meta = {
             "session_id": session_id,
             "input_type": "freeText",
@@ -970,6 +1124,7 @@ class PMInterviewHandler:
             "question": question,
             "is_complete": False,
             "classification": classification,
+            "skip_eligible": skip_eligible,
             "deferred_this_round": diff["new_deferred"],
             "decide_later_this_round": diff["new_decide_later"],
             # Keep backward-compat fields from AC 8
@@ -982,16 +1137,34 @@ class PMInterviewHandler:
             "pm_handler.question_asked",
             session_id=session_id,
             classification=classification,
+            skip_eligible=skip_eligible,
             has_pending_reframe=pending_reframe is not None,
             **diff,
         )
+
+        # Build response text — include skip hint when applicable
+        response_text = f"Session {session_id}\n\n{question}"
+        if is_decide_later:
+            response_text += (
+                "\n\n💡 This question can be deferred. "
+                'The user may answer now, or choose "decide later" to skip it. '
+                "If they choose to decide later, pass "
+                f'answer="[decide_later]" with session_id="{session_id}".'
+            )
+        elif is_deferred:
+            response_text += (
+                "\n\n💡 This is a technical question that can be deferred to the dev phase. "
+                "The user may answer now, or choose to defer it. "
+                "If they choose to defer, pass "
+                f'answer="[deferred]" with session_id="{session_id}".'
+            )
 
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
-                        text=f"Session {session_id}\n\n{question}",
+                        text=response_text,
                     ),
                 ),
                 is_error=False,
@@ -1055,12 +1228,33 @@ class PMInterviewHandler:
 
         seed = seed_result.value
 
-        # Save seed to ~/.ouroboros/seeds/ (idempotent — overwrites on retry)
-        seed_path = engine.save_pm_seed(seed)
-
-        # Save human-readable pm.md to {cwd}/.ouroboros/ (consistent with CLI path)
-        pm_output_dir = Path(cwd) / ".ouroboros"
-        pm_path = save_pm_document(seed, output_dir=pm_output_dir)
+        # Save seed and PM document with recovery contract
+        try:
+            seed_path = engine.save_pm_seed(seed)
+            pm_output_dir = Path(cwd) / ".ouroboros"
+            pm_path = save_pm_document(seed, output_dir=pm_output_dir)
+        except Exception as e:
+            log.error("pm_handler.generate_save_failed", error=str(e), session_id=session_id)
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                f"PM generation succeeded but saving artifacts failed: {e}\n"
+                                f"Session ID: {session_id}\n"
+                                f'Retry with: action="generate", session_id="{session_id}"'
+                            ),
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "session_id": session_id,
+                        "is_complete": True,
+                        "generation_failed": True,
+                    },
+                )
+            )
 
         return Result.ok(
             MCPToolResult(
@@ -1071,7 +1265,8 @@ class PMInterviewHandler:
                             f"PM seed generated: {seed.product_name}\n"
                             f"Seed: {seed_path}\n"
                             f"PM document: {pm_path}\n\n"
-                            f"Decide-later items: {len(seed.deferred_items) + len(seed.decide_later_items)}"
+                            f"Deferred items: {len(seed.deferred_items)}\n"
+                            f"Decide-later items: {len(seed.decide_later_items)}"
                         ),
                     ),
                 ),

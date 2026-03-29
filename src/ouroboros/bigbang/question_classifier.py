@@ -3,9 +3,10 @@
 Classifies generated questions as PM-answerable (planning), DEV-only
 (development/technical), or decide-later (premature/unknowable).
 
-DEV-only questions are reframed into PM-friendly language or deferred to
-the development interview phase. Decide-later questions get an automatic
-placeholder response without PM interaction.
+DEV-only questions are reframed into PM-friendly language or returned to
+the user with the option to defer to the development interview phase.
+Decide-later questions are returned to the user with the option to defer
+rather than being automatically skipped.
 
 Uses a Sonnet-grade model for accurate judgment and reframing.
 """
@@ -51,8 +52,8 @@ class ClassifierOutputType(StrEnum):
 
     PASSTHROUGH: Planning question forwarded unchanged to the PM.
     REFRAMED: Development question rewritten in PM-friendly language.
-    DEFERRED: Deeply technical question deferred to the dev interview phase.
-    DECIDE_LATER: Premature question auto-answered with a placeholder.
+    DEFERRED: Deeply technical question returned to user with defer option.
+    DECIDE_LATER: Premature question returned to user with decide-later option.
     """
 
     PASSTHROUGH = "passthrough"
@@ -73,8 +74,9 @@ class ClassificationResult:
         reasoning: Why the classifier chose this category.
         defer_to_dev: Whether this question should be deferred entirely.
         decide_later: Whether this question is premature and should be
-            auto-answered with a placeholder.
-        placeholder_response: Automatic response for decide-later questions.
+            returned to the user with the option to defer.
+        placeholder_response: Placeholder response for decide-later questions
+            (used if the user chooses to defer).
     """
 
     original_question: str
@@ -90,8 +92,10 @@ class ClassificationResult:
         """Determine the classifier output type for this result.
 
         Returns:
-            DECIDE_LATER if premature/unknowable question (auto-answered),
-            DEFERRED if deeply technical (skipped entirely),
+            DECIDE_LATER if premature/unknowable question (returned to user
+                with option to defer),
+            DEFERRED if deeply technical (returned to user with option to
+                defer to dev phase),
             PASSTHROUGH if planning question (forwarded unchanged),
             REFRAMED if development question rewritten for PM.
         """
@@ -109,13 +113,20 @@ class ClassificationResult:
 
         For PASSTHROUGH: returns original_question unchanged.
         For REFRAMED: returns the reframed_question.
-        For DEFERRED: returns empty string (should not be shown).
-        For DECIDE_LATER: returns empty string (auto-answered).
+        For DEFERRED: returns original_question (shown to user
+            so they can choose to answer or defer to dev).
+        For DECIDE_LATER: returns original_question (shown to user
+            so they can choose to answer or defer).
         """
         if self.output_type == ClassifierOutputType.PASSTHROUGH:
             return self.original_question
         if self.output_type == ClassifierOutputType.REFRAMED:
             return self.reframed_question
+        if self.output_type in (
+            ClassifierOutputType.DECIDE_LATER,
+            ClassifierOutputType.DEFERRED,
+        ):
+            return self.original_question
         return ""
 
 
@@ -181,7 +192,8 @@ class QuestionClassifier:
 
     Uses a Sonnet-grade LLM to judge whether questions are appropriate
     for a PM audience, reframes technical questions when possible, and
-    identifies premature questions that should be auto-answered.
+    identifies premature questions that should be returned to the user
+    with the option to defer.
 
     Attributes:
         llm_adapter: LLM adapter for classification calls.
