@@ -78,7 +78,7 @@ Respond ONLY with valid JSON in this exact format:
     ],
     "constraints": ["constraint 1", "constraint 2"],
     "success_criteria": ["criterion 1", "criterion 2"],
-    "deferred_items": ["deferred item 1"],  # merged into decide_later_items on PMSeed (see _parse_pm_seed)
+    "deferred_items": ["deferred item 1"],
     "decide_later_items": ["original question text for items to decide later"],
     "assumptions": ["assumption 1"]
 }
