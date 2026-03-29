@@ -10,15 +10,20 @@ runner = CliRunner()
 
 
 @patch("ouroboros.cli.commands.pm._run_pm_interview")
+@patch("ouroboros.cli.commands.pm.resolve_llm_backend", return_value="codex")
+@patch("ouroboros.cli.commands.pm.get_llm_backend", return_value="codex")
 @patch("ouroboros.cli.commands.pm.get_clarification_model", return_value="default")
 def test_pm_uses_configured_clarification_model_when_option_omitted(
-    mock_get_clarification_model, mock_run_pm_interview
+    mock_get_clarification_model,
+    _mock_get_llm_backend,
+    _mock_resolve_llm_backend,
+    mock_run_pm_interview,
 ) -> None:
     """The bare `pm` command should resolve its model from config."""
     result = runner.invoke(app, ["pm"], input="n\n")
 
     assert result.exit_code == 0
-    mock_get_clarification_model.assert_called_once_with()
+    mock_get_clarification_model.assert_called_once_with("codex")
     mock_run_pm_interview.assert_called_once()
     assert mock_run_pm_interview.call_args.kwargs["model"] == "default"
     assert "Model:" in result.output
