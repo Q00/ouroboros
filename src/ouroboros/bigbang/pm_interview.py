@@ -664,16 +664,20 @@ class PMInterviewEngine:
         return await self.inner.complete_interview(state)
 
     def get_decide_later_summary(self) -> list[str]:
-        """Return the list of decide-later items collected during the interview.
+        """Return the combined list of deferred + decide-later items.
 
-        These are the original question texts for questions classified as
-        DECIDE_LATER — premature or unknowable at the PM stage. Shown to
-        the PM at interview end so they have a clear record of open items.
+        Merges runtime ``deferred_items`` (technical questions deferred to
+        dev phase) with ``decide_later_items`` (premature/unknowable questions)
+        into one canonical list for display and artifact generation.
 
         Returns:
             List of original question text strings. Empty if none were deferred.
         """
-        return list(self.decide_later_items)
+        combined = list(self.decide_later_items)
+        for item in self.deferred_items:
+            if item not in combined:
+                combined.append(item)
+        return combined
 
     def format_decide_later_summary(self) -> str:
         """Format decide-later items as a human-readable summary string.

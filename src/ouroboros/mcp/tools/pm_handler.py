@@ -1049,8 +1049,8 @@ class PMInterviewHandler:
                 "deferred_this_round": [],
                 "decide_later_this_round": [],
                 **completion,
-                "deferred_count": len(engine.deferred_items),
-                "decide_later_count": len(engine.decide_later_items),
+                "deferred_count": 0,
+                "decide_later_count": len(engine.deferred_items) + len(engine.decide_later_items),
                 "seed_path": str(seed_path),
                 "pm_path": str(pm_path),
             }

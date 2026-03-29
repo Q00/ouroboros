@@ -51,6 +51,12 @@ class PMSeed:
         codebase_context: Shared codebase exploration context (brownfield).
         brownfield_repos: Registered brownfield repositories.
         created_at: When this seed was generated.
+
+    Deprecated fields (kept for backward compatibility, merged on init):
+        deferred_items: Merged into decide_later_items.
+        deferred_decisions: Merged into decide_later_items.
+        seed: Preserved for legacy round-trip; not used by new code.
+        referenced_repos: Merged into brownfield_repos.
     """
 
     pm_id: str = field(default_factory=lambda: f"pm_seed_{uuid4().hex[:12]}")
@@ -74,9 +80,39 @@ class PMSeed:
         default_factory=lambda: datetime.now(UTC).isoformat(),
     )
 
+    # ── Deprecated fields (backward compat, merged via __post_init__) ──
+    deferred_items: tuple[str, ...] = ()
+    deferred_decisions: tuple[str, ...] = ()
+    seed: str = ""
+    referenced_repos: tuple[dict[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        """Merge deprecated fields into their canonical counterparts."""
+        # Merge deferred_items and deferred_decisions → decide_later_items
+        if self.deferred_items or self.deferred_decisions:
+            combined = list(self.decide_later_items)
+            for item in self.deferred_items:
+                if item not in combined:
+                    combined.append(item)
+            for item in self.deferred_decisions:
+                if item not in combined:
+                    combined.append(item)
+            object.__setattr__(self, "decide_later_items", tuple(combined))
+            object.__setattr__(self, "deferred_items", ())
+            object.__setattr__(self, "deferred_decisions", ())
+
+        # Merge referenced_repos → brownfield_repos
+        if self.referenced_repos and not self.brownfield_repos:
+            object.__setattr__(self, "brownfield_repos", self.referenced_repos)
+            object.__setattr__(self, "referenced_repos", ())
+
     def to_dict(self) -> dict:
-        """Convert to a plain dictionary for YAML serialization."""
-        return {
+        """Convert to a plain dictionary for YAML serialization.
+
+        Preserves legacy ``seed`` field when non-empty so that older
+        PM seed artifacts survive a load/save round-trip without data loss.
+        """
+        d: dict = {
             "pm_id": self.pm_id,
             "product_name": self.product_name,
             "goal": self.goal,
@@ -93,13 +129,19 @@ class PMSeed:
             "brownfield_repos": [dict(r) for r in self.brownfield_repos],
             "created_at": self.created_at,
         }
+        # Preserve legacy seed for round-trip safety
+        if self.seed:
+            d["seed"] = self.seed
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> PMSeed:
         """Create a PMSeed from a dictionary (e.g., loaded from YAML).
 
-        Handles backward compatibility: if the dict contains ``deferred_items``
-        (removed field), those items are merged into ``decide_later_items``.
+        Handles backward compatibility: legacy fields ``deferred_items``,
+        ``deferred_decisions``, ``seed``, and ``referenced_repos`` are
+        accepted and migrated to their canonical counterparts via
+        ``__post_init__``.
         """
         stories = tuple(
             UserStory(
@@ -136,6 +178,7 @@ class PMSeed:
             codebase_context=data.get("codebase_context", ""),
             brownfield_repos=tuple(dict(r) for r in brownfield_raw),
             created_at=data.get("created_at", ""),
+            seed=data.get("seed", ""),
         )
 
     def to_initial_context(self) -> str:

@@ -16,26 +16,32 @@ import yaml
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 
 
-class TestPMSeedRemovedFields:
-    """Tests that removed fields are no longer on PMSeed."""
+class TestPMSeedDeprecatedFields:
+    """Tests that deprecated fields are accepted but merged into canonical fields."""
 
-    def test_no_seed_field(self):
-        """PMSeed no longer has a 'seed' field."""
-        assert not hasattr(PMSeed(), "seed") or "seed" not in {
-            f.name for f in dataclasses.fields(PMSeed)
-        }
+    def test_deferred_items_merged_into_decide_later(self):
+        """Passing deferred_items merges them into decide_later_items."""
+        pm = PMSeed(deferred_items=("DB selection",), decide_later_items=("Hosting?",))
+        assert pm.decide_later_items == ("Hosting?", "DB selection")
+        assert pm.deferred_items == ()  # cleared after merge
 
-    def test_no_deferred_decisions_field(self):
-        """PMSeed no longer has a 'deferred_decisions' field."""
-        assert "deferred_decisions" not in {f.name for f in dataclasses.fields(PMSeed)}
+    def test_deferred_decisions_merged_into_decide_later(self):
+        """Passing deferred_decisions merges them into decide_later_items."""
+        pm = PMSeed(deferred_decisions=("Auth strategy?",))
+        assert "Auth strategy?" in pm.decide_later_items
+        assert pm.deferred_decisions == ()
 
-    def test_no_referenced_repos_field(self):
-        """PMSeed no longer has a 'referenced_repos' field."""
-        assert "referenced_repos" not in {f.name for f in dataclasses.fields(PMSeed)}
+    def test_referenced_repos_merged_into_brownfield(self):
+        """Passing referenced_repos populates brownfield_repos."""
+        repos = ({"path": "/x", "name": "x"},)
+        pm = PMSeed(referenced_repos=repos)
+        assert pm.brownfield_repos == repos
+        assert pm.referenced_repos == ()
 
-    def test_no_deferred_items_field(self):
-        """PMSeed no longer has a 'deferred_items' field."""
-        assert "deferred_items" not in {f.name for f in dataclasses.fields(PMSeed)}
+    def test_seed_field_preserved(self):
+        """Passing seed preserves it for round-trip compatibility."""
+        pm = PMSeed(seed="dev_seed_abc")
+        assert pm.seed == "dev_seed_abc"
 
 
 class TestPMSeedRetainedFields:
@@ -61,14 +67,20 @@ class TestPMSeedRetainedFields:
 class TestPMSeedSerialization:
     """Tests for to_dict / from_dict without removed fields."""
 
-    def test_to_dict_excludes_removed_fields(self):
-        """to_dict does not include removed fields."""
+    def test_to_dict_excludes_deprecated_fields(self):
+        """to_dict does not include deprecated fields (except seed when non-empty)."""
         pm = PMSeed()
         d = pm.to_dict()
-        assert "seed" not in d
+        assert "seed" not in d  # empty seed is omitted
         assert "deferred_decisions" not in d
         assert "referenced_repos" not in d
         assert "deferred_items" not in d
+
+    def test_to_dict_preserves_seed_when_nonempty(self):
+        """to_dict includes seed when non-empty for round-trip safety."""
+        pm = PMSeed(seed="dev_seed_abc")
+        d = pm.to_dict()
+        assert d["seed"] == "dev_seed_abc"
 
     def test_to_dict_includes_decide_later_items(self):
         """to_dict includes decide_later_items."""
@@ -76,19 +88,20 @@ class TestPMSeedSerialization:
         d = pm.to_dict()
         assert d["decide_later_items"] == ["DB choice?", "Auth strategy?"]
 
-    def test_from_dict_ignores_removed_fields(self):
-        """from_dict gracefully ignores removed fields in input data."""
+    def test_from_dict_migrates_legacy_fields(self):
+        """from_dict migrates legacy fields into canonical counterparts."""
         data = {
             "product_name": "Widget",
             "goal": "Build widget",
-            "seed": {"goal": "dev goal"},
+            "seed": "dev_seed_123",
             "deferred_decisions": ["Choice X"],
             "referenced_repos": [{"path": "/x", "name": "x", "desc": "x"}],
         }
         pm = PMSeed.from_dict(data)
         assert pm.product_name == "Widget"
-        # Removed fields are not present on the instance
-        assert "seed" not in {f.name for f in dataclasses.fields(pm)}
+        assert pm.seed == "dev_seed_123"
+        assert "Choice X" in pm.decide_later_items
+        assert len(pm.brownfield_repos) == 1
 
     def test_from_dict_merges_legacy_deferred_items(self):
         """from_dict merges legacy deferred_items into decide_later_items."""
