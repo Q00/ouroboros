@@ -85,7 +85,10 @@ def test_run_pm_interview_uses_interview_runtime_options_on_new_session() -> Non
         patch("ouroboros.cli.commands.pm._load_brownfield_from_db", return_value=[]),
         patch("ouroboros.cli.commands.pm._select_repos", return_value=[]),
         patch("ouroboros.cli.commands.pm._save_cli_pm_meta"),
-        patch("ouroboros.cli.commands.pm.console.input", return_value="Build a PM workflow"),
+        patch(
+            "ouroboros.cli.commands.pm.multiline_prompt_async",
+            new=AsyncMock(return_value="Build a PM workflow"),
+        ),
     ):
         asyncio.run(
             _run_pm_interview(

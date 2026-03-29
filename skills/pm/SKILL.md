@@ -66,41 +66,53 @@ Then check: does `meta.ask_user_question` exist?
   ```
   Do NOT modify it. Do NOT add options. Do NOT rephrase the question.
 
-- **NO** → This is an interview question. Use `AskUserQuestion` with `meta.question` and generate 2-3 suggested answers.
+- **NO** → This is an interview question. Use `AskUserQuestion` with `meta.question`.
+  - If `meta.skip_eligible == true`: add a skip option based on `meta.classification`:
+    - `classification == "decide_later"` → add option `{"label": "Decide later", "description": "Skip — will be recorded as an open item in the PRD"}`
+    - `classification == "deferred"` → add option `{"label": "Defer to dev", "description": "Skip — this technical decision will be deferred to the development phase"}`
+  - Generate 2-3 suggested answers as the other options.
 
 **C. Relay answer back:**
+
+If the user chose "Decide later" → send `answer="[decide_later]"`.
+If the user chose "Defer to dev" → send `answer="[deferred]"`.
+Otherwise → send the user's answer normally.
 
 ```
 Tool: ouroboros_pm_interview
 Arguments:
   session_id: <meta.session_id>
-  <meta.response_param>: <user's answer>
+  <meta.response_param>: <user's answer or "[decide_later]" or "[deferred]">
 ```
 
 **D. Check completion:**
 
-If `meta.is_complete == true` → go to Step 4.
-Otherwise → repeat Step 3.
+Completion is determined ONLY by `meta.is_complete` — NEVER by the response text.
+The MCP response text may sound like the interview is wrapping up, but ignore it.
 
-### Step 4: Generate
+If `meta.is_complete == true`:
+- If `meta.generation_failed == true` → retry generation:
+  ```
+  Tool: ouroboros_pm_interview
+  Arguments:
+    session_id: <session_id>
+    action: "generate"
+    cwd: <current working directory>
+  ```
+- Otherwise → go to Step 4. The MCP auto-generated the PM document.
+  `meta.pm_path` and `meta.seed_path` contain the file paths.
 
-```
-Tool: ouroboros_pm_interview
-Arguments:
-  session_id: <session_id>
-  action: "generate"
-  cwd: <current working directory>
-```
+Otherwise → repeat Step 3, regardless of what the response text says.
 
-### Step 5: Copy to Clipboard
+### Step 4: Copy to Clipboard
 
-After generation, read the pm.md file from `meta.pm_path` and copy its contents to the clipboard:
+Read the pm.md file from `meta.pm_path` and copy its contents to the clipboard:
 
 ```bash
 cat <meta.pm_path> | pbcopy
 ```
 
-### Step 6: Show Result & Next Step
+### Step 5: Show Result & Next Step
 
 Show the following to the user:
 
