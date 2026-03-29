@@ -95,8 +95,7 @@ def pm_command(
     define product requirements. Questions are automatically classified
     as planning (PM-answerable) or development (deferred to dev interview).
 
-    The output is a PMSeed JSON file saved to ~/.ouroboros/seeds/ and
-    a human-readable pm.md saved to the output directory.
+    The output is a human-readable pm.md saved to the output directory.
 
     [bold]Examples:[/]
 
@@ -155,17 +154,21 @@ def _load_brownfield_from_db() -> list[dict[str, str]]:
     return repos
 
 
-def _check_existing_pm_document() -> bool:
+def _check_existing_pm_document(output_dir: str | None = None) -> bool:
     """Check for an existing PM document and prompt for overwrite confirmation.
 
-    Scans the default output directory for ``pm.md``.
+    Checks the resolved output directory for ``pm.md``.
     If found, asks the user whether to overwrite or abort.
+
+    Args:
+        output_dir: Output directory for pm.md. Defaults to {cwd}/.ouroboros/.
 
     Returns:
         True if the user wants to proceed (overwrite), False to abort.
         Also returns True if no existing document is found.
     """
-    pm_path = Path.cwd() / ".ouroboros" / "pm.md"
+    pm_dir = Path(output_dir) if output_dir else Path.cwd() / ".ouroboros"
+    pm_path = pm_dir / "pm.md"
 
     if not pm_path.exists():
         return True
@@ -350,7 +353,7 @@ async def _run_pm_interview(
 
     # Check for existing PM document before starting a new session
     if not resume_id:
-        if not _check_existing_pm_document():
+        if not _check_existing_pm_document(output_dir=output_dir):
             raise typer.Exit(code=0)
 
     # Load brownfield repos from DB (registered via ooo setup)
@@ -550,7 +553,7 @@ async def _run_pm_interview(
             pm_dir = Path(output_dir) if output_dir else Path.cwd() / ".ouroboros"
             pm_path = save_pm_document(seed, output_dir=pm_dir)
             print_success(f"PM document saved: {pm_path}")
-            print_info(f"Next: ooo interview {pm_path}")
+            print_info(f"Next: ouroboros init start {pm_path}")
         else:
             print_error(f"Failed to generate PM: {seed_result.error}")
     elif state.rounds and not state.is_complete:

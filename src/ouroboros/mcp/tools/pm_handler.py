@@ -1177,15 +1177,10 @@ class PMInterviewHandler:
         session_id: str,
         cwd: str,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Generate PM seed from completed interview (path-idempotent).
+        """Generate PM document from completed interview.
 
         Loads InterviewState and pm_meta, restores engine via restore_meta(),
-        runs generate_pm_seed, saves PM seed to ~/.ouroboros/seeds/ and
-        pm.md to {cwd}/.ouroboros/.
-
-        Path-idempotent: file paths are deterministic for a given session_id
-        (seed → ``pm_seed_{interview_id}.json``, document → ``pm.md``).
-        Content timestamps (created_at, Generated header) may differ on retry.
+        runs generate_pm_seed, and saves pm.md to {cwd}/.ouroboros/.
 
         Rejects incomplete interviews with an error to prevent partial-spec
         artifacts from being generated.
