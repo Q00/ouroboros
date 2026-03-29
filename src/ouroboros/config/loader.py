@@ -464,6 +464,23 @@ def get_opencode_cli_path() -> str | None:
     return None
 
 
+def get_gemini_cli_path() -> str | None:
+    """Get Gemini CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_GEMINI_CLI_PATH environment variable
+        2. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to Gemini CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_GEMINI_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    return None
+
+
 def get_llm_backend() -> str:
     """Get default LLM backend from environment variable or config.
 
