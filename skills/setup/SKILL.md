@@ -193,10 +193,12 @@ This enables:
 **Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects).
 
 Choose the MCP command based on how ouroboros is installed (check in order):
-1. If `which uvx` succeeds: `{"command": "uvx", "args": ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"]}`
-2. If `which ouroboros` succeeds: `{"command": "ouroboros", "args": ["mcp", "serve"]}`
-3. If `python3 -c "import ouroboros"` succeeds: `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}`
+1. If `which uvx` succeeds: `{"command": "uvx", "args": ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"], "env": {"OUROBOROS_AGENT_MODE": "native"}}`
+2. If `which ouroboros` succeeds: `{"command": "ouroboros", "args": ["mcp", "serve"], "env": {"OUROBOROS_AGENT_MODE": "native"}}`
+3. If `python3 -c "import ouroboros"` succeeds: `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"], "env": {"OUROBOROS_AGENT_MODE": "native"}}`
 4. If none of the above → **do NOT write to mcp.json**. Instead show the prerequisites message from Step 1 and stop.
+
+The `OUROBOROS_AGENT_MODE=native` env var tells the MCP server to return state only (no internal LLM execution), so the host runtime drives execution via subagents.
 
 If `~/.claude/mcp.json` already exists, read it, **always overwrite the `ouroboros` key** with the entry above (to fix stale args from older versions), and preserve all other server entries.
 
