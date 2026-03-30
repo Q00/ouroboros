@@ -26,6 +26,12 @@ from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.config import get_clarification_model
+from ouroboros.core.initial_context import (
+    load_pm_seed_as_context as _load_pm_seed_as_context_result,
+)
+from ouroboros.core.initial_context import (
+    resolve_initial_context_input,
+)
 from ouroboros.observability import LoggingConfig, configure_logging
 from ouroboros.providers import create_llm_adapter
 from ouroboros.providers.base import LLMAdapter
@@ -619,13 +625,10 @@ def _load_pm_seed_as_context(seed_path: Path) -> str:
     Returns:
         YAML-formatted string for use as dev interview initial_context.
     """
-    from ouroboros.bigbang.pm_seed import PMSeed
-
-    with open(seed_path) as f:
-        data = yaml.safe_load(f)
-
-    pm_seed = PMSeed.from_dict(data)
-    return pm_seed.to_initial_context()
+    result = _load_pm_seed_as_context_result(seed_path)
+    if result.is_err:
+        raise ValueError(str(result.error))
+    return result.value
 
 
 @app.command()
@@ -751,6 +754,13 @@ def start(
             console.print()
 
             context = asyncio.run(multiline_prompt_async("What would you like to build?"))
+
+        if context:
+            resolved_context = resolve_initial_context_input(context, cwd=Path.cwd())
+            if resolved_context.is_err:
+                print_error(str(resolved_context.error))
+                raise typer.Exit(code=1)
+            context = resolved_context.value
 
     if not resume and not context:
         print_error("Initial context is required when not resuming.")

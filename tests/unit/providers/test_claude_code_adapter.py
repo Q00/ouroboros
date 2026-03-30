@@ -293,3 +293,66 @@ class TestExecuteSingleRequestSystemPrompt:
 
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert "output_format" not in options_call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_default_tool_policy_omits_allowed_tools_and_uses_configured_cwd(self) -> None:
+        """Default Claude adapters should not force a blanket no-tools policy."""
+        adapter = ClaudeCodeAdapter(cwd="/tmp/project")
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert "allowed_tools" not in options_call_kwargs
+        assert options_call_kwargs["cwd"] == "/tmp/project"
+        assert "Write" in options_call_kwargs["disallowed_tools"]
+
+    @pytest.mark.asyncio
+    async def test_explicit_empty_allowed_tools_blocks_all_sdk_tools(self) -> None:
+        """An explicit empty list keeps the strict no-tools interview policy."""
+        adapter = ClaudeCodeAdapter(allowed_tools=[])
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        assert options_call_kwargs["allowed_tools"] == []
+        assert "Read" in options_call_kwargs["disallowed_tools"]

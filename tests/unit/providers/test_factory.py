@@ -1,5 +1,8 @@
 """Unit tests for provider factory helpers."""
 
+import builtins
+import sys
+
 import pytest
 
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
@@ -63,10 +66,42 @@ class TestCreateLLMAdapter:
         adapter = create_llm_adapter(backend="claude_code")
         assert isinstance(adapter, ClaudeCodeAdapter)
 
+    def test_passes_timeout_to_claude_code_adapter(self) -> None:
+        """Claude backend forwards application-level timeout to the adapter."""
+        adapter = create_llm_adapter(backend="claude_code", timeout=42.0)
+        assert isinstance(adapter, ClaudeCodeAdapter)
+        assert adapter._timeout == 42.0
+
+    def test_passes_cwd_to_claude_code_adapter(self) -> None:
+        """Claude backend forwards cwd to the SDK adapter."""
+        adapter = create_llm_adapter(backend="claude_code", cwd="/tmp/project")
+        assert isinstance(adapter, ClaudeCodeAdapter)
+        assert adapter._cwd == "/tmp/project"
+
     def test_creates_litellm_adapter(self) -> None:
         """LiteLLM backend returns LiteLLMAdapter."""
         adapter = create_llm_adapter(backend="litellm")
         assert isinstance(adapter, LiteLLMAdapter)
+
+    def test_litellm_import_error_raises_runtime_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Missing litellm dependency raises a helpful RuntimeError."""
+        module_name = "ouroboros.providers.litellm_adapter"
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):  # type: ignore[no-untyped-def]
+            if name == module_name:
+                raise ImportError("No module named 'litellm'")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+
+        with pytest.raises(
+            RuntimeError, match="litellm backend requested but litellm is not installed"
+        ):
+            create_llm_adapter(backend="litellm")
 
     def test_creates_codex_adapter(self) -> None:
         """Codex backend returns CodexCliLLMAdapter."""

@@ -1484,6 +1484,52 @@ class TestInterviewHandlerCwd:
         assert call_kwargs[1]["cwd"] == str(tmp_path)
         assert "(ambiguity: 0.67) First question?" in result.value.content[0].text
 
+    async def test_interview_handle_resolves_pm_seed_paths(self, tmp_path) -> None:
+        """initial_context paths should load PMSeed content before starting the interview."""
+        seed_path = tmp_path / "pm_seed_taskflow.json"
+        seed_path.write_text(
+            """{
+  "pm_id": "pm_seed_taskflow",
+  "product_name": "TaskFlow",
+  "goal": "Help teams manage tasks",
+  "constraints": ["Offline support"],
+  "success_criteria": ["Tasks sync correctly"],
+  "user_stories": [],
+  "deferred_items": [],
+  "decide_later_items": []
+}
+""",
+            encoding="utf-8",
+        )
+
+        mock_engine = MagicMock()
+        mock_state = MagicMock()
+        mock_state.interview_id = "test-123"
+        mock_state.rounds = []
+        mock_state.mark_updated = MagicMock()
+        mock_engine.start_interview = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value=mock_state)
+        )
+        mock_engine.ask_next_question = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value="First question?")
+        )
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_score = create_mock_live_ambiguity_score(0.67, seed_ready=False)
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
+
+        handler = InterviewHandler(interview_engine=mock_engine, llm_adapter=MagicMock())
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
+            return_value=mock_scorer,
+        ):
+            result = await handler.handle({"initial_context": str(seed_path), "cwd": str(tmp_path)})
+
+        assert result.is_ok
+        resolved_context = mock_engine.start_interview.call_args.args[0]
+        assert "TaskFlow" in resolved_context
+        assert str(seed_path) not in resolved_context
+
     async def test_interview_handle_clears_stored_ambiguity_after_new_answer(self) -> None:
         """Interview answers should refresh the ambiguity snapshot after rescoring."""
         handler = InterviewHandler(llm_adapter=MagicMock())
