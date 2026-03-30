@@ -89,9 +89,16 @@ def _save_pm_meta(
     if engine is not None:
         pending_reframe = engine.get_pending_reframe()
 
+        # Collapse deferred_items into decide_later_items so the persisted
+        # metadata uses the same canonical schema as PMSeed.
+        combined_decide_later = list(engine.decide_later_items)
+        for item in engine.deferred_items:
+            if item not in combined_decide_later:
+                combined_decide_later.append(item)
+
         meta: dict[str, Any] = {
-            "deferred_items": list(engine.deferred_items),
-            "decide_later_items": list(engine.decide_later_items),
+            "deferred_items": [],  # Deprecated: merged into decide_later_items
+            "decide_later_items": combined_decide_later,
             "codebase_context": engine.codebase_context,
             "pending_reframe": pending_reframe,
             "cwd": cwd,
@@ -874,8 +881,9 @@ class PMInterviewHandler:
                         "pending_reframe": pending_reframe,
                         "new_deferred": [],
                         "new_decide_later": [],
-                        "deferred_count": len(engine.deferred_items),
-                        "decide_later_count": len(engine.decide_later_items),
+                        "deferred_count": 0,
+                        "decide_later_count": len(engine.deferred_items)
+                        + len(engine.decide_later_items),
                     },
                 )
             )
@@ -1028,8 +1036,8 @@ class PMInterviewHandler:
                 session_id=session_id,
                 completion=completion,
                 stored_ambiguity_score=getattr(state, "ambiguity_score", None),
-                deferred_count=len(engine.deferred_items),
-                decide_later_count=len(engine.decide_later_items),
+                deferred_count=0,
+                decide_later_count=len(engine.deferred_items) + len(engine.decide_later_items),
                 decide_later_summary=decide_later_summary,
             )
             summary_text += f"\n\nPM document: {pm_path}\nSeed: {seed_path}"
@@ -1042,8 +1050,8 @@ class PMInterviewHandler:
                 "deferred_this_round": [],
                 "decide_later_this_round": [],
                 **completion,
-                "deferred_count": len(engine.deferred_items),
-                "decide_later_count": len(engine.decide_later_items),
+                "deferred_count": 0,
+                "decide_later_count": len(engine.deferred_items) + len(engine.decide_later_items),
                 "seed_path": str(seed_path),
                 "pm_path": str(pm_path),
             }
@@ -1273,7 +1281,6 @@ class PMInterviewHandler:
                             f"PM document: {pm_path}\n\n"
                             "This PM seed is a handoff artifact for the dev interview, "
                             "not the runnable Seed.\n"
-                            f"Deferred items: {len(seed.deferred_items)}\n"
                             f"Decide-later items: {len(seed.decide_later_items)}\n"
                             f"Next: {next_step}"
                         ),

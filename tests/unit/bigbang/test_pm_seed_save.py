@@ -47,14 +47,16 @@ def _make_seed(pm_id: str = "pm_seed_abc123def456") -> PMSeed:
         ),
         constraints=("Must work offline", "Under 100ms latency"),
         success_criteria=("Create task in 10s", "99.9% uptime"),
-        deferred_items=("Database selection", "CI/CD pipeline"),
-        decide_later_items=("What caching strategy?", "Which cloud provider?"),
+        decide_later_items=(
+            "What caching strategy?",
+            "Which cloud provider?",
+            "Database selection",
+            "CI/CD pipeline",
+        ),
         assumptions=("Users have internet for initial sync",),
         interview_id="interview_xyz",
         codebase_context="existing Flask app",
         brownfield_repos=({"path": "/code/app", "name": "app", "desc": "main"},),
-        deferred_decisions=("Microservices vs monolith",),
-        referenced_repos=({"path": "/code/lib", "name": "lib", "desc": "shared"},),
     )
 
 
@@ -141,17 +143,22 @@ class TestPMSeedSaveJSON:
         assert loaded["user_stories"][0]["persona"] == "PM"
         assert loaded["constraints"] == ["Must work offline", "Under 100ms latency"]
         assert loaded["success_criteria"] == ["Create task in 10s", "99.9% uptime"]
-        assert loaded["deferred_items"] == ["Database selection", "CI/CD pipeline"]
-        assert loaded["decide_later_items"] == ["What caching strategy?", "Which cloud provider?"]
+        assert loaded["decide_later_items"] == [
+            "What caching strategy?",
+            "Which cloud provider?",
+            "Database selection",
+            "CI/CD pipeline",
+        ]
         assert loaded["assumptions"] == ["Users have internet for initial sync"]
         assert loaded["interview_id"] == "interview_xyz"
         assert loaded["codebase_context"] == "existing Flask app"
         assert loaded["brownfield_repos"] == [{"path": "/code/app", "name": "app", "desc": "main"}]
-        assert loaded["deferred_decisions"] == ["Microservices vs monolith"]
-        assert loaded["referenced_repos"] == [
-            {"path": "/code/lib", "name": "lib", "desc": "shared"}
-        ]
         assert "created_at" in loaded
+        # Removed fields must not appear
+        assert "deferred_items" not in loaded
+        assert "deferred_decisions" not in loaded
+        assert "referenced_repos" not in loaded
+        assert "seed" not in loaded
 
     def test_json_roundtrip_produces_equal_seed(self, tmp_path: Path) -> None:
         """PMSeed survives JSON save -> load roundtrip."""
@@ -168,12 +175,9 @@ class TestPMSeedSaveJSON:
         assert len(restored.user_stories) == len(seed.user_stories)
         assert restored.constraints == seed.constraints
         assert restored.success_criteria == seed.success_criteria
-        assert restored.deferred_items == seed.deferred_items
         assert restored.decide_later_items == seed.decide_later_items
         assert restored.assumptions == seed.assumptions
         assert restored.interview_id == seed.interview_id
-        assert restored.deferred_decisions == seed.deferred_decisions
-        assert restored.referenced_repos == seed.referenced_repos
 
     def test_pm_id_default_format(self) -> None:
         """Default pm_id starts with 'pm_seed_'."""

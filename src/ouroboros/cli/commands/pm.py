@@ -355,9 +355,15 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
             "original": engine._reframe_map[reframed],
         }
 
+    # Collapse deferred_items into decide_later_items (canonical schema)
+    combined_decide_later = list(engine.decide_later_items)
+    for item in engine.deferred_items:
+        if item not in combined_decide_later:
+            combined_decide_later.append(item)
+
     meta = {
-        "deferred_items": list(engine.deferred_items),
-        "decide_later_items": list(engine.decide_later_items),
+        "deferred_items": [],  # Deprecated: merged into decide_later_items
+        "decide_later_items": combined_decide_later,
         "codebase_context": engine.codebase_context,
         "pending_reframe": pending_reframe,
         "cwd": "",
@@ -589,8 +595,8 @@ async def _run_pm_interview(
                 session_id=state.interview_id,
                 completion=completion,
                 stored_ambiguity_score=state.ambiguity_score,
-                deferred_count=len(engine.deferred_items),
-                decide_later_count=len(engine.decide_later_items),
+                deferred_count=0,
+                decide_later_count=len(engine.deferred_items) + len(engine.decide_later_items),
                 decide_later_summary=decide_later_summary,
             )
             console.print(f"\n[bold green]{summary_text}[/]\n")
@@ -660,8 +666,8 @@ async def _run_pm_interview(
                 session_id=state.interview_id,
                 completion=completion,
                 stored_ambiguity_score=state.ambiguity_score,
-                deferred_count=len(engine.deferred_items),
-                decide_later_count=len(engine.decide_later_items),
+                deferred_count=0,
+                decide_later_count=len(engine.deferred_items) + len(engine.decide_later_items),
                 decide_later_summary=decide_later_summary,
             )
             console.print(f"\n[bold green]{summary_text}[/]\n")
