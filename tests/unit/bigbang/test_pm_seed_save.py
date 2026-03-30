@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from ouroboros.bigbang.interview import InterviewStateStore
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import QuestionClassifier
@@ -27,9 +28,11 @@ def _make_engine(tmp_path: Path) -> PMInterviewEngine:
     inner.state_dir = tmp_path / "data"
 
     classifier = QuestionClassifier(llm_adapter=mock_adapter)
+    state_store = InterviewStateStore(state_dir=tmp_path / "data")
 
     return PMInterviewEngine(
         inner=inner,
+        state_store=state_store,
         classifier=classifier,
         llm_adapter=mock_adapter,
     )

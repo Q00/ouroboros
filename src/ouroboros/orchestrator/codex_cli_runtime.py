@@ -38,6 +38,7 @@ _TOP_LEVEL_EVENT_MESSAGE_TYPES: dict[str, str] = {
 }
 
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
+_PENDING_STRUCTURED_INPUT_METADATA_KEY = "ouroboros_pending_structured_input"
 
 _SKILL_COMMAND_PATTERN = re.compile(
     r"^\s*(?:(?P<ooo_prefix>ooo)\s+(?P<ooo_skill>[a-z0-9][a-z0-9_-]*)|"
@@ -462,6 +463,50 @@ class CodexCliRuntime:
             "fallback": f"pass_through_to_{self._runtime_backend}",
         }
 
+    @staticmethod
+    def _resume_interview_session_id(current_handle: RuntimeHandle | None) -> str | None:
+        """Return the stored interview session ID when an interview can be resumed."""
+        if current_handle is None:
+            return None
+        session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
+        if not isinstance(session_id, str):
+            return None
+        cleaned = session_id.strip()
+        return cleaned or None
+
+    @staticmethod
+    def _pending_structured_input(
+        current_handle: RuntimeHandle | None,
+    ) -> dict[str, str] | None:
+        """Return normalized pending structured-input metadata when present."""
+        if current_handle is None:
+            return None
+
+        raw_value = current_handle.metadata.get(_PENDING_STRUCTURED_INPUT_METADATA_KEY)
+        if not isinstance(raw_value, dict):
+            return None
+
+        mcp_tool = raw_value.get("mcp_tool")
+        skill_name = raw_value.get("skill_name")
+        command_prefix = raw_value.get("command_prefix")
+        session_id = raw_value.get("session_id")
+        response_param = raw_value.get("response_param", "answer")
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (mcp_tool, skill_name, command_prefix, session_id)
+        ):
+            return None
+        if not isinstance(response_param, str) or not response_param.strip():
+            response_param = "answer"
+
+        return {
+            "mcp_tool": mcp_tool.strip(),
+            "skill_name": skill_name.strip(),
+            "command_prefix": command_prefix.strip(),
+            "session_id": session_id.strip(),
+            "response_param": response_param.strip(),
+        }
+
     def _get_builtin_mcp_handlers(self) -> dict[str, Any]:
         """Load and cache local Ouroboros MCP handlers for exact-prefix dispatch."""
         if self._builtin_mcp_handlers is None:
@@ -487,16 +532,32 @@ class CodexCliRuntime:
         current_handle: RuntimeHandle | None,
     ) -> dict[str, Any]:
         """Build the MCP argument payload for an intercepted skill."""
-        if intercept.mcp_tool != "ouroboros_interview" or current_handle is None:
-            return dict(intercept.mcp_args)
+        arguments: dict[str, Any] = dict(intercept.mcp_args)
+        if current_handle is None:
+            return arguments
+
+        pending_input = self._pending_structured_input(current_handle)
+        if pending_input is not None and pending_input["mcp_tool"] == intercept.mcp_tool:
+            arguments["session_id"] = pending_input["session_id"]
+            if intercept.first_argument is not None:
+                arguments[pending_input["response_param"]] = intercept.first_argument
+            return arguments
+
+        if intercept.mcp_tool == "ouroboros_generate_seed":
+            session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
+            if isinstance(session_id, str) and session_id.strip() and not arguments.get("session_id"):
+                arguments["session_id"] = session_id.strip()
+            return arguments
+
+        if intercept.mcp_tool != "ouroboros_interview":
+            return arguments
 
         session_id = current_handle.metadata.get(_INTERVIEW_SESSION_METADATA_KEY)
         if not isinstance(session_id, str) or not session_id.strip():
-            return dict(intercept.mcp_args)
+            return arguments
 
         # Preserve original frontmatter args (initial_context, cwd, etc.)
         # and overlay session_id + answer for the resume turn.
-        arguments: dict[str, Any] = dict(intercept.mcp_args)
         arguments["session_id"] = session_id.strip()
         if intercept.first_argument is not None:
             arguments["answer"] = intercept.first_argument
@@ -509,8 +570,46 @@ class CodexCliRuntime:
         tool_result: Any,
     ) -> RuntimeHandle | None:
         """Attach interview session metadata to the runtime handle."""
+        metadata = dict(current_handle.metadata) if current_handle is not None else {}
+        pending_input = self._pending_structured_input(current_handle)
+        updated = False
+        if pending_input is not None and pending_input["mcp_tool"] == intercept.mcp_tool:
+            metadata.pop(_PENDING_STRUCTURED_INPUT_METADATA_KEY, None)
+            updated = True
+
+        pending_session_id = tool_result.meta.get("session_id")
+        if (
+            isinstance(tool_result.meta.get("question_spec"), dict)
+            and isinstance(pending_session_id, str)
+            and pending_session_id.strip()
+        ):
+            metadata[_PENDING_STRUCTURED_INPUT_METADATA_KEY] = {
+                "mcp_tool": intercept.mcp_tool,
+                "skill_name": intercept.skill_name,
+                "command_prefix": intercept.command_prefix,
+                "session_id": pending_session_id.strip(),
+                "response_param": (
+                    tool_result.meta.get("response_param")
+                    if isinstance(tool_result.meta.get("response_param"), str)
+                    and tool_result.meta.get("response_param").strip()
+                    else "answer"
+                ),
+            }
+            updated = True
+
         if intercept.mcp_tool != "ouroboros_interview":
-            return current_handle
+            if not updated:
+                return current_handle
+            updated_at = datetime.now(UTC).isoformat()
+            if current_handle is not None:
+                return replace(current_handle, metadata=metadata, updated_at=updated_at)
+            return RuntimeHandle(
+                backend=self.runtime_backend,
+                cwd=self.working_directory,
+                approval_mode=self.permission_mode,
+                updated_at=updated_at,
+                metadata=metadata,
+            )
 
         session_id = tool_result.meta.get("session_id")
         if not isinstance(session_id, str) or not session_id.strip():
@@ -520,9 +619,19 @@ class CodexCliRuntime:
                     session_id_type=type(session_id).__name__,
                     session_id_value=repr(session_id),
                 )
-            return current_handle
+            if not updated:
+                return current_handle
+            updated_at = datetime.now(UTC).isoformat()
+            if current_handle is not None:
+                return replace(current_handle, metadata=metadata, updated_at=updated_at)
+            return RuntimeHandle(
+                backend=self.runtime_backend,
+                cwd=self.working_directory,
+                approval_mode=self.permission_mode,
+                updated_at=updated_at,
+                metadata=metadata,
+            )
 
-        metadata = dict(current_handle.metadata) if current_handle is not None else {}
         metadata[_INTERVIEW_SESSION_METADATA_KEY] = session_id.strip()
         updated_at = datetime.now(UTC).isoformat()
 
@@ -676,6 +785,36 @@ class CodexCliRuntime:
             first_argument=first_argument,
         )
 
+    def _resolve_pending_structured_input_intercept(
+        self,
+        prompt: str,
+        current_handle: RuntimeHandle | None,
+    ) -> SkillInterceptRequest | None:
+        """Resume a pending structured-input turn from plain user text."""
+        pending_input = self._pending_structured_input(current_handle)
+        if pending_input is None:
+            return None
+        if _SKILL_COMMAND_PATTERN.match(prompt) is not None:
+            return None
+
+        answer = prompt.strip()
+        if not answer:
+            return None
+
+        try:
+            with self._resolve_packaged_skill(pending_input["skill_name"]) as skill_md_path:
+                return SkillInterceptRequest(
+                    skill_name=pending_input["skill_name"],
+                    command_prefix=pending_input["command_prefix"],
+                    prompt=prompt,
+                    skill_path=skill_md_path,
+                    mcp_tool=pending_input["mcp_tool"],
+                    mcp_args={},
+                    first_argument=answer,
+                )
+        except FileNotFoundError:
+            return None
+
     async def _maybe_dispatch_skill_intercept(
         self,
         prompt: str,
@@ -684,6 +823,35 @@ class CodexCliRuntime:
         """Attempt deterministic skill dispatch before invoking Codex."""
         intercept = self._resolve_skill_intercept(prompt)
         if intercept is None:
+            intercept = self._resolve_pending_structured_input_intercept(prompt, current_handle)
+            if intercept is None:
+                return None
+
+        # A brand-new `ooo interview` without a topic cannot be dispatched
+        # deterministically because native MCP needs either `initial_context`
+        # or a resumable `session_id`.
+        if (
+            intercept.mcp_tool == "ouroboros_interview"
+            and intercept.first_argument is None
+            and self._resume_interview_session_id(current_handle) is None
+        ):
+            log.info(
+                f"{self._log_namespace}.skill_intercept_skipped",
+                **self._build_intercept_failure_context(intercept),
+                reason="missing_initial_context_for_new_interview",
+            )
+            return None
+
+        if (
+            intercept.mcp_tool == "ouroboros_generate_seed"
+            and intercept.first_argument is None
+            and self._resume_interview_session_id(current_handle) is None
+        ):
+            log.info(
+                f"{self._log_namespace}.skill_intercept_skipped",
+                **self._build_intercept_failure_context(intercept),
+                reason="missing_session_id_for_seed_generation",
+            )
             return None
 
         dispatcher = self._skill_dispatcher or self._dispatch_skill_intercept_locally

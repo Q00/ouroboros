@@ -699,6 +699,15 @@ class TestLineageStatusHandler:
 class TestEvolveStepHandler:
     """Test EvolveStepHandler MCP tool."""
 
+    def test_definition_accepts_seed_id(self) -> None:
+        """Tool definition should expose seed_id for thin Gen 1 startup."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        handler = EvolveStepHandler()
+        param_names = {param.name for param in handler.definition.parameters}
+
+        assert "seed_id" in param_names
+
     @pytest.mark.asyncio
     async def test_handler_gen1(self) -> None:
         """Handler runs Gen 1 with seed_content."""
@@ -735,6 +744,67 @@ class TestEvolveStepHandler:
         assert result.is_ok
         assert "Generation 1" in result.value.text_content
         assert result.value.meta["action"] == "continue"
+
+    @pytest.mark.asyncio
+    async def test_handler_gen1_loads_seed_from_seed_id(self, tmp_path) -> None:
+        """Handler should allow Gen 1 startup from a saved seed_id."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        seed = make_seed(seed_id="saved_seed_001")
+
+        gen_result = GenerationResult(
+            generation_number=1,
+            seed=seed,
+            evaluation_summary=make_eval_summary(),
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+        loop = make_loop(store, gen_result=gen_result)
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+
+        import yaml
+
+        seed_dir = tmp_path / ".ouroboros" / "seeds"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        (seed_dir / "saved_seed_001.yaml").write_text(
+            yaml.dump(seed.to_dict()),
+            encoding="utf-8",
+        )
+
+        with patch("ouroboros.mcp.tools.evolution_handlers.Path.home", return_value=tmp_path):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_handler_seed_id",
+                    "seed_id": "saved_seed_001",
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_ok
+        assert "Generation 1" in result.value.text_content
+        assert result.value.meta["action"] == "continue"
+
+    @pytest.mark.asyncio
+    async def test_handler_missing_seed_id_returns_error(self, tmp_path) -> None:
+        """Missing saved seed should surface a clear seed_id error."""
+        from ouroboros.mcp.tools.definitions import EvolveStepHandler
+
+        store = await create_event_store()
+        loop = make_loop(store)
+        handler = EvolveStepHandler(evolutionary_loop=loop)
+
+        with patch("ouroboros.mcp.tools.evolution_handlers.Path.home", return_value=tmp_path):
+            result = await handler.handle(
+                {
+                    "lineage_id": "lin_missing_seed_id",
+                    "seed_id": "missing_seed",
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_err
+        assert "Seed file not found for seed_id missing_seed" in str(result.error)
 
     @pytest.mark.asyncio
     async def test_handler_resets_project_dir_after_call(self) -> None:

@@ -52,6 +52,54 @@ _PARALLEL_ACTIVITY_EVENT_TYPES = frozenset(
 )
 
 
+def runtime_handle_from_progress(progress: dict[str, Any]) -> Any | None:
+    """Deserialize a persisted runtime handle from session progress."""
+    from ouroboros.orchestrator.adapter import RuntimeHandle
+
+    runtime_payload = progress.get("runtime")
+    try:
+        runtime_handle = RuntimeHandle.from_dict(runtime_payload)
+    except ValueError as exc:
+        log.warning(
+            "orchestrator.session.runtime_handle_deserialize_failed",
+            error=str(exc),
+            runtime_keys=sorted(runtime_payload) if isinstance(runtime_payload, dict) else None,
+        )
+        runtime_handle = None
+    if runtime_handle is not None:
+        return runtime_handle
+
+    legacy_session_id = progress.get("agent_session_id")
+    if isinstance(legacy_session_id, str) and legacy_session_id:
+        legacy_backend = progress.get("runtime_backend", "claude")
+        if not isinstance(legacy_backend, str):
+            legacy_backend = "claude"
+        return RuntimeHandle(backend=legacy_backend, native_session_id=legacy_session_id)
+
+    return None
+
+
+def tracker_runtime_handle(tracker: Any | None) -> Any | None:
+    """Return the persisted runtime handle for a reconstructed session tracker."""
+    if tracker is None:
+        return None
+    progress = getattr(tracker, "progress", None)
+    if not isinstance(progress, dict):
+        return None
+    return runtime_handle_from_progress(progress)
+
+
+def tracker_runtime_cwd(tracker: Any | None) -> str | None:
+    """Return the persisted runtime cwd for a reconstructed session tracker."""
+    runtime_handle = tracker_runtime_handle(tracker)
+    if runtime_handle is None:
+        return None
+    cwd = getattr(runtime_handle, "cwd", None)
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    return cwd
+
+
 # =============================================================================
 # Session Status
 # =============================================================================

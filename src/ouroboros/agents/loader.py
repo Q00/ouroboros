@@ -1,13 +1,15 @@
 """Agent prompt loader -- single source of truth for all agent system prompts.
 
-Loads agent .md files with an explicit 2-tier resolution strategy:
+Loads agent .md files with a 3-tier resolution strategy:
 
 1. ``OUROBOROS_AGENTS_DIR`` env var -- user-managed override directory
-2. ``importlib.resources`` bundle   -- canonical packaged prompts
+2. Project-root ``agents/`` directory -- canonical plugin agents
+3. ``importlib.resources`` bundle    -- legacy packaged prompts (src/ouroboros/agents/)
 
-This keeps ``src/ouroboros/agents`` as the authoritative default source while
-still allowing deliberate overrides without depending on the current working
-directory.
+Files in ``agents/`` may contain YAML frontmatter (``---`` delimited).
+The frontmatter is stripped automatically -- only the body is returned
+as the system prompt. This keeps project-root ``agents/`` as the
+canonical prompt source for plugin mode and internal MCP mode.
 """
 
 from __future__ import annotations
@@ -20,19 +22,44 @@ from pathlib import Path
 import re
 
 # ---------------------------------------------------------------------------
+# Frontmatter stripping
+# ---------------------------------------------------------------------------
+
+
+def _strip_frontmatter(content: str) -> str:
+    """Remove YAML frontmatter (``---`` delimited) from markdown content."""
+    if not content.startswith("---"):
+        return content
+    # Find the closing ---
+    end = content.find("---", 3)
+    if end == -1:
+        return content
+    # Skip past the closing --- and any trailing newline
+    body = content[end + 3:]
+    return body.lstrip("\n")
+
+
+# ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------
+
+def _find_project_agents_dir() -> Path | None:
+    """Find the project-root agents/ directory by walking up from this file."""
+    # src/ouroboros/agents/loader.py → walk up to project root
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        agents_dir = parent / "agents"
+        if agents_dir.is_dir() and (agents_dir / "socratic-interviewer.md").exists():
+            return agents_dir
+    return None
 
 
 @functools.lru_cache(maxsize=64)
 def _resolve_agent_path(agent_name: str) -> Path | None:
-    """Find an agent .md file using the explicit override resolution strategy.
+    """Find an agent .md file using the 3-tier resolution strategy.
 
     Returns the first existing path, or ``None`` to signal that the
     caller should fall back to ``importlib.resources``.
-
-    Cached to prevent repeated filesystem checks and to stabilize
-    path resolution even if CWD changes during process lifetime.
     """
     filename = f"{agent_name}.md"
 
@@ -43,7 +70,14 @@ def _resolve_agent_path(agent_name: str) -> Path | None:
         if path.exists():
             return path
 
-    # Tier 2: fall through to importlib.resources
+    # Tier 2: project-root agents/ directory (plugin agents with frontmatter)
+    project_agents = _find_project_agents_dir()
+    if project_agents:
+        path = project_agents / filename
+        if path.exists():
+            return path
+
+    # Tier 3: fall through to importlib.resources
     return None
 
 
@@ -54,22 +88,23 @@ def _resolve_agent_path(agent_name: str) -> Path | None:
 
 @functools.lru_cache(maxsize=64)
 def load_agent_prompt(agent_name: str) -> str:
-    """Load the full markdown content for an agent.
+    """Load the body content of an agent .md file (frontmatter stripped).
 
     Args:
         agent_name: File stem, e.g. ``"socratic-interviewer"``.
 
     Returns:
-        Full markdown text.
+        Markdown body text (YAML frontmatter removed if present).
 
     Raises:
         FileNotFoundError: If the agent .md cannot be found anywhere.
     """
     path = _resolve_agent_path(agent_name)
     if path is not None:
-        return path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8")
+        return _strip_frontmatter(content)
 
-    # Bundled fallback
+    # Bundled fallback (legacy, no frontmatter)
     package = importlib.resources.files("ouroboros.agents")
     resource = package.joinpath(f"{agent_name}.md")
     try:
@@ -77,7 +112,7 @@ def load_agent_prompt(agent_name: str) -> str:
     except (FileNotFoundError, TypeError):
         raise FileNotFoundError(
             f"Agent prompt not found: {agent_name}.md "
-            f"(searched OUROBOROS_AGENTS_DIR and ouroboros.agents package)"
+            f"(searched OUROBOROS_AGENTS_DIR, project agents/, and ouroboros.agents package)"
         ) from None
 
 

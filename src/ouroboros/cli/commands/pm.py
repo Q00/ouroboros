@@ -340,38 +340,11 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
     Writes to ``~/.ouroboros/data/pm_meta_{session_id}.json`` — the same
     location used by the MCP handler's ``_save_pm_meta``.
     """
-    import json
+    from ouroboros.bigbang.pm_interview import PMInterviewStateStore
 
-    data_dir = Path.home() / ".ouroboros" / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = data_dir / f"pm_meta_{session_id}.json"
-
-    # Build pending_reframe from the engine's reframe map (mirrors MCP _save_pm_meta)
-    pending_reframe: dict[str, str] | None = None
-    if engine._reframe_map:
-        reframed = next(reversed(engine._reframe_map))
-        pending_reframe = {
-            "reframed": reframed,
-            "original": engine._reframe_map[reframed],
-        }
-
-    # Collapse deferred_items into decide_later_items (canonical schema)
-    combined_decide_later = list(engine.decide_later_items)
-    for item in engine.deferred_items:
-        if item not in combined_decide_later:
-            combined_decide_later.append(item)
-
-    meta = {
-        "deferred_items": [],  # Deprecated: merged into decide_later_items
-        "decide_later_items": combined_decide_later,
-        "codebase_context": engine.codebase_context,
-        "pending_reframe": pending_reframe,
-        "cwd": "",
-        "brownfield_repos": list(engine._selected_brownfield_repos),
-        "classifications": [c.output_type.value for c in getattr(engine, "classifications", [])],
-    }
-
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    store = PMInterviewStateStore()
+    meta = store.build_meta(engine=engine, cwd="")
+    store.save_meta(session_id, meta)
 
 
 def _make_message_callback(debug: bool):
@@ -473,18 +446,11 @@ async def _run_pm_interview(
         state = state_result.value
 
         # Restore PM-specific metadata (deferred items, decide-later, etc.)
-        data_dir = Path.home() / ".ouroboros" / "data"
-        pm_meta_path = data_dir / f"pm_meta_{resume_id}.json"
-        if pm_meta_path.exists():
-            import json
+        from ouroboros.bigbang.pm_interview import PMInterviewStateStore
 
-            try:
-                meta = json.loads(pm_meta_path.read_text(encoding="utf-8"))
-                engine.restore_meta(meta)
-            except (json.JSONDecodeError, OSError):
-                print_warning("Could not load PM metadata; continuing without it.")
-                # Still install PM steering even without full meta
-                engine._install_pm_steering()
+        meta = PMInterviewStateStore().load_meta(resume_id)
+        if meta is not None:
+            engine.restore_meta(meta.model_dump())
         else:
             # No pm_meta file — still install PM steering for resumed session
             engine._install_pm_steering()

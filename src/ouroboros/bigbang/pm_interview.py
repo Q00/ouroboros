@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field
 import structlog
 
 from ouroboros.bigbang.ambiguity import AmbiguityScorer
@@ -32,6 +33,7 @@ from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
+    InterviewStateStore,
 )
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
@@ -88,6 +90,114 @@ Respond ONLY with valid JSON in this exact format:
 _FALLBACK_MODEL = "claude-opus-4-6"
 
 
+class PMInterviewMeta(BaseModel):
+    """PM-specific session metadata stored alongside InterviewState."""
+
+    model_config = ConfigDict(extra="allow")
+
+    deferred_items: list[str] = Field(default_factory=list)
+    decide_later_items: list[str] = Field(default_factory=list)
+    codebase_context: str = ""
+    pending_reframe: dict[str, str] | None = None
+    cwd: str = ""
+    brownfield_repos: list[dict[str, str]] = Field(default_factory=list)
+    classifications: list[str] = Field(default_factory=list)
+    initial_context: str = ""
+    status: str | None = None
+
+
+@dataclass
+class PMInterviewStateStore:
+    """Persistence for PM-specific interview metadata."""
+
+    data_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
+
+    def __post_init__(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    def meta_path(self, session_id: str) -> Path:
+        """Return the path to the PM metadata file for a session."""
+        return self.data_dir / f"pm_meta_{session_id}.json"
+
+    def build_meta(
+        self,
+        *,
+        engine: PMInterviewEngine | None = None,
+        cwd: str = "",
+        status: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> PMInterviewMeta:
+        """Build a PM metadata snapshot from the engine."""
+        if engine is not None:
+            payload: dict[str, Any] = {
+                "deferred_items": list(engine.deferred_items),
+                "decide_later_items": list(engine.decide_later_items),
+                "codebase_context": engine.codebase_context,
+                "pending_reframe": engine.get_pending_reframe(),
+                "cwd": cwd,
+                "brownfield_repos": list(getattr(engine, "_selected_brownfield_repos", [])),
+                "classifications": [
+                    c.output_type.value for c in getattr(engine, "classifications", [])
+                ],
+                "initial_context": getattr(engine, "_initial_context", ""),
+            }
+        else:
+            payload = {
+                "deferred_items": [],
+                "decide_later_items": [],
+                "codebase_context": "",
+                "pending_reframe": None,
+                "cwd": cwd,
+                "brownfield_repos": [],
+                "classifications": [],
+                "initial_context": "",
+            }
+
+        if status is not None:
+            payload["status"] = status
+        if extra:
+            payload.update(extra)
+
+        return PMInterviewMeta.model_validate(payload)
+
+    def save_meta(self, session_id: str, meta: PMInterviewMeta) -> Path:
+        """Persist PM metadata to disk, preserving existing status when omitted."""
+        existing = self.load_meta(session_id)
+        to_save = meta
+        if to_save.status is None and existing and existing.status is not None:
+            to_save = to_save.model_copy(update={"status": existing.status})
+        if not to_save.initial_context and existing and existing.initial_context:
+            to_save = to_save.model_copy(update={"initial_context": existing.initial_context})
+
+        path = self.meta_path(session_id)
+        payload = to_save.model_dump()
+        if payload.get("status") is None:
+            payload.pop("status", None)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        log.debug("pm_interview.meta_saved", session_id=session_id, path=str(path))
+        return path
+
+    def load_meta_dict(self, session_id: str) -> dict[str, Any] | None:
+        """Load raw PM metadata payload from disk after schema validation."""
+        path = self.meta_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            PMInterviewMeta.model_validate(payload)
+            return payload
+        except (OSError, ValueError) as exc:
+            log.warning("pm_interview.meta_load_failed", session_id=session_id, error=str(exc))
+            return None
+
+    def load_meta(self, session_id: str) -> PMInterviewMeta | None:
+        """Load PM metadata from disk as a typed model."""
+        payload = self.load_meta_dict(session_id)
+        if payload is None:
+            return None
+        return PMInterviewMeta.model_validate(payload)
+
+
 @dataclass
 class PMInterviewEngine:
     """PM interview engine — wraps InterviewEngine via composition.
@@ -139,6 +249,7 @@ class PMInterviewEngine:
     """
 
     inner: InterviewEngine
+    state_store: InterviewStateStore
     classifier: QuestionClassifier
     llm_adapter: LLMAdapter
     model: str = _FALLBACK_MODEL
@@ -197,6 +308,7 @@ class PMInterviewEngine:
             state_dir=state_dir,
             model=model,
         )
+        state_store = InterviewStateStore(state_dir=state_dir)
 
         classifier = QuestionClassifier(
             llm_adapter=llm_adapter,
@@ -204,6 +316,7 @@ class PMInterviewEngine:
 
         return cls(
             inner=inner,
+            state_store=state_store,
             classifier=classifier,
             llm_adapter=llm_adapter,
             model=model,
@@ -661,7 +774,7 @@ class PMInterviewEngine:
         Returns:
             Result containing updated state or ValidationError.
         """
-        return await self.inner.complete_interview(state)
+        return await self.state_store.complete_interview(state)
 
     def get_decide_later_summary(self) -> list[str]:
         """Return the combined list of deferred + decide-later items.
@@ -713,7 +826,7 @@ class PMInterviewEngine:
         Returns:
             Result containing path to saved file or ValidationError.
         """
-        return await self.inner.save_state(state)
+        return await self.state_store.save_state(state)
 
     async def load_state(
         self,
@@ -729,7 +842,7 @@ class PMInterviewEngine:
         Returns:
             Result containing loaded state or ValidationError.
         """
-        return await self.inner.load_state(interview_id)
+        return await self.state_store.load_state(interview_id)
 
     def restore_meta(self, meta: dict[str, Any]) -> None:
         """Restore PM-specific metadata into this engine from a loaded dict.

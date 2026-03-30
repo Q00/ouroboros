@@ -23,38 +23,54 @@ ooo seed [session_id]
 
 When the user invokes this skill:
 
-### Load MCP Tools (Required before Path A/B decision)
+### Step 0: Load Tools
 
-The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
+**If `ToolSearch` is available** (Claude Code): run both in a single message (parallel):
+1. `ToolSearch` with `+ouroboros seed`
+2. `ToolSearch` with `select:AskUserQuestion`
 
-1. Use the `ToolSearch` tool to find and load the seed generation MCP tool:
-   ```
-   ToolSearch query: "+ouroboros seed"
-   ```
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_generate_seed` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
-3. If ToolSearch finds the tool → proceed to **Path A**. If not → proceed to **Path B**.
+**If `ToolSearch` is not available** (Cursor, other runtimes): MCP tools are already loaded via the configured MCP server. Skip directly to Path A.
 
-**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
+Store whichever question tool is available (`AskUserQuestion` or `AskQuestion`) as the **question tool**. Used for the post-generation star prompt.
+- If MCP tool reachable → **Path A**. If not → **Path B**.
 
 ### Path A: MCP Mode (Preferred)
 
 If the `ouroboros_generate_seed` MCP tool is available (loaded via ToolSearch above):
+
+**Architecture**: Same as interview/evaluate — main is thin, and `ouroboros_generate_seed(action="state")` is the stage-local source of truth.
+
+```
+MCP (state + validate) ←→ @seed-architect (read state, generate YAML, save)
+You (main) = just pass session_id and present the summary
+```
 
 1. Determine the interview session:
    - If `session_id` provided: Use it directly
    - If no session_id: Check conversation for a recent `ouroboros_interview` session ID
    - If none found: Ask the user
 
-2. Call the MCP tool:
+2. **If native subagents are available, delegate to @seed-architect**:
    ```
-   Tool: ouroboros_generate_seed
+   Tool: Agent
    Arguments:
-     session_id: <interview session ID>
+     prompt: "session_id: <session_id>"
+     subagent_type: "ouroboros:seed-architect"
+     description: "Generate seed from interview"
    ```
 
-3. The tool extracts requirements from the interview, calculates ambiguity score, and generates the Seed YAML.
+   The agent reads seed-generation state from `ouroboros_generate_seed(action="state")`, generates YAML, validates+saves via `action="generate"`, and returns a compact summary.
+   Do NOT include Q&A history or interview context in the prompt — the agent reads it from MCP.
 
-4. Present the generated seed to the user.
+3. Present the summary returned by the agent or tool to the user.
+
+If native subagents are unavailable or fail twice, call `ouroboros_generate_seed(session_id=<session_id>)` directly and let MCP run the original internal LLM-in-MCP seed generation flow.
+
+**Context minimization** (CRITICAL):
+- When native subagents are available, do NOT call `ouroboros_generate_seed(session_id=...)` from main — that bypasses the thin-orchestrator contract.
+- Do NOT call `ouroboros_interview(action="state")` from main for seed generation.
+- Do NOT pass Q&A data in the agent prompt.
+- The agent handles ALL MCP interaction in its own isolated context.
 
 **Advantages of MCP mode**: Automated ambiguity scoring (must be <= 0.2), structured extraction from persisted interview state, reproducible.
 
@@ -62,22 +78,12 @@ If the `ouroboros_generate_seed` MCP tool is available (loaded via ToolSearch ab
 
 If the MCP tool is NOT available, fall back to agent-based generation:
 
-1. Read `src/ouroboros/agents/seed-architect.md` and adopt that role
-2. Extract structured requirements from the interview Q&A in conversation history
-3. Generate a Seed YAML specification
-4. Present the seed to the user
+1. Read `agents/seed-architect.md` and adopt that role with `session_id`
+2. Follow the agent's workflow instructions
 
 ## Seed Components
 
-The seed contains:
-
-- **GOAL**: Clear primary objective
-- **CONSTRAINTS**: Hard limitations (e.g., Python >= 3.12, no external DB)
-- **ACCEPTANCE_CRITERIA**: Measurable success criteria
-- **ONTOLOGY_SCHEMA**: Data structure definition (name, fields, types)
-- **EVALUATION_PRINCIPLES**: Quality principles with weights
-- **EXIT_CONDITIONS**: When the workflow should terminate
-- **METADATA**: Version, timestamp, ambiguity score, interview ID
+The seed-architect agent handles component extraction — see agents/seed-architect.md
 
 ## Example Output
 
@@ -113,31 +119,12 @@ On successful seed generation, first announce:
 Your seed has been crystallized!
 ```
 
-Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not set to `true`, use the **AskUserQuestion tool** with this single question:
-
-```json
-{
-  "questions": [{
-    "question": "If Ouroboros helped clarify your thinking, a GitHub star supports continued development. Ready to unlock Full Mode?",
-    "header": "Next step",
-    "options": [
-      {
-        "label": "\u2b50 Star & Setup",
-        "description": "Star on GitHub + run ooo setup to enable run, evaluate, status"
-      },
-      {
-        "label": "Just Setup",
-        "description": "Skip star, go straight to ooo setup for Full Mode"
-      }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+Then check `~/.ouroboros/prefs.json` for `star_asked`. If `star_asked` is not set to `true`, **ask using the question tool loaded in Step 0**:
+- Prompt: `If Ouroboros helped clarify your thinking, a GitHub star supports continued development. Ready to unlock Full Mode?`
+- Options: `⭐ Star & Setup`, `Just Setup`
 
 - **Star & Setup**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
 - **Just Setup**: Save `{"star_asked": true}` to `~/.ouroboros/prefs.json`, then read and execute `skills/setup/SKILL.md`
-- **Other** (user provides custom text): Save `{"star_asked": true}`, skip setup
 
 Create `~/.ouroboros/` directory if it doesn't exist.
 

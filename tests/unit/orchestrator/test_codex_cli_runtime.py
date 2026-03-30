@@ -12,6 +12,7 @@ import pytest
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPToolError
+from ouroboros.mcp.tools.question_specs import build_question_ui_meta
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
@@ -944,6 +945,148 @@ class TestCodexCliRuntime:
         ]
 
     @pytest.mark.asyncio
+    async def test_execute_task_plain_ooo_interview_without_topic_falls_through(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A brand-new `ooo interview` without topic should not dispatch native MCP yet."""
+        self._write_skill(
+            tmp_path,
+            "interview",
+            [
+                "name: interview",
+                'description: "Socratic interview to crystallize vague requirements"',
+                "mcp_tool: ouroboros_interview",
+                "mcp_args:",
+                '  initial_context: "$1"',
+                '  cwd: "$CWD"',
+            ],
+        )
+        dispatcher = AsyncMock()
+        process = _FakeProcess(
+            stdout_lines=[
+                json.dumps({"type": "item.completed", "item": {"type": "result", "text": "ok"}})
+            ],
+            stderr_lines=[],
+        )
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            messages = [message async for message in runtime.execute_task("ooo interview")]
+
+        dispatcher.assert_not_awaited()
+        mock_exec.assert_called_once()
+        assert process.stdin.written == b"ooo interview"
+        assert messages[-1].content == "Codex CLI task completed."
+
+    @pytest.mark.asyncio
+    async def test_execute_task_plain_ooo_seed_without_session_falls_through(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A brand-new `ooo seed` without a session should fall through to normal runtime execution."""
+        self._write_skill(
+            tmp_path,
+            "seed",
+            [
+                "name: seed",
+                'description: "Generate validated Seed specifications from interview results"',
+                "mcp_tool: ouroboros_generate_seed",
+                "mcp_args:",
+                '  session_id: "$1"',
+            ],
+        )
+        dispatcher = AsyncMock()
+        process = _FakeProcess(
+            stdout_lines=[
+                json.dumps({"type": "item.completed", "item": {"type": "result", "text": "ok"}})
+            ],
+            stderr_lines=[],
+        )
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+            skill_dispatcher=dispatcher,
+        )
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            messages = [message async for message in runtime.execute_task("ooo seed")]
+
+        dispatcher.assert_not_awaited()
+        mock_exec.assert_called_once()
+        assert process.stdin.written == b"ooo seed"
+        assert messages[-1].content == "Codex CLI task completed."
+
+    @pytest.mark.asyncio
+    async def test_execute_task_plain_ooo_seed_reuses_interview_session(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plain `ooo seed` should reuse the stored interview session ID."""
+        self._write_skill(
+            tmp_path,
+            "seed",
+            [
+                "name: seed",
+                'description: "Generate validated Seed specifications from interview results"',
+                "mcp_tool: ouroboros_generate_seed",
+                "mcp_args:",
+                '  session_id: "$1"',
+            ],
+        )
+        resume_handle = RuntimeHandle(
+            backend="codex_cli",
+            native_session_id="thread-123",
+            metadata={"ouroboros_interview_session_id": "interview-123"},
+        )
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+        )
+        
+        class _FakeSeedHandler:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, str]] = []
+
+            async def handle(
+                self,
+                arguments: dict[str, str],
+            ) -> Result[MCPToolResult, MCPToolError]:
+                self.calls.append(dict(arguments))
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="Seed saved"),),
+                        is_error=False,
+                        meta={"seed_id": "seed_abc123"},
+                    )
+                )
+
+        handler = _FakeSeedHandler()
+        runtime._builtin_mcp_handlers = {"ouroboros_generate_seed": handler}
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        ) as mock_exec:
+            messages = [message async for message in runtime.execute_task("ooo seed", resume_handle=resume_handle)]
+
+        mock_exec.assert_not_called()
+        assert handler.calls == [{"session_id": "interview-123"}]
+        assert messages[-1].content == "Seed saved"
+
+    @pytest.mark.asyncio
     async def test_execute_task_passes_runtime_handle_into_interview_dispatcher(
         self,
         tmp_path: Path,
@@ -1071,6 +1214,144 @@ class TestCodexCliRuntime:
             messages[-1].resume_handle.metadata["ouroboros_interview_session_id"] == "interview-456"
         )
         assert messages[-1].content == "Next question"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_local_interview_dispatch_preserves_question_spec(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Local interview dispatch should surface structured question metadata for UI adapters."""
+
+        self._write_skill(
+            tmp_path,
+            "interview",
+            [
+                "name: interview",
+                'description: "Socratic interview to crystallize vague requirements"',
+                "mcp_tool: ouroboros_interview",
+                "mcp_args:",
+                '  initial_context: "$1"',
+            ],
+        )
+
+        class _FakeInterviewHandler:
+            async def handle(
+                self, arguments: dict[str, str]
+            ) -> Result[MCPToolResult, MCPToolError]:
+                del arguments
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="Next question"),),
+                        is_error=False,
+                        meta={
+                            "session_id": "interview-789",
+                            **build_question_ui_meta(
+                                "첫 버전에서 어떤 저장소를 우선 지원할까요?",
+                                title="Interview",
+                                answer_mode="single_select",
+                                options=["PostgreSQL", "MySQL"],
+                                has_custom_input=True,
+                            ),
+                        },
+                    )
+                )
+
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+        )
+        runtime._builtin_mcp_handlers = {"ouroboros_interview": _FakeInterviewHandler()}
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        ) as mock_exec:
+            messages = [
+                message async for message in runtime.execute_task('ooo interview "Use PostgreSQL"')
+            ]
+
+        mock_exec.assert_not_called()
+        assert messages[-1].data["question_spec"]["answer_mode"] == "single_select"
+        assert messages[-1].data["question_spec"]["has_custom_input"] is True
+        assert messages[-1].data["cursor_question_payload"]["questions"][0]["options"][-1] == {
+            "id": "custom",
+            "label": "Other",
+        }
+        assert messages[-1].resume_handle is not None
+        assert messages[-1].resume_handle.metadata["ouroboros_pending_structured_input"] == {
+            "mcp_tool": "ouroboros_interview",
+            "skill_name": "interview",
+            "command_prefix": "ooo interview",
+            "session_id": "interview-789",
+            "response_param": "answer",
+        }
+
+    @pytest.mark.asyncio
+    async def test_execute_task_plain_answer_resumes_pending_structured_interview(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plain answer text should resume a pending structured interview turn."""
+
+        self._write_skill(
+            tmp_path,
+            "interview",
+            [
+                "name: interview",
+                'description: "Socratic interview to crystallize vague requirements"',
+                "mcp_tool: ouroboros_interview",
+                "mcp_args:",
+                '  initial_context: "$1"',
+            ],
+        )
+
+        class _FakeInterviewHandler:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, str]] = []
+
+            async def handle(
+                self,
+                arguments: dict[str, str],
+            ) -> Result[MCPToolResult, MCPToolError]:
+                self.calls.append(dict(arguments))
+                return Result.ok(
+                    MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="Recorded answer"),),
+                        is_error=False,
+                        meta={"session_id": "interview-789"},
+                    )
+                )
+
+        handler = _FakeInterviewHandler()
+        runtime = CodexCliRuntime(
+            cli_path="codex",
+            cwd="/tmp/project",
+            skills_dir=tmp_path,
+        )
+        runtime._builtin_mcp_handlers = {"ouroboros_interview": handler}
+        resume_handle = RuntimeHandle(
+            backend="codex_cli",
+            native_session_id="thread-123",
+            metadata={
+                "ouroboros_interview_session_id": "interview-789",
+                "ouroboros_pending_structured_input": {
+                    "mcp_tool": "ouroboros_interview",
+                    "skill_name": "interview",
+                    "command_prefix": "ooo interview",
+                    "session_id": "interview-789",
+                    "response_param": "answer",
+                },
+            },
+        )
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+        ) as mock_exec:
+            messages = [message async for message in runtime.execute_task("없음", resume_handle=resume_handle)]
+
+        mock_exec.assert_not_called()
+        assert handler.calls == [{"session_id": "interview-789", "answer": "없음"}]
+        assert messages[-1].content == "Recorded answer"
 
     @pytest.mark.asyncio
     async def test_execute_task_preserves_nonrecoverable_dispatch_errors(

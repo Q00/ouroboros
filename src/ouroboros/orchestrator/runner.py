@@ -64,7 +64,12 @@ from ouroboros.orchestrator.runtime_message_projection import (
     normalized_message_type,
     project_runtime_message,
 )
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
+from ouroboros.orchestrator.session import (
+    SessionRepository,
+    SessionStatus,
+    SessionTracker,
+    runtime_handle_from_progress,
+)
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 
 if TYPE_CHECKING:
@@ -435,28 +440,7 @@ class OrchestratorRunner:
 
     def _deserialize_runtime_handle(self, progress: dict[str, Any]) -> RuntimeHandle | None:
         """Deserialize runtime resume state from session progress."""
-        runtime_payload = progress.get("runtime")
-        try:
-            runtime_handle = RuntimeHandle.from_dict(runtime_payload)
-        except ValueError as exc:
-            log.warning(
-                "orchestrator.runner.runtime_handle_deserialize_failed",
-                error=str(exc),
-                runtime_keys=sorted(runtime_payload) if isinstance(runtime_payload, dict) else None,
-            )
-            runtime_handle = None
-        if runtime_handle is not None:
-            return runtime_handle
-
-        legacy_session_id = progress.get("agent_session_id")
-        if isinstance(legacy_session_id, str) and legacy_session_id:
-            # Legacy sessions predate multi-runtime; infer backend from context
-            legacy_backend = progress.get("runtime_backend", "claude")
-            if not isinstance(legacy_backend, str):
-                legacy_backend = "claude"
-            return RuntimeHandle(backend=legacy_backend, native_session_id=legacy_session_id)
-
-        return None
+        return runtime_handle_from_progress(progress)
 
     def _seed_runtime_handle(
         self,
@@ -532,6 +516,17 @@ class OrchestratorRunner:
             return runtime_handle.cwd
         cwd = self._adapter.working_directory
         return cwd if isinstance(cwd, str) and cwd else None
+
+    def _build_initial_runtime_progress(self) -> dict[str, Any] | None:
+        """Build the baseline persisted runtime context for a newly prepared session."""
+        runtime_handle = self._seed_runtime_handle(None)
+        if runtime_handle is None:
+            return None
+        return {
+            "runtime": runtime_handle.to_session_state_dict(),
+            "runtime_backend": runtime_handle.backend,
+            "messages_processed": 0,
+        }
 
     def _normalized_message_type(self, message: AgentMessage) -> str:
         """Collapse runtime-specific message details into shared progress categories."""
@@ -1253,7 +1248,26 @@ class OrchestratorRunner:
                     error=str(progress_result.error),
                 )
 
-        return Result.ok(tracker)
+        initial_progress = self._build_initial_runtime_progress()
+        if initial_progress is None:
+            return Result.ok(tracker)
+
+        progress_result = await self._session_repo.track_progress(
+            tracker.session_id,
+            initial_progress,
+        )
+        if progress_result.is_err:
+            return Result.err(
+                OrchestratorError(
+                    message=(
+                        "Failed to persist initial runtime context: "
+                        f"{progress_result.error}"
+                    ),
+                    details={"execution_id": exec_id, "session_id": tracker.session_id},
+                )
+            )
+
+        return Result.ok(tracker.with_progress(initial_progress))
 
     async def execute_precreated_session(
         self,
@@ -1313,15 +1327,36 @@ class OrchestratorRunner:
 
             # Check for parallel execution mode
             if parallel and len(seed.acceptance_criteria) > 1:
-                return await self._execute_parallel(
-                    seed=seed,
-                    exec_id=exec_id,
-                    tracker=tracker,
-                    merged_tools=merged_tools,
-                    tool_catalog=tool_catalog,
-                    system_prompt=system_prompt,
-                    start_time=start_time,
-                )
+                try:
+                    return await self._execute_parallel(
+                        seed=seed,
+                        exec_id=exec_id,
+                        tracker=tracker,
+                        merged_tools=merged_tools,
+                        tool_catalog=tool_catalog,
+                        system_prompt=system_prompt,
+                        start_time=start_time,
+                    )
+                except Exception as exc:
+                    log.exception(
+                        "orchestrator.runner.parallel_execution_failed",
+                        execution_id=exec_id,
+                        session_id=tracker.session_id,
+                    )
+                    duration = (datetime.now(UTC) - start_time).total_seconds()
+                    failed_event = create_session_failed_event(
+                        session_id=tracker.session_id,
+                        error_message=str(exc),
+                        error_type=type(exc).__name__,
+                        messages_processed=messages_processed,
+                    )
+                    await self._event_store.append(failed_event)
+                    return Result.err(
+                        OrchestratorError(
+                            message=f"Parallel execution failed: {exc}",
+                            error_type="parallel_execution_error",
+                        )
+                    )
         except Exception as e:
             self._cleanup_pre_execution_state(
                 exec_id,

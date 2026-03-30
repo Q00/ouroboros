@@ -20,5 +20,6 @@
     "drift-detection"
   ],
   "skills": "./skills/",
+  "agents": "./agents/",
   "mcpServers": "./.mcp.json"
 }

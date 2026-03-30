@@ -192,11 +192,29 @@ def get_ouroboros_tools(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    agent_mode: str | None = None,
 ) -> OuroborosToolHandlers:
-    """Create the default set of Ouroboros MCP tool handlers."""
+    """Create the default set of Ouroboros MCP tool handlers.
+
+    Args:
+        runtime_backend: Agent runtime backend (claude, codex, etc.)
+        llm_backend: LLM backend for reasoning tasks.
+        agent_mode: Agent mode for State/Agent layer separation.
+            "internal" (default): MCP calls LLM internally.
+            "native": MCP is pure state; platform-native agents handle reasoning.
+    """
+    from ouroboros.mcp.layers.gate import AgentMode
+
+    resolved_mode: AgentMode | None = None
+    if agent_mode == "native":
+        resolved_mode = AgentMode.NATIVE
+    elif agent_mode == "internal":
+        resolved_mode = AgentMode.INTERNAL
+
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
+        agent_mode=resolved_mode,
     )
     return (
         execute_seed,
@@ -207,10 +225,10 @@ def get_ouroboros_tools(
         JobResultHandler(),
         CancelJobHandler(),
         QueryEventsHandler(),
-        GenerateSeedHandler(llm_backend=llm_backend),
+        GenerateSeedHandler(llm_backend=llm_backend, agent_mode=resolved_mode),
         MeasureDriftHandler(),
-        InterviewHandler(llm_backend=llm_backend),
-        EvaluateHandler(llm_backend=llm_backend),
+        InterviewHandler(llm_backend=llm_backend, agent_mode=resolved_mode),
+        EvaluateHandler(llm_backend=llm_backend, agent_mode=resolved_mode),
         LateralThinkHandler(),
         EvolveStepHandler(),
         StartEvolveStepHandler(),
@@ -218,8 +236,8 @@ def get_ouroboros_tools(
         EvolveRewindHandler(),
         CancelExecutionHandler(),
         BrownfieldHandler(),
-        PMInterviewHandler(llm_backend=llm_backend),
-        QAHandler(llm_backend=llm_backend),
+        PMInterviewHandler(llm_backend=llm_backend, agent_mode=resolved_mode),
+        QAHandler(llm_backend=llm_backend, agent_mode=resolved_mode),
     )
 
 
