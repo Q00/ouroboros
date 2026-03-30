@@ -82,8 +82,11 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 
 ## Agents
 
-Loaded on-demand — not preloaded.
+Loaded on-demand — not preloaded. Definitions in `agents/`.
 
-**Core**: socratic-interviewer, ontologist, seed-architect, evaluator, qa-judge, contrarian
-**Support**: hacker, simplifier, researcher, architect
+**Core**: socratic-interviewer, ontologist, seed-architect, evaluator, qa-judge, contrarian, judge
+**Execution**: ac-executor, code-executor
+**Interview**: pm-interviewer, breadth-keeper, seed-closer
+**Review**: advocate, consensus-reviewer, semantic-evaluator
+**Support**: hacker, simplifier, researcher, architect, analysis-agent, research-agent, ontology-analyst
 <!-- ooo:END -->

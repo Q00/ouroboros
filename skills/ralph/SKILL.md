@@ -38,6 +38,17 @@ Ralph mode includes parallel execution + automatic verification:
 
 When the user invokes this skill:
 
+### Load MCP Tools (Required first)
+
+**If `ToolSearch` is not available** (Cursor, other runtimes): MCP tools are already loaded via the configured MCP server. Skip directly to Step 1.
+
+**If `ToolSearch` is available** (Claude Code): MCP tools may be registered as deferred tools that must be explicitly loaded.
+1. Use the `ToolSearch` tool to find and load the evolve MCP tools:
+   ```
+   ToolSearch query: "+ouroboros evolve"
+   ```
+2. If ToolSearch finds the tools → proceed to Step 1. If not → explain that Ralph mode requires the Ouroboros MCP server.
+
 1. **Parse the request**: Extract what needs to be done
 
 2. **Initialize loop**:
