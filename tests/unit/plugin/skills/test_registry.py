@@ -18,6 +18,7 @@ import tempfile
 import pytest
 
 from ouroboros.plugin.skills.registry import (
+    WATCHDOG_AVAILABLE,
     SkillInstance,
     SkillMetadata,
     SkillMode,
@@ -897,3 +898,17 @@ class TestSkillRegistryStopWatcher:
 
         # Should not raise exception
         registry.stop_watcher()
+
+    def test_stop_watcher_closes_watcher_loop(self) -> None:
+        """Stopping watcher should close the watcher-owned event loop."""
+        if not WATCHDOG_AVAILABLE:
+            pytest.skip("watchdog not installed")
+
+        registry = SkillRegistry()
+        registry._watcher = type("_Watcher", (), {})()
+        registry._watcher._loop = __import__("asyncio").new_event_loop()
+        registry._watcher.close = lambda: registry._watcher._loop.close()
+
+        registry.stop_watcher()
+
+        assert registry._watcher is None

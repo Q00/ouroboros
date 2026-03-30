@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 from unittest.mock import patch
+import warnings
 
 import pytest
 
@@ -566,14 +567,17 @@ class TestExceptionLogging:
         configure_logging(config)
         log = get_logger()
 
-        try:
-            raise ValueError("test exception")
-        except ValueError:
-            log.exception("error.occurred")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                raise ValueError("test exception")
+            except ValueError:
+                log.exception("error.occurred")
 
         captured = capsys.readouterr()
         assert "error.occurred" in captured.err
         assert "ValueError" in captured.err or "test exception" in captured.err
+        assert not any("pretty exceptions" in str(w.message) for w in caught)
 
 
 class TestSensitiveDataMasking:

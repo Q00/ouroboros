@@ -31,6 +31,13 @@ class TestCodexCliRuntimeChildEnv:
             env = runtime._build_child_env()
         assert "OUROBOROS_LLM_BACKEND" not in env
 
+    def test_strips_parent_codex_thread_id(self) -> None:
+        """Child env must not inherit the parent Codex thread/session identifier."""
+        runtime = _make_runtime()
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-123"}):
+            env = runtime._build_child_env()
+        assert "CODEX_THREAD_ID" not in env
+
     def test_increments_depth_counter(self) -> None:
         """Each child process increments _OUROBOROS_DEPTH."""
         runtime = _make_runtime()
@@ -82,6 +89,12 @@ class TestCodexCliAdapterChildEnv:
         with patch.dict(os.environ, {"_OUROBOROS_DEPTH": "0"}):
             env = CodexCliLLMAdapter._build_child_env()
         assert env["_OUROBOROS_DEPTH"] == "1"
+
+    def test_strips_parent_codex_thread_id(self) -> None:
+        """Adapter child env must not inherit the parent Codex thread id."""
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "thread-123"}):
+            env = CodexCliLLMAdapter._build_child_env()
+        assert "CODEX_THREAD_ID" not in env
 
     def test_malformed_depth_defaults_to_one(self) -> None:
         """Adapter handles non-integer _OUROBOROS_DEPTH gracefully."""

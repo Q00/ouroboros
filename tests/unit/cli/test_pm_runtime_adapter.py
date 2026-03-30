@@ -133,9 +133,9 @@ def test_pm_command_uses_backend_safe_default_model() -> None:
             return_value="bypassPermissions",
         ),
         patch(
-            "ouroboros.cli.commands.pm._run_pm_interview", new=Mock(return_value=object())
+            "ouroboros.cli.commands.pm._run_pm_interview",
+            new=AsyncMock(return_value=None),
         ) as mock_run,
-        patch("ouroboros.cli.commands.pm.asyncio.run"),
         patch("ouroboros.cli.commands.pm.print_warning") as mock_warning,
     ):
         pm_command(
@@ -146,7 +146,7 @@ def test_pm_command_uses_backend_safe_default_model() -> None:
             debug=False,
         )
 
-    mock_run.assert_called_once_with(
+    mock_run.assert_awaited_once_with(
         resume_id=None,
         model="backend-safe-default",
         backend="codex",

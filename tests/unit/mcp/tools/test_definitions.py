@@ -1,6 +1,7 @@
 """Tests for Ouroboros tool definitions."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -44,7 +45,19 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_SESSION_ID_ARG,
 )
 from ouroboros.orchestrator.session import SessionTracker
+from ouroboros.persistence.event_store import EventStore
 from ouroboros.resilience.lateral import ThinkingPersona
+
+
+@pytest.fixture
+async def memory_event_store() -> AsyncIterator[EventStore]:
+    """Provide an initialized in-memory event store and dispose it after each test."""
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    try:
+        yield store
+    finally:
+        await store.close()
 
 
 def create_mock_live_ambiguity_score(
@@ -691,15 +704,14 @@ class TestQueryEventsHandler:
         assert result.is_ok
         assert "test-session" in result.value.text_content
 
-    async def test_handle_with_session_id_includes_related_parallel_execution_events(self) -> None:
+    async def test_handle_with_session_id_includes_related_parallel_execution_events(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """session_id queries should include execution and child AC aggregates."""
         from ouroboros.events.base import BaseEvent
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        await event_store.append(
+        await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
                 aggregate_type="session",
@@ -711,7 +723,7 @@ class TestQueryEventsHandler:
                 },
             )
         )
-        await event_store.append(
+        await memory_event_store.append(
             BaseEvent(
                 type="workflow.progress.updated",
                 aggregate_type="execution",
@@ -726,7 +738,7 @@ class TestQueryEventsHandler:
                 },
             )
         )
-        await event_store.append(
+        await memory_event_store.append(
             BaseEvent(
                 type="execution.session.started",
                 aggregate_type="execution",
@@ -738,7 +750,7 @@ class TestQueryEventsHandler:
             )
         )
 
-        handler = QueryEventsHandler(event_store=event_store)
+        handler = QueryEventsHandler(event_store=memory_event_store)
         result = await handler.handle({"session_id": "orch_parallel_123", "limit": 20})
 
         assert result.is_ok
@@ -1916,24 +1928,23 @@ class TestCancelExecutionHandler:
         assert result.is_err
         assert "execution_id is required" in str(result.error)
 
-    async def test_handle_not_found(self) -> None:
+    async def test_handle_not_found(self, memory_event_store: EventStore) -> None:
         """handle returns error when execution does not exist."""
-        handler = CancelExecutionHandler()
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "nonexistent-id"})
 
         assert result.is_err
         assert "not found" in str(result.error).lower() or "no events" in str(result.error).lower()
 
-    async def test_handle_cancels_running_session(self) -> None:
+    async def test_handle_cancels_running_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """handle successfully cancels a running session."""
         from ouroboros.orchestrator.session import SessionRepository, SessionStatus
-        from ouroboros.persistence.event_store import EventStore
-
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
 
         # Create a running session via the repository
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         create_result = await repo.create_session(
             execution_id="exec_cancel_123",
             seed_id="test-seed",
@@ -1942,7 +1953,7 @@ class TestCancelExecutionHandler:
         assert create_result.is_ok
 
         # Now cancel via handler (passing execution_id, not session_id)
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle(
             {
                 "execution_id": "exec_cancel_123",
@@ -1963,15 +1974,14 @@ class TestCancelExecutionHandler:
         assert reconstructed.is_ok
         assert reconstructed.value.status == SessionStatus.CANCELLED
 
-    async def test_handle_rejects_completed_session(self) -> None:
+    async def test_handle_rejects_completed_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """handle returns error when session is already completed."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_completed_123",
             seed_id="test-seed",
@@ -1979,22 +1989,21 @@ class TestCancelExecutionHandler:
         )
         await repo.mark_completed("orch_completed_123")
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_completed_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
         assert "completed" in str(result.error).lower()
 
-    async def test_handle_rejects_failed_session(self) -> None:
+    async def test_handle_rejects_failed_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """handle returns error when session has already failed."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_failed_123",
             seed_id="test-seed",
@@ -2002,22 +2011,21 @@ class TestCancelExecutionHandler:
         )
         await repo.mark_failed("orch_failed_123", error_message="some error")
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_failed_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
         assert "failed" in str(result.error).lower()
 
-    async def test_handle_rejects_already_cancelled_session(self) -> None:
+    async def test_handle_rejects_already_cancelled_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """handle returns error when session is already cancelled."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_cancelled_123",
             seed_id="test-seed",
@@ -2025,50 +2033,45 @@ class TestCancelExecutionHandler:
         )
         await repo.mark_cancelled("orch_cancelled_123", reason="first cancel")
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_cancelled_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
         assert "cancelled" in str(result.error).lower()
 
-    async def test_handle_default_reason(self) -> None:
+    async def test_handle_default_reason(self, memory_event_store: EventStore) -> None:
         """handle uses default reason when none provided."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_default_reason_123",
             seed_id="test-seed",
             session_id="orch_default_reason_123",
         )
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_default_reason_123"})
 
         assert result.is_ok
         assert result.value.meta["reason"] == "Cancelled by user"
 
-    async def test_handle_cancel_idempotent_state_after_cancel(self) -> None:
+    async def test_handle_cancel_idempotent_state_after_cancel(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """Cancellation is reflected in event store; second cancel attempt rejected."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_double_cancel_123",
             seed_id="test-seed",
             session_id="orch_double_cancel_123",
         )
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
 
         # First cancel succeeds
         result1 = await handler.handle(
@@ -2089,22 +2092,21 @@ class TestCancelExecutionHandler:
         assert result2.is_err
         assert "terminal state" in str(result2.error).lower()
 
-    async def test_handle_cancel_preserves_execution_id_in_response(self) -> None:
+    async def test_handle_cancel_preserves_execution_id_in_response(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """Cancellation response meta contains all expected fields."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_meta_fields_123",
             seed_id="test-seed",
             session_id="orch_meta_fields_123",
         )
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle(
             {
                 "execution_id": "exec_meta_fields_123",

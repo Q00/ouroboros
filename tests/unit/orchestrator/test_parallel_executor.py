@@ -200,6 +200,88 @@ class TestParallelACExecutor:
         assert result.runtime_handle.native_session_id == "opencode-session-1"
 
     @pytest.mark.asyncio
+    async def test_atomic_ac_terminates_live_runtime_handle_after_completion(self) -> None:
+        """Completed AC runs should best-effort terminate live runtime handles."""
+        terminate_calls = 0
+
+        async def _terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        class _StubImplementationRuntime:
+            def __init__(self) -> None:
+                self._runtime_handle_backend = "opencode"
+                self._cwd = "/tmp/project"
+                self._permission_mode = "acceptEdits"
+
+            @property
+            def runtime_backend(self) -> str:
+                return self._runtime_handle_backend
+
+            @property
+            def working_directory(self) -> str | None:
+                return self._cwd
+
+            @property
+            def permission_mode(self) -> str | None:
+                return self._permission_mode
+
+            async def execute_task(
+                self,
+                prompt: str,
+                tools: list[str] | None = None,
+                system_prompt: str | None = None,
+                resume_handle: RuntimeHandle | None = None,
+                resume_session_id: str | None = None,
+            ):
+                del prompt, tools, system_prompt, resume_session_id
+                yield AgentMessage(
+                    type="result",
+                    content="[TASK_COMPLETE]",
+                    data={"subtype": "success"},
+                    resume_handle=RuntimeHandle(
+                        backend=resume_handle.backend if resume_handle is not None else "opencode",
+                        kind=resume_handle.kind
+                        if resume_handle is not None
+                        else "implementation_session",
+                        native_session_id="opencode-session-live",
+                        cwd=resume_handle.cwd if resume_handle is not None else "/tmp/project",
+                        approval_mode=(
+                            resume_handle.approval_mode
+                            if resume_handle is not None
+                            else "acceptEdits"
+                        ),
+                        metadata=dict(resume_handle.metadata) if resume_handle is not None else {},
+                    ).bind_controls(terminate_callback=_terminate),
+                )
+
+        event_store, _ = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_StubImplementationRuntime(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(
+                MCPToolDefinition(name="Read", description="Read a file from the workspace."),
+            ),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert terminate_calls == 1
+
+    @pytest.mark.asyncio
     async def test_remembered_runtime_handle_preserves_live_controls(self) -> None:
         """AC-scope rebinding should preserve live observe/terminate callbacks."""
         executor = _make_executor()

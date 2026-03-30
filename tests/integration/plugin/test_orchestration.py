@@ -118,6 +118,42 @@ class TestAgentPoolIntegration:
         # Clean up
         await pool.stop()
 
+    @pytest.mark.asyncio
+    async def test_agent_pool_cancels_stuck_task(self) -> None:
+        """Health checker cancels timed-out tasks instead of only resetting state."""
+        adapter = MagicMock()
+
+        async def stalled_execute_task(*args, **kwargs):
+            await asyncio.sleep(1.0)
+            if False:  # pragma: no cover - keep this an async generator
+                yield None
+
+        adapter.execute_task = stalled_execute_task
+
+        config = AgentPoolConfig(
+            min_instances=1,
+            max_instances=1,
+            health_check_interval=0.05,
+            task_timeout=0.1,
+            enable_auto_scaling=False,
+        )
+
+        pool = AgentPool(adapter=adapter, config=config)
+        await pool.start()
+
+        task_id = await pool.submit_task(
+            agent_type="executor",
+            prompt="stuck task",
+            priority=1,
+        )
+
+        result = await pool.get_task_result(task_id, timeout=0.5)
+
+        assert result.success is False
+        assert result.error_message == "Task cancelled"
+
+        await pool.stop()
+
 
 class TestAgentRegistryIntegration:
     """Integration tests for AgentRegistry."""

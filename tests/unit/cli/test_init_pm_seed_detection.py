@@ -5,7 +5,7 @@ pm_seed YAML is auto-detected and asks whether to use it for the dev interview.
 """
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import yaml
 
@@ -569,12 +569,11 @@ class TestStartCommandPathResolution:
 
         with (
             patch.object(Path, "home", return_value=tmp_path),
-            patch("ouroboros.cli.commands.init.asyncio.run"),
-            patch("ouroboros.cli.commands.init._run_interview") as mock_run_interview,
+            patch("ouroboros.cli.commands.init._run_interview", new=AsyncMock()) as mock_run_interview,
             patch("ouroboros.cli.commands.init.print_info"),
         ):
             start(context=str(seed_path), resume=None)
 
-        resolved_context = mock_run_interview.call_args.args[0]
+        resolved_context = mock_run_interview.await_args.args[0]
         assert "TaskFlow" in resolved_context
         assert str(seed_path) not in resolved_context

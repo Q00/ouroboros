@@ -21,75 +21,84 @@ class TestJobManager:
         store = _build_store(tmp_path)
         manager = JobManager(store)
 
-        async def _runner() -> MCPToolResult:
-            await asyncio.sleep(0.05)
-            return MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text="done"),),
-                is_error=False,
-                meta={"kind": "test"},
+        try:
+            async def _runner() -> MCPToolResult:
+                await asyncio.sleep(0.05)
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="done"),),
+                    is_error=False,
+                    meta={"kind": "test"},
+                )
+
+            started = await manager.start_job(
+                job_type="test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(),
             )
 
-        started = await manager.start_job(
-            job_type="test",
-            initial_message="queued",
-            runner=_runner(),
-            links=JobLinks(),
-        )
+            await asyncio.sleep(0.15)
+            snapshot = await manager.get_snapshot(started.job_id)
 
-        await asyncio.sleep(0.15)
-        snapshot = await manager.get_snapshot(started.job_id)
-
-        assert snapshot.status == JobStatus.COMPLETED
-        assert snapshot.result_text == "done"
-        assert snapshot.result_meta["kind"] == "test"
+            assert snapshot.status == JobStatus.COMPLETED
+            assert snapshot.result_text == "done"
+            assert snapshot.result_meta["kind"] == "test"
+        finally:
+            await store.close()
 
     async def test_wait_for_change_returns_new_cursor(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
 
-        async def _runner() -> MCPToolResult:
-            await asyncio.sleep(0.05)
-            return MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text="waited"),),
-                is_error=False,
+        try:
+            async def _runner() -> MCPToolResult:
+                await asyncio.sleep(0.05)
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="waited"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="wait-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(),
             )
 
-        started = await manager.start_job(
-            job_type="wait-test",
-            initial_message="queued",
-            runner=_runner(),
-            links=JobLinks(),
-        )
+            snapshot, changed = await manager.wait_for_change(
+                started.job_id,
+                cursor=started.cursor,
+                timeout_seconds=2,
+            )
 
-        snapshot, changed = await manager.wait_for_change(
-            started.job_id,
-            cursor=started.cursor,
-            timeout_seconds=2,
-        )
-
-        assert changed is True
-        assert snapshot.cursor >= started.cursor
+            assert changed is True
+            assert snapshot.cursor >= started.cursor
+        finally:
+            await store.close()
 
     async def test_cancel_job_cancels_non_session_task(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
 
-        async def _runner() -> MCPToolResult:
-            await asyncio.sleep(10)
-            return MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
-                is_error=False,
+        try:
+            async def _runner() -> MCPToolResult:
+                await asyncio.sleep(10)
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="cancel-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(),
             )
 
-        started = await manager.start_job(
-            job_type="cancel-test",
-            initial_message="queued",
-            runner=_runner(),
-            links=JobLinks(),
-        )
+            await manager.cancel_job(started.job_id)
+            await asyncio.sleep(0.1)
+            snapshot = await manager.get_snapshot(started.job_id)
 
-        await manager.cancel_job(started.job_id)
-        await asyncio.sleep(0.1)
-        snapshot = await manager.get_snapshot(started.job_id)
-
-        assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+        finally:
+            await store.close()
