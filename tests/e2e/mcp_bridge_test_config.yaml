@@ -1,0 +1,9 @@
+mcp_servers:
+  - name: openchrome
+    transport: stdio
+    command: npx
+    args: ["--prefer-online", "-y", "openchrome-mcp@latest", "serve", "--auto-launch"]
+
+connection:
+  timeout_seconds: 30
+  retry_attempts: 2
