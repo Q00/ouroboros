@@ -108,6 +108,8 @@ class ExecuteSeedHandler:
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
+    mcp_manager: Any | None = field(default=None, repr=False)
+    mcp_tool_prefix: str = ""
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -394,6 +396,8 @@ class ExecuteSeedHandler:
                     adapter=agent_adapter,
                     event_store=event_store,
                     console=console,
+                    mcp_manager=self.mcp_manager,
+                    mcp_tool_prefix=self.mcp_tool_prefix,
                     debug=False,
                     enable_decomposition=True,
                     inherited_runtime_handle=inherited_runtime_handle,
