@@ -10,14 +10,12 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
-from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 from ouroboros.mcp.tools.definitions import (
     execute_seed_handler,
     get_ouroboros_tools,
     start_execute_seed_handler,
 )
+from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 
 
 class TestExecuteSeedHandlerFields:
@@ -134,7 +132,8 @@ class TestCompositionRoot:
 
         server = create_ouroboros_server()
         bridge_resources = [
-            r for r in server._owned_resources
+            r
+            for r in server._owned_resources
             if hasattr(r, "tool_prefix") and hasattr(r, "manager")
         ]
         assert len(bridge_resources) == 0
