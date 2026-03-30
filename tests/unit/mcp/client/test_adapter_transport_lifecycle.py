@@ -45,11 +45,13 @@ def _mock_session(*, init_fail=False, exit_fail=False):
     if init_fail:
         session.initialize = AsyncMock(side_effect=ConnectionError("init failed"))
     else:
-        session.initialize = AsyncMock(return_value=MagicMock(
-            serverInfo=MagicMock(name="test", version="1.0"),
-            protocolVersion="2024-11-05",
-            capabilities=MagicMock(tools=None, resources=None, prompts=None, logging=None),
-        ))
+        session.initialize = AsyncMock(
+            return_value=MagicMock(
+                serverInfo=MagicMock(name="test", version="1.0"),
+                protocolVersion="2024-11-05",
+                capabilities=MagicMock(tools=None, resources=None, prompts=None, logging=None),
+            )
+        )
     return session
 
 
@@ -63,8 +65,10 @@ class TestConnectRollback:
         transport_cm = _mock_transport_cm()
         session = _mock_session(init_fail=True)
 
-        with patch("mcp.client.stdio.stdio_client", return_value=transport_cm), \
-             patch("mcp.ClientSession", return_value=session):
+        with (
+            patch("mcp.client.stdio.stdio_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+        ):
             result = await adapter.connect(_make_stdio_config())
 
         assert result.is_err
@@ -81,8 +85,10 @@ class TestConnectRollback:
         session = MagicMock()
         session.__aenter__ = AsyncMock(side_effect=RuntimeError("session enter boom"))
 
-        with patch("mcp.client.stdio.stdio_client", return_value=transport_cm), \
-             patch("mcp.ClientSession", return_value=session):
+        with (
+            patch("mcp.client.stdio.stdio_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+        ):
             result = await adapter.connect(_make_stdio_config())
 
         assert result.is_err
@@ -191,8 +197,10 @@ class TestHappyPath:
         transport_cm = _mock_transport_cm()
         session = _mock_session()
 
-        with patch("mcp.client.stdio.stdio_client", return_value=transport_cm), \
-             patch("mcp.ClientSession", return_value=session):
+        with (
+            patch("mcp.client.stdio.stdio_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+        ):
             result = await adapter.connect(_make_stdio_config())
 
         assert result.is_ok
