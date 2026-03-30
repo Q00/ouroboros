@@ -143,7 +143,7 @@ class TestInitCommand:
             with patch(
                 "ouroboros.cli.commands.init.asyncio.run",
                 side_effect=_consume_asyncio_run(return_value=[]),
-            ) as mock_run:
+            ):
 
                 result = runner.invoke(
                     app,
