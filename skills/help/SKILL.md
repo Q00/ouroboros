@@ -46,6 +46,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo cancel` | Cancel stuck or orphaned executions | CLI |
 | `ooo update` | Check for updates + upgrade to latest | Plugin |
 | `ooo brownfield` | Scan and manage brownfield repo defaults | MCP |
+| `ooo publish` | Publish Seed as GitHub Issues for teams | Plugin |
 
 ### Evolutionary Loop
 
@@ -77,6 +78,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
 | "update ouroboros", "upgrade ouroboros" | `ooo update` |
 | "brownfield defaults", "brownfield scan" | `ooo brownfield` |
+| "publish to github", "create issues from seed", "seed to issues" | `ooo publish` |
 
 ### Loop Triggers
 
@@ -106,6 +108,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:cancel` | Cancel stuck or orphaned executions | CLI |
 | `/ouroboros:update` | Check for updates + upgrade to latest | Plugin |
 | `/ouroboros:brownfield` | Scan and manage brownfield repo defaults | MCP |
+| `/ouroboros:publish` | Publish Seed as GitHub Issues for teams | Plugin |
 
 ### Loop Skills
 
