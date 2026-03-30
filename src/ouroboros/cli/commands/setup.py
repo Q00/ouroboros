@@ -42,6 +42,9 @@ _CLAUDE_UVX_ARGS: list[str] = [
 ]
 
 
+_NATIVE_ENV: dict[str, str] = {"OUROBOROS_AGENT_MODE": "native"}
+
+
 def _detect_mcp_entry() -> dict[str, object] | None:
     """Build the correct MCP entry based on how ouroboros is installed.
 
@@ -50,9 +53,9 @@ def _detect_mcp_entry() -> dict[str, object] | None:
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
-        return {"command": "uvx", "args": list(_CLAUDE_UVX_ARGS)}
+        return {"command": "uvx", "args": list(_CLAUDE_UVX_ARGS), "env": _NATIVE_ENV}
     if shutil.which("ouroboros"):
-        return {"command": "ouroboros", "args": ["mcp", "serve"]}
+        return {"command": "ouroboros", "args": ["mcp", "serve"], "env": _NATIVE_ENV}
     # Only use python3 fallback if ouroboros is actually importable
     import subprocess
 
@@ -65,7 +68,7 @@ def _detect_mcp_entry() -> dict[str, object] | None:
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"], "env": _NATIVE_ENV}
 
 
 def _ensure_claude_mcp_entry() -> None:
@@ -457,6 +460,7 @@ def _register_cursor_mcp_server() -> None:
         mcp_data["mcpServers"]["ouroboros"] = {
             "command": "uvx",
             "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+            "env": _NATIVE_ENV,
         }
         with cursor_mcp_path.open("w") as f:
             json.dump(mcp_data, f, indent=2)
