@@ -22,6 +22,7 @@ class TestJobManager:
         manager = JobManager(store)
 
         try:
+
             async def _runner() -> MCPToolResult:
                 await asyncio.sleep(0.05)
                 return MCPToolResult(
@@ -51,6 +52,7 @@ class TestJobManager:
         manager = JobManager(store)
 
         try:
+
             async def _runner() -> MCPToolResult:
                 await asyncio.sleep(0.05)
                 return MCPToolResult(
@@ -81,6 +83,7 @@ class TestJobManager:
         manager = JobManager(store)
 
         try:
+
             async def _runner() -> MCPToolResult:
                 await asyncio.sleep(10)
                 return MCPToolResult(

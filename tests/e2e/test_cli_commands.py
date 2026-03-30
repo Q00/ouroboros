@@ -122,7 +122,6 @@ class TestInitCommand:
                         "ouroboros.cli.commands.init.asyncio.run",
                         side_effect=_consume_asyncio_run(),
                     ) as mock_run:
-
                         _result = runner.invoke(
                             app,
                             [
@@ -144,7 +143,6 @@ class TestInitCommand:
                 "ouroboros.cli.commands.init.asyncio.run",
                 side_effect=_consume_asyncio_run(return_value=[]),
             ):
-
                 result = runner.invoke(
                     app,
                     ["init", "list", "--state-dir", str(temp_state_dir)],
@@ -220,7 +218,6 @@ class TestRunWorkflowCommand:
             "ouroboros.cli.commands.run.asyncio.run",
             side_effect=_consume_asyncio_run(),
         ) as mock_run:
-
             result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--debug"],
@@ -237,7 +234,6 @@ class TestRunWorkflowCommand:
             "ouroboros.cli.commands.run.asyncio.run",
             side_effect=_consume_asyncio_run(),
         ) as mock_run:
-
             _result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--orchestrator"],
@@ -252,7 +248,6 @@ class TestRunWorkflowCommand:
             "ouroboros.cli.commands.run.asyncio.run",
             side_effect=_consume_asyncio_run(),
         ) as mock_run:
-
             _result = runner.invoke(
                 app,
                 [
@@ -273,7 +268,6 @@ class TestRunWorkflowCommand:
             "ouroboros.cli.commands.run.asyncio.run",
             side_effect=_consume_asyncio_run(),
         ) as mock_run:
-
             result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--resume", "sess_123"],
