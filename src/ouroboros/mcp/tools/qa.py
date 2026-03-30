@@ -173,10 +173,8 @@ def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
 
 _LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
 _BOLD_RE = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
-_KV_RE = re.compile(r"(?im)^(\w[\w ]*?)[ \t]*[:=][ \t]*(.+)$")
-_SCORE_FALLBACK_RE = re.compile(
-    r"(?im)\bscore\b[ \t]*(?:is|-)[ \t]*([0-9]*\.?[0-9]+)"
-)
+_KV_RE = re.compile(r"(?im)^(\w[\w ]*?)[ \t]*[:=\-][ \t]*(.+)$")
+_SCORE_FALLBACK_RE = re.compile(r"(?im)\bscore\b[ \t]*(?:is|-)[ \t]*([0-9]*\.?[0-9]+)")
 
 
 def _strip_line_decorations(text: str) -> str:
@@ -222,17 +220,46 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
     except ValueError:
         return None
 
-    differences = [
-        item.strip()
-        for item in re.findall(r"(?im)^\s*(?:[-*]|\d+[.)])\s+(.+)$", response_text)
-    ]
+    differences: list[str] = []
+    suggestions: list[str] = []
+    dimensions: dict[str, float] = {}
+
+    # Track which section we're in based on headers
+    current_section = "differences"
+    _SECTION_RE = re.compile(r"(?i)^\s*#*\s*(suggestions?|differences?|dimensions?)\s*:?\s*$")
+    _BULLET_RE = re.compile(r"(?m)^\s*(?:[-*]|\d+[.)])\s+(.+)$")
+    _DIM_RE = re.compile(r"^(\w[\w ]*?)[:=\-]\s*([0-9]*\.?[0-9]+)\s*$")
+
+    for line in response_text.splitlines():
+        section_match = _SECTION_RE.match(line)
+        if section_match:
+            header = section_match.group(1).lower().rstrip("s")
+            if header == "suggestion":
+                current_section = "suggestions"
+            elif header == "dimension":
+                current_section = "dimensions"
+            else:
+                current_section = "differences"
+            continue
+
+        bullet_match = _BULLET_RE.match(line)
+        if bullet_match:
+            item = bullet_match.group(1).strip()
+            # Check if this bullet is a dimension (e.g. "accuracy: 0.9")
+            dim_match = _DIM_RE.match(item)
+            if dim_match and current_section == "dimensions":
+                dimensions[dim_match.group(1).strip().lower()] = float(dim_match.group(2))
+            elif current_section == "suggestions":
+                suggestions.append(item)
+            else:
+                differences.append(item)
 
     return {
         "score": score,
         "verdict": fields.get("verdict", ""),
-        "dimensions": {},
+        "dimensions": dimensions,
         "differences": differences,
-        "suggestions": [],
+        "suggestions": suggestions,
         "reasoning": fields.get("reasoning", ""),
     }
 
