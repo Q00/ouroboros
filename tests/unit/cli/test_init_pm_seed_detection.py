@@ -569,7 +569,9 @@ class TestStartCommandPathResolution:
 
         with (
             patch.object(Path, "home", return_value=tmp_path),
-            patch("ouroboros.cli.commands.init._run_interview", new=AsyncMock()) as mock_run_interview,
+            patch(
+                "ouroboros.cli.commands.init._run_interview", new=AsyncMock()
+            ) as mock_run_interview,
             patch("ouroboros.cli.commands.init.print_info"),
         ):
             start(context=str(seed_path), resume=None)

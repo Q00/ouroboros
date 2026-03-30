@@ -1146,6 +1146,17 @@ class OrchestratorRunner:
                     error=str(cancel_result.error),
                 )
 
+        # Mirror cancellation into execution stream for TUI.
+        await self._event_store.append(
+            create_execution_terminal_event(
+                execution_id=execution_id,
+                session_id=session_id,
+                status="cancelled",
+                error_message="Execution cancelled by external request",
+                messages_processed=messages_processed,
+            )
+        )
+
         # Display cancellation notice
         self._console.print(
             Panel(
@@ -2166,7 +2177,9 @@ Note: This is a resumed session. Please continue from where execution was interr
                 )
 
             # Mirror terminal state into execution stream for TUI.
-            terminal_status = "completed" if success else ("paused" if recoverable_resume_failure else "failed")
+            terminal_status = (
+                "completed" if success else ("paused" if recoverable_resume_failure else "failed")
+            )
             await self._event_store.append(
                 create_execution_terminal_event(
                     execution_id=tracker.execution_id,
