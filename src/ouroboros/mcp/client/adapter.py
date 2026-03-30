@@ -239,6 +239,8 @@ class MCPClientAdapter:
                 except Exception:
                     pass
                 self._transport_cm = None
+                self._read_stream = None
+                self._write_stream = None
                 raise
 
         elif config.transport in (TransportType.SSE, TransportType.STREAMABLE_HTTP):
@@ -305,6 +307,8 @@ class MCPClientAdapter:
             finally:
                 self._transport_cm = None
 
+        self._read_stream = None
+        self._write_stream = None
         self._server_info = None
         server_name = self._config.name if self._config else "unknown"
 
