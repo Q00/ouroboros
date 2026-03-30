@@ -53,6 +53,7 @@ class SessionStatusHandler:
         """Close the event store if this handler owns it."""
         if self._owns_event_store:
             await self._event_store.close()
+            self._initialized = False
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -167,6 +168,9 @@ class SessionStatusHandler:
                     tool_name="ouroboros_session_status",
                 )
             )
+        finally:
+            if self._owns_event_store:
+                await self.close()
 
 
 @dataclass
@@ -242,9 +246,14 @@ class QueryEventsHandler:
             offset=offset,
         )
 
+        store = self.event_store
+        owns_event_store = False
+
         try:
             # Use injected or create event store
-            store = self.event_store or EventStore()
+            if store is None:
+                store = EventStore()
+                owns_event_store = True
             await store.initialize()
 
             # Query events from the store
@@ -262,10 +271,6 @@ class QueryEventsHandler:
                     limit=limit,
                     offset=offset,
                 )
-
-            # Only close if we created the store ourselves
-            if self.event_store is None:
-                await store.close()
 
             # Format events for response
             events_text = self._format_events(events, session_id, event_type, offset, limit)
@@ -289,6 +294,9 @@ class QueryEventsHandler:
                     tool_name="ouroboros_query_events",
                 )
             )
+        finally:
+            if owns_event_store and store is not None:
+                await store.close()
 
     def _format_events(
         self,
@@ -365,6 +373,7 @@ class ACDashboardHandler:
         """Close the event store if this handler owns it."""
         if self._owns_event_store:
             await self._event_store.close()
+            self._initialized = False
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -415,10 +424,60 @@ class ACDashboardHandler:
         mode = arguments.get("mode", "summary")
         ac_index = arguments.get("ac_index")
 
-        await self._ensure_initialized()
-
         try:
+            await self._ensure_initialized()
             events = await self._event_store.replay_lineage(lineage_id)
+            if not events:
+                return Result.err(
+                    MCPToolError(
+                        f"No lineage found with ID: {lineage_id}",
+                        tool_name="ouroboros_ac_dashboard",
+                    )
+                )
+
+            from ouroboros.evolution.projector import LineageProjector
+            from ouroboros.mcp.tools.dashboard import (
+                format_full,
+                format_single_ac,
+                format_summary,
+            )
+
+            projector = LineageProjector()
+            lineage = projector.project(events)
+
+            if lineage is None:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to project lineage: {lineage_id}",
+                        tool_name="ouroboros_ac_dashboard",
+                    )
+                )
+
+            if mode == "full":
+                text = format_full(lineage)
+            elif mode == "ac":
+                if ac_index is None:
+                    return Result.err(
+                        MCPToolError(
+                            "ac_index is required for mode='ac'",
+                            tool_name="ouroboros_ac_dashboard",
+                        )
+                    )
+                text = format_single_ac(lineage, int(ac_index) - 1)  # Convert to 0-based
+            else:
+                text = format_summary(lineage)
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                    is_error=False,
+                    meta={
+                        "lineage_id": lineage.lineage_id,
+                        "mode": mode,
+                        "generations": lineage.current_generation,
+                    },
+                )
+            )
         except Exception as e:
             return Result.err(
                 MCPToolError(
@@ -426,55 +485,6 @@ class ACDashboardHandler:
                     tool_name="ouroboros_ac_dashboard",
                 )
             )
-
-        if not events:
-            return Result.err(
-                MCPToolError(
-                    f"No lineage found with ID: {lineage_id}",
-                    tool_name="ouroboros_ac_dashboard",
-                )
-            )
-
-        from ouroboros.evolution.projector import LineageProjector
-        from ouroboros.mcp.tools.dashboard import (
-            format_full,
-            format_single_ac,
-            format_summary,
-        )
-
-        projector = LineageProjector()
-        lineage = projector.project(events)
-
-        if lineage is None:
-            return Result.err(
-                MCPToolError(
-                    f"Failed to project lineage: {lineage_id}",
-                    tool_name="ouroboros_ac_dashboard",
-                )
-            )
-
-        if mode == "full":
-            text = format_full(lineage)
-        elif mode == "ac":
-            if ac_index is None:
-                return Result.err(
-                    MCPToolError(
-                        "ac_index is required for mode='ac'",
-                        tool_name="ouroboros_ac_dashboard",
-                    )
-                )
-            text = format_single_ac(lineage, int(ac_index) - 1)  # Convert to 0-based
-        else:
-            text = format_summary(lineage)
-
-        return Result.ok(
-            MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text=text),),
-                is_error=False,
-                meta={
-                    "lineage_id": lineage.lineage_id,
-                    "mode": mode,
-                    "generations": lineage.current_generation,
-                },
-            )
-        )
+        finally:
+            if self._owns_event_store:
+                await self.close()

@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+import inspect
 from typing import Any
 from uuid import uuid4
 
@@ -82,6 +83,7 @@ class JobManager:
     def __init__(self, event_store: EventStore | None = None) -> None:
         self._event_store = event_store or EventStore()
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._monitors: dict[str, asyncio.Task[None]] = {}
         self._initialized = False
         self._known_job_ids: set[str] = set()
@@ -121,6 +123,9 @@ class JobManager:
         )
 
         self._known_job_ids.add(job_id)
+        if inspect.iscoroutine(runner):
+            runner = asyncio.create_task(runner)
+            self._runner_tasks[job_id] = runner
         task = asyncio.create_task(self._run_job(job_id, job_type, runner))
         self._tasks[job_id] = task
         self._monitors[job_id] = asyncio.create_task(self._monitor_job(job_id))
@@ -129,11 +134,22 @@ class JobManager:
 
     async def _run_job(self, job_id: str, job_type: str, runner: Any) -> None:
         """Run the actual background job and persist terminal state."""
+        runner_task: asyncio.Task[Any] | None = runner if isinstance(runner, asyncio.Task) else None
+        runner_awaitable = runner_task or runner
         await self.update_status(job_id, JobStatus.RUNNING, f"Running {job_type}")
 
         try:
-            result = await runner
+            if runner_task is None and inspect.iscoroutine(runner):
+                runner_task = asyncio.create_task(runner)
+                runner_awaitable = runner_task
+            result = await runner_awaitable
         except asyncio.CancelledError:
+            if runner_task is not None and not runner_task.done():
+                runner_task.cancel()
+                try:
+                    await runner_task
+                except asyncio.CancelledError:
+                    pass
             await self._append_event(
                 "mcp.job.cancelled",
                 job_id,
@@ -183,7 +199,10 @@ class JobManager:
                 },
             )
         finally:
+            if runner_task is None and inspect.iscoroutine(runner):
+                runner.close()
             self._tasks.pop(job_id, None)
+            self._runner_tasks.pop(job_id, None)
             monitor = self._monitors.pop(job_id, None)
             if monitor is not None:
                 monitor.cancel()
@@ -418,6 +437,9 @@ class JobManager:
             task = self._tasks.get(job_id)
             if task is not None:
                 task.cancel()
+            runner_task = self._runner_tasks.get(job_id)
+            if runner_task is not None and not runner_task.done():
+                runner_task.cancel()
 
         return await self.get_snapshot(job_id)
 
@@ -443,6 +465,7 @@ class JobManager:
         for job_id in expired:
             self._known_job_ids.discard(job_id)
             self._tasks.pop(job_id, None)
+            self._runner_tasks.pop(job_id, None)
             self._monitors.pop(job_id, None)
         return len(expired)
 

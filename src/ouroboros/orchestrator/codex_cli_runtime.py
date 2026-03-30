@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass, replace
@@ -84,6 +85,11 @@ class CodexCliRuntime:
     _skills_package_uri = "packaged://ouroboros.codex/skills"
     _process_shutdown_timeout_seconds = 5.0
     _max_resume_retries = 3
+    _max_ouroboros_depth = 5
+    _startup_output_timeout_seconds = 60.0
+    _stdout_idle_timeout_seconds = 300.0
+    _max_stderr_lines = 512
+    _child_session_env_keys = ("CODEX_THREAD_ID",)
 
     def __init__(
         self,
@@ -148,7 +154,13 @@ class CodexCliRuntime:
         return get_codex_cli_path()
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
-        """Resolve the Codex CLI path from explicit, config, or PATH values."""
+        """Resolve the Codex CLI path from explicit, config, or PATH values.
+
+        Validates that the resolved binary is the real Node.js CLI and not a
+        platform wrapper (e.g. zeude) that can fork-bomb when invoked without
+        a TTY.  When a wrapper is detected the method falls back to the next
+        ``codex`` on ``PATH`` that passes validation.
+        """
         if cli_path is not None:
             candidate = str(Path(cli_path).expanduser())
         else:
@@ -160,8 +172,62 @@ class CodexCliRuntime:
 
         path = Path(candidate).expanduser()
         if path.exists():
-            return str(path)
+            resolved = str(path)
+            if not self._is_wrapper_binary(resolved):
+                return resolved
+            # The candidate is a wrapper — try to find the real CLI on PATH.
+            log.warning(
+                f"{self._log_namespace}.cli_wrapper_detected",
+                wrapper_path=resolved,
+                hint="Searching PATH for the real Node.js codex CLI.",
+            )
+            fallback = self._find_real_cli(skip=resolved)
+            if fallback is not None:
+                log.info(
+                    f"{self._log_namespace}.cli_resolved_via_fallback",
+                    fallback_path=fallback,
+                )
+                return fallback
+            # No fallback found — use the wrapper and hope for the best.
+            log.warning(
+                f"{self._log_namespace}.cli_no_fallback",
+                wrapper_path=resolved,
+            )
+            return resolved
         return candidate
+
+    @staticmethod
+    def _is_wrapper_binary(path: str) -> bool:
+        """Return True when *path* looks like a compiled wrapper, not the real CLI.
+
+        The real ``codex`` CLI is a Node.js script (``#!/usr/bin/env node``).
+        Platform wrappers (e.g. zeude) are native Mach-O / ELF binaries that
+        delegate to the real CLI but may perform recursive version checks that
+        fork-bomb when invoked from a non-TTY subprocess.
+        """
+        try:
+            with open(path, "rb") as fh:
+                magic = fh.read(4)
+            # Mach-O: \xcf\xfa\xed\xfe (64-bit) or \xce\xfa\xed\xfe (32-bit)
+            # ELF:    \x7fELF
+            return magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\x7fELF")
+        except OSError:
+            return False
+
+    def _find_real_cli(self, *, skip: str) -> str | None:
+        """Walk ``PATH`` for the first ``codex`` that is not *skip* and not a wrapper."""
+        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+        for d in path_dirs:
+            candidate = os.path.join(d, self._default_cli_name)
+            if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+                continue
+            resolved = str(Path(candidate).resolve())
+            if resolved == str(Path(skip).resolve()):
+                continue
+            if self._is_wrapper_binary(candidate):
+                continue
+            return candidate
+        return None
 
     def _resolve_skills_dir(self, skills_dir: str | Path | None) -> Path | None:
         """Resolve an optional explicit skill override directory for intercept metadata."""
@@ -747,17 +813,27 @@ class CodexCliRuntime:
 
         Strips ``OUROBOROS_AGENT_RUNTIME`` and ``OUROBOROS_LLM_BACKEND`` so
         that a child Codex process does not re-load the Ouroboros MCP server,
-        preventing the recursive startup loop described in #185.
+        preventing the recursive startup loop described in #185. Also strips
+        parent Codex thread/session env so nested ``codex exec`` starts a fresh
+        subprocess instead of inheriting the current agent thread.
         """
         env = os.environ.copy()
         # Prevent child from re-entering Ouroboros MCP
         for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
             env.pop(key, None)
-        # Track recursion depth for diagnostics (defensive: ignore malformed values)
+        for key in self._child_session_env_keys:
+            env.pop(key, None)
+        # Strip CLAUDECODE so the child codex doesn't think it's a nested
+        # session inside Claude Code and refuse to start / hang (#269).
+        env.pop("CLAUDECODE", None)
+        # Track and enforce recursion depth to prevent fork bombs.
         try:
             depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
         except (ValueError, TypeError):
             depth = 1
+        if depth > self._max_ouroboros_depth:
+            msg = f"Maximum Ouroboros nesting depth ({self._max_ouroboros_depth}) exceeded"
+            raise RuntimeError(msg)
         env["_OUROBOROS_DEPTH"] = str(depth)
         return env
 
@@ -798,22 +874,29 @@ class CodexCliRuntime:
     async def _collect_stream_lines(
         self,
         stream: asyncio.StreamReader | None,
+        *,
+        max_lines: int | None = None,
     ) -> list[str]:
         """Drain a subprocess stream without blocking the main event loop."""
         if stream is None:
             return []
 
-        lines: list[str] = []
+        if max_lines is not None and max_lines > 0:
+            lines: deque[str] = deque(maxlen=max_lines)
+        else:
+            lines = deque()
         async for line in self._iter_stream_lines(stream):
             if line:
                 lines.append(line)
-        return lines
+        return list(lines)
 
     async def _iter_stream_lines(
         self,
         stream: asyncio.StreamReader | None,
         *,
         chunk_size: int = 16384,
+        first_chunk_timeout_seconds: float | None = None,
+        chunk_timeout_seconds: float | None = None,
     ) -> AsyncIterator[str]:
         """Yield decoded lines without relying on StreamReader.readline().
 
@@ -826,12 +909,33 @@ class CodexCliRuntime:
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         buffer = ""
         buffer_byte_estimate = 0
+        saw_chunk = False
 
         while True:
-            chunk = await stream.read(chunk_size)
+            timeout_seconds: float | None = None
+            if not saw_chunk:
+                timeout_seconds = first_chunk_timeout_seconds
+            elif chunk_timeout_seconds is not None:
+                timeout_seconds = chunk_timeout_seconds
+
+            try:
+                if timeout_seconds is None:
+                    chunk = await stream.read(chunk_size)
+                else:
+                    chunk = await asyncio.wait_for(
+                        stream.read(chunk_size),
+                        timeout=timeout_seconds,
+                    )
+            except TimeoutError as exc:
+                phase = "startup" if not saw_chunk else "idle"
+                raise TimeoutError(
+                    f"{self._display_name} produced no stdout during {phase} "
+                    f"window ({timeout_seconds:.0f}s)"
+                ) from exc
             if not chunk:
                 break
 
+            saw_chunk = True
             decoded = decoder.decode(chunk)
             buffer += decoded
             # Track byte size incrementally: worst-case 4 bytes per char (UTF-8).
@@ -1540,11 +1644,20 @@ class CodexCliRuntime:
             process=process,
             control_state=control_state,
         )
-        stderr_task = asyncio.create_task(self._collect_stream_lines(process.stderr))
+        stderr_task = asyncio.create_task(
+            self._collect_stream_lines(
+                process.stderr,
+                max_lines=self._max_stderr_lines,
+            )
+        )
 
         try:
             if process.stdout is not None:
-                async for line in self._iter_stream_lines(process.stdout):
+                async for line in self._iter_stream_lines(
+                    process.stdout,
+                    first_chunk_timeout_seconds=self._startup_output_timeout_seconds,
+                    chunk_timeout_seconds=self._stdout_idle_timeout_seconds,
+                ):
                     if not line:
                         continue
 
@@ -1615,6 +1728,45 @@ class CodexCliRuntime:
                             yielded_final = True
                         yield message
 
+        except TimeoutError as e:
+            if process is not None and control_state is not None:
+                await self._terminate_bound_runtime_handle(process, control_state)
+                current_handle = self._bind_runtime_handle_controls(
+                    current_handle,
+                    process=process,
+                    control_state=control_state,
+                )
+            process_finished = getattr(process, "returncode", None) is not None
+            process_terminated = True
+            if stderr_task is not None:
+                stderr_lines = await stderr_task
+            final_message = "\n".join(stderr_lines).strip()
+            if not final_message:
+                final_message = f"{self._display_name} became unresponsive and was terminated: {e}"
+            data = {
+                "subtype": "error",
+                "error_type": type(e).__name__,
+            }
+            data.update(self._build_resume_retry_metadata(attempted_resume_session_id))
+            yield AgentMessage(
+                type="result",
+                content=final_message,
+                data=data,
+                resume_handle=current_handle,
+            )
+            return
+        except asyncio.CancelledError:
+            if process is not None:
+                log.warning(f"{self._log_namespace}.task_cancelled", cwd=self._cwd)
+                await self._terminate_process(process)
+                process_terminated = True
+                if control_state is not None:
+                    control_state["terminated"] = True
+                    control_state["returncode"] = getattr(process, "returncode", None)
+                    control_state["runtime_status"] = "terminated"
+            raise
+        else:
+            # Normal completion path — stdout stream finished without timeout.
             returncode = await process.wait()
             process_finished = True
             control_state["returncode"] = returncode
@@ -1681,33 +1833,25 @@ class CodexCliRuntime:
                     yield message
                 return
 
-            data: dict[str, Any] = {
+            result_data: dict[str, Any] = {
                 "subtype": "success" if returncode == 0 else "error",
                 "returncode": returncode,
             }
             if current_handle is not None and current_handle.native_session_id:
-                data["session_id"] = current_handle.native_session_id
+                result_data["session_id"] = current_handle.native_session_id
             if returncode != 0:
-                data["error_type"] = self._runtime_error_type
+                result_data["error_type"] = self._runtime_error_type
                 if attempted_resume_session_id and not saw_runtime_event:
-                    data.update(self._build_resume_retry_metadata(attempted_resume_session_id))
+                    result_data.update(
+                        self._build_resume_retry_metadata(attempted_resume_session_id)
+                    )
 
             yield AgentMessage(
                 type="result",
                 content=final_message,
-                data=data,
+                data=result_data,
                 resume_handle=current_handle,
             )
-        except asyncio.CancelledError:
-            if process is not None:
-                log.warning(f"{self._log_namespace}.task_cancelled", cwd=self._cwd)
-                await self._terminate_process(process)
-                process_terminated = True
-                if control_state is not None:
-                    control_state["terminated"] = True
-                    control_state["returncode"] = getattr(process, "returncode", None)
-                    control_state["runtime_status"] = "terminated"
-            raise
         finally:
             if process is not None:
                 if (

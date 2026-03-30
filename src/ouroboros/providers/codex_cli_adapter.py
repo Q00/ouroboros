@@ -44,6 +44,7 @@ from ouroboros.providers.codex_cli_stream import (
 log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
+_MAX_OUROBOROS_DEPTH = 5
 
 _RETRYABLE_ERROR_PATTERNS = (
     "rate limit",
@@ -631,10 +632,20 @@ class CodexCliLLMAdapter:
         env = os.environ.copy()
         for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
             env.pop(key, None)
+        env.pop("CODEX_THREAD_ID", None)
+        # Strip CLAUDECODE so child codex doesn't hang in nested session
+        # detection when invoked from within Claude Code (#269).
+        env.pop("CLAUDECODE", None)
         try:
             depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
         except (ValueError, TypeError):
             depth = 1
+        if depth > _MAX_OUROBOROS_DEPTH:
+            raise ProviderError(
+                message=f"Maximum Ouroboros nesting depth ({_MAX_OUROBOROS_DEPTH}) exceeded",
+                provider="codex_cli",
+                details={"depth": depth},
+            )
         env["_OUROBOROS_DEPTH"] = str(depth)
         return env
 

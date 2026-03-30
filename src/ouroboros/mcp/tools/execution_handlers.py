@@ -7,6 +7,7 @@ This module contains handlers for seed execution:
 
 import asyncio
 from dataclasses import dataclass, field
+import inspect
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -508,7 +509,9 @@ class ExecuteSeedHandler:
                             release_lock(_workspace.lock_path)
                         if _owns_event_store:
                             try:
-                                await _event_store.close()
+                                close_result = _event_store.close()
+                                if inspect.isawaitable(close_result):
+                                    await close_result
                             except Exception:
                                 log.exception("mcp.tool.execute_seed.event_store_close_error")
 
@@ -564,6 +567,13 @@ class ExecuteSeedHandler:
             finally:
                 if workspace is not None and not launched:
                     release_lock(workspace.lock_path)
+                if owns_event_store and not launched:
+                    try:
+                        close_result = event_store.close()
+                        if inspect.isawaitable(close_result):
+                            await close_result
+                    except Exception:
+                        log.exception("mcp.tool.execute_seed.event_store_close_error")
         except Exception as e:
             log.error("mcp.tool.execute_seed.error", error=str(e))
             return Result.err(

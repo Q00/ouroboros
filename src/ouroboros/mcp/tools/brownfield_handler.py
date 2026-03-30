@@ -212,6 +212,7 @@ class BrownfieldHandler:
         - Otherwise → ``query``
         """
         action = _detect_action(arguments)
+        owned_store = self._store is None
 
         try:
             if action == "scan":
@@ -245,6 +246,10 @@ class BrownfieldHandler:
                     tool_name=_TOOL_NAME,
                 )
             )
+        finally:
+            if owned_store and self._store is not None:
+                await self._store.close()
+                self._store = None
 
     # ──────────────────────────────────────────────────────────────
     # scan — Discover repos from home directory

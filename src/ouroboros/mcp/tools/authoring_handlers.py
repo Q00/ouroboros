@@ -466,6 +466,7 @@ class InterviewHandler:
 
     def __post_init__(self) -> None:
         """Initialize event store."""
+        self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._initialized = False
 
@@ -474,6 +475,12 @@ class InterviewHandler:
         if not self._initialized:
             await self._event_store.initialize()
             self._initialized = True
+
+    async def close(self) -> None:
+        """Close the event store if this handler owns it."""
+        if self._owns_event_store:
+            await self._event_store.close()
+            self._initialized = False
 
     async def _emit_event(self, event: Any) -> None:
         """Emit event to store. Swallows errors to not break interview flow."""
@@ -1043,3 +1050,6 @@ class InterviewHandler:
                     tool_name="ouroboros_interview",
                 )
             )
+        finally:
+            if self._owns_event_store:
+                await self.close()

@@ -90,6 +90,7 @@ class MCPClientAdapter:
         self._retry_wait_initial = retry_wait_initial
         self._retry_wait_max = retry_wait_max
         self._session: Any = None
+        self._transport_cm: Any = None
         self._read_stream: Any = None
         self._write_stream: Any = None
         self._server_info: MCPServerInfo | None = None
@@ -213,13 +214,18 @@ class MCPClientAdapter:
                 env=config.env if config.env else None,
             )
 
-            self._read_stream, self._write_stream = await stdio_client(server_params).__aenter__()
-            self._session = ClientSession(self._read_stream, self._write_stream)
-            await self._session.__aenter__()
+            self._transport_cm = stdio_client(server_params)
+            try:
+                self._read_stream, self._write_stream = await self._transport_cm.__aenter__()
+                self._session = ClientSession(self._read_stream, self._write_stream)
+                await self._session.__aenter__()
 
-            # Initialize the session
-            result = await self._session.initialize()
-            self._server_info = self._parse_server_info(result, config.name)
+                # Initialize the session
+                result = await self._session.initialize()
+                self._server_info = self._parse_server_info(result, config.name)
+            except Exception:
+                await self._reset_connection_state()
+                raise
 
         elif config.transport in (TransportType.SSE, TransportType.STREAMABLE_HTTP):
             # SSE/HTTP transport would be implemented here
@@ -228,6 +234,34 @@ class MCPClientAdapter:
         else:
             msg = f"Unknown transport: {config.transport}"
             raise ValueError(msg)
+
+    async def _reset_connection_state(self) -> None:
+        """Best-effort cleanup for partially initialized connection state."""
+        session = self._session
+        transport_cm = self._transport_cm
+
+        self._session = None
+        self._transport_cm = None
+        self._read_stream = None
+        self._write_stream = None
+        self._server_info = None
+
+        errors: list[BaseException] = []
+
+        if session is not None:
+            try:
+                await session.__aexit__(None, None, None)
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                errors.append(exc)
+
+        if transport_cm is not None:
+            try:
+                await transport_cm.__aexit__(None, None, None)
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                errors.append(exc)
+
+        if errors:
+            raise errors[0]
 
     def _parse_server_info(self, init_result: Any, server_name: str) -> MCPServerInfo:
         """Parse server info from initialization result.
@@ -258,13 +292,22 @@ class MCPClientAdapter:
         Returns:
             Result containing None on success or MCPClientError on failure.
         """
-        if self._session is None:
+        if self._session is None and self._transport_cm is None:
             return Result.ok(None)
 
+        session = self._session
+        transport_cm = self._transport_cm
+        self._session = None
+        self._transport_cm = None
+        self._read_stream = None
+        self._write_stream = None
+        self._server_info = None
+
         try:
-            await self._session.__aexit__(None, None, None)
-            self._session = None
-            self._server_info = None
+            if session is not None:
+                await session.__aexit__(None, None, None)
+            if transport_cm is not None:
+                await transport_cm.__aexit__(None, None, None)
             log.info("mcp.disconnected", server=self._config.name if self._config else "unknown")
             return Result.ok(None)
         except Exception as e:

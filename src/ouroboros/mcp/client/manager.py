@@ -230,7 +230,6 @@ class MCPClientManager:
             )
 
         # Connect outside the lock
-        await conn.adapter.__aenter__()
         result = await conn.adapter.connect(conn.config)
 
         async with self._lock:
@@ -320,7 +319,6 @@ class MCPClientManager:
                 )
 
         result = await conn.adapter.disconnect()
-        await conn.adapter.__aexit__(None, None, None)
 
         async with self._lock:
             self._connections[server_name] = ServerConnection(

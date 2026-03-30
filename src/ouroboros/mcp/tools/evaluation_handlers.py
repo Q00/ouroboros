@@ -361,6 +361,9 @@ class EvaluateHandler:
             trigger_consensus=trigger_consensus,
         )
 
+        store = self.event_store
+        owns_event_store = False
+
         try:
             # Extract goal/constraints from seed if provided
             goal = ""
@@ -380,7 +383,9 @@ class EvaluateHandler:
 
             # Try to enrich from session repository if event_store available
             if not goal:
-                store = self.event_store or EventStore()
+                if store is None:
+                    store = EventStore()
+                    owns_event_store = True
                 try:
                     await store.initialize()
                     repo = SessionRepository(store)
@@ -472,6 +477,9 @@ class EvaluateHandler:
                     tool_name="ouroboros_evaluate",
                 )
             )
+        finally:
+            if owns_event_store and store is not None:
+                await store.close()
 
     async def _has_code_changes(self, working_dir: Path) -> bool | None:
         """Detect whether the working tree has code changes.
