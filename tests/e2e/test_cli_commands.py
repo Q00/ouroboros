@@ -162,7 +162,7 @@ class TestInitCommand:
             with patch(
                 "ouroboros.cli.commands.init.asyncio.run",
                 side_effect=_consume_asyncio_run(side_effect=typer.Exit(code=1)),
-            ) as mock_run:
+            ):
                 # The function should raise typer.Exit on error
                 result = runner.invoke(
                     app,
