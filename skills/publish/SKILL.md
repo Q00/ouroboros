@@ -10,8 +10,8 @@ Convert a Seed specification into structured GitHub Issues for team workflows.
 ## Usage
 
 ```
-ooo publish [seed_path_or_session_id]
-/ouroboros:publish [seed_path_or_session_id]
+ooo publish [seed_path]
+/ouroboros:publish [seed_path]
 ```
 
 **Trigger keywords:** "publish to github", "create issues from seed", "seed to issues"
@@ -22,7 +22,20 @@ When the user invokes this skill:
 
 ### Step 1: Prerequisite Check
 
-Verify `gh` CLI is authenticated:
+**1a. Verify `gh` CLI is installed:**
+
+```bash
+command -v gh >/dev/null 2>&1 && echo "OK" || echo "MISSING"
+```
+
+If missing, tell the user:
+```
+GitHub CLI (gh) is not installed.
+Install it: https://cli.github.com/
+```
+Stop.
+
+**1b. Verify `gh` is authenticated:**
 
 ```bash
 gh auth status
@@ -36,25 +49,32 @@ Stop.
 
 ### Step 2: Locate the Seed
 
+Ouroboros stores seeds in `~/.ouroboros/seeds/`:
+- **Interview seeds**: `~/.ouroboros/seeds/{seed_id}.yaml` (YAML)
+- **PM seeds**: `~/.ouroboros/seeds/pm_seed_{id}.json` (JSON)
+
 Determine the Seed source in this priority order:
 
-1. **Explicit path argument**: If the user provided a file path, read it directly
-2. **Session ID argument**: If the user provided a session ID, look for the seed at `~/.ouroboros/sessions/<session_id>/seed.yaml`
-3. **Recent session**: Search for the most recent seed file:
+1. **Explicit path argument**: If the user provided a file path (`.yaml` or `.json`), read it directly
+2. **Most recent seed file**: Search for the most recent seed in the standard location:
    ```bash
-   ls -t ~/.ouroboros/sessions/*/seed.yaml 2>/dev/null | head -1
+   ls -t ~/.ouroboros/seeds/*.yaml ~/.ouroboros/seeds/*.json 2>/dev/null | head -5
    ```
-4. **Conversation context**: If `ooo seed` was just run in this conversation, use the seed data from context
+   If multiple seeds exist, present the top candidates via AskUserQuestion and let the user choose.
+3. **Conversation context**: If `ooo seed` or `ooo pm` was just run in this conversation and the seed path was reported, use that path.
 
 If no seed is found:
 ```
-No Seed found. Run `ooo seed` first to generate a specification.
+No Seed found. Run `ooo seed` or `ooo pm` first to generate a specification.
 ```
 Stop.
 
 ### Step 3: Parse the Seed
 
-Read the Seed YAML file and extract these components:
+Detect the file format by extension and parse accordingly:
+
+**For YAML seeds** (from `ooo interview` + `ooo seed`):
+Read the YAML file and extract:
 - `goal` → Epic title and description
 - `constraints` → Listed in Epic body
 - `acceptance_criteria` → Checklist items in Epic + distributed to Task issues
@@ -62,17 +82,22 @@ Read the Seed YAML file and extract these components:
 - `evaluation_principles` → Quality criteria reference
 - `exit_conditions` → Definition of Done
 - `metadata.ambiguity_score` → Confidence indicator
+- `metadata.seed_id` → Used for duplicate detection
+
+**For JSON seeds** (from `ooo pm`):
+Read the JSON file and extract equivalent fields. PM seeds use a PMSeed schema with fields like `pm_id`, `goal`, `acceptance_criteria`, `constraints`, etc. Map them to the same Epic/Task structure. If any field is missing, omit that section from the Epic body rather than failing.
 
 ### Step 4: Detect Repository
 
-Determine the target GitHub repository:
+**4a. Attempt auto-detection from current directory:**
 
 ```bash
-gh repo view --json nameWithOwner -q '.nameWithOwner'
+gh repo view --json nameWithOwner -q '.nameWithOwner' 2>/dev/null
 ```
 
-Confirm with the user via AskUserQuestion:
+**4b. Present the target repo choice via AskUserQuestion:**
 
+If auto-detection succeeded:
 ```json
 {
   "questions": [{
@@ -80,22 +105,69 @@ Confirm with the user via AskUserQuestion:
     "header": "Target Repository",
     "options": [
       {"label": "<detected_repo>", "description": "Use current repository"},
-      {"label": "Other", "description": "I'll specify a different repository"}
+      {"label": "Other", "description": "I'll specify a different owner/repo"}
     ],
     "multiSelect": false
   }]
 }
 ```
 
-### Step 5: Plan Issue Structure
+If auto-detection failed (not in a git repo):
+```json
+{
+  "questions": [{
+    "question": "Which GitHub repository should the issues be created in? (format: owner/repo)",
+    "header": "Target Repository"
+  }]
+}
+```
+
+If the user chose "Other", ask:
+```json
+{
+  "questions": [{
+    "question": "Enter the target repository (format: owner/repo):",
+    "header": "Target Repository"
+  }]
+}
+```
+
+Store the resolved repository as `TARGET_REPO`. **All subsequent `gh` commands MUST include `-R <TARGET_REPO>`** to ensure they target the correct repository.
+
+### Step 5: Duplicate Check
+
+Before creating issues, check if this seed was already published:
+
+```bash
+gh issue list -R <TARGET_REPO> --label "ouroboros" --search "<seed_id or goal summary>" --limit 5 --json number,title
+```
+
+If matching issues are found, warn the user via AskUserQuestion:
+```json
+{
+  "questions": [{
+    "question": "Found existing Ouroboros issues that may be from the same seed:\n\n<list of matching issues>\n\nCreate new issues anyway?",
+    "header": "Duplicate Warning",
+    "options": [
+      {"label": "Create anyway", "description": "Proceed with new issues"},
+      {"label": "Cancel", "description": "Do not create duplicate issues"}
+    ],
+    "multiSelect": false
+  }]
+}
+```
+
+If "Cancel": Stop.
+
+### Step 6: Plan Issue Structure
 
 Before creating issues, present the planned structure to the user for review.
 
-**5a. Break down acceptance criteria into Task groups:**
+**6a. Break down acceptance criteria into Task groups:**
 
 Analyze the acceptance criteria and group them into logical implementation units. Each unit becomes a Task issue. Use your understanding of the domain to create meaningful groupings (e.g., group by feature area, layer, or dependency order).
 
-**5b. Present the plan via AskUserQuestion:**
+**6b. Present the plan via AskUserQuestion:**
 
 ```json
 {
@@ -113,20 +185,22 @@ Analyze the acceptance criteria and group them into logical implementation units
 
 If "Modify plan": Ask what to change, adjust, and re-present.
 
-### Step 6: Create GitHub Issues
+### Step 7: Create GitHub Issues
 
-**6a. Create labels (if they don't exist):**
+**IMPORTANT**: Every `gh` command in this step MUST include `-R <TARGET_REPO>`.
+
+**7a. Create labels (if they don't exist):**
 
 ```bash
-gh label create "ouroboros" --description "Created by Ouroboros publish" --color "6f42c1" 2>/dev/null || true
-gh label create "epic" --description "Epic / parent issue" --color "0075ca" 2>/dev/null || true
-gh label create "task" --description "Implementation task" --color "008672" 2>/dev/null || true
+gh label create "ouroboros" -R <TARGET_REPO> --description "Created by Ouroboros publish" --color "6f42c1" 2>/dev/null || true
+gh label create "epic" -R <TARGET_REPO> --description "Epic / parent issue" --color "0075ca" 2>/dev/null || true
+gh label create "task" -R <TARGET_REPO> --description "Implementation task" --color "008672" 2>/dev/null || true
 ```
 
-**6b. Create the Epic issue:**
+**7b. Create the Epic issue:**
 
 ```bash
-gh issue create \
+gh issue create -R <TARGET_REPO> \
   --title "[Epic] <goal_summary>" \
   --label "ouroboros,epic" \
   --body "$(cat <<'BODY'
@@ -163,19 +237,19 @@ gh issue create \
 ---
 
 **Ambiguity Score**: <score> | **Seed**: `<seed_file_path>`
-*Generated by [Ouroboros](https://github.com/Q00/ouroboros)*
+*Generated by [Ouroboros](https://github.com/Q00/ouroboros) via `ooo publish`*
 BODY
 )"
 ```
 
 Capture the Epic issue number from the output.
 
-**6c. Create Task issues (one per implementation unit):**
+**7c. Create Task issues (one per implementation unit):**
 
 For each task:
 
 ```bash
-gh issue create \
+gh issue create -R <TARGET_REPO> \
   --title "[Task] <task_title>" \
   --label "ouroboros,task" \
   --body "$(cat <<'BODY'
@@ -202,17 +276,17 @@ Parent: #<epic_number>
 
 ---
 
-*Part of [Epic] #<epic_number> | Generated by [Ouroboros](https://github.com/Q00/ouroboros)*
+*Part of [Epic] #<epic_number> | Generated by [Ouroboros](https://github.com/Q00/ouroboros) via `ooo publish`*
 BODY
 )"
 ```
 
-**6d. Update Epic with task links:**
+**7d. Update Epic with task links:**
 
 After all tasks are created, add a comment to the Epic:
 
 ```bash
-gh issue comment <epic_number> --body "$(cat <<'BODY'
+gh issue comment <epic_number> -R <TARGET_REPO> --body "$(cat <<'BODY'
 ## Implementation Tasks
 
 - [ ] #<task_1_number> — <task_1_title>
@@ -224,19 +298,19 @@ BODY
 )"
 ```
 
-### Step 7: Summary
+### Step 8: Summary
 
 Present the results:
 
 ```
-Published to <repo>:
+Published to <TARGET_REPO>:
 
   #<epic>  [Epic] <goal_summary>
     ├── #<task_1>  [Task] <task_1_title>
     ├── #<task_2>  [Task] <task_2_title>
     └── #<task_3>  [Task] <task_3_title>
 
-View: https://github.com/<repo>/issues/<epic>
+View: https://github.com/<TARGET_REPO>/issues/<epic>
 ```
 
 Then suggest next steps:
@@ -252,5 +326,5 @@ Next steps:
 
 - **No MCP required**: This skill works entirely through `gh` CLI
 - **Non-destructive**: Creates new issues only, never modifies existing ones
-- **Idempotent guard**: If the same seed was already published (check by searching issues with the seed's session ID), warn before creating duplicates
-- **Works with `ooo pm` output too**: If the user ran `ooo pm` instead of `ooo interview + ooo seed`, they can point `ooo publish` at the generated seed file from the PM flow
+- **Cross-repo support**: All `gh` commands use `-R <TARGET_REPO>`, so seeds can be published to any repository the user has write access to
+- **Works with both seed formats**: YAML seeds from `ooo seed` and JSON seeds from `ooo pm` are both supported — the parser auto-detects format by file extension
