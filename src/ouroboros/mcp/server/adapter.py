@@ -569,6 +569,7 @@ def create_ouroboros_server(
     state_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    mcp_bridge: Any | None = None,
 ) -> MCPServerAdapter:
     """Create an Ouroboros MCP server with all tools and dependencies wired.
 
@@ -1138,12 +1139,21 @@ def create_ouroboros_server(
     # Create tool registry for dependency injection
     registry = ToolRegistry()
 
+    _bridge_manager = mcp_bridge.manager if mcp_bridge is not None else None
+    _bridge_prefix = (
+        mcp_bridge.tool_prefix
+        if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
+        else ""
+    )
+
     # Create and register tool handlers with injected dependencies
     execute_seed = ExecuteSeedHandler(
         event_store=event_store,
         llm_adapter=llm_adapter,
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
+        mcp_manager=_bridge_manager,
+        mcp_tool_prefix=_bridge_prefix,
     )
     evolve_step = EvolveStepHandler(
         evolutionary_loop=evolutionary_loop,
@@ -1238,6 +1248,9 @@ def create_ouroboros_server(
 
     # The server owns the shared event store lifecycle
     server.register_owned_resource(event_store)
+
+    if mcp_bridge is not None:
+        server.register_owned_resource(mcp_bridge)
 
     # Register all tools with the server
     for handler in tool_handlers:

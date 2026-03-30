@@ -92,6 +92,7 @@ class MCPClientAdapter:
         self._session: Any = None
         self._read_stream: Any = None
         self._write_stream: Any = None
+        self._transport_cm: Any = None
         self._server_info: MCPServerInfo | None = None
         self._config: MCPServerConfig | None = None
 
@@ -213,7 +214,8 @@ class MCPClientAdapter:
                 env=config.env if config.env else None,
             )
 
-            self._read_stream, self._write_stream = await stdio_client(server_params).__aenter__()
+            self._transport_cm = stdio_client(server_params)
+            self._read_stream, self._write_stream = await self._transport_cm.__aenter__()
             self._session = ClientSession(self._read_stream, self._write_stream)
             await self._session.__aenter__()
 
@@ -264,6 +266,12 @@ class MCPClientAdapter:
         try:
             await self._session.__aexit__(None, None, None)
             self._session = None
+            if self._transport_cm is not None:
+                try:
+                    await self._transport_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                self._transport_cm = None
             self._server_info = None
             log.info("mcp.disconnected", server=self._config.name if self._config else "unknown")
             return Result.ok(None)
