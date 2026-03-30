@@ -622,16 +622,10 @@ class ExecuteSeedHandler:
                     )
 
                 # ── Environment-driven: native mode returns prepare state ──
-                effective_mode = get_agent_mode(self.agent_mode)
-                if effective_mode == AgentMode.NATIVE:
-                    return await self._action_prepare(
-                        seed=seed,
-                        seed_content=seed_content,
-                        tracker=tracker,
-                        runtime_backend=runtime_backend,
-                        resolved_llm_backend=resolved_llm_backend,
-                        resolved_cwd=resolved_cwd,
-                    )
+                # Only auto-route to prepare when action was explicitly omitted
+                # AND native mode is active. Callers without action= get legacy
+                # background execution to preserve compatibility (#210, QA flow).
+                # Native callers should always pass action=prepare explicitly.
 
                 # ── Internal compatibility mode: fire-and-forget ──
                 # Launch execution in a background task and

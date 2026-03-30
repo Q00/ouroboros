@@ -2254,16 +2254,18 @@ class TestGenerateSeedHandlerAmbiguity:
         )
 
         # LLM tries to pass ambiguity_score=0.18 to bypass the gate
-        await handler.handle(
+        result = await handler.handle(
             {
                 "session_id": "sess-bypass",
                 "ambiguity_score": 0.18,
             }
         )
 
-        # The stored score (0.35) should be used, NOT the caller's 0.18
-        generate_call = mock_seed_generator.generate.await_args
-        assert generate_call.args[1].overall_score == 0.35
+        # In native mode the handler returns state (no internal generation).
+        # The returned ambiguity score must be the stored 0.35, NOT the caller's 0.18.
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["ambiguity_score"] == 0.35
 
 
 class TestCancelExecutionHandler:

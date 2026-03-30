@@ -328,7 +328,9 @@ class TestOrchestratorRunner:
 
         assert result.is_ok
         assert result.value == orchestrator_result
-        prepare_session.assert_awaited_once_with(sample_seed, execution_id="exec_delegated")
+        prepare_session.assert_awaited_once_with(
+            sample_seed, execution_id="exec_delegated", session_id=None,
+        )
         execute_precreated.assert_awaited_once_with(
             seed=sample_seed,
             tracker=tracker,

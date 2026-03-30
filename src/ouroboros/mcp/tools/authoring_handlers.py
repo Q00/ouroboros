@@ -425,12 +425,16 @@ class GenerateSeedHandler:
             )
         state: InterviewState = state_result.value
 
-        # Resolve ambiguity score (provided > stored)
+        # Always use persisted/computed score — never trust caller input.
+        # See: https://github.com/Q00/ouroboros/issues/210
         ambiguity_score_value = arguments.get("ambiguity_score")
         if ambiguity_score_value is not None:
-            ambiguity_score = self._build_ambiguity_score_from_value(ambiguity_score_value)
-        else:
-            ambiguity_score = self._load_stored_ambiguity_score(state)
+            log.warning(
+                "mcp.tool.generate_seed.state.ignoring_caller_ambiguity_score",
+                session_id=session_id,
+                caller_value=ambiguity_score_value,
+            )
+        ambiguity_score = self._load_stored_ambiguity_score(state)
 
         score_text = f"{ambiguity_score.overall_score:.2f}" if ambiguity_score else "not computed"
 

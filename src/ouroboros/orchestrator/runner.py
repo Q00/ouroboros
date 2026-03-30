@@ -1129,7 +1129,9 @@ class OrchestratorRunner:
         Returns:
             Result containing OrchestratorResult on success.
         """
-        session_result = await self.prepare_session(seed, execution_id=execution_id)
+        session_result = await self.prepare_session(
+            seed, execution_id=execution_id, session_id=session_id,
+        )
         if session_result.is_err:
             return Result.err(session_result.error)
 
@@ -1190,6 +1192,11 @@ class OrchestratorRunner:
             initial_progress,
         )
         if progress_result.is_err:
+            self._cleanup_pre_execution_state(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                session_registered=True,
+            )
             return Result.err(
                 OrchestratorError(
                     message=(
