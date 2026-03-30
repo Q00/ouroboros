@@ -215,13 +215,31 @@ class MCPClientAdapter:
             )
 
             self._transport_cm = stdio_client(server_params)
-            self._read_stream, self._write_stream = await self._transport_cm.__aenter__()
-            self._session = ClientSession(self._read_stream, self._write_stream)
-            await self._session.__aenter__()
+            try:
+                self._read_stream, self._write_stream = await self._transport_cm.__aenter__()
+            except Exception:
+                self._transport_cm = None
+                raise
 
-            # Initialize the session
-            result = await self._session.initialize()
-            self._server_info = self._parse_server_info(result, config.name)
+            try:
+                self._session = ClientSession(self._read_stream, self._write_stream)
+                await self._session.__aenter__()
+                result = await self._session.initialize()
+                self._server_info = self._parse_server_info(result, config.name)
+            except Exception:
+                # Rollback: close session if entered, then close transport
+                if self._session is not None:
+                    try:
+                        await self._session.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    self._session = None
+                try:
+                    await self._transport_cm.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                self._transport_cm = None
+                raise
 
         elif config.transport in (TransportType.SSE, TransportType.STREAMABLE_HTTP):
             # SSE/HTTP transport would be implemented here
@@ -257,31 +275,55 @@ class MCPClientAdapter:
     async def disconnect(self) -> Result[None, MCPClientError]:
         """Disconnect from the current MCP server.
 
+        Releases both the MCP session and the underlying transport context
+        manager in reverse acquisition order.  Always attempts to close both
+        resources even when one teardown raises.
+
         Returns:
             Result containing None on success or MCPClientError on failure.
         """
-        if self._session is None:
+        if self._session is None and self._transport_cm is None:
             return Result.ok(None)
 
-        try:
-            await self._session.__aexit__(None, None, None)
-            self._session = None
-            if self._transport_cm is not None:
-                try:
-                    await self._transport_cm.__aexit__(None, None, None)
-                except Exception:
-                    pass
+        errors: list[Exception] = []
+
+        # 1. Close session (if present)
+        if self._session is not None:
+            try:
+                await self._session.__aexit__(None, None, None)
+            except Exception as e:
+                errors.append(e)
+            finally:
+                self._session = None
+
+        # 2. Close transport (always, even if session close failed)
+        if self._transport_cm is not None:
+            try:
+                await self._transport_cm.__aexit__(None, None, None)
+            except Exception as e:
+                errors.append(e)
+            finally:
                 self._transport_cm = None
-            self._server_info = None
-            log.info("mcp.disconnected", server=self._config.name if self._config else "unknown")
-            return Result.ok(None)
-        except Exception as e:
+
+        self._server_info = None
+        server_name = self._config.name if self._config else "unknown"
+
+        if errors:
+            log.warning(
+                "mcp.disconnect_errors",
+                server=server_name,
+                error_count=len(errors),
+                errors=[str(e) for e in errors],
+            )
             return Result.err(
                 MCPClientError.from_exception(
-                    e,
+                    errors[0],
                     server_name=self._config.name if self._config else None,
                 )
             )
+
+        log.info("mcp.disconnected", server=server_name)
+        return Result.ok(None)
 
     def _ensure_connected(self) -> Result[None, MCPClientError]:
         """Ensure we're connected to a server.
