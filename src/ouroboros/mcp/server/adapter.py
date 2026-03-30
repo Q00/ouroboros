@@ -569,6 +569,7 @@ def create_ouroboros_server(
     state_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    mcp_bridge: Any | None = None,
 ) -> MCPServerAdapter:
     """Create an Ouroboros MCP server with all tools and dependencies wired.
 
@@ -1238,6 +1239,15 @@ def create_ouroboros_server(
 
     # The server owns the shared event store lifecycle
     server.register_owned_resource(event_store)
+
+    # Inject bridge into all BridgeAwareMixin handlers (loop-based auto-discovery)
+    if mcp_bridge is not None:
+        from ouroboros.mcp.tools.bridge_mixin import inject_bridge
+
+        injected = [type(h).__name__ for h in tool_handlers if inject_bridge(h, mcp_bridge)]
+        if injected:
+            log.info("mcp.bridge.injected", handlers=injected)
+        server.register_owned_resource(mcp_bridge)
 
     # Register all tools with the server
     for handler in tool_handlers:
