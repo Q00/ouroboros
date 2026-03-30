@@ -227,6 +227,25 @@ class ClaudeCodeAdapter:
         non_system_msgs = [m for m in messages if m.role != MessageRole.SYSTEM]
         system_prompt = system_msgs[0].content if system_msgs else None
 
+        # Claude Code's CLI path does not reliably honor json_schema structured
+        # output. When callers request a schema, reinforce the requirement in the
+        # prompt text and let downstream parsers extract JSON from the plain-text
+        # response rather than depending on SDK-level structured_output.
+        if config.response_format and config.response_format.get("type") == "json_schema":
+            schema = config.response_format.get("json_schema", {})
+            schema_instruction = (
+                "Respond with ONLY a valid JSON object that matches this schema. "
+                "Do not use markdown fences, headers, or explanatory text.\n\n"
+                f"JSON schema:\n{json.dumps(schema, indent=2, sort_keys=True)}"
+            )
+            if system_prompt:
+                system_prompt = f"{system_prompt}\n\n{schema_instruction}"
+            else:
+                non_system_msgs = [
+                    Message(role=MessageRole.USER, content=schema_instruction),
+                    *non_system_msgs,
+                ]
+
         # Build prompt from non-system messages only
         prompt = self._build_prompt(non_system_msgs)
 
@@ -417,13 +436,10 @@ class ClaudeCodeAdapter:
         if system_prompt:
             options_kwargs["system_prompt"] = system_prompt
 
-        # Pass structured output format if requested
-        # SDK expects: output_format={"type": "json_schema", "schema": {...}}
-        if config.response_format and config.response_format.get("type") == "json_schema":
-            options_kwargs["output_format"] = {
-                "type": "json_schema",
-                "schema": config.response_format.get("json_schema", {}),
-            }
+        # Do not pass output_format here. The Claude CLI path used by the Agent
+        # SDK currently ignores json_schema structured output constraints and may
+        # return plain text, so we enforce schema compliance via prompt text in
+        # complete() and parse the JSON from the response body.
 
         options = ClaudeAgentOptions(**options_kwargs)
 

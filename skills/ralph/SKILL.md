@@ -38,6 +38,17 @@ Ralph mode includes parallel execution + automatic verification:
 
 When the user invokes this skill:
 
+### Load MCP Tools (Required first)
+
+**If `ToolSearch` is not available** (Cursor, other runtimes): MCP tools are already loaded via the configured MCP server. Skip directly to Step 1.
+
+**If `ToolSearch` is available** (Claude Code): MCP tools may be registered as deferred tools that must be explicitly loaded.
+1. Use the `ToolSearch` tool to find and load the evolve MCP tools:
+   ```
+   ToolSearch query: "+ouroboros evolve"
+   ```
+2. If ToolSearch finds the tools → proceed to Step 1. If not → explain that Ralph mode requires the Ouroboros MCP server.
+
 1. **Parse the request**: Extract what needs to be done
 
 2. **Initialize loop**:
@@ -45,26 +56,12 @@ When the user invokes this skill:
    - Track iteration, verification_history in conversation context
    - No file I/O needed — evolve_step stores all execution data in EventStore
 
-4. **Enter the loop** (non-blocking background execution):
+4. **Enter the loop** (synchronous execution per generation):
 
    ```
    while iteration < max_iterations:
-       # Start evolve_step in background — returns immediately
-       job = await start_evolve_step(lineage_id, seed_content, execute=true)
-       job_id = job.meta["job_id"]
-       cursor = job.meta["cursor"]
-
-       # Poll for progress (non-blocking, shows intermediate state)
-       # Use timeout_seconds=60 to reduce context consumption
-       while not terminal:
-           wait_result = await job_wait(job_id, cursor, timeout_seconds=60)
-           cursor = wait_result.meta["cursor"]
-           status = wait_result.meta["status"]
-           # Report progress concisely (one line per poll)
-           terminal = status in ("completed", "failed", "cancelled")
-
-       # Fetch final result
-       result = await job_result(job_id)
+       # Run evolve_step synchronously — blocks until generation completes
+       result = await evolve_step(lineage_id, seed_content, execute=true)
 
        # Parse QA from evolve_step response text
        # (EvolveStepHandler runs QA internally and appends verdict)
@@ -92,9 +89,7 @@ When the user invokes this skill:
    ```
 
    **Tool mapping:**
-   - `start_evolve_step` = `ouroboros_start_evolve_step`
-   - `job_wait` = `ouroboros_job_wait`
-   - `job_result` = `ouroboros_job_result`
+   - `evolve_step` = `ouroboros_evolve_step`
 
 4. **On termination**, display a next-step:
    - **Success** (QA passed): `Next: ooo evaluate for formal 3-stage verification`
@@ -121,6 +116,17 @@ When the user invokes this skill:
    - If user says "continue": call `ouroboros_query_events(aggregate_id=<lineage_id>)`
      to reconstruct iteration history from EventStore
 
+### Retry Rule
+
+If `ouroboros_evolve_step` fails:
+
+1. Retry once with the same arguments.
+2. If it fails again, fall back to background execution:
+   ```
+   job = await ouroboros_start_evolve_step(lineage_id, seed_content, execute=true)
+   # Poll with ouroboros_job_wait until completed, then ouroboros_job_result
+   ```
+
 ## The Boulder Never Stops
 
 This is the key phrase. Ralph does not give up:
@@ -134,12 +140,7 @@ This is the key phrase. Ralph does not give up:
 User: ooo ralph fix all failing tests
 
 [Ralph Iteration 1/10]
-Started background execution (job_abc123)
-Polling progress...
-  Phase: Executing | AC Progress: 1/3
-  Phase: Executing | AC Progress: 2/3
-  Phase: Executing | AC Progress: 3/3
-Execution complete. Fetching result...
+Executing generation...
 
 QA Verdict: REVISE (score: 0.65)
 Differences:
@@ -151,9 +152,7 @@ Suggestions:
 The boulder never stops. Continuing...
 
 [Ralph Iteration 2/10]
-Executing in parallel...
-Fixing remaining issues...
-Running QA...
+Executing...
 
 QA Verdict: REVISE (score: 0.85)
 Differences:
@@ -164,9 +163,7 @@ Suggestions:
 The boulder never stops. Continuing...
 
 [Ralph Iteration 3/10]
-Executing in parallel...
-Fixing edge case...
-Running QA...
+Executing...
 
 QA Verdict: PASS (score: 1.0)
 

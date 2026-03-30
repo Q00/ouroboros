@@ -269,4 +269,16 @@ class Seed(BaseModel, frozen=True):
         Returns:
             Seed instance.
         """
+        if not isinstance(data, dict):
+            msg = f"Seed data must be a mapping, got {type(data).__name__!r}"
+            raise TypeError(msg)
+        data = dict(data)
+        if "ontology_schema" not in data:
+            data["ontology_schema"] = {
+                "name": "Output",
+                "description": "Workflow output",
+                "fields": [],
+            }
+        if "metadata" not in data:
+            data["metadata"] = {"ambiguity_score": 0.0}
         return cls.model_validate(data)

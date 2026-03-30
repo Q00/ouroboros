@@ -6,6 +6,7 @@ This module contains handlers for seed execution:
 """
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from ouroboros.core.worktree import (
 )
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.layers.gate import AgentMode, get_agent_mode
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.types import (
     ContentType,
@@ -49,7 +51,11 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.runner import OrchestratorRunner
-from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.orchestrator.session import (
+    SessionRepository,
+    SessionStatus,
+    tracker_runtime_cwd,
+)
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
@@ -95,6 +101,50 @@ def _extract_inherited_effective_tools(arguments: dict[str, Any]) -> list[str] |
     return inherited or None
 
 
+def _normalize_acceptance_criterion(text: str) -> str:
+    """Collapse whitespace for stable AC display and summaries."""
+    return " ".join(text.split()).strip()
+
+
+def _summarize_acceptance_criterion(text: str, *, max_words: int = 8) -> str:
+    """Return a short deterministic AC summary for thin orchestration metadata."""
+    normalized = _normalize_acceptance_criterion(text)
+    if not normalized:
+        return ""
+    words = normalized.split()
+    if len(words) <= max_words:
+        return normalized
+    return f"{' '.join(words[:max_words])}..."
+
+
+def _build_acceptance_criteria_items(
+    acceptance_criteria: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Build numbered AC metadata for state and planning payloads."""
+    items: list[dict[str, Any]] = []
+    for index, ac_text in enumerate(acceptance_criteria, start=1):
+        normalized = _normalize_acceptance_criterion(ac_text)
+        items.append(
+            {
+                "index": index,
+                "label": f"AC{index}",
+                "text": normalized,
+                "summary": _summarize_acceptance_criterion(normalized),
+            }
+        )
+    return items
+
+
+def _build_default_stage_plan(ac_items: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the compact default execution plan for native `ooo run`."""
+    return [
+        {
+            "stage": 1,
+            "ac_indices": [int(item["index"]) for item in ac_items],
+        }
+    ]
+
+
 @dataclass
 class ExecuteSeedHandler:
     """Handler for the execute_seed tool.
@@ -107,6 +157,7 @@ class ExecuteSeedHandler:
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
+    agent_mode: AgentMode | None = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -137,6 +188,29 @@ class ExecuteSeedHandler:
                     required=False,
                 ),
                 MCPToolParameter(
+                    name="seed_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Seed ID to load from ~/.ouroboros/seeds/<seed_id>.yaml. "
+                        "Alternative to seed_content/seed_path."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="action",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Action to perform: prepare, state, record_result. "
+                        "'prepare' parses seed and creates session (no execution). "
+                        "'state' returns session status plus numbered AC data. "
+                        "'record_result' with agent_execution_result records the result. "
+                        "Omit for auto-routing: returns prepare state in native mode (default), "
+                        "or runs background execution when OUROBOROS_AGENT_MODE=internal."
+                    ),
+                    required=False,
+                    enum=("prepare", "state", "record_result"),
+                ),
+                MCPToolParameter(
                     name="cwd",
                     type=ToolInputType.STRING,
                     description="Working directory used to resolve relative seed paths.",
@@ -146,6 +220,15 @@ class ExecuteSeedHandler:
                     name="session_id",
                     type=ToolInputType.STRING,
                     description="Optional session ID to resume. If not provided, a new session is created.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="ac_index",
+                    type=ToolInputType.INTEGER,
+                    description=(
+                        "Optional 1-based acceptance-criterion index to spotlight in "
+                        "action='state' responses for executor agents."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -169,6 +252,26 @@ class ExecuteSeedHandler:
                     description="Skip post-execution QA evaluation. Default: false",
                     required=False,
                     default=False,
+                ),
+                MCPToolParameter(
+                    name="agent_qa_verdict",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Pre-computed QA verdict from an agent (JSON). "
+                        "When provided after execution completes, finalizes the "
+                        "execution with this QA result. Used in native agent mode."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="agent_execution_result",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Execution result from a native agent. "
+                        "Summary of what was implemented, files changed, tests run. "
+                        "When provided with action='record_result', MCP records it."
+                    ),
+                    required=False,
                 ),
             ),
         )
@@ -194,6 +297,47 @@ class ExecuteSeedHandler:
         resolved_cwd = self._resolve_dispatch_cwd(arguments.get("cwd"))
         seed_content = arguments.get("seed_content")
         seed_path = arguments.get("seed_path")
+        seed_id = arguments.get("seed_id")
+        ac_index_arg = arguments.get("ac_index")
+
+        # Fast path: session_id only (no seed content) → resolve seed from session
+        action_arg = arguments.get("action")
+        session_id_arg = arguments.get("session_id")
+
+        # Normalize: if seed_id looks like a session_id (orch_ prefix), treat as session
+        if seed_id and seed_id.startswith("orch_") and not seed_content and not seed_path:
+            session_id_arg = session_id_arg or seed_id
+            seed_id = None
+
+        if (
+            action_arg in ("state", None)
+            and session_id_arg
+            and not seed_content
+            and not seed_path
+            and not seed_id
+        ):
+            return await self._action_state_from_session(
+                session_id_arg,
+                arguments.get("cwd"),
+                ac_index=ac_index_arg,
+            )
+
+        if (
+            action_arg == "record_result"
+            and session_id_arg
+            and not seed_content
+            and not seed_path
+            and not seed_id
+        ):
+            session_seed = await self._load_session_seed_bundle(session_id_arg)
+            if session_seed.is_err:
+                return Result.err(session_seed.error)
+            _, _, seed_content = session_seed.value
+
+        # Resolve seed_id to seed_path if provided
+        if not seed_content and not seed_path and seed_id:
+            seed_path = str(Path.home() / ".ouroboros" / "seeds" / f"{seed_id}.yaml")
+
         if not seed_content and seed_path:
             seed_candidate = Path(str(seed_path)).expanduser()
             if not seed_candidate.is_absolute():
@@ -224,8 +368,19 @@ class ExecuteSeedHandler:
                     encoding="utf-8",
                 )
             except FileNotFoundError:
-                # Per tool contract: treat non-existent path as inline YAML
-                seed_content = str(seed_path)
+                # Before treating as inline YAML, try ~/.ouroboros/seeds/<filename>
+                # (handles "ooo run seed_abc.yaml" where seed is stored by seed_id)
+                seeds_fallback = Path.home() / ".ouroboros" / "seeds" / Path(str(seed_path)).name
+                if seeds_fallback.exists():
+                    try:
+                        seed_content = await asyncio.to_thread(
+                            seeds_fallback.read_text,
+                            encoding="utf-8",
+                        )
+                    except OSError:
+                        seed_content = str(seed_path)
+                else:
+                    seed_content = str(seed_path)
             except OSError as e:
                 return Result.err(
                     MCPToolError(
@@ -237,7 +392,7 @@ class ExecuteSeedHandler:
         if not seed_content:
             return Result.err(
                 MCPToolError(
-                    "seed_content or seed_path is required",
+                    "seed_content, seed_path, or seed_id is required",
                     tool_name="ouroboros_execute_seed",
                 )
             )
@@ -280,6 +435,16 @@ class ExecuteSeedHandler:
                     tool_name="ouroboros_execute_seed",
                 )
             )
+        except TypeError as e:
+            log.error("mcp.tool.execute_seed.type_error", error=str(e))
+            return Result.err(
+                MCPToolError(
+                    f"Seed content is not a valid YAML mapping — "
+                    f"got {type(yaml.safe_load(seed_content)).__name__!r}. "
+                    f"Pass seed_id instead of seed_path for seeds stored in ~/.ouroboros/seeds/",
+                    tool_name="ouroboros_execute_seed",
+                )
+            )
         except (ValidationError, PydanticValidationError) as e:
             log.error("mcp.tool.execute_seed.validation_error", error=str(e))
             return Result.err(
@@ -308,6 +473,10 @@ class ExecuteSeedHandler:
             session_repo = SessionRepository(event_store)
             workspace: TaskWorkspace | None = None
             launched = False
+
+            skip_qa = arguments.get("skip_qa", False)
+            agent_qa_verdict = arguments.get("agent_qa_verdict")
+            action = arguments.get("action")
 
             try:
                 if is_resume and session_id:
@@ -400,7 +569,6 @@ class ExecuteSeedHandler:
                     task_workspace=workspace,
                 )
 
-                skip_qa = arguments.get("skip_qa", False)
                 if not is_resume:
                     prepared = await runner.prepare_session(
                         seed,
@@ -416,7 +584,51 @@ class ExecuteSeedHandler:
                         )
                     tracker = prepared.value
 
-                # Fire-and-forget: launch execution in a background task and
+                agent_execution_result = arguments.get("agent_execution_result")
+
+                # ── Action dispatch for native mode ──
+                if action == "prepare":
+                    return await self._action_prepare(
+                        seed=seed,
+                        seed_content=seed_content,
+                        tracker=tracker,
+                        runtime_backend=runtime_backend,
+                        resolved_llm_backend=resolved_llm_backend,
+                        resolved_cwd=resolved_cwd,
+                    )
+
+                if action == "state":
+                    return self._build_state_response(
+                        seed,
+                        tracker,
+                        resolved_cwd,
+                        ac_index=ac_index_arg,
+                    )
+
+                if action == "record_result":
+                    if agent_execution_result is None:
+                        return Result.err(
+                            MCPToolError(
+                                "agent_execution_result is required for action=record_result",
+                                tool_name="ouroboros_execute_seed",
+                            )
+                        )
+                    return self._action_record_result(
+                        seed=seed,
+                        tracker=tracker,
+                        agent_execution_result=agent_execution_result,
+                        agent_qa_verdict=agent_qa_verdict,
+                        skip_qa=skip_qa,
+                    )
+
+                # ── Environment-driven: native mode returns prepare state ──
+                # Only auto-route to prepare when action was explicitly omitted
+                # AND native mode is active. Callers without action= get legacy
+                # background execution to preserve compatibility (#210, QA flow).
+                # Native callers should always pass action=prepare explicitly.
+
+                # ── Internal compatibility mode: fire-and-forget ──
+                # Launch execution in a background task and
                 # return the session/execution IDs immediately so the MCP
                 # client is not blocked by Codex's tool-call timeout.
                 async def _run_in_background(
@@ -574,6 +786,359 @@ class ExecuteSeedHandler:
             )
 
     @staticmethod
+    def _build_state_response(
+        seed: "Seed",
+        tracker: Any,
+        resolved_cwd: Path,
+        *,
+        ac_index: int | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Build the standard action=state MCP response."""
+        ac_items = _build_acceptance_criteria_items(seed.acceptance_criteria)
+        selected_ac: dict[str, Any] | None = None
+        if ac_index is not None:
+            if not isinstance(ac_index, int):
+                return Result.err(
+                    MCPToolError(
+                        "ac_index must be an integer",
+                        tool_name="ouroboros_execute_seed",
+                    )
+                )
+            if ac_index < 1 or ac_index > len(ac_items):
+                return Result.err(
+                    MCPToolError(
+                        f"ac_index {ac_index} is out of range 1-{len(ac_items)}",
+                        tool_name="ouroboros_execute_seed",
+                    )
+                )
+            selected_ac = ac_items[ac_index - 1]
+
+        ac_lines = []
+        for item in ac_items:
+            marker = " ← ASSIGNED" if selected_ac and item["index"] == selected_ac["index"] else ""
+            ac_lines.append(f"  {item['label']}: {item['text']}{marker}")
+        ac_text = "\n".join(ac_lines)
+        constraints_text = "\n".join(f"  - {c}" for c in (seed.constraints or []))
+        selected_ac_block = ""
+        if selected_ac is not None:
+            selected_ac_block = (
+                f"Assigned: {selected_ac['label']}: {selected_ac['text']}\n\n"
+            )
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            f"Session: {tracker.session_id}\n"
+                            f"Seed: {seed.metadata.seed_id}\n"
+                            f"Status: {tracker.status.value}\n"
+                            f"CWD: {resolved_cwd}\n"
+                            f"Goal: {seed.goal}\n\n"
+                            f"{selected_ac_block}"
+                            f"Acceptance Criteria ({len(ac_items)}):\n{ac_text}\n\n"
+                            f"Constraints:\n{constraints_text or '  (none)'}\n"
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "session_id": tracker.session_id,
+                    "execution_id": tracker.execution_id,
+                    "seed_id": seed.metadata.seed_id,
+                    "status": tracker.status.value,
+                    "goal": seed.goal,
+                    "ac_count": len(seed.acceptance_criteria),
+                    "acceptance_criteria": list(seed.acceptance_criteria),
+                    "acceptance_criteria_items": ac_items,
+                    "constraints": list(seed.constraints or []),
+                    "cwd": str(resolved_cwd),
+                    **(
+                        {
+                            "assigned_ac_index": selected_ac["index"],
+                            "assigned_acceptance_criterion": selected_ac["text"],
+                        }
+                        if selected_ac is not None
+                        else {}
+                    ),
+                },
+            )
+        )
+
+    async def _load_session_seed_bundle(
+        self,
+        session_id: str,
+    ) -> Result[tuple[Any, Seed, str], MCPServerError]:
+        """Resolve session_id -> tracker + seed + raw seed content."""
+        try:
+            event_store = self.event_store or EventStore()
+            owns_event_store = self.event_store is None
+            await event_store.initialize()
+            session_repo = SessionRepository(event_store)
+
+            tracker_result = await session_repo.reconstruct_session(session_id)
+            if tracker_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Session not found: {tracker_result.error}",
+                        tool_name="ouroboros_execute_seed",
+                    )
+                )
+            tracker = tracker_result.value
+
+            seed_file = Path.home() / ".ouroboros" / "seeds" / f"{tracker.seed_id}.yaml"
+            try:
+                seed_content = await asyncio.to_thread(seed_file.read_text, encoding="utf-8")
+                seed_dict = yaml.safe_load(seed_content)
+                seed = Seed.from_dict(seed_dict)
+            except FileNotFoundError:
+                return Result.err(
+                    MCPToolError(
+                        f"Seed file not found: {seed_file}",
+                        tool_name="ouroboros_execute_seed",
+                    )
+                )
+            except Exception as e:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to load seed for session: {e}",
+                        tool_name="ouroboros_execute_seed",
+                    )
+                )
+
+            return Result.ok((tracker, seed, seed_content))
+        finally:
+            if "owns_event_store" in locals() and owns_event_store:
+                try:
+                    await event_store.close()
+                except Exception:
+                    log.exception("mcp.tool.execute_seed.state_close_error")
+
+    async def _action_state_from_session(
+        self,
+        session_id: str,
+        raw_cwd: Any,
+        *,
+        ac_index: int | None = None,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Return seed state by resolving session_id → seed_id → seed file.
+
+        Used when the executor agent has only a session_id and needs to read
+        the seed without passing seed_content/seed_path/seed_id explicitly.
+        """
+        seed_bundle = await self._load_session_seed_bundle(session_id)
+        if seed_bundle.is_err:
+            return Result.err(seed_bundle.error)
+        tracker, seed, _seed_content = seed_bundle.value
+        if isinstance(raw_cwd, str) and raw_cwd.strip():
+            resolved_cwd = self._resolve_dispatch_cwd(raw_cwd)
+        else:
+            resolved_cwd = self._resolve_dispatch_cwd(tracker_runtime_cwd(tracker))
+        return self._build_state_response(
+            seed,
+            tracker,
+            resolved_cwd,
+            ac_index=ac_index,
+        )
+
+    async def _action_prepare(
+        self,
+        *,
+        seed: Seed,
+        seed_content: str,
+        tracker,
+        runtime_backend: str,
+        resolved_llm_backend: str,
+        resolved_cwd: Path,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Parse seed, create session, return compact session info (no execution).
+
+        Analyzes AC dependencies via DependencyAnalyzer (same as the internal
+        runner path) to produce a proper multi-stage execution plan.
+        Returns only routing metadata. The executor agent reads full seed
+        details via action='state' in its own isolated context.
+        """
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
+        ac_items = _build_acceptance_criteria_items(seed.acceptance_criteria)
+        ac_briefs = [
+            {
+                "index": int(item["index"]),
+                "label": str(item["label"]),
+                "summary": str(item["summary"]),
+            }
+            for item in ac_items
+        ]
+
+        # Analyze AC dependencies (same logic as OrchestratorRunner._execute_parallel)
+        planning_mode = "dependency_analyzed"
+        if len(seed.acceptance_criteria) <= 1:
+            stage_plan = _build_default_stage_plan(ac_items)
+            planning_mode = "single_stage_default"
+        else:
+            analyzer = DependencyAnalyzer(llm_adapter=self.llm_adapter)
+            dep_result = await analyzer.analyze(seed.acceptance_criteria)
+            if dep_result.is_err:
+                log.warning(
+                    "execution_handlers.prepare.dependency_analysis_failed",
+                    session_id=tracker.session_id,
+                    error=str(dep_result.error),
+                )
+                stage_plan = _build_default_stage_plan(ac_items)
+                planning_mode = "single_stage_fallback"
+            else:
+                execution_plan = dep_result.value.to_execution_plan()
+                # Convert 0-based dependency_analyzer indices → 1-based stage_plan
+                stage_plan = [
+                    {
+                        "stage": stage.stage_number,
+                        "ac_indices": [idx + 1 for idx in stage.ac_indices],
+                    }
+                    for stage in execution_plan.stages
+                ]
+
+        import json
+
+        meta = {
+            "seed_id": seed.metadata.seed_id,
+            "session_id": tracker.session_id,
+            "execution_id": tracker.execution_id,
+            "goal": seed.goal,
+            "ac_count": len(seed.acceptance_criteria),
+            "status": "prepared",
+            "cwd": str(resolved_cwd),
+            "ac_briefs": ac_briefs,
+            "stage_plan": stage_plan,
+            "stage_count": len(stage_plan),
+            "planning_mode": planning_mode,
+        }
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            f"Prepared session:{tracker.session_id} "
+                            f"seed:{seed.metadata.seed_id} "
+                            f"ac:{len(seed.acceptance_criteria)} "
+                            f"stages:{len(stage_plan)}\n"
+                            f"meta:{json.dumps(meta, ensure_ascii=False)}"
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
+    def _action_record_result(
+        self,
+        *,
+        seed: Seed,
+        tracker,
+        agent_execution_result: str,
+        agent_qa_verdict: str | None,
+        skip_qa: bool,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Record execution result from native agent."""
+        tracker_cwd = tracker_runtime_cwd(tracker)
+        resolved_tracker_cwd = (
+            str(self._resolve_dispatch_cwd(tracker_cwd)) if tracker_cwd else None
+        )
+        # If QA verdict also provided, finalize fully
+        if agent_qa_verdict is not None:
+            from ouroboros.mcp.tools.qa import _parse_qa_response
+
+            parse_result = _parse_qa_response(agent_qa_verdict)
+            qa_meta: dict[str, object] = {}
+            if parse_result.is_ok:
+                v = parse_result.value
+                qa_meta = {"score": v.score, "verdict": v.verdict, "passed": v.score >= 0.80}
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                f"Execution + QA Complete\n{'=' * 60}\n"
+                                f"Session: {tracker.session_id}\n"
+                                f"Goal: {seed.goal}\n\n"
+                                f"### Execution Result\n{agent_execution_result[:1000]}\n\n"
+                                f"### QA Verdict\n{agent_qa_verdict}"
+                            ),
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "seed_id": seed.metadata.seed_id,
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "success": True,
+                        "status": "completed",
+                        **({"cwd": resolved_tracker_cwd} if resolved_tracker_cwd else {}),
+                        "qa": qa_meta,
+                    },
+                )
+            )
+
+        # Execution result only (no QA or QA skipped)
+        if skip_qa:
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                f"Execution Complete (QA skipped)\n{'=' * 60}\n"
+                                f"Session: {tracker.session_id}\n"
+                                f"Goal: {seed.goal}\n\n"
+                                f"{agent_execution_result[:1000]}"
+                            ),
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "seed_id": seed.metadata.seed_id,
+                        "session_id": tracker.session_id,
+                        "execution_id": tracker.execution_id,
+                        "success": True,
+                        "status": "completed",
+                        **({"cwd": resolved_tracker_cwd} if resolved_tracker_cwd else {}),
+                        "qa_skipped": True,
+                    },
+                )
+            )
+
+        # Execution recorded, QA still needed
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=(
+                            f"Execution Result Recorded\n{'=' * 60}\n"
+                            f"Session: {tracker.session_id}\n"
+                            f"Goal: {seed.goal}\n\n"
+                            f"{agent_execution_result[:1000]}\n\n"
+                            f"QA evaluation is needed. Call ouroboros_qa with "
+                            f"the execution result as artifact, or call execute_seed "
+                            f"again with action='record_result' and agent_qa_verdict."
+                        ),
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "seed_id": seed.metadata.seed_id,
+                    "session_id": tracker.session_id,
+                    "execution_id": tracker.execution_id,
+                    "status": "completed_awaiting_qa",
+                    **({"cwd": resolved_tracker_cwd} if resolved_tracker_cwd else {}),
+                },
+            )
+        )
+
+    @staticmethod
     def _resolve_dispatch_cwd(raw_cwd: Any) -> Path:
         """Resolve the working directory for intercepted seed execution."""
         if isinstance(raw_cwd, str) and raw_cwd.strip():
@@ -693,6 +1258,12 @@ class StartExecuteSeedHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         seed_content = arguments.get("seed_content")
         seed_path = arguments.get("seed_path")
+        seed_id = arguments.get("seed_id")
+
+        # Resolve seed_id to seed_path if provided
+        if not seed_content and not seed_path and seed_id:
+            seed_path = str(Path.home() / ".ouroboros" / "seeds" / f"{seed_id}.yaml")
+
         if not seed_content and seed_path:
             resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(
                 arguments.get("cwd"),
@@ -724,8 +1295,19 @@ class StartExecuteSeedHandler:
                 seed_content = await asyncio.to_thread(seed_candidate.read_text, encoding="utf-8")
                 arguments = {**arguments, "seed_content": seed_content}
             except FileNotFoundError:
-                # Per tool contract: treat non-existent path as inline YAML
-                seed_content = str(seed_path)
+                # Before treating as inline YAML, try ~/.ouroboros/seeds/<filename>
+                # (handles "ooo run seed_abc.yaml" where seed is stored by seed_id)
+                seeds_fallback = Path.home() / ".ouroboros" / "seeds" / Path(str(seed_path)).name
+                if seeds_fallback.exists():
+                    try:
+                        seed_content = await asyncio.to_thread(
+                            seeds_fallback.read_text,
+                            encoding="utf-8",
+                        )
+                    except OSError:
+                        seed_content = str(seed_path)
+                else:
+                    seed_content = str(seed_path)
                 arguments = {**arguments, "seed_content": seed_content}
             except OSError as e:
                 return Result.err(
@@ -738,7 +1320,7 @@ class StartExecuteSeedHandler:
         if not seed_content:
             return Result.err(
                 MCPToolError(
-                    "seed_content or seed_path is required",
+                    "seed_content, seed_path, or seed_id is required",
                     tool_name="ouroboros_start_execute_seed",
                 )
             )

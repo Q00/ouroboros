@@ -42,6 +42,9 @@ _CLAUDE_UVX_ARGS: list[str] = [
 ]
 
 
+_NATIVE_ENV: dict[str, str] = {"OUROBOROS_AGENT_MODE": "native"}
+
+
 def _detect_mcp_entry() -> dict[str, object] | None:
     """Build the correct MCP entry based on how ouroboros is installed.
 
@@ -50,9 +53,9 @@ def _detect_mcp_entry() -> dict[str, object] | None:
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
-        return {"command": "uvx", "args": list(_CLAUDE_UVX_ARGS)}
+        return {"command": "uvx", "args": list(_CLAUDE_UVX_ARGS), "env": _NATIVE_ENV}
     if shutil.which("ouroboros"):
-        return {"command": "ouroboros", "args": ["mcp", "serve"]}
+        return {"command": "ouroboros", "args": ["mcp", "serve"], "env": _NATIVE_ENV}
     # Only use python3 fallback if ouroboros is actually importable
     import subprocess
 
@@ -65,7 +68,7 @@ def _detect_mcp_entry() -> dict[str, object] | None:
         )
     except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}
+    return {"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"], "env": _NATIVE_ENV}
 
 
 def _ensure_claude_mcp_entry() -> None:
@@ -137,12 +140,27 @@ app = typer.Typer(
 # ── Runtime detection helpers ────────────────────────────────────
 
 
+def _get_current_backend() -> str | None:
+    """Read the current runtime backend from config, if configured."""
+    config_path = Path.home() / ".ouroboros" / "config.yaml"
+    if not config_path.exists():
+        return None
+    try:
+        data = yaml.safe_load(config_path.read_text()) or {}
+        return data.get("orchestrator", {}).get("runtime_backend")
+    except Exception:
+        return None
+
+
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH."""
     runtimes: dict[str, str | None] = {}
     for name in ("claude", "codex", "opencode"):
         path = shutil.which(name)
         runtimes[name] = path
+    # Cursor is an IDE — detect by presence of ~/.cursor/
+    if (Path.home() / ".cursor").is_dir():
+        runtimes["cursor"] = str(Path.home() / ".cursor")
     return runtimes
 
 
@@ -269,8 +287,62 @@ def _print_codex_config_guidance(config_path: Path) -> None:
     print_info("Use ~/.codex/config.toml only for the Codex MCP/env hookup written by setup.")
 
 
+def _find_plugin_cache_skills_dir() -> Path | None:
+    """Return the skills/ directory of the latest installed ouroboros plugin cache, or None."""
+    plugin_base = Path.home() / ".claude" / "plugins" / "cache" / "ouroboros" / "ouroboros"
+    if not plugin_base.is_dir():
+        return None
+    versions = sorted(
+        (d for d in plugin_base.iterdir() if d.is_dir()),
+        key=lambda d: d.name,
+    )
+    if not versions:
+        return None
+    skills_dir = versions[-1] / "skills"
+    return skills_dir if skills_dir.is_dir() else None
+
+
+def _install_codex_skills_symlinked(plugin_skills_dir: Path) -> None:
+    """Install Codex skills as symlinks pointing to the Claude plugin cache.
+
+    This keeps ~/.codex/skills/ouroboros-* in sync with the plugin without
+    duplicating files. Cursor reads ~/.codex/skills/ (higher scan priority)
+    but always gets the same content as the plugin because it follows symlinks.
+    """
+    from ouroboros.codex.artifacts import CODEX_SKILL_NAMESPACE, _SKILL_ENTRYPOINT
+
+    codex_skills_dir = Path.home() / ".codex" / "skills"
+    codex_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # Prune stale ouroboros symlinks that no longer point to the plugin.
+    for existing in codex_skills_dir.iterdir():
+        if not existing.name.startswith(CODEX_SKILL_NAMESPACE):
+            continue
+        if existing.is_symlink():
+            existing.unlink()
+        elif existing.is_dir():
+            shutil.rmtree(existing)
+
+    installed: list[Path] = []
+    for skill_dir in sorted(plugin_skills_dir.iterdir()):
+        if not skill_dir.is_dir() or not (skill_dir / _SKILL_ENTRYPOINT).is_file():
+            continue
+        target = codex_skills_dir / f"{CODEX_SKILL_NAMESPACE}{skill_dir.name}"
+        target.symlink_to(skill_dir)
+        installed.append(target)
+
+    print_success(
+        f"Linked {len(installed)} Codex skills → {codex_skills_dir} (→ {plugin_skills_dir})"
+    )
+
+
 def _install_codex_artifacts() -> None:
-    """Install packaged Ouroboros rules and skills into ~/.codex/."""
+    """Install packaged Ouroboros rules and skills into ~/.codex/.
+
+    When the Claude Code plugin is also installed, skills are created as
+    symlinks into the plugin cache so Cursor always reads identical content
+    regardless of which path it resolves first.
+    """
     from ouroboros.codex import install_codex_rules, install_codex_skills
 
     codex_dir = Path.home() / ".codex"
@@ -280,6 +352,15 @@ def _install_codex_artifacts() -> None:
         print_success(f"Installed Codex rules → {rules_path}")
     except FileNotFoundError:
         print_error("Could not locate packaged Codex rules.")
+
+    plugin_skills_dir = _find_plugin_cache_skills_dir()
+    if plugin_skills_dir is not None:
+        # Symlink into plugin cache — single source of truth, no divergence.
+        try:
+            _install_codex_skills_symlinked(plugin_skills_dir)
+            return
+        except Exception as exc:
+            print_warning(f"Symlink install failed ({exc}), falling back to copy.")
 
     try:
         skill_paths = install_codex_skills(codex_dir=codex_dir, prune=True)
@@ -322,6 +403,9 @@ def _setup_codex(codex_path: str) -> None:
     _register_codex_mcp_server()
     _print_codex_config_guidance(config_path)
 
+    # Also register in ~/.cursor/mcp.json for users who have Cursor
+    _register_cursor_mcp_server()
+
     # Also register/fix MCP server for Codex users who also have Claude Code
     if (Path.home() / ".claude").is_dir():
         _ensure_claude_mcp_entry()
@@ -356,6 +440,33 @@ def _setup_claude(claude_path: str) -> None:
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
     print_info(f"Config saved to: {config_path}")
+
+    # Also register in ~/.cursor/mcp.json if Cursor is installed
+    _register_cursor_mcp_server()
+
+
+def _register_cursor_mcp_server() -> None:
+    """Register MCP server in ~/.cursor/mcp.json if Cursor is detected."""
+    cursor_mcp_path = Path.home() / ".cursor" / "mcp.json"
+    if not cursor_mcp_path.parent.is_dir():
+        return
+
+    mcp_data: dict = {}
+    if cursor_mcp_path.exists():
+        mcp_data = json.loads(cursor_mcp_path.read_text())
+
+    mcp_data.setdefault("mcpServers", {})
+    if "ouroboros" not in mcp_data["mcpServers"]:
+        mcp_data["mcpServers"]["ouroboros"] = {
+            "command": "uvx",
+            "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+            "env": _NATIVE_ENV,
+        }
+        with cursor_mcp_path.open("w") as f:
+            json.dump(mcp_data, f, indent=2)
+        print_success("Registered MCP server in ~/.cursor/mcp.json")
+    else:
+        print_info("MCP server already registered in ~/.cursor/mcp.json")
 
 
 # ── Brownfield repo helpers ──────────────────────────────────────
@@ -552,6 +663,12 @@ def setup(
 
     console.print("\n[bold cyan]Ouroboros Setup[/bold cyan]\n")
 
+    # Show current backend if already configured
+    current_backend = _get_current_backend()
+    if current_backend:
+        console.print(f"[bold]Current backend:[/bold] [cyan]{current_backend}[/cyan]")
+        console.print()
+
     # Detect available runtimes
     detected = _detect_runtimes()
     available = {k: v for k, v in detected.items() if v is not None}
@@ -559,7 +676,8 @@ def setup(
     if available:
         console.print("[bold]Detected runtimes:[/bold]")
         for name, path in available.items():
-            console.print(f"  [green]✓[/green] {name} → {path}")
+            marker = " [yellow](current)[/yellow]" if name == current_backend else ""
+            console.print(f"  [green]✓[/green] {name} → {path}{marker}")
     else:
         console.print("[yellow]No runtimes detected in PATH.[/yellow]")
 
@@ -581,10 +699,14 @@ def setup(
                 print_info(f"Non-interactive mode, selected: {selected}")
             else:
                 choices = list(available.keys())
+                default_idx = "1"
                 for i, name in enumerate(choices, 1):
-                    console.print(f"  [{i}] {name}")
+                    current_mark = " [yellow](current)[/yellow]" if name == current_backend else ""
+                    console.print(f"  [{i}] {name}{current_mark}")
+                    if name == current_backend:
+                        default_idx = str(i)
                 console.print()
-                choice = typer.prompt("Select runtime", default="1")
+                choice = typer.prompt("Select runtime", default=default_idx)
                 try:
                     idx = int(choice) - 1
                     selected = choices[idx]

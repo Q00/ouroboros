@@ -17,6 +17,16 @@ Interactive onboarding for new Ouroboros users.
 
 ## Instructions
 
+### Load Question Tool
+
+**If `ToolSearch` is not available** (Cursor, other runtimes): `AskUserQuestion` is already loaded. Use it directly for all user-facing choices below.
+
+**If `ToolSearch` is available** (Claude Code):
+```
+ToolSearch query: "select:AskUserQuestion"
+```
+Store whichever tool becomes available (`AskUserQuestion` or `AskQuestion`) as the **question tool**. Use it for all user-facing choices below. If neither is available, present choices as numbered markdown options.
+
 When this skill is invoked, follow this flow:
 
 ---
@@ -40,20 +50,9 @@ fi
 
 **If `ALREADY_COMPLETED` is true AND no `--force` flag:**
 
-Use **AskUserQuestion**:
-```json
-{
-  "questions": [{
-    "question": "Ouroboros welcome was already completed on $WELCOME_COMPLETED. What would you like to do?",
-    "header": "Welcome",
-    "options": [
-      { "label": "Skip", "description": "Continue to work (recommended)" },
-      { "label": "Re-run welcome", "description": "Go through the interactive onboarding again" }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+**Ask using the question tool:**
+- Prompt: `Ouroboros welcome was already completed on $WELCOME_COMPLETED. What would you like to do?`
+- Options: `Skip`, `Re-run welcome`
 - **Skip**: Mark as complete and exit
 - **Re-run welcome**: Continue to Step 1 below
 
@@ -90,30 +89,9 @@ Interview -> Seed -> Execute -> Evaluate
 
 ### Step 2: Persona Detection
 
-**AskUserQuestion**:
-```json
-{
-  "questions": [{
-    "question": "What brings you to Ouroboros?",
-    "header": "Welcome",
-    "options": [
-      {
-        "label": "New project idea",
-        "description": "I have a vague idea and want to crystallize it into a clear spec"
-      },
-      {
-        "label": "Tired of rewriting prompts",
-        "description": "AI keeps building the wrong thing because my requirements are unclear"
-      },
-      {
-        "label": "Just exploring",
-        "description": "Heard about Ouroboros and want to see what it does"
-      }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+**Ask using the question tool:**
+- Prompt: `What brings you to Ouroboros?`
+- Options: `New project idea`, `Tired of rewriting prompts`, `Just exploring`
 
 Give brief personalized response (1-2 sentences) based on choice.
 
@@ -125,20 +103,9 @@ Give brief personalized response (1-2 sentences) based on choice.
 cat ~/.claude/mcp.json 2>/dev/null | grep -q ouroboros && echo "MCP_OK" || echo "MCP_MISSING"
 ```
 
-**If MCP_MISSING**, **AskUserQuestion**:
-```json
-{
-  "questions": [{
-    "question": "Ouroboros has a Python backend for advanced features (TUI dashboard, 3-stage evaluation, drift tracking). Set it up now?",
-    "header": "MCP Setup",
-    "options": [
-      { "label": "Set up now (Recommended)", "description": "Register MCP server (requires Python >= 3.12)" },
-      { "label": "Skip for now", "description": "Use basic features first (interview, seed, unstuck)" }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+**If MCP_MISSING**, ask with platform-native structured choice UI. Keep the prompt and choices equivalent across platforms; on Cursor, provide explicit `options`.
+- Prompt: `Ouroboros has a Python backend for advanced features (TUI dashboard, 3-stage evaluation, drift tracking). Set it up now?`
+- Options: `Set up now (Recommended)`, `Skip for now`
 - **Set up now**: Read and execute `skills/setup/SKILL.md`, then return to Step 4
 - **Skip for now**: Continue to Step 4
 
@@ -165,21 +132,9 @@ Available Commands:
 
 ### Step 5: First Action
 
-**AskUserQuestion**:
-```json
-{
-  "questions": [{
-    "question": "What would you like to do first?",
-    "header": "Get started",
-    "options": [
-      { "label": "Start a project", "description": "Run a Socratic interview on your idea right now" },
-      { "label": "Try the tutorial", "description": "Interactive hands-on learning with a sample project" },
-      { "label": "Read the docs", "description": "Full command reference and architecture overview" }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+**Ask using the question tool:**
+- Prompt: `What would you like to do first?`
+- Options: `Start a project`, `Try the tutorial`, `Read the docs`
 
 Based on choice:
 - **Start a project**: Ask "What do you want to build?" → execute `skills/interview/SKILL.md`
@@ -197,20 +152,9 @@ gh auth status &>/dev/null && echo "GH_OK" || echo "GH_MISSING"
 
 **If `GH_OK` AND `star_asked` not true:**
 
-**AskUserQuestion**:
-```json
-{
-  "questions": [{
-    "question": "If you're enjoying Ouroboros, would you like to star it on GitHub?",
-    "header": "Community",
-    "options": [
-      { "label": "Star on GitHub", "description": "Takes 1 second -- helps the project grow" },
-      { "label": "Maybe later", "description": "Skip for now" }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+**Ask using the question tool:**
+- Prompt: `If you're enjoying Ouroboros, would you like to star it on GitHub?`
+- Options: `Star on GitHub`, `Maybe later`
 
 - **Star on GitHub**: `gh api -X PUT /user/starred/Q00/ouroboros`
 - Both: Save `{"star_asked": true, "welcomeShown": true, "welcomeCompleted": "$(date -Iseconds)", "welcomeVersion": "0.14.0"}` to `~/.ouroboros/prefs.json`

@@ -43,31 +43,42 @@ ooo evolve --rewind <lineage_id> <generation_number>
 
 ### Load MCP Tools (Required before Path A/B decision)
 
-The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
+**If `ToolSearch` is not available** (Cursor, other runtimes): MCP tools are already loaded via the configured MCP server. Skip directly to **Path A**.
 
+**If `ToolSearch` is available** (Claude Code): MCP tools may be registered as deferred tools that must be explicitly loaded.
 1. Use the `ToolSearch` tool to find and load the evolve MCP tools:
    ```
    ToolSearch query: "+ouroboros evolve"
    ```
-2. The tools will typically be named with prefix `mcp__plugin_ouroboros_ouroboros__` (e.g., `ouroboros_evolve_step`, `ouroboros_interview`, `ouroboros_generate_seed`). After ToolSearch returns, the tools become callable.
-3. If ToolSearch finds the tools → proceed to **Path A**. If not → proceed to **Path B**.
+2. If ToolSearch finds the tools → proceed to **Path A**. If not → proceed to **Path B**.
 
-**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
+### Path A: Native Execution
 
-### Path A: MCP Available (loaded via ToolSearch above)
+**Architecture**:
+
+```
+ouroboros_evolve_step (synchronous, one generation at a time)
+  ←→ You (main — thin orchestrator, loop until converged)
+      ←→ @socratic-interviewer   # bootstrap only
+      ←→ @seed-architect         # bootstrap only
+```
 
 **Starting a new evolutionary loop:**
 1. Parse the user's input as `initial_context`
-2. Run the interview: call `ouroboros_interview` with `initial_context`
-3. Complete the interview (3+ rounds until ambiguity ≤ 0.2)
-4. Generate seed: call `ouroboros_generate_seed` with the `session_id`
-5. Call `ouroboros_evolve_step` with:
-   - `lineage_id`: new unique ID (e.g., `lin_<seed_id>`)
-   - `seed_content`: the generated seed YAML
-   - `execute`: `true` (default) for full Execute→Evaluate pipeline,
-     `false` for fast ontology-only evolution (no seed execution)
-6. Check the `action` in the response:
-   - `continue` → Call `ouroboros_evolve_step` again with just `lineage_id`
+2. Start an interview session with `ouroboros_interview(action="start", initial_context=<initial_context>)`.
+3. Run the interview using the same native pattern as `skills/interview`: spawn `ouroboros:socratic-interviewer` with `session_id`; the subagent only reads `action="state"` and persists `action="score"`; the main session routes the question to the user and records the full turn with `action="record_turn"` until `seed_ready: true`.
+4. Generate seed via `ouroboros:seed-architect` with `session_id` and record the returned `seed_id`.
+5. Run Gen 1 with `ouroboros_evolve_step` (synchronous — no job polling needed):
+   ```
+   Tool: ouroboros_evolve_step
+   Arguments:
+     lineage_id: lin_<seed_id>   # new unique lineage ID
+     seed_id: <seed_id>
+     execute: true               # false for --no-execute / fast mode
+   ```
+   Returns the generation result directly. No job_wait or job_result needed.
+6. Check the `action` in the result:
+   - `continue` → first call `ouroboros_lineage_status(lineage_id=<lineage_id>)`, then call `ouroboros_evolve_step(lineage_id=<lineage_id>)` for the next generation
    - `converged` → Evolution complete! Display final ontology
    - `stagnated` → Ontology unchanged for 3+ gens. Consider `ouroboros_lateral_think`
    - `exhausted` → Max 30 generations reached. Display best result
@@ -81,13 +92,58 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
 
 **Checking status:**
 1. Call `ouroboros_lineage_status` with the `lineage_id`
-2. Display: generation count, ontology evolution, convergence progress
+2. Treat `ouroboros_lineage_status` as the source of truth for current generation count, ontology evolution, and convergence progress
 
 **Rewinding:**
-1. Call `ouroboros_evolve_step` with:
-   - `lineage_id`: the lineage to continue from a rewind point
-   - `seed_content`: the seed YAML from the target generation
-   (Future: dedicated `ouroboros_evolve_rewind` tool)
+1. Call `ouroboros_evolve_rewind(lineage_id=<lineage_id>, to_generation=<n>)`
+2. After rewind, confirm the new state with `ouroboros_lineage_status`
+
+**Context minimization** (CRITICAL):
+- Do NOT inline full seed YAML into the main session if you already have `seed_id`
+- Prefer `ouroboros_evolve_step(seed_id=...)` for Gen 1 over copying large `seed_content`
+- Treat `ouroboros_lineage_status` as the stage-local source of truth
+- Do NOT manually replay lineage events in the main session
+
+### Retry Rule
+
+If `ouroboros_evolve_step` fails:
+
+1. Retry once with the same arguments.
+2. If it fails again, fall back to **Path A Fallback** (background job).
+
+### Path A Fallback: Background Job Execution
+
+If `ouroboros_evolve_step` fails twice, fall back to background execution:
+
+1. **Start background generation**:
+   ```
+   Tool: ouroboros_start_evolve_step
+   Arguments:
+     lineage_id: <lineage_id>
+     seed_id: <seed_id>          # Gen 1 only
+     execute: <bool>
+   ```
+   Returns `job_id`.
+
+2. **Poll for completion**:
+   ```
+   loop:
+     Tool: ouroboros_job_wait
+     Arguments:
+       job_id: <job_id>
+       cursor: <cursor from previous response, starts at 0>
+       timeout_seconds: 60
+     # Continue until status is "completed", "failed", or "cancelled"
+   ```
+
+3. **Fetch result**:
+   ```
+   Tool: ouroboros_job_result
+   Arguments:
+     job_id: <job_id>
+   ```
+
+4. Process result action the same as Path A step 6, using `ouroboros_start_evolve_step` for subsequent generations.
 
 ### Path B: Plugin-only (no MCP tools available)
 

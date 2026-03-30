@@ -71,10 +71,16 @@ def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.S
 
     By setting __signature__ with explicit parameters, FastMCP generates the
     correct schema and clients can send flat argument dicts.
+
+    Special case: parameters named ``agent_*`` accept both str and dict,
+    because LLM subagents may send either format unpredictably.
     """
     sig_params = []
     for p in parameters:
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
+        # agent_* fields accept both str and dict — LLM subagents are unpredictable
+        if p.name.startswith("agent_"):
+            python_type = str | dict
         if p.required:
             sig_params.append(
                 inspect.Parameter(

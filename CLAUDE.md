@@ -36,7 +36,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 
 ## Agents
 
-Bundled agents live in `src/ouroboros/agents/`. When a skill references an agent (e.g., `ouroboros:socratic-interviewer`), read its definition from `src/ouroboros/agents/{name}.md` and adopt that role. Use `OUROBOROS_AGENTS_DIR` or `.claude-plugin/agents/` only for explicit custom overrides.
+Bundled agents live in `agents/`. When a skill references an agent (e.g., `ouroboros:socratic-interviewer`), read its definition from `agents/{name}.md` and adopt that role. Use `OUROBOROS_AGENTS_DIR` or `.claude-plugin/agents/` only for explicit custom overrides.
 
 <!-- ooo:START -->
 <!-- ooo:VERSION:0.26.0 -->
@@ -82,8 +82,11 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 
 ## Agents
 
-Loaded on-demand — not preloaded.
+Loaded on-demand — not preloaded. Definitions in `agents/`.
 
-**Core**: socratic-interviewer, ontologist, seed-architect, evaluator, qa-judge, contrarian
-**Support**: hacker, simplifier, researcher, architect
+**Core**: socratic-interviewer, ontologist, seed-architect, evaluator, qa-judge, contrarian, judge
+**Execution**: ac-executor, code-executor
+**Interview**: pm-interviewer, breadth-keeper, seed-closer
+**Review**: advocate, consensus-reviewer, semantic-evaluator
+**Support**: hacker, simplifier, researcher, architect, analysis-agent, research-agent, ontology-analyst
 <!-- ooo:END -->

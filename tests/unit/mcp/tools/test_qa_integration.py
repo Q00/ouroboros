@@ -24,6 +24,7 @@ from ouroboros.mcp.tools.definitions import EvolveStepHandler, ExecuteSeedHandle
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import DELEGATED_PARENT_CWD_ARG
 from ouroboros.orchestrator.session import SessionTracker
+from ouroboros.mcp.layers.gate import AgentMode
 
 # ---------------------------------------------------------------------------
 # Fixtures: minimal seed YAML
@@ -168,7 +169,7 @@ class TestExecuteSeedHandlerQA:
 
     async def test_qa_called_on_success(self) -> None:
         """QA is called in background after successful execution."""
-        handler = ExecuteSeedHandler()
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.INTERNAL)
 
         fake_exec = FakeExecResult(
             summary={
@@ -326,7 +327,7 @@ class TestExecuteSeedHandlerQA:
 
     async def test_skip_qa_bypasses_qa(self) -> None:
         """skip_qa=True prevents QA from running in background."""
-        handler = ExecuteSeedHandler()
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.INTERNAL)
 
         fake_exec = FakeExecResult()
         mock_runner = MagicMock()
@@ -362,7 +363,7 @@ class TestExecuteSeedHandlerQA:
 
     async def test_qa_not_called_on_failure(self) -> None:
         """QA is not called when execution fails."""
-        handler = ExecuteSeedHandler()
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.INTERNAL)
 
         fake_exec = FakeExecResult(success=False, final_message="Build failed")
         mock_runner = MagicMock()
@@ -399,7 +400,7 @@ class TestExecuteSeedHandlerQA:
 
     async def test_qa_failure_degrades_gracefully(self) -> None:
         """If QA handler raises, background task does not crash."""
-        handler = ExecuteSeedHandler()
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.INTERNAL)
 
         fake_exec = FakeExecResult()
         mock_runner = MagicMock()

@@ -5,6 +5,7 @@ in a separate decide_later_items list, flowing through to PMSeed and PM document
 """
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,6 +15,7 @@ from ouroboros.bigbang.interview import (
     InterviewEngine,
     InterviewRound,
     InterviewState,
+    InterviewStateStore,
     InterviewStatus,
 )
 from ouroboros.bigbang.pm_document import generate_pm_markdown
@@ -62,9 +64,11 @@ def _make_engine(adapter: MagicMock | None = None) -> PMInterviewEngine:
     classifier = MagicMock(spec=QuestionClassifier)
     classifier.classify = AsyncMock()
     classifier.codebase_context = ""
+    state_store = InterviewStateStore(state_dir=Path("/tmp/test_pm_state"))
 
     return PMInterviewEngine(
         inner=inner,
+        state_store=state_store,
         classifier=classifier,
         llm_adapter=adapter,
     )

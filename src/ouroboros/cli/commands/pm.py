@@ -29,6 +29,28 @@ app = typer.Typer(
 )
 
 
+def _create_pm_litellm_adapter() -> Any:
+    """Construct the PM interview adapter or raise actionable guidance.
+
+    The PM CLI currently relies on the LiteLLM-backed path. On base installs
+    without the optional ``litellm`` extra, importing the adapter crashes with
+    ``ModuleNotFoundError``. Convert that into a user-facing error instead.
+    """
+    try:
+        from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+    except ModuleNotFoundError as exc:
+        if exc.name == "litellm":
+            msg = (
+                "PM interviews require the optional LiteLLM dependency. "
+                "Reinstall with `ouroboros-ai[litellm]`, or if you use uv tool: "
+                "`uv tool install --force --with litellm ouroboros-ai`."
+            )
+            raise RuntimeError(msg) from exc
+        raise
+
+    return LiteLLMAdapter()
+
+
 @app.callback(invoke_without_command=True)
 def pm_command(
     ctx: typer.Context,
@@ -270,32 +292,11 @@ def _save_cli_pm_meta(session_id: str, engine: Any) -> None:
     Writes to ``~/.ouroboros/data/pm_meta_{session_id}.json`` — the same
     location used by the MCP handler's ``_save_pm_meta``.
     """
-    import json
+    from ouroboros.bigbang.pm_interview import PMInterviewStateStore
 
-    data_dir = Path.home() / ".ouroboros" / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = data_dir / f"pm_meta_{session_id}.json"
-
-    # Build pending_reframe from the engine's reframe map (mirrors MCP _save_pm_meta)
-    pending_reframe: dict[str, str] | None = None
-    if engine._reframe_map:
-        reframed = next(reversed(engine._reframe_map))
-        pending_reframe = {
-            "reframed": reframed,
-            "original": engine._reframe_map[reframed],
-        }
-
-    meta = {
-        "deferred_items": list(engine.deferred_items),
-        "decide_later_items": list(engine.decide_later_items),
-        "codebase_context": engine.codebase_context,
-        "pending_reframe": pending_reframe,
-        "cwd": "",
-        "brownfield_repos": list(engine._selected_brownfield_repos),
-        "classifications": [c.output_type.value for c in getattr(engine, "classifications", [])],
-    }
-
-    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    store = PMInterviewStateStore()
+    meta = store.build_meta(engine=engine, cwd="")
+    store.save_meta(session_id, meta)
 
 
 async def _run_pm_interview(
@@ -316,9 +317,12 @@ async def _run_pm_interview(
         output_dir: Optional output directory for the generated PM document.
     """
     from ouroboros.bigbang.pm_interview import PMInterviewEngine
-    from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
-    adapter = LiteLLMAdapter()
+    try:
+        adapter = _create_pm_litellm_adapter()
+    except RuntimeError as exc:
+        print_error(str(exc))
+        raise typer.Exit(code=1) from exc
     engine = PMInterviewEngine.create(llm_adapter=adapter, model=model)
 
     # Check for existing PM seeds before starting a new session
@@ -341,18 +345,11 @@ async def _run_pm_interview(
         state = state_result.value
 
         # Restore PM-specific metadata (deferred items, decide-later, etc.)
-        data_dir = Path.home() / ".ouroboros" / "data"
-        pm_meta_path = data_dir / f"pm_meta_{resume_id}.json"
-        if pm_meta_path.exists():
-            import json
+        from ouroboros.bigbang.pm_interview import PMInterviewStateStore
 
-            try:
-                meta = json.loads(pm_meta_path.read_text(encoding="utf-8"))
-                engine.restore_meta(meta)
-            except (json.JSONDecodeError, OSError):
-                print_warning("Could not load PM metadata; continuing without it.")
-                # Still install PM steering even without full meta
-                engine._install_pm_steering()
+        meta = PMInterviewStateStore().load_meta(resume_id)
+        if meta is not None:
+            engine.restore_meta(meta.model_dump())
         else:
             # No pm_meta file — still install PM steering for resumed session
             engine._install_pm_steering()

@@ -200,9 +200,9 @@ def main() -> None:
         print(f"""{user_input}
 
 <skill-suggestion>
-🎯 MATCHED SKILLS (use AskUserQuestion to let user choose):
+🎯 MATCHED SKILLS (use the structured question UI tool — AskUserQuestion on Claude Code, AskQuestion on Cursor — to let the user choose):
 - /ouroboros:{skill_name} - First time using Ouroboros! Starting welcome experience.
-IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confirm or skip.
+IMPORTANT: Auto-triggering welcome experience now. Use the structured question UI tool to confirm or skip.
 </skill-suggestion>
 """)
         return

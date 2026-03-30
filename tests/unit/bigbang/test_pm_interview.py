@@ -15,6 +15,7 @@ from ouroboros.bigbang.interview import (
     InterviewEngine,
     InterviewRound,
     InterviewState,
+    InterviewStateStore,
     InterviewStatus,
 )
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
@@ -104,6 +105,8 @@ class TestPMInterviewEngineComposition:
         assert engine.inner.model == "test-model"
         assert engine.model == "test-model"
         assert engine.inner.state_dir == tmp_path
+        assert isinstance(engine.state_store, InterviewStateStore)
+        assert engine.state_store.state_dir == tmp_path
 
     def test_initial_state_is_clean(self, tmp_path: Path) -> None:
         """Newly created engine has empty deferred items and classifications."""
@@ -1179,7 +1182,7 @@ class TestSaveAndLoadState:
 
     @pytest.mark.asyncio
     async def test_save_delegates(self, tmp_path: Path) -> None:
-        """save_state delegates to inner engine."""
+        """save_state uses the dedicated interview state store."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 
@@ -1193,7 +1196,7 @@ class TestSaveAndLoadState:
 
     @pytest.mark.asyncio
     async def test_load_delegates(self, tmp_path: Path) -> None:
-        """load_state delegates to inner engine."""
+        """load_state uses the dedicated interview state store."""
         adapter = _make_adapter()
         engine = _make_engine(adapter, tmp_path)
 

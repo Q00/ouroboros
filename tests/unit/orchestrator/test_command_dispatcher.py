@@ -193,6 +193,181 @@ class TestCodexCommandDispatcher:
         )
 
     @pytest.mark.asyncio
+    async def test_generate_seed_dispatch_persists_latest_seed_id_in_resume_handle(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`ooo seed` should persist the generated seed_id for a later plain `ooo run`."""
+        intercept = self._make_intercept(
+            tmp_path,
+            "seed",
+            mcp_tool="ouroboros_generate_seed",
+            mcp_args={"session_id": "interview-123"},
+            prompt="ooo seed interview-123",
+            first_argument="interview-123",
+        )
+        fake_server = AsyncMock()
+        fake_server.call_tool = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="Seed saved"),),
+                    meta={"seed_id": "seed_abc123"},
+                )
+            )
+        )
+        dispatcher = create_codex_command_dispatcher(cwd=tmp_path, runtime_backend="claude")
+
+        with patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            return_value=fake_server,
+        ):
+            messages = await dispatcher(intercept, None)
+
+        assert messages is not None
+        resume_handle = messages[-1].resume_handle
+        assert resume_handle is not None
+        assert resume_handle.backend == "claude"
+        assert resume_handle.metadata["ouroboros_latest_seed_id"] == "seed_abc123"
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_dispatch_reuses_latest_seed_id_when_argument_omitted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plain `ooo run` should reuse the most recently generated seed_id."""
+        intercept = self._make_intercept(
+            tmp_path,
+            "run",
+            mcp_tool="ouroboros_execute_seed",
+            mcp_args={"seed_path": "", "cwd": str(tmp_path)},
+            prompt="ooo run",
+            first_argument=None,
+        )
+        current_handle = RuntimeHandle(
+            backend="claude",
+            metadata={"ouroboros_latest_seed_id": "seed_abc123"},
+        )
+        fake_server = AsyncMock()
+        fake_server.call_tool = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="Prepared session:orch-1"),),
+                    meta={"seed_id": "seed_abc123", "session_id": "orch-1"},
+                )
+            )
+        )
+        dispatcher = create_codex_command_dispatcher(cwd=tmp_path, runtime_backend="claude")
+
+        with patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            return_value=fake_server,
+        ):
+            messages = await dispatcher(intercept, current_handle)
+
+        fake_server.call_tool.assert_awaited_once_with(
+            "ouroboros_execute_seed",
+            {"cwd": str(tmp_path), "seed_id": "seed_abc123"},
+        )
+        assert messages is not None
+        assert messages[-1].resume_handle is not None
+        assert messages[-1].resume_handle.metadata["ouroboros_latest_seed_id"] == "seed_abc123"
+
+    @pytest.mark.asyncio
+    async def test_generate_seed_dispatch_reuses_interview_session_when_argument_omitted(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plain `ooo seed` should reuse the current interview session when available."""
+        intercept = self._make_intercept(
+            tmp_path,
+            "seed",
+            mcp_tool="ouroboros_generate_seed",
+            mcp_args={"session_id": ""},
+            prompt="ooo seed",
+            first_argument=None,
+        )
+        current_handle = RuntimeHandle(
+            backend="claude",
+            metadata={"ouroboros_interview_session_id": "interview-123"},
+        )
+        fake_server = AsyncMock()
+        fake_server.call_tool = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="Seed saved"),),
+                    meta={"seed_id": "seed_abc123"},
+                )
+            )
+        )
+        dispatcher = create_codex_command_dispatcher(cwd=tmp_path, runtime_backend="claude")
+
+        with patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            return_value=fake_server,
+        ):
+            messages = await dispatcher(intercept, current_handle)
+
+        fake_server.call_tool.assert_awaited_once_with(
+            "ouroboros_generate_seed",
+            {"session_id": "interview-123"},
+        )
+        assert messages is not None
+        assert messages[-1].resume_handle is not None
+        assert messages[-1].resume_handle.metadata["ouroboros_latest_seed_id"] == "seed_abc123"
+
+    @pytest.mark.asyncio
+    async def test_interview_dispatch_persists_pending_structured_input_metadata(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Question-spec responses should persist pending structured-input metadata."""
+        intercept = self._make_intercept(
+            tmp_path,
+            "interview",
+            mcp_tool="ouroboros_interview",
+            mcp_args={"initial_context": "Build a todo app", "cwd": str(tmp_path)},
+            prompt='ooo interview "Build a todo app"',
+            first_argument="Build a todo app",
+        )
+        fake_server = AsyncMock()
+        fake_server.call_tool = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="Next question"),),
+                    meta={
+                        "session_id": "interview-789",
+                        "response_param": "answer",
+                        "question_spec": {
+                            "answer_mode": "single_select",
+                            "options": ["Task CRUD"],
+                            "allow_multiple": False,
+                            "has_custom_input": True,
+                        },
+                    },
+                )
+            )
+        )
+        dispatcher = create_codex_command_dispatcher(cwd=tmp_path, runtime_backend="claude")
+
+        with patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            return_value=fake_server,
+        ):
+            messages = await dispatcher(intercept, None)
+
+        assert messages is not None
+        resume_handle = messages[-1].resume_handle
+        assert resume_handle is not None
+        assert resume_handle.metadata["ouroboros_interview_session_id"] == "interview-789"
+        assert resume_handle.metadata["ouroboros_pending_structured_input"] == {
+            "mcp_tool": "ouroboros_interview",
+            "skill_name": "interview",
+            "command_prefix": "ooo interview",
+            "session_id": "interview-789",
+            "response_param": "answer",
+        }
+
+    @pytest.mark.asyncio
     async def test_dispatch_returns_recoverable_messages_when_call_tool_fails(
         self,
         tmp_path: Path,

@@ -27,6 +27,16 @@ ooo setup
 
 ---
 
+## Load Question Tool
+
+**If `ToolSearch` is not available** (Cursor, other runtimes): the question tool is already available. Skip the ToolSearch call below.
+
+**If `ToolSearch` is available** (Claude Code): load it explicitly:
+```
+select:AskUserQuestion
+```
+Store whichever tool becomes available (`AskUserQuestion` or `AskQuestion`) as the **question tool**. Use it for all user-facing choices below. If neither is available, present choices as numbered markdown options.
+
 ## Setup Wizard Flow
 
 When the user invokes this skill, guide them through an enhanced 6-step wizard with progressive disclosure and celebration checkpoints.
@@ -55,31 +65,12 @@ Setup takes ~2 minutes. Let's go!
 
 ### Step 0.5: Community Support
 
-Before we begin, check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`, use **AskUserQuestion**:
-
-```json
-{
-  "questions": [{
-    "question": "Ouroboros is free and open-source. A GitHub star helps other developers discover it. Star the repo?",
-    "header": "Community",
-    "options": [
-      {
-        "label": "Star on GitHub",
-        "description": "Takes 1 second — helps the project grow"
-      },
-      {
-        "label": "Skip for now",
-        "description": "Continue with setup"
-      }
-    ],
-    "multiSelect": false
-  }]
-}
-```
+Before we begin, check `~/.ouroboros/prefs.json` for `star_asked`. If not `true`, ask with platform-native structured choice UI. Keep the prompt and choices equivalent across platforms; on Cursor, provide explicit `options`.
+- Prompt: `Ouroboros is free and open-source. A GitHub star helps other developers discover it. Star the repo?`
+- Options: `Star on GitHub`, `Skip for now`
 
 - **Star on GitHub**: Run `gh api -X PUT /user/starred/Q00/ouroboros`, save `{"star_asked": true}` to `~/.ouroboros/prefs.json`
 - **Skip for now**: Save `{"star_asked": true}` to `~/.ouroboros/prefs.json`
-- **Other**: Save `{"star_asked": true}`
 
 Create `~/.ouroboros/` directory if it doesn't exist.
 
@@ -202,12 +193,20 @@ This enables:
 **Automatically create or update `~/.claude/mcp.json`** (user-level, works across all projects).
 
 Choose the MCP command based on how ouroboros is installed (check in order):
-1. If `which uvx` succeeds: `{"command": "uvx", "args": ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"]}`
-2. If `which ouroboros` succeeds: `{"command": "ouroboros", "args": ["mcp", "serve"]}`
-3. If `python3 -c "import ouroboros"` succeeds: `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"]}`
+1. If `which uvx` succeeds: `{"command": "uvx", "args": ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"], "env": {"OUROBOROS_AGENT_MODE": "native"}}`
+2. If `which ouroboros` succeeds: `{"command": "ouroboros", "args": ["mcp", "serve"], "env": {"OUROBOROS_AGENT_MODE": "native"}}`
+3. If `python3 -c "import ouroboros"` succeeds: `{"command": "python3", "args": ["-m", "ouroboros", "mcp", "serve"], "env": {"OUROBOROS_AGENT_MODE": "native"}}`
 4. If none of the above → **do NOT write to mcp.json**. Instead show the prerequisites message from Step 1 and stop.
 
+The `OUROBOROS_AGENT_MODE=native` env var tells the MCP server to return state only (no internal LLM execution), so the host runtime drives execution via subagents.
+
 If `~/.claude/mcp.json` already exists, read it, **always overwrite the `ouroboros` key** with the entry above (to fix stale args from older versions), and preserve all other server entries.
+
+**Also register in `~/.cursor/mcp.json`** if the directory exists:
+```bash
+ls ~/.cursor/ 2>/dev/null && echo "CURSOR_DETECTED" || echo "NO_CURSOR"
+```
+If detected, apply the same MCP entry to `~/.cursor/mcp.json` (merge, preserve other servers).
 
 **Celebration Checkpoint 2:**
 ```
@@ -246,7 +245,7 @@ A backup will be created: CLAUDE.md.bak
 **If "Preview first", show:**
 ````markdown
 <!-- ooo:START -->
-<!-- ooo:VERSION:0.26.2 -->
+<!-- ooo:VERSION:0.26.4 -->
 # Ouroboros — Specification-First AI Development
 
 > Before telling AI what to build, define what should be built.
@@ -323,7 +322,7 @@ ls skills/ | wc -l  # Should show 12+ skills
 
 Check agents are available:
 ```bash
-ls src/ouroboros/agents/*.md | wc -l  # Should show 20+ bundled agents
+ls agents/*.md | wc -l  # Should show 20+ bundled agents
 ```
 
 Check MCP registration (if enabled):
@@ -411,42 +410,12 @@ Include `*` markers for defaults exactly as they appear in the scan response. Do
 
 **Default repo selection — IMMEDIATELY after showing the list:**
 
-Use `AskUserQuestion` with the current default numbers from the scan response.
+**Ask using the question tool:**
+- Prompt: `Which repos should be the default interview context?`
+- Options: `Use current defaults (<current default numbers>)`, `Use no default repos`, `Enter custom repo numbers`
+- Include the `custom` choice on Cursor.
 
-**If defaults exist**, show them as the recommended option:
-
-```json
-{
-  "questions": [{
-    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
-    "header": "Default Repos",
-    "options": [
-      {"label": "<current default numbers> (Recommended)", "description": "<current default names>"},
-      {"label": "None", "description": "Clear all defaults — interviews will run in greenfield mode"},
-      {"label": "Select repos", "description": "Type repo numbers to set as default"}
-    ],
-    "multiSelect": false
-  }]
-}
-```
-
-**If no defaults exist**, do NOT show a "(Recommended)" option — offer "None" and "Select repos" instead:
-
-```json
-{
-  "questions": [{
-    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
-    "header": "Default Repos",
-    "options": [
-      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"},
-      {"label": "Select repos", "description": "Type repo numbers to set as default"}
-    ],
-    "multiSelect": false
-  }]
-}
-```
-
-The user can select the recommended defaults (if any), choose "None", or type custom numbers.
+Only one recommended preset option: the current defaults. In Claude Code, the user may type custom numbers directly. In Cursor, if the user picks `custom`, immediately ask: `Enter repo numbers like '6, 18, 19'.` If the user picks `none`, clear all defaults.
 
 After the user responds, use ONE MCP call to update all defaults at once:
 

@@ -1,13 +1,17 @@
 """Tests for Ouroboros tool definitions."""
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+import yaml
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
+from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
+from ouroboros.mcp.layers.gate import AgentMode
 from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_signal
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
@@ -44,6 +48,26 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_SESSION_ID_ARG,
 )
 from ouroboros.orchestrator.session import SessionTracker
+from ouroboros.resilience.lateral import ThinkingPersona
+
+_MINIMAL_SEED_YAML = """\
+goal: Test task
+constraints: []
+acceptance_criteria:
+  - Pass
+ontology_schema:
+  name: Test
+  description: Test
+  fields: []
+evaluation_principles: []
+exit_conditions: []
+metadata:
+  seed_id: seed-123
+  version: "1.0.0"
+  created_at: "2024-01-01T00:00:00Z"
+  ambiguity_score: 0.1
+  interview_id: null
+"""
 
 
 def create_mock_live_ambiguity_score(
@@ -115,6 +139,7 @@ class TestExecuteSeedHandler:
         param_names = {p.name for p in defn.parameters}
         assert "cwd" in param_names
         assert "session_id" in param_names
+        assert "ac_index" in param_names
         assert "model_tier" in param_names
         assert "max_iterations" in param_names
 
@@ -132,7 +157,7 @@ class TestExecuteSeedHandler:
         result = await handler.handle({})
 
         assert result.is_err
-        assert "seed_content or seed_path is required" in str(result.error)
+        assert "seed_id is required" in str(result.error)
 
     def test_execute_seed_handler_factory_accepts_runtime_backend(self) -> None:
         """Factory helper preserves explicit runtime backend selection."""
@@ -256,8 +281,8 @@ class TestExecuteSeedHandler:
         assert called_seed.goal == "Test task"
 
     async def test_handle_success(self) -> None:
-        """handle returns an immediate launched response with valid YAML seed input."""
-        handler = ExecuteSeedHandler()
+        """Internal mode: handle returns an immediate launched response with valid YAML seed input."""
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.INTERNAL)
         mock_runtime = MagicMock()
         mock_runtime._runtime_backend = "codex"
         mock_event_store = AsyncMock()
@@ -315,11 +340,11 @@ class TestExecuteSeedHandler:
         assert result.value.meta["status"] == "running"
 
     async def test_handle_reads_seed_from_seed_path(self, tmp_path: Path) -> None:
-        """handle loads seed YAML from seed_path and launches execution in the background."""
+        """Internal mode: handle loads seed YAML from seed_path and launches execution in the background."""
         seed_file = tmp_path / "seed.yaml"
         seed_file.write_text(VALID_SEED_YAML, encoding="utf-8")
 
-        handler = ExecuteSeedHandler()
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.INTERNAL)
         mock_runtime = MagicMock()
         mock_runtime._runtime_backend = "codex"
         mock_event_store = AsyncMock()
@@ -378,6 +403,229 @@ class TestExecuteSeedHandler:
         assert result.value.meta["runtime_backend"] in ("claude", "codex")
         assert result.value.meta["resume_requested"] is False
 
+    async def test_native_prepare_returns_compact_state_with_ac_count(self) -> None:
+        """Native prepare should expose compact routing metadata for thin orchestration."""
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.NATIVE)
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_runner = MagicMock()
+        prepared_tracker = SessionTracker.create(
+            "exec-native-prepare",
+            "test-seed-123",
+            session_id="orch-native-prepare",
+        )
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
+        mock_runner.execute_precreated_session = AsyncMock()
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": VALID_SEED_YAML,
+                    "action": "prepare",
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["status"] == "prepared"
+        assert result.value.meta["ac_count"] == 1
+        assert result.value.meta["goal"] == "Test task"
+        assert result.value.meta["planning_mode"] == "single_stage_default"
+        assert result.value.meta["stage_count"] == 1
+        assert result.value.meta["stage_plan"] == [{"stage": 1, "ac_indices": [1]}]
+        assert result.value.meta["ac_briefs"] == [
+            {
+                "index": 1,
+                "label": "AC1",
+                "summary": "Task completes successfully",
+            }
+        ]
+        assert "Prepared session:orch-native-prepare" in result.value.text_content
+        mock_runner.execute_precreated_session.assert_not_called()
+
+    async def test_native_state_returns_numbered_ac_data_for_subagents(self, tmp_path: Path) -> None:
+        """Native state should expose numbered AC metadata plus the assigned AC."""
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.NATIVE)
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_runner = MagicMock()
+        prepared_tracker = SessionTracker.create(
+            "exec-native-state",
+            "test-seed-123",
+            session_id="orch-native-state",
+        )
+        mock_runner.prepare_session = AsyncMock(return_value=Result.ok(prepared_tracker))
+        mock_runner.execute_precreated_session = AsyncMock()
+        mock_runner.resume_session = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "seed_content": VALID_SEED_YAML,
+                    "action": "state",
+                    "cwd": str(tmp_path),
+                    "ac_index": 1,
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["status"] in {"initialized", "running"}
+        assert result.value.meta["ac_count"] == 1
+        assert result.value.meta["acceptance_criteria"] == ["Task completes successfully"]
+        assert result.value.meta["acceptance_criteria_items"] == [
+            {
+                "index": 1,
+                "label": "AC1",
+                "text": "Task completes successfully",
+                "summary": "Task completes successfully",
+            }
+        ]
+        assert result.value.meta["assigned_ac_index"] == 1
+        assert result.value.meta["assigned_acceptance_criterion"] == "Task completes successfully"
+        assert result.value.meta["cwd"] == str(tmp_path.resolve())
+        assert "Assigned:" in result.value.text_content
+        assert "AC1: Task completes successfully" in result.value.text_content
+        mock_runner.execute_precreated_session.assert_not_called()
+
+    async def test_record_result_accepts_session_id_without_seed_id(self) -> None:
+        """record_result should resolve the seed from session_id alone."""
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.NATIVE)
+        mock_runtime = MagicMock()
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+        mock_runner = MagicMock()
+        mock_runner.prepare_session = AsyncMock()
+        mock_runner.execute_precreated_session = AsyncMock()
+        mock_runner.resume_session = AsyncMock()
+        resumed_tracker = SessionTracker.create(
+            "exec-record-only",
+            "test-seed-123",
+            session_id="orch-record-only",
+        )
+        resumed_tracker = replace(
+            resumed_tracker,
+            progress={
+                "runtime": {
+                    "backend": "codex_cli",
+                    "cwd": "/tmp/record-result-project",
+                }
+            },
+        )
+        seed = Seed.from_dict(yaml.safe_load(VALID_SEED_YAML))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+                return_value=mock_runtime,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.EventStore",
+                return_value=mock_event_store,
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.OrchestratorRunner",
+                return_value=mock_runner,
+            ),
+            patch.object(
+                handler,
+                "_load_session_seed_bundle",
+                new=AsyncMock(return_value=Result.ok((resumed_tracker, seed, VALID_SEED_YAML))),
+            ) as mock_seed_bundle,
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.SessionRepository.reconstruct_session",
+                new=AsyncMock(return_value=Result.ok(resumed_tracker)),
+            ),
+        ):
+            result = await handler.handle(
+                {
+                    "action": "record_result",
+                    "session_id": "orch-record-only",
+                    "agent_execution_result": (
+                        "ac:1 status:DONE\n"
+                        "created:none\n"
+                        "modified:src/app.py\n"
+                        "tests:1/1\n"
+                        "note:done"
+                    ),
+                    "skip_qa": True,
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["session_id"] == "orch-record-only"
+        assert result.value.meta["seed_id"] == "test-seed-123"
+        assert result.value.meta["status"] == "completed"
+        assert result.value.meta["qa_skipped"] is True
+        assert result.value.meta["cwd"] == str(Path("/tmp/record-result-project").resolve())
+        mock_seed_bundle.assert_awaited_once_with("orch-record-only")
+        mock_runner.prepare_session.assert_not_awaited()
+        mock_runner.execute_precreated_session.assert_not_awaited()
+        mock_runner.resume_session.assert_not_awaited()
+
+    async def test_native_state_from_session_recovers_tracker_cwd_when_omitted(self) -> None:
+        """state(session_id) should use the reconstructed session cwd when no cwd arg is passed."""
+        handler = ExecuteSeedHandler(agent_mode=AgentMode.NATIVE)
+        tracker = SessionTracker.create(
+            "exec-state-cwd",
+            "test-seed-123",
+            session_id="orch-state-cwd",
+        )
+        tracker = replace(
+            tracker,
+            progress={
+                "runtime": {
+                    "backend": "codex_cli",
+                    "cwd": "/tmp/restored-project",
+                }
+            },
+        )
+        seed = Seed.from_dict(yaml.safe_load(VALID_SEED_YAML))
+
+        with patch.object(
+            handler,
+            "_load_session_seed_bundle",
+            new=AsyncMock(return_value=Result.ok((tracker, seed, VALID_SEED_YAML))),
+        ):
+            result = await handler.handle(
+                {
+                    "action": "state",
+                    "session_id": "orch-state-cwd",
+                    "ac_index": 1,
+                }
+            )
+
+        assert result.is_ok
+        assert result.value.meta["cwd"] == str(Path("/tmp/restored-project").resolve())
+        assert "Assigned:" in result.value.text_content
+
     async def test_handle_rejects_opencode_runtime_at_boundary(self) -> None:
         """OpenCode is not yet available — handler should surface a clear error."""
         handler = ExecuteSeedHandler(
@@ -397,10 +645,11 @@ class TestExecuteSeedHandler:
         assert "not yet available" in result.error.message
 
     async def test_handle_launches_background_resume_for_existing_session(self) -> None:
-        """Resuming through MCP should reuse the current orchestrator resume path."""
+        """Internal mode: resuming through MCP should reuse the current orchestrator resume path."""
         handler = ExecuteSeedHandler(
             agent_runtime_backend="codex",
             llm_backend="codex",
+            agent_mode=AgentMode.INTERNAL,
         )
         mock_runtime = MagicMock()
         mock_runtime._runtime_backend = "codex"
@@ -819,8 +1068,8 @@ class TestOuroborosTools:
         assert evaluate_handler(llm_backend="litellm").llm_backend == "litellm"
 
     async def test_interview_handler_uses_interview_use_case(self) -> None:
-        """Interview fallback requests the interview-specific permission policy."""
-        handler = InterviewHandler(llm_backend="codex")
+        """Internal mode: interview fallback requests the interview-specific permission policy."""
+        handler = InterviewHandler(llm_backend="codex", agent_mode=AgentMode.INTERNAL)
         mock_adapter = MagicMock()
         mock_engine = MagicMock()
         mock_start = AsyncMock()
@@ -847,11 +1096,11 @@ class TestOuroborosTools:
         assert mock_create_adapter.call_args.kwargs["use_case"] == "interview"
 
     async def test_generate_seed_handler_passes_llm_backend_to_model_lookup(self) -> None:
-        """GenerateSeedHandler should resolve model defaults with the active LLM backend."""
-        handler = GenerateSeedHandler(llm_backend="codex")
+        """Internal mode: GenerateSeedHandler should resolve model defaults with the active LLM backend."""
+        handler = GenerateSeedHandler(llm_backend="codex", agent_mode=AgentMode.INTERNAL)
         mock_adapter = MagicMock()
-        mock_interview_engine = MagicMock()
-        mock_interview_engine.load_state = AsyncMock(return_value=Result.ok(MagicMock()))
+        mock_state_store = MagicMock()
+        mock_state_store.load_state = AsyncMock(return_value=Result.ok(MagicMock()))
         mock_seed_generator = MagicMock()
         mock_seed_generator.generate = AsyncMock(return_value=Result.err(RuntimeError("boom")))
 
@@ -861,8 +1110,8 @@ class TestOuroborosTools:
                 return_value=mock_adapter,
             ),
             patch(
-                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
-                return_value=mock_interview_engine,
+                "ouroboros.mcp.tools.authoring_handlers.InterviewStateStore",
+                return_value=mock_state_store,
             ),
             patch(
                 "ouroboros.mcp.tools.authoring_handlers.SeedGenerator",
@@ -875,11 +1124,46 @@ class TestOuroborosTools:
         ):
             await handler.handle({"session_id": "sess-123", "ambiguity_score": 0.1})
 
-        assert mock_get_model.call_args_list == [call("codex"), call("codex")]
+        assert mock_get_model.call_args_list == [call("codex")]
+
+    async def test_generate_seed_native_state_uses_state_store_not_interview_engine(self) -> None:
+        """Native seed state action should use InterviewStateStore directly."""
+        state = InterviewState(
+            interview_id="sess-123",
+            initial_context="Build a tool",
+            rounds=[
+                InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+            ],
+        )
+        mock_state_store = MagicMock()
+        mock_state_store.load_state = AsyncMock(return_value=Result.ok(state))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewStateStore",
+                return_value=mock_state_store,
+            ) as mock_store_cls,
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+            ) as mock_engine_cls,
+        ):
+            handler = GenerateSeedHandler(agent_mode=AgentMode.NATIVE)
+            result = await handler.handle({"session_id": "sess-123", "action": "state"})
+
+        assert result.is_ok
+        assert result.value.meta["session_id"] == "sess-123"
+        assert result.value.meta["ambiguity_score"] is None
+        assert result.value.meta["round_count"] == 1
+        assert result.value.meta["answered_rounds"] == 1
+        assert "rounds" not in result.value.meta
+        assert "Q1: Q1?" in result.value.content[0].text
+        assert "A1: A1" in result.value.content[0].text
+        assert mock_store_cls.call_count == 1
+        mock_engine_cls.assert_not_called()
 
     async def test_evaluate_handler_passes_llm_backend_to_semantic_model_lookup(self) -> None:
-        """EvaluateHandler should derive semantic model defaults from the active backend."""
-        handler = EvaluateHandler(llm_backend="codex")
+        """Internal mode: EvaluateHandler should derive semantic model defaults from the active backend."""
+        handler = EvaluateHandler(llm_backend="codex", agent_mode=AgentMode.INTERNAL)
         mock_adapter = MagicMock()
         mock_pipeline = MagicMock()
         mock_pipeline.evaluate = AsyncMock(return_value=Result.err(RuntimeError("semantic failed")))
@@ -932,8 +1216,8 @@ metadata:
         mock_get_model.assert_called_once_with("codex")
 
     async def test_qa_handler_passes_llm_backend_to_qa_model_lookup(self) -> None:
-        """QAHandler should derive QA model defaults from the active backend."""
-        handler = QAHandler(llm_backend="codex")
+        """Internal mode: QAHandler should derive QA model defaults from the active backend."""
+        handler = QAHandler(llm_backend="codex", agent_mode=AgentMode.INTERNAL)
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(return_value=Result.err(RuntimeError("llm failed")))
 
@@ -1013,6 +1297,77 @@ metadata:
   ambiguity_score: 0.1
   interview_id: null
 """
+
+
+class TestLateralThinkHandler:
+    """Test LateralThinkHandler argument normalization."""
+
+    async def test_handle_treats_null_failed_attempts_as_empty(self) -> None:
+        """Explicit null from MCP clients should behave like an omitted optional array."""
+        handler = LateralThinkHandler()
+
+        mock_lateral_result = MagicMock(
+            approach_summary="Try a different angle",
+            prompt="Consider an alternative path",
+            questions=("What assumption can you invert?",),
+            persona=MagicMock(value="contrarian"),
+        )
+        mock_thinker = MagicMock()
+        mock_thinker.generate_alternative.return_value = Result.ok(mock_lateral_result)
+
+        with patch(
+            "ouroboros.resilience.lateral.LateralThinker",
+            return_value=mock_thinker,
+        ):
+            result = await handler.handle(
+                {
+                    "problem_context": "tool crashes when optional arg is null",
+                    "current_approach": "call ouroboros_lateral_think without failed_attempts",
+                    "failed_attempts": None,
+                }
+            )
+
+        assert result.is_ok
+        mock_thinker.generate_alternative.assert_called_once_with(
+            persona=ThinkingPersona.CONTRARIAN,
+            problem_context="tool crashes when optional arg is null",
+            current_approach="call ouroboros_lateral_think without failed_attempts",
+            failed_attempts=(),
+        )
+
+    async def test_handle_filters_falsey_failed_attempts_entries(self) -> None:
+        """Falsy entries should be dropped while valid entries are stringified."""
+        handler = LateralThinkHandler()
+
+        mock_lateral_result = MagicMock(
+            approach_summary="Try a different angle",
+            prompt="Consider an alternative path",
+            questions=("What assumption can you invert?",),
+            persona=MagicMock(value="architect"),
+        )
+        mock_thinker = MagicMock()
+        mock_thinker.generate_alternative.return_value = Result.ok(mock_lateral_result)
+
+        with patch(
+            "ouroboros.resilience.lateral.LateralThinker",
+            return_value=mock_thinker,
+        ):
+            result = await handler.handle(
+                {
+                    "problem_context": "problem",
+                    "current_approach": "approach",
+                    "persona": "architect",
+                    "failed_attempts": ["first", None, "", 7],
+                }
+            )
+
+        assert result.is_ok
+        mock_thinker.generate_alternative.assert_called_once_with(
+            persona=ThinkingPersona.ARCHITECT,
+            problem_context="problem",
+            current_approach="approach",
+            failed_attempts=("first", "7"),
+        )
 
 
 class TestMeasureDriftHandler:
@@ -1118,22 +1473,27 @@ class TestEvaluateHandler:
         handler = EvaluateHandler()
         assert handler.TIMEOUT_SECONDS == 0
 
-    def test_definition_requires_session_id_and_artifact(self) -> None:
-        """EvaluateHandler requires session_id and artifact parameters."""
+    def test_definition_requires_session_id_and_has_optional_artifact_inputs(self) -> None:
+        """EvaluateHandler requires session_id and exposes optional artifact inputs."""
         handler = EvaluateHandler()
         defn = handler.definition
 
         param_names = {p.name for p in defn.parameters}
         assert "session_id" in param_names
         assert "artifact" in param_names
+        assert "artifact_path" in param_names
 
         session_param = next(p for p in defn.parameters if p.name == "session_id")
         assert session_param.required is True
         assert session_param.type == ToolInputType.STRING
 
         artifact_param = next(p for p in defn.parameters if p.name == "artifact")
-        assert artifact_param.required is True
+        assert artifact_param.required is False
         assert artifact_param.type == ToolInputType.STRING
+
+        artifact_path_param = next(p for p in defn.parameters if p.name == "artifact_path")
+        assert artifact_path_param.required is False
+        assert artifact_path_param.type == ToolInputType.STRING
 
     def test_definition_has_optional_trigger_consensus(self) -> None:
         """EvaluateHandler has optional trigger_consensus parameter."""
@@ -1158,13 +1518,103 @@ class TestEvaluateHandler:
         assert result.is_err
         assert "session_id is required" in str(result.error)
 
-    async def test_handle_requires_artifact(self) -> None:
-        """handle returns error when artifact is missing."""
+    async def test_native_state_requires_resolvable_context(self) -> None:
+        """Native mode without session context or seed_content returns context error."""
         handler = EvaluateHandler()
-        result = await handler.handle({"session_id": "test-session"})
+        with patch.object(handler, "_load_seed_from_session", new_callable=AsyncMock) as mock_load:
+            mock_load.return_value = None
+            result = await handler.handle({"session_id": "test-session"})
+
+        assert result.is_err
+        assert "Could not resolve evaluation context" in str(result.error)
+
+    async def test_internal_handle_requires_artifact(self) -> None:
+        """Internal compatibility mode still requires artifact content."""
+        handler = EvaluateHandler(agent_mode=AgentMode.INTERNAL)
+        result = await handler.handle({"session_id": "test-session", "seed_content": _MINIMAL_SEED_YAML})
 
         assert result.is_err
         assert "artifact is required" in str(result.error)
+
+    async def test_native_action_state_uses_session_context_and_artifact_path(self, tmp_path: Path) -> None:
+        """action=state should return session-derived goal/ACs and artifact_path without artifact body."""
+        handler = EvaluateHandler()
+        result = await handler.handle(
+            {
+                "session_id": "test-session",
+                "action": "state",
+                "seed_content": _MINIMAL_SEED_YAML,
+                "working_dir": str(tmp_path),
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["seed_id"] == "seed-123"
+        assert result.value.meta["goal"] == "Test task"
+        assert result.value.meta["acceptance_criteria"] == ["Pass"]
+        assert result.value.meta["cwd"] == str(tmp_path.resolve())
+        assert result.value.meta["artifact_path"] == str(tmp_path.resolve())
+        assert f"Artifact Path: {tmp_path.resolve()}" in result.value.text_content
+
+    async def test_native_action_record_accepts_stage1_failure_verdict(self) -> None:
+        """action=record should parse evaluator stage output including Stage 1 rejection."""
+        handler = EvaluateHandler()
+        result = await handler.handle(
+            {
+                "session_id": "test-session",
+                "action": "record",
+                "seed_content": _MINIMAL_SEED_YAML,
+                "agent_verdict": '{"stage1":{"passed":false,"build":false,"tests_passed":1,"tests_total":3},"needs_consensus":false}',
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["highest_stage"] == 1
+        assert result.value.meta["stage1_passed"] is False
+        assert result.value.meta["final_approved"] is False
+        assert "Highest Stage Completed: 1" in result.value.text_content
+
+    async def test_native_action_record_accepts_stage3_consensus_bundle(self) -> None:
+        """action=record should accept a simple 3-vote consensus bundle."""
+        handler = EvaluateHandler()
+        result = await handler.handle(
+            {
+                "session_id": "test-session",
+                "action": "record",
+                "seed_content": _MINIMAL_SEED_YAML,
+                "agent_verdict": """
+                {
+                  "stage2": {
+                    "score": 0.65,
+                    "drift_score": 0.12,
+                    "ac_results": [{"ac": 1, "passed": true, "note": "Looks complete"}]
+                  },
+                  "stage3": {
+                    "approved": true,
+                    "majority_ratio": 0.6666667,
+                    "total_votes": 3,
+                    "approving_votes": 2,
+                    "votes": [
+                      {"reviewer": "reviewer_1", "approved": true, "confidence": 0.91, "reasoning": "AC is satisfied"},
+                      {"reviewer": "reviewer_2", "approved": true, "confidence": 0.77, "reasoning": "Looks production ready"},
+                      {"reviewer": "reviewer_3", "approved": false, "confidence": 0.72, "reasoning": "One edge case remains"}
+                    ]
+                  }
+                }
+                """,
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["highest_stage"] == 3
+        assert result.value.meta["final_approved"] is True
+        assert result.value.meta["stage3_approved"] is True
+        assert result.value.meta["stage3_total_votes"] == 3
+        assert result.value.meta["stage3_approving_votes"] == 2
+        assert result.value.meta["stage3_majority_ratio"] == pytest.approx(0.6666667)
+        assert "Stage 3: Multi-Model Consensus" in result.value.text_content
+        assert "Total Votes: 3" in result.value.text_content
+        assert "[APPROVE] reviewer_1" in result.value.text_content
 
     async def test_handle_success(self) -> None:
         """handle returns success with valid session_id and artifact."""
@@ -1222,7 +1672,7 @@ class TestEvaluateHandler:
             mock_pipeline_instance.evaluate = AsyncMock(return_value=mock_pipeline_result)
             MockPipeline.return_value = mock_pipeline_instance
 
-            handler = EvaluateHandler()
+            handler = EvaluateHandler(agent_mode=AgentMode.INTERNAL)
             result = await handler.handle(
                 {
                     "session_id": "test-session",
@@ -1398,7 +1848,7 @@ class TestInterviewHandlerCwd:
         mock_scorer = MagicMock()
         mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
 
-        handler = InterviewHandler(interview_engine=mock_engine, llm_adapter=MagicMock())
+        handler = InterviewHandler(interview_engine=mock_engine, llm_adapter=MagicMock(), agent_mode=AgentMode.INTERNAL)
         with patch(
             "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
             return_value=mock_scorer,
@@ -1411,10 +1861,11 @@ class TestInterviewHandlerCwd:
         call_kwargs = mock_engine.start_interview.call_args
         assert call_kwargs[1]["cwd"] == str(tmp_path)
         assert "(ambiguity: 0.67) First question?" in result.value.content[0].text
+        assert result.value.meta["question"] == "First question?"
 
     async def test_interview_handle_clears_stored_ambiguity_after_new_answer(self) -> None:
-        """Interview answers should refresh the ambiguity snapshot after rescoring."""
-        handler = InterviewHandler(llm_adapter=MagicMock())
+        """Internal mode: interview answers should refresh the ambiguity snapshot after rescoring."""
+        handler = InterviewHandler(llm_adapter=MagicMock(), agent_mode=AgentMode.INTERNAL)
         state = InterviewState(
             interview_id="sess-123",
             ambiguity_score=0.14,
@@ -1454,10 +1905,11 @@ class TestInterviewHandlerCwd:
         assert state.ambiguity_score == 0.44
         assert state.ambiguity_breakdown is not None
         assert "(ambiguity: 0.44) Next question?" in result.value.content[0].text
+        assert result.value.meta["question"] == "Next question?"
 
     async def test_interview_handle_done_completes_without_new_question(self) -> None:
-        """Explicit completion signals should stop the interview instead of asking again."""
-        handler = InterviewHandler()
+        """Internal mode: explicit completion signals should stop the interview instead of asking again."""
+        handler = InterviewHandler(agent_mode=AgentMode.INTERNAL)
         handler._emit_event = AsyncMock()
         state = InterviewState(
             interview_id="sess-123",
@@ -1499,8 +1951,8 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["completed"] is True
 
     async def test_interview_handle_auto_completes_when_live_ambiguity_is_low(self) -> None:
-        """Low live ambiguity should end the interview without another question."""
-        handler = InterviewHandler(llm_adapter=MagicMock())
+        """Internal mode: low live ambiguity should end the interview without another question."""
+        handler = InterviewHandler(llm_adapter=MagicMock(), agent_mode=AgentMode.INTERNAL)
         handler._emit_event = AsyncMock()
         state = InterviewState(
             interview_id="sess-123",
@@ -1559,6 +2011,72 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["ambiguity_score"] == 0.18
         assert "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
         mock_engine.ask_next_question.assert_not_called()
+
+    async def test_native_action_state_keeps_full_text_but_trims_meta_duplication(self) -> None:
+        """Native state action should keep full transcript text without duplicating rounds in meta."""
+        state = InterviewState(
+            interview_id="sess-native",
+            initial_context="Build a task manager",
+            rounds=[
+                InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+                InterviewRound(round_number=2, question="Q2?", user_response=None),
+            ],
+        )
+        mock_store = MagicMock()
+        mock_store.load_state = AsyncMock(return_value=Result.ok(state))
+
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.InterviewStateStore",
+            return_value=mock_store,
+        ):
+            handler = InterviewHandler(agent_mode=AgentMode.NATIVE)
+            result = await handler.handle({"action": "state", "session_id": "sess-native"})
+
+        assert result.is_ok
+        text = result.value.content[0].text
+        assert "Q1: Q1?" in text
+        assert "A1: A1" in text
+        assert "Q2: Q2?" in text
+        assert "A2: (pending)" in text
+        assert result.value.meta["round_count"] == 2
+        assert result.value.meta["answered_rounds"] == 1
+        assert result.value.meta["question"] == "Q2?"
+        assert "rounds" not in result.value.meta
+
+    async def test_native_action_record_returns_migration_error(self) -> None:
+        """Native interview mode should reject legacy question-first record calls."""
+
+        handler = InterviewHandler(agent_mode=AgentMode.NATIVE)
+        result = await handler.handle(
+            {
+                "action": "record",
+                "session_id": "sess-native",
+                "type": "answer",
+                "answer": "A1",
+            }
+        )
+
+        assert result.is_err
+        assert "action=record" in result.error.message
+        assert "action=record_turn" in result.error.message
+
+    async def test_native_state_actions_reuse_state_store(self) -> None:
+        """Native CRUD actions should reuse a single state-only InterviewStateStore instance."""
+        state = InterviewState(interview_id="sess-native", initial_context="Build a task manager")
+        mock_store = MagicMock()
+        mock_store.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_store.complete_interview = AsyncMock(return_value=Result.ok(state))
+        mock_store.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.InterviewStateStore",
+            return_value=mock_store,
+        ) as mock_store_cls:
+            handler = InterviewHandler(agent_mode=AgentMode.NATIVE)
+            await handler.handle({"action": "state", "session_id": "sess-native"})
+            await handler.handle({"action": "complete", "session_id": "sess-native"})
+
+        assert mock_store_cls.call_count == 1
 
 
 class TestGenerateSeedHandlerAmbiguity:
@@ -1620,6 +2138,7 @@ class TestGenerateSeedHandlerAmbiguity:
             llm_adapter=mock_adapter,
             interview_engine=mock_interview_engine,
             seed_generator=mock_seed_generator,
+            agent_mode=AgentMode.INTERNAL,
         )
 
         with (
@@ -1678,6 +2197,7 @@ class TestGenerateSeedHandlerAmbiguity:
             llm_adapter=mock_adapter,
             interview_engine=mock_interview_engine,
             seed_generator=mock_seed_generator,
+            agent_mode=AgentMode.INTERNAL,
         )
 
         with (
@@ -1734,16 +2254,18 @@ class TestGenerateSeedHandlerAmbiguity:
         )
 
         # LLM tries to pass ambiguity_score=0.18 to bypass the gate
-        await handler.handle(
+        result = await handler.handle(
             {
                 "session_id": "sess-bypass",
                 "ambiguity_score": 0.18,
             }
         )
 
-        # The stored score (0.35) should be used, NOT the caller's 0.18
-        generate_call = mock_seed_generator.generate.await_args
-        assert generate_call.args[1].overall_score == 0.35
+        # In native mode the handler returns state (no internal generation).
+        # The returned ambiguity score must be the stored 0.35, NOT the caller's 0.18.
+        assert result.is_ok
+        meta = result.value.meta
+        assert meta["ambiguity_score"] == 0.35
 
 
 class TestCancelExecutionHandler:

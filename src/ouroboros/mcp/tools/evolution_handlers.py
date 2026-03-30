@@ -115,7 +115,7 @@ class EvolveStepHandler:
             name="ouroboros_evolve_step",
             description=(
                 "Run exactly ONE generation of the evolutionary loop. "
-                "For Gen 1: provide lineage_id and seed_content (YAML). "
+                "For Gen 1: provide lineage_id and seed_content (YAML) or seed_id. "
                 "For Gen 2+: provide lineage_id only (state reconstructed from events). "
                 "Returns generation result, convergence signal, and next action "
                 "(continue/converged/stagnated/exhausted/failed)."
@@ -133,6 +133,16 @@ class EvolveStepHandler:
                     description=(
                         "Seed YAML content for Gen 1. "
                         "Omit for Gen 2+ (seed reconstructed from events)."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="seed_id",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Saved seed ID for Gen 1. Loaded from "
+                        "~/.ouroboros/seeds/<seed_id>.yaml and preferred over "
+                        "inlining large seed_content in the caller context."
                     ),
                     required=False,
                 ),
@@ -202,6 +212,25 @@ class EvolveStepHandler:
         # Parse seed if provided (Gen 1)
         initial_seed = None
         seed_content = arguments.get("seed_content")
+        seed_id = arguments.get("seed_id")
+        if not seed_content and seed_id:
+            seed_file = Path.home() / ".ouroboros" / "seeds" / f"{seed_id}.yaml"
+            try:
+                seed_content = seed_file.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return Result.err(
+                    MCPToolError(
+                        f"Seed file not found for seed_id {seed_id}: {seed_file}",
+                        tool_name="ouroboros_evolve_step",
+                    )
+                )
+            except OSError as e:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to read seed for seed_id {seed_id}: {e}",
+                        tool_name="ouroboros_evolve_step",
+                    )
+                )
         if seed_content:
             try:
                 seed_dict = yaml.safe_load(seed_content)

@@ -9,18 +9,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
-from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_interview import PMInterviewEngine, PMInterviewStateStore
+from ouroboros.providers.base import CompletionResponse, UsageInfo
 from ouroboros.core.types import Result
+from ouroboros.mcp.layers.gate import AgentMode
 from ouroboros.mcp.tools.pm_handler import (
     _DATA_DIR,
     PMInterviewHandler,
-    _check_completion,
-    _compute_deferred_diff,
     _detect_action,
-    _load_pm_meta,
-    _meta_path,
-    _restore_engine_meta,
-    _save_pm_meta,
 )
 from tests.unit.mcp.tools.conftest import make_pm_engine_mock
 
@@ -38,6 +34,47 @@ def _make_engine_stub(
         deferred_items=list(deferred or []),
         decide_later_items=list(decide_later or []),
     )
+
+
+def _make_real_pm_engine(tmp_path: Path) -> PMInterviewEngine:
+    adapter = MagicMock()
+    adapter.complete = AsyncMock(
+        return_value=Result.ok(
+            CompletionResponse(
+                content="ignored",
+                model="claude-opus-4-6",
+                usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                finish_reason="stop",
+            )
+        )
+    )
+    return PMInterviewEngine.create(llm_adapter=adapter, state_dir=tmp_path)
+
+
+def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
+    return PMInterviewStateStore(data_dir=data_dir or _DATA_DIR).meta_path(session_id)
+
+
+def _save_pm_meta(
+    session_id: str,
+    engine: PMInterviewEngine | None = None,
+    cwd: str = "",
+    data_dir: Path | None = None,
+    *,
+    status: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    store = PMInterviewStateStore(data_dir=data_dir or _DATA_DIR)
+    meta = store.build_meta(engine=engine, cwd=cwd, status=status, extra=extra)
+    store.save_meta(session_id, meta)
+
+
+def _load_pm_meta(session_id: str, data_dir: Path | None = None) -> dict[str, Any] | None:
+    return PMInterviewStateStore(data_dir=data_dir or _DATA_DIR).load_meta_dict(session_id)
+
+
+def _restore_engine_meta(engine: PMInterviewEngine, meta: dict[str, Any]) -> None:
+    engine.restore_meta(meta)
 
 
 def _make_state(
@@ -67,7 +104,7 @@ class TestComputeDeferredDiff:
     def test_no_new_items(self) -> None:
         """Diff is empty when no items were added."""
         engine = _make_engine_stub(deferred=["old1"], decide_later=["old_dl1"])
-        diff = _compute_deferred_diff(engine, deferred_len_before=1, decide_later_len_before=1)
+        diff = engine.compute_deferred_diff(1, 1)
 
         assert diff["new_deferred"] == []
         assert diff["new_decide_later"] == []
@@ -77,7 +114,7 @@ class TestComputeDeferredDiff:
     def test_one_new_deferred(self) -> None:
         """Diff captures a single newly deferred item."""
         engine = _make_engine_stub(deferred=["old1", "new_deferred_q"])
-        diff = _compute_deferred_diff(engine, deferred_len_before=1, decide_later_len_before=0)
+        diff = engine.compute_deferred_diff(1, 0)
 
         assert diff["new_deferred"] == ["new_deferred_q"]
         assert diff["new_decide_later"] == []
@@ -86,7 +123,7 @@ class TestComputeDeferredDiff:
     def test_one_new_decide_later(self) -> None:
         """Diff captures a single newly decide-later item."""
         engine = _make_engine_stub(decide_later=["old_dl", "new_dl_q"])
-        diff = _compute_deferred_diff(engine, deferred_len_before=0, decide_later_len_before=1)
+        diff = engine.compute_deferred_diff(0, 1)
 
         assert diff["new_deferred"] == []
         assert diff["new_decide_later"] == ["new_dl_q"]
@@ -102,7 +139,7 @@ class TestComputeDeferredDiff:
             deferred=["old_d", "new_d1", "new_d2"],
             decide_later=["old_dl", "new_dl1", "new_dl2", "new_dl3"],
         )
-        diff = _compute_deferred_diff(engine, deferred_len_before=1, decide_later_len_before=1)
+        diff = engine.compute_deferred_diff(1, 1)
 
         assert diff["new_deferred"] == ["new_d1", "new_d2"]
         assert diff["new_decide_later"] == ["new_dl1", "new_dl2", "new_dl3"]
@@ -112,7 +149,7 @@ class TestComputeDeferredDiff:
     def test_empty_lists_with_zero_before(self) -> None:
         """Handles empty lists with zero snapshot gracefully."""
         engine = _make_engine_stub()
-        diff = _compute_deferred_diff(engine, deferred_len_before=0, decide_later_len_before=0)
+        diff = engine.compute_deferred_diff(0, 0)
 
         assert diff["new_deferred"] == []
         assert diff["new_decide_later"] == []
@@ -125,7 +162,7 @@ class TestComputeDeferredDiff:
             deferred=["d1", "d2"],
             decide_later=["dl1"],
         )
-        diff = _compute_deferred_diff(engine, deferred_len_before=0, decide_later_len_before=0)
+        diff = engine.compute_deferred_diff(0, 0)
 
         assert diff["new_deferred"] == ["d1", "d2"]
         assert diff["new_decide_later"] == ["dl1"]
@@ -321,12 +358,12 @@ class TestPMHandlerDiffIntegration:
 
     def test_definition_name(self) -> None:
         """Handler has correct tool name."""
-        handler = PMInterviewHandler()
+        handler = PMInterviewHandler(agent_mode=AgentMode.INTERNAL)
         assert handler.definition.name == "ouroboros_pm_interview"
 
     def test_definition_has_flat_optional_params(self) -> None:
         """All parameters are optional (flat params pattern)."""
-        handler = PMInterviewHandler()
+        handler = PMInterviewHandler(agent_mode=AgentMode.INTERNAL)
         defn = handler.definition
         for param in defn.parameters:
             assert param.required is False, f"{param.name} should be optional"
@@ -369,7 +406,7 @@ class TestPMHandlerDiffIntegration:
         engine.deferred_items = ["existing_deferred"]
         engine.decide_later_items = []
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -406,7 +443,7 @@ class TestPMHandlerDiffIntegration:
 
         _save_pm_meta("sess-2", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -440,7 +477,7 @@ class TestPMHandlerDiffIntegration:
 
         _save_pm_meta("sess-3", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -477,7 +514,7 @@ class TestCheckCompletion:
         state = _make_state(rounds=_make_answered_rounds(2))
         engine = _make_engine_stub()
 
-        result = await _check_completion(state, engine)
+        result = await engine.check_completion(state)
         assert result is None
 
     @pytest.mark.asyncio
@@ -512,7 +549,7 @@ class TestCheckCompletion:
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
 
-            result = await _check_completion(state, engine)
+            result = await engine.check_completion(state)
 
         assert result is not None
         assert result["interview_complete"] is True
@@ -551,7 +588,7 @@ class TestCheckCompletion:
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
 
-            result = await _check_completion(state, engine)
+            result = await engine.check_completion(state)
 
         assert result is None
 
@@ -571,7 +608,7 @@ class TestCheckCompletion:
             mock_scorer.score = AsyncMock(return_value=Result.err(ProviderError("LLM down")))
             mock_scorer_cls.return_value = mock_scorer
 
-            result = await _check_completion(state, engine)
+            result = await engine.check_completion(state)
 
         assert result is None
 
@@ -585,7 +622,7 @@ class TestCheckCompletion:
         engine = _make_engine_stub()
 
         # 2 answered rounds < MIN_ROUNDS_BEFORE_EARLY_EXIT (3)
-        result = await _check_completion(state, engine)
+        result = await engine.check_completion(state)
         assert result is None
 
     @pytest.mark.asyncio
@@ -619,7 +656,7 @@ class TestCheckCompletion:
             mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
             mock_scorer_cls.return_value = mock_scorer
 
-            await _check_completion(state, engine)
+            await engine.check_completion(state)
 
             # Verify scorer was called with additional_context containing decide-later items
             call_kwargs = mock_scorer.score.call_args
@@ -652,27 +689,23 @@ class TestHandlerCompletionIntegration:
 
         _save_pm_meta("sess-complete", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
-        # Mock _check_completion to return completion
+        # Mock engine.check_completion to return completion
         completion_meta = {
             "interview_complete": True,
             "completion_reason": "ambiguity_resolved",
             "rounds_completed": 5,
             "ambiguity_score": 0.18,
         }
+        engine.check_completion = AsyncMock(return_value=completion_meta)
 
-        with patch(
-            "ouroboros.mcp.tools.pm_handler._check_completion",
-            new_callable=AsyncMock,
-            return_value=completion_meta,
-        ):
-            result = await handler.handle(
-                {
-                    "session_id": "sess-complete",
-                    "answer": "Final answer",
-                }
-            )
+        result = await handler.handle(
+            {
+                "session_id": "sess-complete",
+                "answer": "Final answer",
+            }
+        )
 
         assert result.is_ok
         meta = result.value.meta
@@ -707,7 +740,7 @@ class TestHandlerCompletionIntegration:
 
         _save_pm_meta("sess-done", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         # User types "done" — should NOT trigger completion
         result = await handler.handle(
@@ -1300,8 +1333,11 @@ class TestHandleStartBrownfield:
         assert "is_brownfield" in meta
         # Step 2 response meta: status, input_type, response_param (AC 7)
         assert meta["status"] == "interview_started"
-        assert meta["input_type"] == "freeText"
+        assert meta["input_type"] == "choice"
         assert meta["response_param"] == "answer"
+        assert "prompt" not in meta["question_spec"]
+        assert meta["question_spec"]["options"] == ["Not sure yet"]
+        assert meta["cursor_question_payload"]["questions"][0]["options"][-1]["label"] == "Other"
         # Diff fields
         assert "new_deferred" in meta
         assert "new_decide_later" in meta
@@ -1354,7 +1390,7 @@ class TestResumeMetaFields:
 
         _save_pm_meta("resume-ac3", engine, cwd="/tmp/proj", data_dir=tmp_path)
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -1416,7 +1452,7 @@ class TestResumeMetaFields:
         engine.deferred_items = ["old_deferred"]
         engine.decide_later_items = []
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -1453,7 +1489,7 @@ class TestResumeMetaFields:
 
         _save_pm_meta("resume-noclassify", engine, cwd="/tmp", data_dir=tmp_path)
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -1507,7 +1543,7 @@ class TestResumeMetaFields:
 
         _save_pm_meta("resume-complete", engine, cwd="/tmp", data_dir=tmp_path)
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -1550,7 +1586,7 @@ class TestResumeMetaFields:
         # Save meta with specific values
         _save_pm_meta("resume-load", engine, cwd="/project", data_dir=tmp_path)
 
-        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -2182,7 +2218,7 @@ class TestRestartRecovery:
     """AC 10: MCP server restart recovery for awaiting_repo_selection sessions."""
 
     def _make_handler(self, engine, tmp_path):
-        return PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        return PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
     @pytest.mark.asyncio
     async def test_resume_interview_started_session_works(self, tmp_path: Path):
@@ -2329,6 +2365,269 @@ class TestRestartRecovery:
         assert result.is_ok
         engine.load_state.assert_called_once_with(session_id)
 
+
+class TestPMNativeActions:
+    """Native PM MCP contract tests using explicit actions."""
+
+    def _make_handler(self, engine, tmp_path):
+        return PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
+
+    @pytest.mark.asyncio
+    async def test_native_start_initializes_state_only(self, tmp_path: Path) -> None:
+        handler = PMInterviewHandler(data_dir=tmp_path)
+
+        with patch.object(handler, "_query_default_repos", new_callable=AsyncMock) as mock_defaults:
+            mock_defaults.return_value = []
+            result = await handler.handle(
+                {
+                    "action": "start",
+                    "initial_context": "새 관리자 대시보드를 만들고 싶어",
+                    "cwd": str(tmp_path),
+                }
+            )
+
+        assert result.is_ok
+        meta = result.value.meta
+        session_id = meta["session_id"]
+        assert meta["round_count"] == 0
+        assert meta["answered_rounds"] == 0
+        assert meta["pending_reframe"] is None
+
+        state_store = PMInterviewHandler(data_dir=tmp_path)._get_interview_state_store()
+        loaded = await state_store.load_state(session_id)
+        assert loaded.is_ok
+        assert loaded.value.initial_context == "새 관리자 대시보드를 만들고 싶어"
+        assert loaded.value.rounds == []
+
+    @pytest.mark.asyncio
+    async def test_native_record_question_persists_pm_meta(self, tmp_path: Path) -> None:
+        engine = _make_real_pm_engine(tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        start_result = await handler.handle(
+            {
+                "action": "start",
+                "initial_context": "B2B 결제 관리 기능",
+                "cwd": str(tmp_path),
+            }
+        )
+        assert start_result.is_ok
+        session_id = start_result.value.meta["session_id"]
+
+        result = await handler.handle(
+            {
+                "action": "record",
+                "type": "question",
+                "session_id": session_id,
+                "question": "운영자와 일반 사용자의 핵심 권한 차이는 뭐야?",
+                "classification": "reframed",
+                "original_question": "What IAM roles should we configure?",
+                "deferred_this_round": ["What queue should we use?"],
+                "decide_later_this_round": ["Which SSO vendor should we choose?"],
+                "ambiguity_score": 0.42,
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["pending_reframe"] == {
+            "reframed": "운영자와 일반 사용자의 핵심 권한 차이는 뭐야?",
+            "original": "What IAM roles should we configure?",
+        }
+        assert result.value.meta["deferred_count"] == 1
+        assert result.value.meta["decide_later_count"] == 1
+
+        saved_meta = _load_pm_meta(session_id, tmp_path)
+        assert saved_meta is not None
+        assert saved_meta["classifications"] == ["reframed"]
+        assert saved_meta["deferred_items"] == ["What queue should we use?"]
+        assert saved_meta["decide_later_items"] == ["Which SSO vendor should we choose?"]
+
+    @pytest.mark.asyncio
+    async def test_native_record_answer_clears_pending_reframe(self, tmp_path: Path) -> None:
+        engine = _make_real_pm_engine(tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        start_result = await handler.handle(
+            {
+                "action": "start",
+                "initial_context": "협업용 티켓 분류 기능",
+                "cwd": str(tmp_path),
+            }
+        )
+        assert start_result.is_ok
+        session_id = start_result.value.meta["session_id"]
+
+        question_result = await handler.handle(
+            {
+                "action": "record",
+                "type": "question",
+                "session_id": session_id,
+                "question": "사용자 그룹별로 어떤 작업만 허용돼야 해?",
+                "classification": "reframed",
+                "original_question": "What RBAC matrix should we implement?",
+            }
+        )
+        assert question_result.is_ok
+
+        answer_result = await handler.handle(
+            {
+                "action": "record",
+                "type": "answer",
+                "session_id": session_id,
+                "answer": "관리자는 모두 가능하고, 일반 사용자는 자신이 만든 티켓만 수정 가능해야 해.",
+            }
+        )
+
+        assert answer_result.is_ok
+        assert answer_result.value.meta["ambiguity_score"] is None
+
+        saved_meta = _load_pm_meta(session_id, tmp_path)
+        assert saved_meta is not None
+        assert saved_meta["pending_reframe"] is None
+
+        state_store = handler._get_interview_state_store()
+        state = (await state_store.load_state(session_id)).value
+        assert len(state.rounds) == 1
+        assert "[Original technical question:" in state.rounds[0].question
+        assert state.rounds[0].user_response is not None
+
+    @pytest.mark.asyncio
+    async def test_native_record_turn_persists_full_pm_turn(self, tmp_path: Path) -> None:
+        engine = _make_real_pm_engine(tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        start_result = await handler.handle(
+            {
+                "action": "start",
+                "initial_context": "B2B 결제 관리 기능",
+                "cwd": str(tmp_path),
+            }
+        )
+        assert start_result.is_ok
+        session_id = start_result.value.meta["session_id"]
+
+        result = await handler.handle(
+            {
+                "action": "record_turn",
+                "session_id": session_id,
+                "question": "운영자와 일반 사용자의 핵심 권한 차이는 뭐야?",
+                "answer": "관리자는 환불 승인과 정산 수정이 가능하고 일반 사용자는 조회만 가능해야 해.",
+                "classification": "reframed",
+                "original_question": "What IAM roles should we configure?",
+                "deferred_this_round": ["What queue should we use?"],
+                "decide_later_this_round": ["Which SSO vendor should we choose?"],
+                "ambiguity_score": 0.42,
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["answered_rounds"] == 1
+        assert result.value.meta["deferred_count"] == 1
+        assert result.value.meta["decide_later_count"] == 1
+        assert result.value.meta["pending_reframe"] is None
+
+        saved_meta = _load_pm_meta(session_id, tmp_path)
+        assert saved_meta is not None
+        assert saved_meta["classifications"] == ["reframed"]
+        assert saved_meta["deferred_items"] == ["What queue should we use?"]
+        assert saved_meta["decide_later_items"] == ["Which SSO vendor should we choose?"]
+
+        state_store = handler._get_interview_state_store()
+        state = (await state_store.load_state(session_id)).value
+        assert len(state.rounds) == 1
+        assert state.rounds[0].user_response is not None
+        assert "[Original technical question:" in state.rounds[0].question
+
+    @pytest.mark.asyncio
+    async def test_native_state_returns_transcript_and_compact_meta(self, tmp_path: Path) -> None:
+        engine = _make_real_pm_engine(tmp_path)
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+
+        start_result = await handler.handle(
+            {
+                "action": "start",
+                "initial_context": "사내 승인 워크플로우 도구",
+                "cwd": str(tmp_path),
+            }
+        )
+        session_id = start_result.value.meta["session_id"]
+
+        await handler.handle(
+            {
+                "action": "record",
+                "type": "question",
+                "session_id": session_id,
+                "question": "어떤 승인 단계가 꼭 필요해?",
+                "ambiguity_score": 0.5,
+            }
+        )
+        await handler.handle(
+            {
+                "action": "record",
+                "type": "answer",
+                "session_id": session_id,
+                "answer": "팀장 승인과 보안 승인 두 단계는 필요해.",
+            }
+        )
+
+        result = await handler.handle(
+            {
+                "action": "state",
+                "session_id": session_id,
+            }
+        )
+
+        assert result.is_ok
+        assert "Transcript:" in result.value.content[0].text
+        assert "팀장 승인과 보안 승인 두 단계는 필요해." in result.value.content[0].text
+        assert result.value.meta["round_count"] == 1
+        assert result.value.meta["answered_rounds"] == 1
+        assert result.value.meta["completed"] is False
+
+    @pytest.mark.asyncio
+    async def test_native_score_and_complete_gate(self, tmp_path: Path) -> None:
+        handler = PMInterviewHandler(data_dir=tmp_path)
+
+        start_result = await handler.handle(
+            {
+                "action": "start",
+                "initial_context": "고객 온보딩 체크리스트 기능",
+                "cwd": str(tmp_path),
+            }
+        )
+        assert start_result.is_ok
+        session_id = start_result.value.meta["session_id"]
+
+        blocked = await handler.handle(
+            {
+                "action": "complete",
+                "session_id": session_id,
+            }
+        )
+        assert blocked.is_ok
+        assert blocked.value.meta["seed_ready"] is False
+
+        score_result = await handler.handle(
+            {
+                "action": "score",
+                "session_id": session_id,
+                "goal_clarity": 0.9,
+                "constraint_clarity": 0.9,
+                "success_criteria_clarity": 0.9,
+            }
+        )
+        assert score_result.is_ok
+        assert score_result.value.meta["seed_ready"] is True
+
+        complete_result = await handler.handle(
+            {
+                "action": "complete",
+                "session_id": session_id,
+            }
+        )
+        assert complete_result.is_ok
+        assert complete_result.value.meta["completed"] is True
+
     @pytest.mark.asyncio
     async def test_resume_missing_state_returns_error(self, tmp_path: Path):
         """Resume when engine can't load state returns error."""
@@ -2412,7 +2711,7 @@ class TestTwoStepStartOrchestrationFlow:
         return eng
 
     def _make_handler(self, engine, tmp_path):
-        return PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        return PMInterviewHandler(pm_engine=engine, data_dir=tmp_path, agent_mode=AgentMode.INTERNAL)
 
     @pytest.mark.asyncio
     async def test_simple_flow_start_answer_next(self, engine, tmp_path):
@@ -2591,8 +2890,10 @@ class TestTwoStepStartOrchestrationFlow:
         assert result.is_ok
         meta = result.value.meta
         assert meta["status"] == "interview_started"
-        assert meta["input_type"] == "freeText"
+        assert meta["input_type"] == "choice"
         assert meta["is_brownfield"] is False
+        assert meta["question_spec"]["options"] == ["Not sure yet"]
+        assert meta["cursor_question_payload"]["questions"][0]["options"][-1]["label"] == "Other"
         # Engine was started with greenfield
         engine.ask_opening_and_start.assert_called_once()
         call_kwargs = engine.ask_opening_and_start.call_args

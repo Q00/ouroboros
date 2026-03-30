@@ -39,7 +39,9 @@ This may take a moment...
 
 **Implementation — use MCP tools only, do NOT use CLI or Python scripts:**
 
-1. Load the brownfield MCP tool: `ToolSearch query: "+ouroboros brownfield"`
+1. Load the brownfield MCP tool:
+   - **If `ToolSearch` is not available** (Cursor, other runtimes): MCP tools are already loaded. Skip to step 2.
+   - **If `ToolSearch` is available** (Claude Code): `ToolSearch query: "+ouroboros brownfield"`
 2. Call scan+register:
    ```
    Tool: ouroboros_brownfield
@@ -68,43 +70,24 @@ No GitHub repositories found in your home directory.
 ```
 Then stop.
 
+**Step 1.5: Load Question Tool**
+
+**If `ToolSearch` is not available** (Cursor, other runtimes): `AskUserQuestion` is already loaded. Use it directly.
+
+**If `ToolSearch` is available** (Claude Code):
+```
+ToolSearch query: "select:AskUserQuestion"
+```
+Store whichever tool becomes available (`AskUserQuestion` or `AskQuestion`) as the **question tool**. If neither is available, present choices as numbered markdown options.
+
 **Step 2: Default Selection**
 
-**IMMEDIATELY after showing the list**, use `AskUserQuestion` with the current default numbers from the scan response.
+**IMMEDIATELY after showing the list**, ask using the **question tool**:
+- Prompt: `Which repos should be the default interview context?`
+- Options: `Use current defaults (<current default numbers>)`, `Use no default repos`, `Enter custom repo numbers`
+- Include the `custom` choice on Cursor.
 
-**If defaults exist**, show them as the recommended option:
-
-```json
-{
-  "questions": [{
-    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
-    "header": "Default Repos",
-    "options": [
-      {"label": "<current default numbers> (Recommended)", "description": "<current default names>"},
-      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"}
-    ],
-    "multiSelect": false
-  }]
-}
-```
-
-**If no defaults exist**, do NOT show a "(Recommended)" option — offer "None" and "Select repos" instead:
-
-```json
-{
-  "questions": [{
-    "question": "Which repos to set as default for interviews? Enter numbers like '6, 18, 19'.",
-    "header": "Default Repos",
-    "options": [
-      {"label": "None", "description": "No default repos — interviews will run in greenfield mode"},
-      {"label": "Select repos", "description": "Type repo numbers to set as default"}
-    ],
-    "multiSelect": false
-  }]
-}
-```
-
-The user can select the recommended defaults (if any), choose "None", or type custom numbers.
+The user can select the recommended defaults, choose "None", or enter custom numbers. In Claude Code, the user may type custom numbers directly. In Cursor, if the user picks `custom`, immediately ask: `Enter repo numbers like '6, 18, 19'.`
 
 After the user responds, use ONE MCP call to update all defaults at once:
 

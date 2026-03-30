@@ -191,6 +191,173 @@ class InterviewState(BaseModel):
 
 
 @dataclass
+class InterviewStateStore:
+    """State-only interview persistence and lifecycle operations.
+
+    This store intentionally excludes any LLM-backed question generation.
+    Native MCP flows should depend on this type instead of `InterviewEngine`.
+    """
+
+    state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
+
+    def __post_init__(self) -> None:
+        """Ensure state directory exists."""
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
+    def _state_file_path(self, interview_id: str) -> Path:
+        """Get the path to the state file for an interview."""
+        return self.state_dir / f"interview_{interview_id}.json"
+
+    async def start_interview(
+        self, initial_context: str, interview_id: str | None = None, cwd: str | None = None
+    ) -> Result[InterviewState, ValidationError]:
+        """Start a new interview session."""
+        is_valid, error_msg = InputValidator.validate_initial_context(initial_context)
+        if not is_valid:
+            return Result.err(ValidationError(error_msg, field="initial_context"))
+
+        if interview_id is None:
+            interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+
+        state = InterviewState(
+            interview_id=interview_id,
+            initial_context=initial_context,
+        )
+
+        if cwd:
+            from ouroboros.bigbang.explore import detect_brownfield
+
+            if detect_brownfield(cwd):
+                state.is_brownfield = True
+                state.codebase_paths = [{"path": cwd, "role": "primary"}]
+
+        log.info(
+            "interview.started",
+            interview_id=interview_id,
+            initial_context_length=len(initial_context),
+            is_brownfield=state.is_brownfield,
+        )
+
+        return Result.ok(state)
+
+    async def save_state(self, state: InterviewState) -> Result[Path, ValidationError]:
+        """Persist interview state to disk."""
+        try:
+            file_path = self._state_file_path(state.interview_id)
+            state.mark_updated()
+
+            with _file_lock(file_path, exclusive=True):
+                content = state.model_dump_json(indent=2)
+                file_path.write_text(content, encoding="utf-8")
+
+            log.info(
+                "interview.state_saved",
+                interview_id=state.interview_id,
+                file_path=str(file_path),
+            )
+
+            return Result.ok(file_path)
+        except (OSError, ValueError) as e:
+            log.exception(
+                "interview.state_save_failed",
+                interview_id=state.interview_id,
+                error=str(e),
+            )
+            return Result.err(
+                ValidationError(
+                    f"Failed to save interview state: {e}",
+                    details={"interview_id": state.interview_id},
+                )
+            )
+
+    async def load_state(self, interview_id: str) -> Result[InterviewState, ValidationError]:
+        """Load interview state from disk."""
+        file_path = self._state_file_path(interview_id)
+
+        if not file_path.exists():
+            return Result.err(
+                ValidationError(
+                    f"Interview state not found: {interview_id}",
+                    field="interview_id",
+                    value=interview_id,
+                )
+            )
+
+        try:
+            with _file_lock(file_path, exclusive=False):
+                content = file_path.read_text(encoding="utf-8")
+
+            state = InterviewState.model_validate_json(content)
+
+            log.info(
+                "interview.state_loaded",
+                interview_id=interview_id,
+                rounds=len(state.rounds),
+            )
+
+            return Result.ok(state)
+        except (OSError, ValueError) as e:
+            log.exception(
+                "interview.state_load_failed",
+                interview_id=interview_id,
+                error=str(e),
+            )
+            return Result.err(
+                ValidationError(
+                    f"Failed to load interview state: {e}",
+                    field="interview_id",
+                    value=interview_id,
+                    details={"file_path": str(file_path)},
+                )
+            )
+
+    async def complete_interview(
+        self, state: InterviewState
+    ) -> Result[InterviewState, ValidationError]:
+        """Mark the interview as completed."""
+        if state.status == InterviewStatus.COMPLETED:
+            return Result.ok(state)
+
+        state.status = InterviewStatus.COMPLETED
+        state.mark_updated()
+
+        log.info(
+            "interview.completed",
+            interview_id=state.interview_id,
+            total_rounds=len(state.rounds),
+        )
+
+        return Result.ok(state)
+
+    async def list_interviews(self) -> list[dict[str, Any]]:
+        """List all interview sessions in the state directory."""
+        interviews = []
+
+        for file_path in self.state_dir.glob("interview_*.json"):
+            try:
+                content = file_path.read_text(encoding="utf-8")
+                state = InterviewState.model_validate_json(content)
+                interviews.append(
+                    {
+                        "interview_id": state.interview_id,
+                        "status": state.status,
+                        "rounds": len(state.rounds),
+                        "created_at": state.created_at,
+                        "updated_at": state.updated_at,
+                    }
+                )
+            except (OSError, ValueError) as e:
+                log.warning(
+                    "interview.list_failed_for_file",
+                    file_path=str(file_path),
+                    error=str(e),
+                )
+                continue
+
+        return sorted(interviews, key=lambda x: x["updated_at"], reverse=True)
+
+
+@dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
 
@@ -231,68 +398,17 @@ class InterviewEngine:
     model: str = field(default_factory=get_clarification_model)
     temperature: float = 0.7
     max_tokens: int = 2048
+    _state_store: InterviewStateStore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Ensure state directory exists."""
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-
-    def _state_file_path(self, interview_id: str) -> Path:
-        """Get the path to the state file for an interview.
-
-        Args:
-            interview_id: The interview ID.
-
-        Returns:
-            Path to the state file.
-        """
-        return self.state_dir / f"interview_{interview_id}.json"
+        """Initialize the shared state store."""
+        self._state_store = InterviewStateStore(state_dir=self.state_dir)
 
     async def start_interview(
         self, initial_context: str, interview_id: str | None = None, cwd: str | None = None
     ) -> Result[InterviewState, ValidationError]:
-        """Start a new interview session.
-
-        Args:
-            initial_context: The initial context or idea provided by the user.
-            interview_id: Optional interview ID (generated if not provided).
-            cwd: Optional working directory. When provided, auto-detects
-                brownfield projects and runs codebase exploration before the
-                first question.
-
-        Returns:
-            Result containing the new InterviewState or ValidationError.
-        """
-        # Validate initial context with security limits
-        is_valid, error_msg = InputValidator.validate_initial_context(initial_context)
-        if not is_valid:
-            return Result.err(ValidationError(error_msg, field="initial_context"))
-
-        if interview_id is None:
-            interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
-
-        state = InterviewState(
-            interview_id=interview_id,
-            initial_context=initial_context,
-        )
-
-        # Auto-detect brownfield projects from CWD.
-        # codebase_paths is informational only — the main session (not MCP)
-        # handles codebase exploration directly via Read/Glob/Grep.
-        if cwd:
-            from ouroboros.bigbang.explore import detect_brownfield
-
-            if detect_brownfield(cwd):
-                state.is_brownfield = True
-                state.codebase_paths = [{"path": cwd, "role": "primary"}]
-
-        log.info(
-            "interview.started",
-            interview_id=interview_id,
-            initial_context_length=len(initial_context),
-            is_brownfield=state.is_brownfield,
-        )
-
-        return Result.ok(state)
+        """Start a new interview session."""
+        return await self._state_store.start_interview(initial_context, interview_id, cwd)
 
     async def ask_next_question(
         self, state: InterviewState
@@ -417,96 +533,12 @@ class InterviewEngine:
         return Result.ok(state)
 
     async def save_state(self, state: InterviewState) -> Result[Path, ValidationError]:
-        """Persist interview state to disk.
-
-        Uses file locking to prevent race conditions during concurrent access.
-
-        Args:
-            state: The interview state to save.
-
-        Returns:
-            Result containing path to saved file or ValidationError.
-        """
-        try:
-            file_path = self._state_file_path(state.interview_id)
-            state.mark_updated()
-
-            # Use file locking to prevent race conditions
-            with _file_lock(file_path, exclusive=True):
-                # Write state as JSON
-                content = state.model_dump_json(indent=2)
-                file_path.write_text(content, encoding="utf-8")
-
-            log.info(
-                "interview.state_saved",
-                interview_id=state.interview_id,
-                file_path=str(file_path),
-            )
-
-            return Result.ok(file_path)
-        except (OSError, ValueError) as e:
-            log.exception(
-                "interview.state_save_failed",
-                interview_id=state.interview_id,
-                error=str(e),
-            )
-            return Result.err(
-                ValidationError(
-                    f"Failed to save interview state: {e}",
-                    details={"interview_id": state.interview_id},
-                )
-            )
+        """Persist interview state to disk."""
+        return await self._state_store.save_state(state)
 
     async def load_state(self, interview_id: str) -> Result[InterviewState, ValidationError]:
-        """Load interview state from disk.
-
-        Uses file locking to prevent race conditions during concurrent access.
-
-        Args:
-            interview_id: The interview ID to load.
-
-        Returns:
-            Result containing loaded state or ValidationError.
-        """
-        file_path = self._state_file_path(interview_id)
-
-        if not file_path.exists():
-            return Result.err(
-                ValidationError(
-                    f"Interview state not found: {interview_id}",
-                    field="interview_id",
-                    value=interview_id,
-                )
-            )
-
-        try:
-            # Use shared lock for reading
-            with _file_lock(file_path, exclusive=False):
-                content = file_path.read_text(encoding="utf-8")
-
-            state = InterviewState.model_validate_json(content)
-
-            log.info(
-                "interview.state_loaded",
-                interview_id=interview_id,
-                rounds=len(state.rounds),
-            )
-
-            return Result.ok(state)
-        except (OSError, ValueError) as e:
-            log.exception(
-                "interview.state_load_failed",
-                interview_id=interview_id,
-                error=str(e),
-            )
-            return Result.err(
-                ValidationError(
-                    f"Failed to load interview state: {e}",
-                    field="interview_id",
-                    value=interview_id,
-                    details={"file_path": str(file_path)},
-                )
-            )
+        """Load interview state from disk."""
+        return await self._state_store.load_state(interview_id)
 
     def _build_system_prompt(self, state: InterviewState) -> str:
         """Build the system prompt for question generation.
@@ -536,12 +568,14 @@ class InterviewEngine:
                 f"CRITICAL: Start your FIRST response with a DIRECT QUESTION about the project. "
                 f'Do NOT introduce yourself. Do NOT say "I\'ll conduct" or "Let me ask". '
                 f"Just ask a specific, clarifying question immediately.\n\n"
+                f"Return ONLY the next question as plain text. Do NOT return JSON, metadata, or explanation.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
                 f"Initial context: {state.initial_context}\n"
             )
         else:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
+                f"Return ONLY the next question as plain text. Do NOT return JSON, metadata, or explanation.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
                 f"Initial context: {state.initial_context}\n"
             )
@@ -556,7 +590,7 @@ class InterviewEngine:
                 "codebase access and will enrich answers with code context. Focus your "
                 "questions on INTENT and DECISIONS, not on discovering what exists. "
                 "Answers prefixed with [from-code] describe existing code state. "
-                "Answers prefixed with [from-user] are human decisions."
+                "Unprefixed answers are human decisions."
             )
 
         ambiguity_snapshot = self._build_ambiguity_snapshot_prompt(state)
@@ -737,55 +771,9 @@ class InterviewEngine:
     async def complete_interview(
         self, state: InterviewState
     ) -> Result[InterviewState, ValidationError]:
-        """Mark the interview as completed.
-
-        Args:
-            state: Current interview state.
-
-        Returns:
-            Result containing updated state or ValidationError.
-        """
-        if state.status == InterviewStatus.COMPLETED:
-            return Result.ok(state)
-
-        state.status = InterviewStatus.COMPLETED
-        state.mark_updated()
-
-        log.info(
-            "interview.completed",
-            interview_id=state.interview_id,
-            total_rounds=len(state.rounds),
-        )
-
-        return Result.ok(state)
+        """Mark the interview as completed."""
+        return await self._state_store.complete_interview(state)
 
     async def list_interviews(self) -> list[dict[str, Any]]:
-        """List all interview sessions in the state directory.
-
-        Returns:
-            List of interview metadata dictionaries.
-        """
-        interviews = []
-
-        for file_path in self.state_dir.glob("interview_*.json"):
-            try:
-                content = file_path.read_text(encoding="utf-8")
-                state = InterviewState.model_validate_json(content)
-                interviews.append(
-                    {
-                        "interview_id": state.interview_id,
-                        "status": state.status,
-                        "rounds": len(state.rounds),
-                        "created_at": state.created_at,
-                        "updated_at": state.updated_at,
-                    }
-                )
-            except (OSError, ValueError) as e:
-                log.warning(
-                    "interview.list_failed_for_file",
-                    file_path=str(file_path),
-                    error=str(e),
-                )
-                continue
-
-        return sorted(interviews, key=lambda x: x["updated_at"], reverse=True)
+        """List all interview sessions in the state directory."""
+        return await self._state_store.list_interviews()

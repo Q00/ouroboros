@@ -119,8 +119,8 @@ class TestParseSemanticResponse:
         assert result.is_err
         assert "Missing required fields" in result.error.message
 
-    def test_missing_reward_hacking_risk_is_rejected(self) -> None:
-        """Omitting reward_hacking_risk must fail, not silently default to 0.0."""
+    def test_missing_reward_hacking_risk_defaults_to_zero(self) -> None:
+        """Omitting reward_hacking_risk should degrade gracefully to 0.0."""
         response = """{
             "score": 0.8,
             "ac_compliance": true,
@@ -131,8 +131,8 @@ class TestParseSemanticResponse:
         }"""
         result = parse_semantic_response(response)
 
-        assert result.is_err
-        assert "reward_hacking_risk" in str(result.error.details)
+        assert result.is_ok
+        assert result.value.reward_hacking_risk == 0.0
 
     def test_no_json_in_response(self) -> None:
         """Error when no JSON found."""
