@@ -1244,11 +1244,7 @@ def create_ouroboros_server(
     if mcp_bridge is not None:
         from ouroboros.mcp.tools.bridge_mixin import inject_bridge
 
-        injected = [
-            type(h).__name__
-            for h in tool_handlers
-            if inject_bridge(h, mcp_bridge)
-        ]
+        injected = [type(h).__name__ for h in tool_handlers if inject_bridge(h, mcp_bridge)]
         if injected:
             log.info("mcp.bridge.injected", handlers=injected)
         server.register_owned_resource(mcp_bridge)
