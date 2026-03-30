@@ -155,6 +155,21 @@ async def _run_mcp_server(
         # Auto-cleanup is best-effort — don't prevent server from starting
         _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
 
+    # Auto-discover and connect MCP bridge for server-to-server communication
+    from ouroboros.mcp.bridge import create_bridge_from_env
+
+    mcp_bridge = create_bridge_from_env()
+    if mcp_bridge is not None:
+        try:
+            results = await mcp_bridge.connect()
+            connected = sum(1 for r in results.values() if r.is_ok)
+            _stderr_console.print(
+                f"[blue]MCP Bridge: {connected}/{len(results)} upstream server(s) connected[/blue]"
+            )
+        except Exception as e:
+            _stderr_console.print(f"[yellow]MCP Bridge connection failed: {e}[/yellow]")
+            mcp_bridge = None
+
     # Create server with all tools pre-registered via dependency injection.
     # Do NOT re-register OUROBOROS_TOOLS here — create_ouroboros_server already
     # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
@@ -164,6 +179,7 @@ async def _run_mcp_server(
         event_store=event_store,
         runtime_backend=runtime_backend,
         llm_backend=llm_backend,
+        mcp_bridge=mcp_bridge,
     )
 
     tool_count = len(server.info.tools)
