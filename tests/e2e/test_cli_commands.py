@@ -122,7 +122,6 @@ class TestInitCommand:
                         "ouroboros.cli.commands.init.asyncio.run",
                         side_effect=_consume_asyncio_run(),
                     ) as mock_run:
-
                         _result = runner.invoke(
                             app,
                             [
@@ -143,8 +142,7 @@ class TestInitCommand:
             with patch(
                 "ouroboros.cli.commands.init.asyncio.run",
                 side_effect=_consume_asyncio_run(return_value=[]),
-            ) as mock_run:
-
+            ):
                 result = runner.invoke(
                     app,
                     ["init", "list", "--state-dir", str(temp_state_dir)],
@@ -162,7 +160,7 @@ class TestInitCommand:
             with patch(
                 "ouroboros.cli.commands.init.asyncio.run",
                 side_effect=_consume_asyncio_run(side_effect=typer.Exit(code=1)),
-            ) as mock_run:
+            ):
                 # The function should raise typer.Exit on error
                 result = runner.invoke(
                     app,
@@ -220,7 +218,6 @@ class TestRunWorkflowCommand:
             "ouroboros.cli.commands.run.asyncio.run",
             side_effect=_consume_asyncio_run(),
         ) as mock_run:
-
             result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--debug"],
@@ -237,7 +234,6 @@ class TestRunWorkflowCommand:
             "ouroboros.cli.commands.run.asyncio.run",
             side_effect=_consume_asyncio_run(),
         ) as mock_run:
-
             _result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--orchestrator"],
@@ -252,7 +248,6 @@ class TestRunWorkflowCommand:
             "ouroboros.cli.commands.run.asyncio.run",
             side_effect=_consume_asyncio_run(),
         ) as mock_run:
-
             _result = runner.invoke(
                 app,
                 [
@@ -273,7 +268,6 @@ class TestRunWorkflowCommand:
             "ouroboros.cli.commands.run.asyncio.run",
             side_effect=_consume_asyncio_run(),
         ) as mock_run:
-
             result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--resume", "sess_123"],
