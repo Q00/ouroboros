@@ -622,11 +622,9 @@ class ExecuteSeedHandler:
                         skip_qa=skip_qa,
                     )
 
-                # ── Environment-driven: native mode returns prepare state ──
-                # Only auto-route to prepare when action was explicitly omitted
-                # AND native mode is active. Callers without action= get legacy
-                # background execution to preserve compatibility (#210, QA flow).
-                # Native callers should always pass action=prepare explicitly.
+                # ── No explicit action: fall through to legacy background execution ──
+                # Native callers must pass action=prepare explicitly.
+                # Omitted action preserves backward compat (#210, QA, verification).
 
                 # ── Internal compatibility mode: fire-and-forget ──
                 # Launch execution in a background task and
