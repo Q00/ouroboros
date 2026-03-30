@@ -158,7 +158,7 @@ async def _run_mcp_server(
     # Auto-discover and connect MCP bridge for server-to-server communication
     from ouroboros.mcp.bridge import create_bridge_from_env
 
-    mcp_bridge = create_bridge_from_env()
+    mcp_bridge = create_bridge_from_env(cwd=Path.cwd())
     if mcp_bridge is not None:
         try:
             results = await mcp_bridge.connect()

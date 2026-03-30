@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from ouroboros.mcp.tools.definitions import (
+    execute_seed_handler,
+    get_ouroboros_tools,
+    start_execute_seed_handler,
+)
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
-from ouroboros.mcp.tools.definitions import execute_seed_handler, get_ouroboros_tools, start_execute_seed_handler
 
 
 class TestExecuteSeedHandlerWiring:
@@ -44,6 +48,7 @@ class TestExecuteSeedHandlerWiring:
 class TestCompositionRootWiring:
     def test_server_creation_with_bridge(self):
         from ouroboros.mcp.server.adapter import create_ouroboros_server
+
         mock_bridge = MagicMock()
         mock_bridge.manager = MagicMock()
         mock_bridge.tool_prefix = "bridge_"
@@ -52,6 +57,7 @@ class TestCompositionRootWiring:
 
     def test_server_creation_without_bridge(self):
         from ouroboros.mcp.server.adapter import create_ouroboros_server
+
         server = create_ouroboros_server()
         bridge_resources = [r for r in server._owned_resources if hasattr(r, "tool_prefix")]
         assert len(bridge_resources) == 0

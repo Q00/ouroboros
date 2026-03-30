@@ -29,7 +29,9 @@ def create_bridge_from_env(cwd: Path | None = None) -> MCPBridge | None:
         return None
     result = load_bridge_config(config_path)
     if result.is_err:
-        log.warning("bridge.factory.config_load_failed", path=str(config_path), error=str(result.error))
+        log.warning(
+            "bridge.factory.config_load_failed", path=str(config_path), error=str(result.error)
+        )
         return None
     log.info("bridge.factory.created_from_env", config_path=str(config_path))
     return MCPBridge.from_config(result.value)

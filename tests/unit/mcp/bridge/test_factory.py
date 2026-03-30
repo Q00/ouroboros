@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
-
-import pytest
-
-from ouroboros.mcp.bridge.config import MCPBridgeConfig
-from ouroboros.mcp.bridge.factory import create_bridge, create_bridge_from_config_file, create_bridge_from_env
-from ouroboros.mcp.types import MCPServerConfig, TransportType
+from ouroboros.mcp.bridge.factory import (
+    create_bridge_from_env,
+)
 
 
 class TestCreateBridgeFromEnv:
@@ -22,7 +17,9 @@ class TestCreateBridgeFromEnv:
         monkeypatch.delenv("OUROBOROS_MCP_CONFIG", raising=False)
         d = tmp_path / ".ouroboros"
         d.mkdir()
-        (d / "mcp_servers.yaml").write_text("mcp_servers:\n  - name: local\n    transport: stdio\n    command: echo\n    args: ['hello']\n")
+        (d / "mcp_servers.yaml").write_text(
+            "mcp_servers:\n  - name: local\n    transport: stdio\n    command: echo\n    args: ['hello']\n"
+        )
         bridge = create_bridge_from_env(cwd=tmp_path)
         assert bridge is not None
         assert not bridge.is_connected

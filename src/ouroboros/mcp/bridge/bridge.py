@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from ouroboros.core.types import Result
-from ouroboros.mcp.client.manager import MCPClientManager
 from ouroboros.mcp.bridge.config import MCPBridgeConfig, load_bridge_config
+from ouroboros.mcp.client.manager import MCPClientManager
 from ouroboros.mcp.types import MCPServerInfo
 from ouroboros.observability.logging import get_logger
 
@@ -61,7 +61,12 @@ class MCPBridge:
             await self._manager.add_server(server_config)
         results = await self._manager.connect_all()
         connected_count = sum(1 for r in results.values() if r.is_ok)
-        log.info("bridge.connected", connected=connected_count, total=len(results), servers=list(results.keys()))
+        log.info(
+            "bridge.connected",
+            connected=connected_count,
+            total=len(results),
+            servers=list(results.keys()),
+        )
         self._connected = True
         return results
 

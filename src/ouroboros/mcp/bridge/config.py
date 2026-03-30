@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
-from typing import Any
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPClientError
@@ -57,9 +56,7 @@ def load_bridge_config(config_path: Path) -> Result[MCPBridgeConfig, MCPClientEr
 
     result = load_mcp_config(config_path)
     if result.is_err:
-        return Result.err(
-            MCPClientError(f"Failed to load bridge config: {result.error}")
-        )
+        return Result.err(MCPClientError(f"Failed to load bridge config: {result.error}"))
 
     client_config = result.value
     return Result.ok(
@@ -67,5 +64,7 @@ def load_bridge_config(config_path: Path) -> Result[MCPBridgeConfig, MCPClientEr
             servers=client_config.servers,
             timeout_seconds=client_config.connection.timeout_seconds,
             retry_attempts=client_config.connection.retry_attempts,
+            health_check_interval=client_config.connection.health_check_interval,
+            tool_prefix=client_config.tool_prefix,
         )
     )

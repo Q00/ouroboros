@@ -47,11 +47,32 @@ class TestDiscoverConfig:
 class TestLoadBridgeConfig:
     def test_load_valid_config(self, tmp_path: Path):
         config_file = tmp_path / "mcp.yaml"
-        config_file.write_text("mcp_servers:\n  - name: test\n    transport: stdio\n    command: echo\n    args: ['hi']\nconnection:\n  timeout_seconds: 15\n  retry_attempts: 2\n")
+        config_file.write_text(
+            "mcp_servers:\n  - name: test\n    transport: stdio\n    command: echo\n    args: ['hi']\nconnection:\n  timeout_seconds: 15\n  retry_attempts: 2\n"
+        )
         result = load_bridge_config(config_file)
         assert result.is_ok
         assert len(result.value.servers) == 1
         assert result.value.timeout_seconds == 15.0
+
+    def test_load_preserves_tool_prefix_and_health_check(self, tmp_path: Path):
+        config_file = tmp_path / "mcp.yaml"
+        config_file.write_text(
+            "mcp_servers:\n"
+            "  - name: test\n"
+            "    transport: stdio\n"
+            "    command: echo\n"
+            "    args: ['hi']\n"
+            "tool_prefix: upstream_\n"
+            "connection:\n"
+            "  timeout_seconds: 10\n"
+            "  retry_attempts: 1\n"
+            "  health_check_interval: 45.0\n"
+        )
+        result = load_bridge_config(config_file)
+        assert result.is_ok
+        assert result.value.tool_prefix == "upstream_"
+        assert result.value.health_check_interval == 45.0
 
     def test_load_nonexistent_file(self, tmp_path: Path):
         result = load_bridge_config(tmp_path / "nonexistent.yaml")

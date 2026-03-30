@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,8 +14,14 @@ from ouroboros.mcp.types import MCPServerConfig, TransportType
 @pytest.fixture
 def sample_config() -> MCPBridgeConfig:
     return MCPBridgeConfig(
-        servers=(MCPServerConfig(name="test-server", transport=TransportType.STDIO, command="echo", args=("hello",)),),
-        timeout_seconds=5.0, retry_attempts=1, tool_prefix="test_",
+        servers=(
+            MCPServerConfig(
+                name="test-server", transport=TransportType.STDIO, command="echo", args=("hello",)
+            ),
+        ),
+        timeout_seconds=5.0,
+        retry_attempts=1,
+        tool_prefix="test_",
     )
 
 
@@ -30,8 +35,10 @@ class TestMCPBridge:
     @pytest.mark.asyncio
     async def test_connect_disconnect(self, sample_config):
         bridge = MCPBridge.from_config(sample_config)
-        with patch.object(bridge._manager, "add_server", new_callable=AsyncMock), \
-             patch.object(bridge._manager, "connect_all", new_callable=AsyncMock, return_value={}):
+        with (
+            patch.object(bridge._manager, "add_server", new_callable=AsyncMock),
+            patch.object(bridge._manager, "connect_all", new_callable=AsyncMock, return_value={}),
+        ):
             await bridge.connect()
             assert bridge.is_connected
         with patch.object(bridge._manager, "disconnect_all", new_callable=AsyncMock):
@@ -47,8 +54,10 @@ class TestMCPBridge:
     @pytest.mark.asyncio
     async def test_context_manager(self, sample_config):
         bridge = MCPBridge.from_config(sample_config)
-        with patch.object(bridge, "connect", new_callable=AsyncMock) as mc, \
-             patch.object(bridge, "disconnect", new_callable=AsyncMock) as md:
+        with (
+            patch.object(bridge, "connect", new_callable=AsyncMock) as mc,
+            patch.object(bridge, "disconnect", new_callable=AsyncMock) as md,
+        ):
             async with bridge as b:
                 assert b is bridge
             mc.assert_called_once()
@@ -56,6 +65,8 @@ class TestMCPBridge:
 
     def test_from_config_file_valid(self, tmp_path):
         f = tmp_path / "mcp.yaml"
-        f.write_text("mcp_servers:\n  - name: fs\n    transport: stdio\n    command: echo\n    args: ['test']\n")
+        f.write_text(
+            "mcp_servers:\n  - name: fs\n    transport: stdio\n    command: echo\n    args: ['test']\n"
+        )
         bridge = MCPBridge.from_config_file(f)
         assert len(bridge.config.servers) == 1
