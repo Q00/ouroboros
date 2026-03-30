@@ -139,6 +139,27 @@ class TestLoadPackagedCodexSkills:
             assert skill_md_path.name == "SKILL.md"
             assert skill_md_path.read_text(encoding="utf-8").startswith("---\nname: run\n")
 
+    def test_repo_skills_override_stale_embedded_bundle(self, tmp_path: Path, monkeypatch) -> None:
+        """Source checkouts should prefer the live repo skill over embedded packaged copies."""
+
+        fake_package_root = tmp_path / "embedded-package"
+        fake_skill = self._write_skill(
+            fake_package_root / "skills",
+            "interview",
+            body="---\nname: interview\n---\n\nstale embedded copy\n",
+        )
+        repo_skill = Path(__file__).resolve().parents[2] / "skills" / "interview" / "SKILL.md"
+        assert repo_skill.is_file()
+
+        monkeypatch.setattr(
+            "ouroboros.codex.artifacts.importlib.resources.files",
+            lambda _package: fake_package_root,
+        )
+
+        with resolve_packaged_codex_skill_path("interview") as skill_md_path:
+            assert skill_md_path.read_text(encoding="utf-8") == repo_skill.read_text(encoding="utf-8")
+            assert skill_md_path.read_text(encoding="utf-8") != fake_skill.read_text(encoding="utf-8")
+
     def test_raises_when_explicit_packaged_skill_is_missing(self, tmp_path: Path) -> None:
         """Missing skill entrypoints should fail fast."""
         packaged_skills_dir = tmp_path / "packaged-skills"

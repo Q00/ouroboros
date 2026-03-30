@@ -6,6 +6,7 @@ Contains handlers for interview and seed generation tools:
 """
 
 from dataclasses import dataclass, field
+import json as json_mod
 import os
 from pathlib import Path
 import re
@@ -25,6 +26,7 @@ from ouroboros.bigbang.ambiguity import (
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
+    InterviewStateStore,
     InterviewState,
 )
 from ouroboros.bigbang.seed_generator import SeedGenerator
@@ -32,6 +34,7 @@ from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.layers.gate import AgentMode, get_agent_mode
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -40,6 +43,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.mcp.tools.question_specs import build_question_ui_meta
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 from ouroboros.providers.base import LLMAdapter
@@ -121,6 +125,18 @@ def _is_interview_completion_signal(answer: str | None) -> bool:
 def _count_answered_rounds(state: InterviewState) -> int:
     """Return the number of completed interview rounds."""
     return sum(1 for round_data in state.rounds if round_data.user_response is not None)
+
+
+def _legacy_record_turn_error() -> Result[MCPToolResult, MCPServerError]:
+    """Return the migration error for removed native interview record flows."""
+
+    return Result.err(
+        MCPToolError(
+            "Native interview mode no longer supports action=record. "
+            "Ask the user first, then persist the full question+answer turn with action=record_turn.",
+            tool_name="ouroboros_interview",
+        )
+    )
 
 
 def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
@@ -207,9 +223,33 @@ class GenerateSeedHandler:
     """
 
     interview_engine: InterviewEngine | None = field(default=None, repr=False)
+    interview_state_store: InterviewStateStore | None = field(default=None, repr=False)
     seed_generator: SeedGenerator | None = field(default=None, repr=False)
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    agent_mode: AgentMode | None = field(default=None, repr=False)
+    _interview_state_store: InterviewStateStore | InterviewEngine | None = field(
+        default=None, repr=False, init=False
+    )
+
+    def _get_interview_state_store(self) -> InterviewStateStore | InterviewEngine:
+        """Return the interview state backend used by seed handlers.
+
+        `GenerateSeedHandler` only needs interview persistence, not question
+        generation. Keep supporting injected `InterviewEngine` instances for
+        backward-compatible tests and call sites, but default to the pure
+        `InterviewStateStore`.
+        """
+        if self.interview_state_store is not None:
+            return self.interview_state_store
+
+        if self.interview_engine is not None:
+            return self.interview_engine
+
+        if self._interview_state_store is None:
+            self._interview_state_store = InterviewStateStore()
+
+        return self._interview_state_store
 
     def _build_ambiguity_score_from_value(self, ambiguity_score_value: float) -> AmbiguityScore:
         """Build an ambiguity score object from an explicit numeric override."""
@@ -277,11 +317,32 @@ class GenerateSeedHandler:
                     required=True,
                 ),
                 MCPToolParameter(
+                    name="action",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Action to perform: generate, state. "
+                        "In native agent mode, use explicit actions. "
+                        "Without action, internal compatibility behavior is used."
+                    ),
+                    required=False,
+                    enum=("generate", "state"),
+                ),
+                MCPToolParameter(
                     name="ambiguity_score",
                     type=ToolInputType.NUMBER,
                     description=(
                         "Ambiguity score for the interview (0.0 = clear, 1.0 = ambiguous). "
                         "Required if interview didn't calculate it. Generation fails if > 0.2."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="agent_seed_yaml",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Pre-generated seed YAML from agent. When provided with action=generate, "
+                        "validates and saves the seed directly (no internal LLM). "
+                        "Used in native agent mode."
                     ),
                     required=False,
                 ),
@@ -294,11 +355,10 @@ class GenerateSeedHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle a seed generation request.
 
-        Args:
-            arguments: Tool arguments including session_id and optional ambiguity_score.
-
-        Returns:
-            Result containing generated Seed YAML or error.
+        Action dispatch:
+            1. action="state" -> return interview state for seed generation
+            2. action="generate" with agent_seed_yaml -> validate and save (no LLM)
+            3. No action -> internal compatibility mode
         """
         session_id = arguments.get("session_id")
         if not session_id:
@@ -309,135 +369,35 @@ class GenerateSeedHandler:
                 )
             )
 
-        ambiguity_score_value = arguments.get("ambiguity_score")
+        action = arguments.get("action")
 
         log.info(
             "mcp.tool.generate_seed",
             session_id=session_id,
-            ambiguity_score=ambiguity_score_value,
+            action=action,
+            agent_mode=get_agent_mode(self.agent_mode).value,
+            has_agent_seed=arguments.get("agent_seed_yaml") is not None,
         )
 
         try:
-            # Use injected or create services
-            llm_adapter = self.llm_adapter or create_llm_adapter(
-                backend=self.llm_backend,
-                max_turns=1,
-            )
-            interview_engine = self.interview_engine or InterviewEngine(
-                llm_adapter=llm_adapter,
-                model=get_clarification_model(self.llm_backend),
-            )
+            effective_mode = get_agent_mode(self.agent_mode)
 
-            # Load interview state
-            state_result = await interview_engine.load_state(session_id)
+            # Explicit action always routes to native
+            if action:
+                if action == "state":
+                    return await self._action_state(arguments, session_id)
+                elif action == "generate":
+                    return await self._action_generate(arguments, session_id)
+                return Result.err(MCPToolError(f"Unknown action: {action}", tool_name="ouroboros_generate_seed"))
 
-            if state_result.is_err:
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to load interview state: {state_result.error}",
-                        tool_name="ouroboros_generate_seed",
-                    )
-                )
+            # Environment-driven: native mode auto-routes
+            if effective_mode == AgentMode.NATIVE:
+                if arguments.get("agent_seed_yaml"):
+                    return await self._action_generate(arguments, session_id)
+                return await self._action_state(arguments, session_id)
 
-            state: InterviewState = state_result.value
-
-            # Always use a trusted ambiguity score: persisted snapshot or
-            # freshly computed.  The caller-supplied ``ambiguity_score``
-            # parameter is intentionally ignored to prevent LLM callers
-            # from overriding the gate with an arbitrary low value.
-            # See: https://github.com/Q00/ouroboros/issues/210
-            if ambiguity_score_value is not None:
-                log.warning(
-                    "mcp.tool.generate_seed.ignoring_caller_ambiguity_score",
-                    session_id=session_id,
-                    caller_value=ambiguity_score_value,
-                )
-
-            ambiguity_score = self._load_stored_ambiguity_score(state)
-            if ambiguity_score is None:
-                scorer = AmbiguityScorer(
-                    llm_adapter=llm_adapter,
-                )
-                score_result = await scorer.score(state)
-                if score_result.is_err:
-                    return Result.err(
-                        MCPToolError(
-                            f"Failed to calculate ambiguity: {score_result.error}",
-                            tool_name="ouroboros_generate_seed",
-                        )
-                    )
-
-                ambiguity_score = score_result.value
-                state.store_ambiguity(
-                    score=ambiguity_score.overall_score,
-                    breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
-                )
-                save_result = await interview_engine.save_state(state)
-                if save_result.is_err:
-                    log.warning(
-                        "mcp.tool.generate_seed.persist_ambiguity_failed",
-                        session_id=session_id,
-                        error=str(save_result.error),
-                    )
-
-            # Use injected or create seed generator
-            generator = self.seed_generator or SeedGenerator(
-                llm_adapter=llm_adapter,
-                model=get_clarification_model(self.llm_backend),
-            )
-
-            # Generate seed
-            seed_result = await generator.generate(state, ambiguity_score)
-
-            if seed_result.is_err:
-                error = seed_result.error
-                if isinstance(error, ValidationError):
-                    return Result.err(
-                        MCPToolError(
-                            f"Validation error: {error}",
-                            tool_name="ouroboros_generate_seed",
-                        )
-                    )
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to generate seed: {error}",
-                        tool_name="ouroboros_generate_seed",
-                    )
-                )
-
-            seed = seed_result.value
-
-            # Convert seed to YAML
-            seed_dict = seed.to_dict()
-            seed_yaml = yaml.dump(
-                seed_dict,
-                default_flow_style=False,
-                allow_unicode=True,
-                sort_keys=False,
-            )
-
-            result_text = (
-                f"Seed Generated Successfully\n"
-                f"=========================\n"
-                f"Seed ID: {seed.metadata.seed_id}\n"
-                f"Interview ID: {seed.metadata.interview_id}\n"
-                f"Ambiguity Score: {seed.metadata.ambiguity_score:.2f}\n"
-                f"Goal: {seed.goal}\n\n"
-                f"--- Seed YAML ---\n"
-                f"{seed_yaml}"
-            )
-
-            return Result.ok(
-                MCPToolResult(
-                    content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
-                    is_error=False,
-                    meta={
-                        "seed_id": seed.metadata.seed_id,
-                        "interview_id": seed.metadata.interview_id,
-                        "ambiguity_score": seed.metadata.ambiguity_score,
-                    },
-                )
-            )
+            # Internal compatibility mode
+            return await self._handle_internal_compat(arguments, session_id)
 
         except Exception as e:
             log.error("mcp.tool.generate_seed.error", error=str(e))
@@ -447,6 +407,251 @@ class GenerateSeedHandler:
                     tool_name="ouroboros_generate_seed",
                 )
             )
+
+    async def _action_state(
+        self,
+        arguments: dict[str, Any],
+        session_id: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Return interview state for agent-driven seed generation (no LLM)."""
+        state_store = self._get_interview_state_store()
+        state_result = await state_store.load_state(session_id)
+        if state_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to load interview state: {state_result.error}",
+                    tool_name="ouroboros_generate_seed",
+                )
+            )
+        state: InterviewState = state_result.value
+
+        # Resolve ambiguity score (provided > stored)
+        ambiguity_score_value = arguments.get("ambiguity_score")
+        if ambiguity_score_value is not None:
+            ambiguity_score = self._build_ambiguity_score_from_value(ambiguity_score_value)
+        else:
+            ambiguity_score = self._load_stored_ambiguity_score(state)
+
+        score_text = f"{ambiguity_score.overall_score:.2f}" if ambiguity_score else "not computed"
+
+        result_text = (
+            f"Interview State for Seed Generation\n"
+            f"====================================\n"
+            f"Session ID: {session_id}\n"
+            f"Interview ID: {state.interview_id}\n"
+            f"Initial Context: {state.initial_context}\n"
+            f"Ambiguity Score: {score_text}\n"
+            f"Rounds: {len(state.rounds)}\n"
+            f"Status: {state.status}\n\n"
+            f"Q&A History:\n"
+        )
+        for r in state.rounds:
+            result_text += f"  Q{r.round_number}: {r.question}\n"
+            result_text += f"  A{r.round_number}: {r.user_response or '(unanswered)'}\n"
+
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
+                is_error=False,
+                meta={
+                    "session_id": session_id,
+                    "interview_id": state.interview_id,
+                    "initial_context": state.initial_context,
+                    "ambiguity_score": ambiguity_score.overall_score if ambiguity_score else None,
+                    "round_count": len(state.rounds),
+                    "answered_rounds": _count_answered_rounds(state),
+                    "status": state.status,
+                },
+            )
+        )
+
+    async def _action_generate(
+        self,
+        arguments: dict[str, Any],
+        session_id: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Validate and save agent-provided seed YAML (no LLM)."""
+        agent_seed_yaml = arguments.get("agent_seed_yaml")
+        if not agent_seed_yaml:
+            return Result.err(
+                MCPToolError(
+                    "agent_seed_yaml is required for action=generate",
+                    tool_name="ouroboros_generate_seed",
+                )
+            )
+        return self._handle_agent_seed(agent_seed_yaml, session_id)
+
+    @staticmethod
+    def _normalize_seed_dict(seed_dict: dict[str, Any]) -> dict[str, Any]:
+        """Normalize agent-generated seed dict to match Seed model schema.
+
+        LLMs often generate constraints/acceptance_criteria as list[dict]
+        (e.g., [{id: "C1", description: "..."}]) instead of list[str].
+        This converts them to plain strings.
+        """
+        for key in ("constraints", "acceptance_criteria"):
+            items = seed_dict.get(key)
+            if isinstance(items, list):
+                normalized = []
+                for item in items:
+                    if isinstance(item, dict):
+                        # Extract description or first string value
+                        normalized.append(
+                            item.get("description")
+                            or item.get("text")
+                            or next(
+                                (v for v in item.values() if isinstance(v, str)), str(item)
+                            )
+                        )
+                    else:
+                        normalized.append(str(item))
+                seed_dict[key] = normalized
+        return seed_dict
+
+    def _handle_agent_seed(
+        self, agent_seed_yaml: str, session_id: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Validate pre-generated seed YAML from agent (State Layer)."""
+        from ouroboros.core.seed import Seed
+
+        try:
+            seed_dict = yaml.safe_load(agent_seed_yaml)
+            seed_dict = self._normalize_seed_dict(seed_dict)
+            seed = Seed.from_dict(seed_dict)
+        except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
+            return Result.err(
+                MCPToolError(
+                    f"Invalid agent seed YAML: {e}",
+                    tool_name="ouroboros_generate_seed",
+                )
+            )
+        if session_id and not seed.metadata.interview_id:
+            seed = seed.model_copy(
+                update={"metadata": seed.metadata.model_copy(update={"interview_id": session_id})}
+            )
+        return self._build_seed_result(seed)
+
+    async def _handle_internal_compat(
+        self,
+        arguments: dict[str, Any],
+        session_id: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Internal compatibility mode: generate seed with internal LLM."""
+        ambiguity_score_value = arguments.get("ambiguity_score")
+        agent_seed_yaml = arguments.get("agent_seed_yaml")
+
+        # If agent_seed_yaml provided without action, still handle it for compatibility
+        if agent_seed_yaml is not None:
+            return self._handle_agent_seed(agent_seed_yaml, session_id)
+
+        # Load interview state
+        state_store = self._get_interview_state_store()
+        llm_adapter = self.llm_adapter or create_llm_adapter(
+            backend=self.llm_backend,
+            max_turns=1,
+        )
+        state_result = await state_store.load_state(session_id)
+        if state_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to load interview state: {state_result.error}",
+                    tool_name="ouroboros_generate_seed",
+                )
+            )
+        state: InterviewState = state_result.value
+
+        # Always use a trusted ambiguity score: persisted snapshot or
+        # freshly computed.  The caller-supplied ``ambiguity_score``
+        # parameter is intentionally ignored to prevent LLM callers
+        # from overriding the gate with an arbitrary low value.
+        # See: https://github.com/Q00/ouroboros/issues/210
+        if ambiguity_score_value is not None:
+            log.warning(
+                "mcp.tool.generate_seed.ignoring_caller_ambiguity_score",
+                session_id=session_id,
+                caller_value=ambiguity_score_value,
+            )
+
+        ambiguity_score = self._load_stored_ambiguity_score(state)
+        if ambiguity_score is None:
+            scorer = AmbiguityScorer(llm_adapter=llm_adapter)
+            score_result = await scorer.score(state)
+            if score_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to calculate ambiguity: {score_result.error}",
+                        tool_name="ouroboros_generate_seed",
+                    )
+                )
+            ambiguity_score = score_result.value
+            state.store_ambiguity(
+                score=ambiguity_score.overall_score,
+                breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
+            )
+            save_result = await state_store.save_state(state)
+            if save_result.is_err:
+                log.warning(
+                    "mcp.tool.generate_seed.persist_ambiguity_failed",
+                    session_id=session_id,
+                    error=str(save_result.error),
+                )
+
+        # Internal mode: generate seed with LLM
+        generator = self.seed_generator or SeedGenerator(
+            llm_adapter=llm_adapter,
+            model=get_clarification_model(self.llm_backend),
+        )
+        seed_result = await generator.generate(state, ambiguity_score)
+
+        if seed_result.is_err:
+            error = seed_result.error
+            if isinstance(error, ValidationError):
+                return Result.err(
+                    MCPToolError(
+                        f"Validation error: {error}",
+                        tool_name="ouroboros_generate_seed",
+                    )
+                )
+            return Result.err(
+                MCPToolError(
+                    f"Failed to generate seed: {error}",
+                    tool_name="ouroboros_generate_seed",
+                )
+            )
+
+        return self._build_seed_result(seed_result.value)
+
+    @staticmethod
+    def _build_seed_result(seed) -> Result[MCPToolResult, MCPServerError]:
+        """Build MCPToolResult from a validated Seed and persist to disk."""
+        seed_dict = seed.to_dict()
+        seed_yaml = yaml.dump(
+            seed_dict, default_flow_style=False, allow_unicode=True, sort_keys=False,
+        )
+
+        # Persist seed YAML to ~/.ouroboros/seeds/ for later use by run/evaluate
+        seeds_dir = Path.home() / ".ouroboros" / "seeds"
+        seeds_dir.mkdir(parents=True, exist_ok=True)
+        seed_path = seeds_dir / f"{seed.metadata.seed_id}.yaml"
+        seed_path.write_text(seed_yaml, encoding="utf-8")
+
+        result_text = (
+            f"Seed saved: {seed_path}\n"
+            f"seed_id:{seed.metadata.seed_id} amb:{seed.metadata.ambiguity_score:.2f}\n"
+            f"goal: {seed.goal}"
+        )
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
+                is_error=False,
+                meta={
+                    "seed_id": seed.metadata.seed_id,
+                    "seed_path": str(seed_path),
+                    "interview_id": seed.metadata.interview_id,
+                    "ambiguity_score": seed.metadata.ambiguity_score,
+                },
+            )
+        )
 
 
 @dataclass
@@ -459,14 +664,17 @@ class InterviewHandler:
     """
 
     interview_engine: InterviewEngine | None = field(default=None, repr=False)
+    interview_state_store: InterviewStateStore | None = field(default=None, repr=False)
     event_store: EventStore | None = field(default=None, repr=False)
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    agent_mode: AgentMode | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize event store."""
         self._event_store = self.event_store or EventStore()
         self._initialized = False
+        self._state_store: InterviewStateStore | None = None
 
     async def _ensure_initialized(self) -> None:
         """Ensure the event store is initialized."""
@@ -481,6 +689,43 @@ class InterviewHandler:
             await self._event_store.append(event)
         except Exception as e:
             log.warning("mcp.tool.interview.event_emission_failed", error=str(e))
+
+    def _get_state_store(self) -> InterviewStateStore:
+        """Return a reusable store for native state-only actions."""
+        if self.interview_state_store is not None:
+            return self.interview_state_store
+
+        if self._state_store is None:
+            self._state_store = InterviewStateStore(
+                state_dir=Path.home() / ".ouroboros" / "data",
+            )
+
+        return self._state_store
+
+    @staticmethod
+    def _build_ambiguity_from_value(score_value: float) -> AmbiguityScore:
+        """Build AmbiguityScore from a numeric value (agent-provided)."""
+        breakdown = ScoreBreakdown(
+            goal_clarity=ComponentScore(
+                name="goal_clarity",
+                clarity_score=1.0 - score_value,
+                weight=0.40,
+                justification="Provided by agent",
+            ),
+            constraint_clarity=ComponentScore(
+                name="constraint_clarity",
+                clarity_score=1.0 - score_value,
+                weight=0.30,
+                justification="Provided by agent",
+            ),
+            success_criteria_clarity=ComponentScore(
+                name="success_criteria_clarity",
+                clarity_score=1.0 - score_value,
+                weight=0.30,
+                justification="Provided by agent",
+            ),
+        )
+        return AmbiguityScore(overall_score=score_value, breakdown=breakdown)
 
     async def _score_interview_state(
         self,
@@ -542,7 +787,7 @@ class InterviewHandler:
 
     async def _complete_interview_response(
         self,
-        engine: InterviewEngine,
+        engine: InterviewStateStore,
         state: InterviewState,
         session_id: str,
         score: AmbiguityScore | None = None,
@@ -607,8 +852,8 @@ class InterviewHandler:
             name="ouroboros_interview",
             description=(
                 "Interactive interview for requirement clarification. "
-                "Start a new interview with initial_context, resume with session_id, "
-                "or record an answer to the current question."
+                "Start a new interview with initial_context, inspect state with session_id, "
+                "or persist a completed native turn with action=record_turn."
             ),
             parameters=(
                 MCPToolParameter(
@@ -626,7 +871,10 @@ class InterviewHandler:
                 MCPToolParameter(
                     name="answer",
                     type=ToolInputType.STRING,
-                    description="Response to the current interview question",
+                    description=(
+                        "Response to the current interview question. "
+                        "Used with action=record_turn or internal compatibility resume flows."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -638,6 +886,66 @@ class InterviewHandler:
                     ),
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="action",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Action to perform: start, state, record_turn, score, complete. "
+                        "In native subagent orchestration, use record_turn after the user answers. "
+                        "record_turn records question+answer in one call. "
+                        "Legacy action=record is no longer accepted in native mode. "
+                        "In native agent mode, use explicit actions. "
+                        "Without action, internal compatibility behavior is used."
+                    ),
+                    required=False,
+                    enum=("start", "state", "record_turn", "score", "complete", "record"),
+                ),
+                MCPToolParameter(
+                    name="type",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Legacy-only subtype for action=record. "
+                        "Native callers should use action=record_turn instead."
+                    ),
+                    required=False,
+                    enum=("question", "answer"),
+                ),
+                MCPToolParameter(
+                    name="question",
+                    type=ToolInputType.STRING,
+                    description="Question text. Used with action=record_turn.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="goal_clarity",
+                    type=ToolInputType.NUMBER,
+                    description="Goal clarity score (0.0-1.0). Used with action=score.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="constraint_clarity",
+                    type=ToolInputType.NUMBER,
+                    description="Constraint clarity score (0.0-1.0). Used with action=score.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="success_criteria_clarity",
+                    type=ToolInputType.NUMBER,
+                    description="Success criteria clarity score (0.0-1.0). Used with action=score.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="context_clarity",
+                    type=ToolInputType.NUMBER,
+                    description="Codebase context clarity score (0.0-1.0). Used with action=score for brownfield.",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="is_brownfield",
+                    type=ToolInputType.BOOLEAN,
+                    description="Whether this is a brownfield project. Affects scoring weights. Used with action=score.",
+                    required=False,
+                ),
             ),
         )
 
@@ -647,12 +955,480 @@ class InterviewHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle an interview request.
 
-        Args:
-            arguments: Tool arguments including initial_context, session_id, or answer.
-
-        Returns:
-            Result containing interview question and session_id or error.
+        Routing:
+            1. Explicit action param always uses native dispatch
+            2. OUROBOROS_AGENT_MODE=native (default) → state CRUD only (no LLM)
+            3. OUROBOROS_AGENT_MODE=internal → internal compatibility mode with internal LLM
         """
+        effective_mode = get_agent_mode(self.agent_mode)
+        action = arguments.get("action")
+
+        # Explicit action always routes to native
+        if action:
+            return await self._dispatch_native(action, arguments)
+
+        # Environment-driven routing
+        if effective_mode == AgentMode.NATIVE:
+            return await self._route_native(arguments)
+
+        # Internal compatibility mode
+        return await self._handle_internal_compat(arguments)
+
+    async def _dispatch_native(
+        self, action: str, arguments: dict[str, Any]
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Dispatch explicit native action."""
+        if action == "start":
+            return await self._action_start(arguments)
+        if action == "state":
+            return await self._action_state(arguments)
+        if action == "record":
+            return _legacy_record_turn_error()
+        if action == "record_turn":
+            return await self._action_record_turn(arguments)
+        if action == "score":
+            return await self._action_score(arguments)
+        if action == "complete":
+            return await self._action_complete(arguments)
+        return Result.err(MCPServerError(f"Unknown action: {action}"))
+
+    async def _route_native(
+        self, arguments: dict[str, Any]
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Auto-route to native actions based on arguments."""
+        if arguments.get("initial_context"):
+            return await self._action_start(arguments)
+        session_id = arguments.get("session_id")
+        if not session_id:
+            return Result.err(MCPServerError("session_id or initial_context required"))
+        if arguments.get("answer"):
+            return _legacy_record_turn_error()
+        return await self._action_state(arguments)
+
+    # ---- Native action methods (state-only, zero LLM calls) ----
+
+    async def _action_start(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Start a new interview session (state init only, no LLM)."""
+        initial_context = arguments.get("initial_context")
+        if not initial_context:
+            return Result.err(
+                MCPToolError(
+                    "initial_context is required for action=start",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        cwd = arguments.get("cwd") or os.getcwd()
+
+        engine = self._get_state_store()
+
+        try:
+            result = await engine.start_interview(initial_context, cwd=cwd)
+            if result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        str(result.error),
+                        tool_name="ouroboros_interview",
+                    )
+                )
+
+            state = result.value
+
+            # Persist state
+            save_result = await engine.save_state(state)
+            if save_result.is_err:
+                log.warning(
+                    "mcp.tool.interview.save_failed_on_start",
+                    error=str(save_result.error),
+                )
+
+            # Emit interview started event
+            from ouroboros.events.interview import interview_started
+
+            await self._emit_event(
+                interview_started(
+                    state.interview_id,
+                    initial_context,
+                )
+            )
+
+            log.info(
+                "mcp.tool.interview.started",
+                session_id=state.interview_id,
+                mode="native",
+            )
+
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                f"Interview started. Session ID: {state.interview_id}\n\n"
+                                f"Initial context: {initial_context}\n"
+                                f"Status: {state.status}\n"
+                                "Ask the user first. After the user answers, persist the completed "
+                                "turn with action=record_turn."
+                            ),
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "session_id": state.interview_id,
+                        "initial_context": initial_context,
+                        "status": state.status,
+                    "is_brownfield": state.is_brownfield,
+                    "codebase_context": state.codebase_context or None,
+                    },
+                )
+            )
+
+        except Exception as e:
+            log.error("mcp.tool.interview.start_error", error=str(e))
+            return Result.err(
+                MCPToolError(
+                    f"Interview start failed: {e}",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+    async def _action_state(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Return full interview state (no LLM)."""
+        session_id = arguments.get("session_id")
+        if not session_id:
+            return Result.err(
+                MCPToolError(
+                    "session_id is required for action=state",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        engine = self._get_state_store()
+
+        load_result = await engine.load_state(session_id)
+        if load_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    str(load_result.error),
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        state = load_result.value
+
+        result_text = (
+            f"Interview State\n"
+            f"===============\n"
+            f"Session ID: {session_id}\n"
+            f"Status: {state.status}\n"
+            f"Initial Context: {state.initial_context}\n"
+            f"Ambiguity Score: {state.ambiguity_score}\n"
+            f"Completed: {state.is_complete}\n"
+            f"Rounds: {len(state.rounds)}\n"
+        )
+        for r in state.rounds:
+            result_text += f"\n  Q{r.round_number}: {r.question}"
+            if r.user_response:
+                result_text += f"\n  A{r.round_number}: {r.user_response}"
+            else:
+                result_text += f"\n  A{r.round_number}: (pending)"
+
+        meta = {
+            "session_id": session_id,
+            "round_count": len(state.rounds),
+            "answered_rounds": _count_answered_rounds(state),
+            "ambiguity_score": state.ambiguity_score,
+            "status": state.status,
+            "completed": state.is_complete,
+        }
+        if state.rounds and state.rounds[-1].user_response is None:
+            meta.update(
+                build_question_ui_meta(
+                    state.rounds[-1].question,
+                    title="Interview",
+                )
+            )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
+    async def _action_record_turn(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Record a full Q&A turn (question + answer) in one call.
+
+        Used when the subagent generates questions without recording them,
+        and the orchestrator records the complete turn after the user answers.
+        """
+        from ouroboros.bigbang.interview import InterviewRound
+
+        session_id = arguments.get("session_id")
+        question = arguments.get("question")
+        answer = arguments.get("answer")
+        if not session_id:
+            return Result.err(
+                MCPToolError(
+                    "session_id is required for action=record_turn",
+                    tool_name="ouroboros_interview",
+                )
+            )
+        if not question:
+            return Result.err(
+                MCPToolError(
+                    "question is required for action=record_turn",
+                    tool_name="ouroboros_interview",
+                )
+            )
+        if not answer:
+            return Result.err(
+                MCPToolError(
+                    "answer is required for action=record_turn",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        engine = self._get_state_store()
+
+        load_result = await engine.load_state(session_id)
+        if load_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    str(load_result.error),
+                    tool_name="ouroboros_interview",
+                )
+            )
+        state = load_result.value
+
+        # Create round with both question and answer
+        state.rounds.append(
+            InterviewRound(
+                round_number=state.current_round_number,
+                question=question,
+                user_response=answer,
+            )
+        )
+
+        state.mark_updated()
+
+        save_result = await engine.save_state(state)
+        if save_result.is_err:
+            log.warning(
+                "mcp.tool.interview.save_failed",
+                error=str(save_result.error),
+            )
+
+        # Emit event
+        from ouroboros.events.interview import interview_response_recorded
+
+        await self._emit_event(
+            interview_response_recorded(
+                interview_id=state.interview_id,
+                round_number=len(state.rounds),
+                question_preview=question,
+                response_preview=answer,
+            )
+        )
+
+        log.info(
+            "mcp.tool.interview.turn_recorded",
+            session_id=state.interview_id,
+            round=len(state.rounds),
+            mode="native",
+        )
+
+        round_num = len(state.rounds)
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=f"Round {round_num} recorded",
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "session_id": state.interview_id,
+                    "round": round_num,
+                },
+            )
+        )
+
+    async def _action_score(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Calculate ambiguity score from component clarity scores and persist to state.
+
+        Greenfield weights: goal(40%) + constraint(30%) + success_criteria(30%)
+        Brownfield weights: goal(35%) + constraint(25%) + success_criteria(25%) + context(15%)
+        """
+        session_id = arguments.get("session_id")
+        if not session_id:
+            return Result.err(
+                MCPToolError(
+                    "session_id is required for action=score",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        try:
+            goal = float(arguments.get("goal_clarity", 0.0))
+            constraint = float(arguments.get("constraint_clarity", 0.0))
+            success = float(arguments.get("success_criteria_clarity", 0.0))
+        except (TypeError, ValueError) as e:
+            return Result.err(
+                MCPToolError(
+                    f"Invalid component score: {e}",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        is_brownfield = bool(arguments.get("is_brownfield", False))
+        context_raw = arguments.get("context_clarity")
+
+        if is_brownfield and context_raw is not None:
+            try:
+                context = float(context_raw)
+            except (TypeError, ValueError):
+                context = 0.0
+            clarity = goal * 0.35 + constraint * 0.25 + success * 0.25 + context * 0.15
+        else:
+            clarity = goal * 0.40 + constraint * 0.30 + success * 0.30
+
+        score = round(1.0 - clarity, 4)
+        score = max(0.0, min(1.0, score))
+        seed_ready = score <= AMBIGUITY_THRESHOLD
+
+        engine = self._get_state_store()
+
+        load_result = await engine.load_state(session_id)
+        if load_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    str(load_result.error),
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        state = load_result.value
+        state.store_ambiguity(score=score, breakdown={})
+        state.mark_updated()
+
+        save_result = await engine.save_state(state)
+        if save_result.is_err:
+            log.warning(
+                "mcp.tool.interview.score_save_failed",
+                error=str(save_result.error),
+            )
+
+        log.info(
+            "mcp.tool.interview.scored",
+            session_id=session_id,
+            score=score,
+            seed_ready=seed_ready,
+        )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text=f"{score:.2f} seed_ready:{str(seed_ready).lower()}",
+                    ),
+                ),
+                is_error=False,
+                meta={
+                    "session_id": session_id,
+                    "ambiguity_score": score,
+                    "seed_ready": seed_ready,
+                },
+            )
+        )
+
+    async def _action_complete(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Complete the interview (state-only, checks ambiguity gate)."""
+        session_id = arguments.get("session_id")
+        if not session_id:
+            return Result.err(
+                MCPToolError(
+                    "session_id is required for action=complete",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        engine = self._get_state_store()
+
+        load_result = await engine.load_state(session_id)
+        if load_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    str(load_result.error),
+                    tool_name="ouroboros_interview",
+                )
+            )
+        state = load_result.value
+
+        # Check ambiguity gate from stored score
+        exit_score = _load_state_ambiguity_score(state)
+
+        # If agent provided ambiguity_score in arguments, use that
+        ambiguity_score_value = arguments.get("ambiguity_score")
+        if ambiguity_score_value is not None:
+            exit_score = self._build_ambiguity_from_value(float(ambiguity_score_value))
+
+        if exit_score is not None and not exit_score.is_ready_for_seed:
+            return self._ambiguity_gate_response(session_id, exit_score)
+
+        if exit_score is None:
+            # No score available - refuse completion in native mode
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text=(
+                                f"Cannot complete - no ambiguity score available. "
+                                "Please persist the latest score with action=score "
+                                "before completing the interview."
+                            ),
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "session_id": session_id,
+                        "ambiguity_score": None,
+                        "seed_ready": False,
+                    },
+                )
+            )
+
+        return await self._complete_interview_response(
+            engine, state, session_id, exit_score,
+        )
+
+    # ---- Internal compatibility mode (internal LLM calls) ----
+
+    async def _handle_internal_compat(
+        self,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Internal compatibility mode: full interview flow with internal LLM calls."""
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
@@ -689,7 +1465,11 @@ class InterviewHandler:
 
                 state = result.value
                 _interview_id = state.interview_id
+
+                # Internal ambiguity scoring
                 live_score = await self._score_interview_state(llm_adapter, state)
+
+                # Internal question generation
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
@@ -791,6 +1571,10 @@ class InterviewHandler:
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
                             ),
+                            **build_question_ui_meta(
+                                question,
+                                title="Interview",
+                            ),
                         },
                     )
                 )
@@ -830,6 +1614,10 @@ class InterviewHandler:
                                     state.ambiguity_score is not None
                                     and state.ambiguity_score <= AMBIGUITY_THRESHOLD
                                 ),
+                                **build_question_ui_meta(
+                                    state.rounds[-1].question,
+                                    title="Interview",
+                                ),
                             },
                         )
                     )
@@ -840,10 +1628,11 @@ class InterviewHandler:
                         if state.rounds and state.rounds[-1].user_response is None:
                             state.rounds.pop()
                         # Gate: check ambiguity before completing.
-                        # Stored score first; live scoring as fallback.
                         exit_score = _load_state_ambiguity_score(state)
                         if exit_score is None or not exit_score.is_ready_for_seed:
-                            exit_score = await self._score_interview_state(llm_adapter, state)
+                            exit_score = await self._score_interview_state(
+                                llm_adapter, state
+                            )
                         if exit_score is not None and exit_score.is_ready_for_seed:
                             return await self._complete_interview_response(
                                 engine,
@@ -902,7 +1691,9 @@ class InterviewHandler:
                     # question generation failures downstream
                     await engine.save_state(state)
 
+                    # Internal ambiguity scoring
                     live_score = await self._score_interview_state(llm_adapter, state)
+
                     if (
                         live_score is not None
                         and live_score.is_ready_for_seed
@@ -917,7 +1708,7 @@ class InterviewHandler:
                 else:
                     live_score = _load_state_ambiguity_score(state)
 
-                # Generate next question (whether resuming or after recording answer)
+                # Internal question generation
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
@@ -1002,6 +1793,10 @@ class InterviewHandler:
                             ),
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
+                            ),
+                            **build_question_ui_meta(
+                                question,
+                                title="Interview",
                             ),
                         },
                     )

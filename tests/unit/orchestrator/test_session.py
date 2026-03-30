@@ -11,6 +11,8 @@ from ouroboros.orchestrator.session import (
     SessionRepository,
     SessionStatus,
     SessionTracker,
+    runtime_handle_from_progress,
+    tracker_runtime_cwd,
 )
 
 
@@ -77,6 +79,35 @@ class TestSessionTracker:
 
         assert tracker.messages_processed == 5
         assert tracker.progress["messages_processed"] == 5
+
+    def test_tracker_runtime_cwd_reads_persisted_runtime(self) -> None:
+        """tracker_runtime_cwd should read cwd from the persisted runtime handle."""
+        tracker = SessionTracker.create("exec", "seed").with_progress(
+            {
+                "runtime": {
+                    "backend": "codex_cli",
+                    "kind": "agent_runtime",
+                    "cwd": "/tmp/project",
+                    "approval_mode": "acceptEdits",
+                    "metadata": {},
+                }
+            }
+        )
+
+        assert tracker_runtime_cwd(tracker) == "/tmp/project"
+
+    def test_runtime_handle_from_progress_restores_legacy_runtime(self) -> None:
+        """Legacy session progress should still reconstruct a minimal runtime handle."""
+        runtime_handle = runtime_handle_from_progress(
+            {
+                "agent_session_id": "legacy-123",
+                "runtime_backend": "codex",
+            }
+        )
+
+        assert runtime_handle is not None
+        assert runtime_handle.backend == "codex_cli"
+        assert runtime_handle.native_session_id == "legacy-123"
 
     def test_with_progress_increments_when_messages_processed_absent(self) -> None:
         """Without explicit messages_processed, auto-increment by 1."""

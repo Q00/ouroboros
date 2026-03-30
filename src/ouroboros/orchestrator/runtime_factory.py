@@ -59,6 +59,7 @@ def create_agent_runtime(
             model=model,
             cwd=cwd,
             cli_path=cli_path or get_cli_path(),
+            llm_backend=resolved_llm_backend,
         )
 
     runtime_kwargs = {

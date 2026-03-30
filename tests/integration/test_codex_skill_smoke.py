@@ -11,6 +11,7 @@ import yaml
 
 from ouroboros.codex import resolve_packaged_codex_skill_path
 from ouroboros.core.types import Result
+from ouroboros.mcp.tools.question_specs import build_question_ui_meta
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 from ouroboros.orchestrator.runtime_factory import create_agent_runtime
@@ -137,3 +138,61 @@ async def test_packaged_ooo_prefixes_dispatch_from_skill_frontmatter(
     assert messages[-1].content == f"{skill_name} ok"
     assert messages[-1].data["mcp_tool"] == expected_tool
     assert messages[-1].data["mcp_args"] == expected_args
+
+
+@pytest.mark.asyncio
+async def test_packaged_interview_dispatch_preserves_choice_ui_spec(tmp_path: Path) -> None:
+    """Interview intercepts should keep structured question metadata intact for Cursor/Claude adapters."""
+
+    runtime = create_agent_runtime(
+        backend="codex",
+        cli_path="codex",
+        permission_mode="acceptEdits",
+        cwd=tmp_path,
+    )
+    assert isinstance(runtime, CodexCliRuntime)
+
+    fake_server = AsyncMock()
+    fake_server.call_tool = AsyncMock(
+        return_value=Result.ok(
+            MCPToolResult(
+                content=(
+                    MCPContentItem(
+                        type=ContentType.TEXT,
+                        text="Next interview question",
+                    ),
+                ),
+                meta={
+                    "session_id": "interview-session",
+                    **build_question_ui_meta(
+                        "첫 버전에서 어떤 핵심 기능이 반드시 필요할까요?",
+                        title="Interview",
+                        answer_mode="multi_select",
+                        options=[
+                            "Create, edit, and delete tasks",
+                            "Complete tasks and filter lists",
+                            "Due dates and priorities",
+                        ],
+                        has_custom_input=True,
+                    ),
+                },
+            )
+        )
+    )
+
+    with (
+        patch(
+            "ouroboros.mcp.server.adapter.create_ouroboros_server",
+            return_value=fake_server,
+        ),
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec"
+        ) as mock_exec,
+    ):
+        messages = [message async for message in runtime.execute_task('ooo interview "Build a REST API"')]
+
+    mock_exec.assert_not_called()
+    assert messages[-1].data["structured_input_request"] is True
+    assert messages[-1].data["question_spec"]["allow_multiple"] is True
+    assert "prompt" not in messages[-1].data["question_spec"]
+    assert messages[-1].data["cursor_question_payload"]["questions"][0]["options"][-1]["label"] == "Other"

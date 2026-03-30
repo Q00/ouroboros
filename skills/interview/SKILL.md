@@ -29,224 +29,140 @@ When the user invokes this skill:
 Before starting the interview, check if a newer version is available:
 
 ```bash
-# Fetch latest release tag from GitHub (timeout 3s to avoid blocking)
 curl -s --max-time 3 https://api.github.com/repos/Q00/ouroboros/releases/latest | grep -o '"tag_name": "[^"]*"' | head -1
 ```
 
-Compare the result with the current version in `.claude-plugin/plugin.json`.
-- If a newer version exists, ask the user via `AskUserQuestion`:
-  ```json
-  {
-    "questions": [{
-      "question": "Ouroboros <latest> is available (current: <local>). Update before starting?",
-      "header": "Update",
-      "options": [
-        {"label": "Update now", "description": "Update plugin to latest version (restart required to apply)"},
-        {"label": "Skip, start interview", "description": "Continue with current version"}
-      ],
-      "multiSelect": false
-    }]
-  }
-  ```
-  - If "Update now":
-    1. Run `claude plugin marketplace update ouroboros` via Bash (refresh marketplace index). If this fails, tell the user "⚠️ Marketplace refresh failed, continuing…" and proceed.
-    2. Run `claude plugin update ouroboros@ouroboros` via Bash (update plugin/skills). If this fails, inform the user and stop — do NOT proceed to step 3.
-    3. Detect the user's Python package manager and upgrade the MCP server:
-       - Check which tool installed `ouroboros-ai` by running these in order:
-         - `uv tool list 2>/dev/null | grep "^ouroboros-ai "` → if found, use `uv tool upgrade ouroboros-ai`
-         - `pipx list 2>/dev/null | grep "^  ouroboros-ai "` → if found, use `pipx upgrade ouroboros-ai`
-         - Otherwise, print: "Also upgrade the MCP server: `pip install --upgrade ouroboros-ai`" (do NOT run pip automatically)
-    4. Tell the user: "Updated! Restart your session to apply, then run `ooo interview` again."
-  - If "Skip": proceed immediately.
-- If versions match, the check fails (network error, timeout, rate limit 403/429), or parsing fails/returns empty: **silently skip** and proceed.
+Compare the result with `.claude-plugin/plugin.json`.
 
-Then choose the execution path:
+- If a newer version exists, ask whether to update first.
+- If the user chooses update:
+  1. Run `claude plugin marketplace update ouroboros`.
+  2. Run `claude plugin update ouroboros@ouroboros`.
+  3. Upgrade the MCP server:
+     - `uv tool upgrade ouroboros-ai` if installed via `uv`
+     - `pipx upgrade ouroboros-ai` if installed via `pipx`
+     - otherwise tell the user to run `pip install --upgrade ouroboros-ai`
+  4. Tell the user to restart and run `ooo interview` again.
+- If the user chooses skip/continue, immediately continue the same interview invocation using the original topic or resumable session. Do not drop the pending `initial_context`.
+- If the check fails, times out, or returns nothing: silently continue.
 
-### Step 0.5: Load MCP Tools (Required before Path A/B decision)
+### Step 0.5: Load Tools (Required before Path A/B decision)
 
-The Ouroboros MCP tools are often registered as **deferred tools** that must be explicitly loaded before use. **You MUST perform this step before deciding between Path A and Path B.**
+**If `ToolSearch` is not available** (Cursor, other runtimes): MCP tools are already loaded via the configured MCP server. Skip to the Path A/B decision below.
 
-1. Use the `ToolSearch` tool to find and load the interview MCP tool:
+**If `ToolSearch` is available** (Claude Code): MCP tools may be registered as deferred tools that must be explicitly loaded.
+
+1. Load the interview MCP tool with `ToolSearch`:
    ```
-   ToolSearch query: "+ouroboros interview"
+   +ouroboros interview
    ```
-   This searches for tools with "ouroboros" in the name related to "interview".
-
-2. The tool will typically be named `mcp__plugin_ouroboros_ouroboros__ouroboros_interview` (with a plugin prefix). After ToolSearch returns, the tool becomes callable.
-
-3. If ToolSearch finds the tool → proceed to **Path A**.
-   If ToolSearch returns no matching tools → proceed to **Path B**.
-
-**IMPORTANT**: Do NOT skip this step. Do NOT assume MCP tools are unavailable just because they don't appear in your immediate tool list. They are almost always available as deferred tools that need to be loaded first.
-
-### Path A: MCP Mode (Preferred)
-
-If the `ouroboros_interview` MCP tool is available (loaded via ToolSearch above), use it for persistent, structured interviews.
-
-**Architecture**: MCP is a pure question generator. You (the main session) are the answerer and router.
-
-```
-MCP (question generator) ←→ You (answerer + router) ←→ User (human judgment only)
-```
-
-**Role split**:
-- **MCP**: Generates Socratic questions, manages interview state, scores ambiguity. Does NOT read code.
-- **You (main session)**: Receives MCP questions, answers them by reading code (Read/Glob/Grep), or routes to the user when human judgment is needed.
-- **User**: Only answers questions that require human decisions (goals, acceptance criteria, business logic, preferences).
-
-#### Interview Flow
-
-1. **Start a new interview**:
+2. Load the structured question tool with `ToolSearch`:
    ```
-   Tool: ouroboros_interview
-   Arguments:
-     initial_context: <user's topic or idea>
-     cwd: <current working directory>
+   select:AskUserQuestion
    ```
-   Returns a session ID and the first question.
+   Store whichever tool becomes available (`AskUserQuestion` or `AskQuestion`) as the **question tool** for later use.
+3. If the interview MCP tool becomes available, use **Path A** and fall back to **Path B** if native subagents are unavailable or fail.
+4. If the interview MCP tool is not available, use **Path B**.
 
-2. **For each question from MCP, apply 3-Path Routing:**
+Do not assume MCP is unavailable until this lookup fails.
 
-   **PATH 1 — Code Confirmation** (describe current state, user confirms):
-   When the question asks about existing tech stack, frameworks, dependencies,
-   current patterns, architecture, or file structure:
-   - Use Read/Glob/Grep to find the factual answer
-   - Present findings to user as a **confirmation question** via AskUserQuestion:
-     ```json
-     {
-       "questions": [{
-         "question": "MCP asks: What auth method does the project use?\n\nI found: JWT-based auth in src/auth/jwt.py\n\nIs this correct?",
-         "header": "Q<N> — Code Confirmation",
-         "options": [
-           {"label": "Yes, correct", "description": "Use this as the answer"},
-           {"label": "No, let me correct", "description": "I'll provide the right answer"}
-         ],
-         "multiSelect": false
-       }]
-     }
-     ```
-   - NEVER auto-send without user seeing and confirming
-   - Prefix answer with `[from-code]` when sending to MCP
-   - **Description, not prescription**: "The project uses JWT" is fact.
-     "The new feature should also use JWT" is a DECISION — route to PATH 2.
+## Shared Rules
 
-   **PATH 2 — Human Judgment** (decisions only humans can make):
-   When the question asks about goals, vision, acceptance criteria, business logic,
-   preferences, tradeoffs, scope, or desired behavior for NEW features:
-   - Present question directly to user via AskUserQuestion with suggested options
-   - Prefix answer with `[from-user]` when sending to MCP
+- Preserve the original topic/session across any update-check turn. If there is no topic and no active interview session to resume, ask for the interview topic first.
+- Read `agents/socratic-interviewer.md` as the source of truth for questioning behavior.
+- Ask one question at a time. Preserve breadth across ambiguity tracks and prefer closure once scope, outputs, verification, and non-goals are stable.
+- Never make product or design decisions for the user.
+- Use code scanning only for factual confirmation.
+- If the subagent returns `question_spec`, treat it as the canonical UI contract for the next turn.
+- The subagent generates the question. The main session only routes it and shapes the final user-facing UI.
+- **CRITICAL: Always present interview questions using the question tool loaded in Step 0.5.** Never output a question as plain text.
+  - If `AskUserQuestion` is available, call it with `question` and `options` from `question_spec`.
+  - If `AskQuestion` is available, call it with the `cursor_question_payload` format.
+  - If neither tool is available, format the question as a numbered markdown block:
+    ```
+    **Q: [question text]**
 
-   **PATH 3 — Code + Judgment** (facts exist but interpretation needed):
-   When code contains relevant facts BUT the question also requires judgment
-   (e.g., "I see a saga pattern in orders/. Should payments use the same?"):
-   - Read relevant code first
-   - Present BOTH the code findings AND the question to user
-   - If any part of the question requires judgment, route the ENTIRE question to user
-   - Prefix answer with `[from-user]` (human made the decision)
+    1. Option A
+    2. Option B
+    3. Other (Write your own answer)
 
-   **When in doubt, use PATH 2.** It's safer to ask the user than to guess.
+    > Please choose a number or enter your own answer.
+    ```
+- Keep the prompt and choices equivalent across platforms.
+- Do not ask raw plain-text interview turns. If `question_spec` is absent or has no options, synthesize a minimal UI with `Not sure yet` and `Other`. If `question_spec.has_custom_input` is true, keep `Other` instead of a separate free-text follow-up.
+- Suggest `ooo seed` only after the interview is complete or `seed_ready` is `true`.
 
-3. **Send the answer back to MCP**:
-   ```
-   Tool: ouroboros_interview
-   Arguments:
-     session_id: <session ID>
-     answer: "[from-code] JWT-based auth in src/auth/jwt.py" or "[from-user] Stripe Billing"
-   ```
-   MCP records the answer, generates the next question, and returns it.
+### Routing Rule
 
-6. **Keep a visible ambiguity ledger**:
-   Track independent ambiguity tracks (scope, constraints, outputs, verification).
-   Do NOT let the interview collapse onto a single subtopic.
+Use the same three routing modes in both paths:
 
-7. **Repeat steps 2-6** until the user says "done" or MCP signals seed-ready.
+- `PATH 1` Code confirmation:
+  read code first, present findings as a confirmation, prefix recorded answer with `[from-code]`
+- `PATH 2` Human judgment:
+  ask the user directly, no prefix
+- `PATH 3` Code + judgment:
+  present verified facts, then ask the user for the decision, no prefix
 
-8. **Prefer stopping over over-interviewing**:
-   When scope, outputs, AC, and non-goals are clear, suggest `ooo seed`.
+When in doubt, use `PATH 2`.
 
-9. After completion, suggest the next step:
-   `📍 Next: ooo seed to crystallize these requirements into a specification`
+If three consecutive questions were effectively `PATH 1`, force the next turn to be `PATH 2` or `PATH 3`.
 
-#### Dialectic Rhythm Guard
+## Path A: MCP + Native Subagent
 
-Track consecutive PATH 1 (code confirmation) answers. If 3 consecutive questions
-were answered via PATH 1, the next question MUST be routed to PATH 2 (directly
-to user), even if it appears code-answerable. This preserves the Socratic
-dialectic rhythm — the interview is with the human, not the codebase.
-Reset the counter whenever user answers directly (PATH 2 or PATH 3).
+Use this path when the interview MCP tool is available and the runtime supports native subagents.
 
-#### Retry on Failure
+### Role Split
 
-If MCP returns `is_error=true` with `meta.recoverable=true`:
-1. Tell user: "Question generation encountered an issue. Retrying..."
-2. Call `ouroboros_interview(session_id=...)` to resume (max 2 retries).
-   State (including any recorded answers) is persisted before the error,
-   so resuming will not lose progress.
-3. If still failing: "MCP is having trouble. Switching to direct interview mode."
-   Then switch to Path B and continue from where you left off.
+- `ouroboros_interview`: state CRUD only
+- main session: orchestrates the loop, shapes the user-facing question, records the turn
+- `@socratic-interviewer`: reads state, scores ambiguity, returns the next question
 
-**Advantages of MCP mode**: State persists to disk, ambiguity scoring, direct `ooo seed` integration via session ID. Code-enriched confirmation questions reduce user burden — only human-judgment questions require user input.
+### Flow
 
-### Path B: Plugin Fallback (No MCP Server)
+0. If no topic argument is available and no resumable interview session exists, ask the user for a short topic/problem statement and stop. Do not start MCP yet.
+1. Start a session with `action=start`, `initial_context=<topic>`, and `cwd=<current working directory>`.
+2. Spawn `@socratic-interviewer` with only the `session_id`.
+3. The agent reads state from MCP, persists ambiguity via `action=score`, and returns `{question, ambiguity_score, seed_ready}` and optionally `question_spec`.
+4. Route the question via `PATH 1/2/3`, then present it by **calling the question tool** (loaded in Step 0.5) with the `question_spec` options. If `question_spec` is absent, synthesize a minimal single-select UI with `Not sure yet` and `Other`.
+5. Record the full turn with `action=record_turn`.
+6. Show only the ambiguity status line.
+7. Repeat until the user stops or `seed_ready` is true.
+8. Complete with `action=complete`.
 
-If the MCP tool is NOT available, fall back to agent-based interview:
+### Context Rule
 
-1. Read `src/ouroboros/agents/socratic-interviewer.md` and adopt that role
-2. **Pre-scan the codebase**: Use Glob to check for config files (`pyproject.toml`, `package.json`, `go.mod`, etc.). If found, use Read/Grep to scan key files and incorporate findings into your questions as confirmation-style ("I see X. Should I assume Y?") rather than open-ended discovery ("Do you have X?")
-3. Ask clarifying questions based on the user's topic and codebase context
-4. **Present each question using AskUserQuestion** with contextually relevant suggested answers (same format as Path A step 2)
-5. Use Read, Glob, Grep, WebFetch to explore further context if needed
-6. Maintain the same ambiguity ledger and breadth-check behavior as in Path A:
-   - Track multiple independent ambiguity threads
-   - Revisit unresolved threads every few rounds
-   - Do not let one detailed subtopic crowd out the rest of the original request
-7. Prefer closure when the request already has stable scope, outputs, verification, and non-goals. Ask whether to move to `ooo seed` rather than continuing to generate narrower questions.
-8. Continue until the user says "done"
-9. Interview results live in conversation context (not persisted)
-10. After completion, suggest the next step in `📍 Next:` format:
-   `📍 Next: ooo seed to crystallize these requirements into a specification`
+- Do not pass Q&A history into the subagent prompt.
+- Do not restate prior turns between MCP calls.
+- Keep the main session as a thin orchestrator.
 
-## Interviewer Behavior
+### Retry Rule
 
-**MCP (question generator)** is ONLY a questioner:
-- Always generates a question targeting the biggest source of ambiguity
-- Preserves breadth across independent ambiguity tracks
-- NEVER writes code, edits files, or runs commands
+- Retry the native path once.
+- If it still fails, continue via **Path B**.
 
-**You (main session)** are a Socratic facilitator:
-- Read `src/ouroboros/agents/socratic-interviewer.md` to understand the interview methodology
-- You CAN use Read/Glob/Grep to scan the codebase for answering MCP questions
-- You present every MCP question to the user (as confirmation or direct question)
-- You NEVER skip a question or auto-send without user seeing it
-- You NEVER make decisions on behalf of the user
+## Path B: Compatibility Fallback
 
-## Example Session
+Use this path when:
 
-```
-User: ooo interview Add payment module to existing project
+- the runtime cannot spawn native subagents, or
+- the native path fails twice and continuity matters more than persistence, or
+- the MCP tool is unavailable
 
-MCP Q1: "Is this a greenfield or brownfield project?"
-→ [Scanning... pyproject.toml, src/ found]
-→ Auto-answer: "Brownfield, Python/FastAPI project"
+### Flow
 
-MCP Q2: "What payment provider will you use?"
-→ This is a human decision.
-→ User: "Stripe"
+If the MCP tool is still available, prefer the original internal MCP flow:
 
-MCP Q3: "What authentication method does the project use?"
-→ [Scanning... src/auth/jwt.py found]
-→ Auto-answer: "JWT-based auth in src/auth/jwt.py"
+1. Call `ouroboros_interview` without explicit native actions.
+2. Let the MCP tool run the original internal LLM-in-MCP interview logic.
+3. Present each returned question by **calling the question tool** with the same rules as Path A, then relay each answer back with `session_id`.
+4. Keep the MCP tool as the source of truth for the interview state.
 
-MCP Q4: "How should payment failures affect order state?"
-→ This is a design decision.
-→ User: "Saga pattern for rollback"
+If the MCP tool is unavailable, fall back to direct interviewing:
 
-MCP Q5: "What are the acceptance criteria for this feature?"
-→ This requires human judgment.
-→ User: "Successful Stripe charge, webhook handling, refund support"
-
-📍 Next: `ooo seed` to crystallize these requirements into a specification
-```
+1. Read `agents/socratic-interviewer.md` and follow the same interviewing discipline directly.
+2. If brownfield context is likely, pre-scan the codebase and turn facts into confirmation-style questions.
+3. Ask one clarifying question at a time by **calling the question tool** with the same rules as Path A.
+4. Maintain the same breadth and closure discipline as the native path.
 
 ## Next Steps
 

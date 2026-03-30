@@ -30,6 +30,7 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 
 if TYPE_CHECKING:
+    from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime, SkillDispatchHandler
     from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message
 
 log = get_logger(__name__)
@@ -719,6 +720,9 @@ class ClaudeAgentAdapter:
         model: str | None = None,
         cwd: str | Path | None = None,
         cli_path: str | Path | None = None,
+        skill_dispatcher: SkillDispatchHandler | None = None,
+        skills_dir: str | Path | None = None,
+        llm_backend: str | None = None,
     ) -> None:
         """Initialize Claude Agent adapter.
 
@@ -733,12 +737,19 @@ class ClaudeAgentAdapter:
                 If not provided, uses the SDK default.
             cwd: Working directory for tool execution and resume metadata.
             cli_path: Optional Claude CLI path to pass through to the SDK.
+            skill_dispatcher: Optional deterministic exact-prefix dispatcher.
+            skills_dir: Optional skill directory override for exact-prefix dispatch.
+            llm_backend: Optional LLM backend hint for in-process MCP dispatch.
         """
         self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self._permission_mode = permission_mode
         self._model = model
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
         self._cli_path = str(Path(cli_path).expanduser()) if cli_path is not None else None
+        self._skill_dispatcher = skill_dispatcher
+        self._skills_dir = Path(skills_dir).expanduser() if skills_dir is not None else None
+        self._llm_backend = llm_backend
+        self._skill_intercept_runtime: CodexCliRuntime | None = None
 
         log.info(
             "orchestrator.adapter.initialized",
@@ -747,6 +758,44 @@ class ClaudeAgentAdapter:
             cwd=self._cwd,
             cli_path=self._cli_path,
         )
+
+    def _get_skill_intercept_runtime(self) -> CodexCliRuntime:
+        """Lazily build a dispatch-only helper for exact-prefix Ouroboros skills."""
+        if self._skill_dispatcher is None:
+            from ouroboros.orchestrator.command_dispatcher import create_codex_command_dispatcher
+
+            self._skill_dispatcher = create_codex_command_dispatcher(
+                cwd=self._cwd,
+                runtime_backend=self._runtime_backend,
+                llm_backend=self._llm_backend,
+            )
+
+        if self._skill_intercept_runtime is None:
+            from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+
+            self._skill_intercept_runtime = CodexCliRuntime(
+                cli_path="codex",
+                permission_mode=self._permission_mode,
+                cwd=self._cwd,
+                skills_dir=self._skills_dir,
+                skill_dispatcher=self._skill_dispatcher,
+                llm_backend=self._llm_backend,
+            )
+
+        return self._skill_intercept_runtime
+
+    async def _maybe_dispatch_skill_intercept(
+        self,
+        prompt: str,
+        current_handle: RuntimeHandle | None,
+    ) -> tuple[AgentMessage, ...] | None:
+        """Try deterministic skill dispatch before invoking Claude."""
+        stripped_prompt = prompt.lstrip()
+        if not (stripped_prompt.startswith("ooo ") or stripped_prompt.startswith("/ouroboros:")):
+            return None
+
+        dispatch_runtime = self._get_skill_intercept_runtime()
+        return await dispatch_runtime._maybe_dispatch_skill_intercept(prompt, current_handle)
 
     # -- AgentRuntime protocol properties ----------------------------------
 
@@ -937,6 +986,18 @@ class ClaudeAgentAdapter:
             yield self._execution_dispatch_error_message(dispatch)
             return
 
+        current_runtime_handle = dispatch.runtime_handle
+        current_session_id = dispatch.resume_session_id
+
+        dispatched_messages = await self._maybe_dispatch_skill_intercept(
+            prompt,
+            current_runtime_handle,
+        )
+        if dispatched_messages is not None:
+            for message in dispatched_messages:
+                yield message
+            return
+
         try:
             # Lazy import to avoid loading SDK at module import time
             from claude_agent_sdk import ClaudeAgentOptions, query
@@ -956,8 +1017,6 @@ class ClaudeAgentAdapter:
         # Retry loop for transient errors
         attempt = 0
         last_error: Exception | None = None
-        current_runtime_handle = dispatch.runtime_handle
-        current_session_id = dispatch.resume_session_id
 
         while attempt < MAX_RETRIES:
             attempt += 1

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from types import ModuleType
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from ouroboros.core.types import Result
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import (
     DEFAULT_TOOLS,
     AgentMessage,
@@ -683,6 +685,92 @@ class TestClaudeAgentAdapter:
             content="Claude Agent SDK is not installed. Run: pip install claude-agent-sdk",
             data={"subtype": "error"},
         )
+
+    @pytest.mark.asyncio
+    async def test_execute_task_dispatches_plain_ooo_run_before_sdk_import(
+        self,
+        tmp_path,
+    ) -> None:
+        """Plain `ooo run` should dispatch through MCP before Claude tries to reason."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd=tmp_path)
+        resume_handle = RuntimeHandle(
+            backend="claude",
+            metadata={"ouroboros_latest_seed_id": "seed_abc123"},
+        )
+        fake_server = AsyncMock()
+        fake_server.call_tool = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="Prepared session:orch-123 seed:seed_abc123 ac:3",
+                        ),
+                    ),
+                    meta={"seed_id": "seed_abc123", "session_id": "orch-123"},
+                )
+            )
+        )
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=fake_server,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"claude_agent_sdk": None, "claude_agent_sdk.types": None},
+            ),
+        ):
+            messages = [
+                message
+                async for message in adapter.execute_task(
+                    "ooo run",
+                    resume_handle=resume_handle,
+                )
+            ]
+
+        fake_server.call_tool.assert_awaited_once_with(
+            "ouroboros_execute_seed",
+            {"cwd": str(tmp_path), "seed_id": "seed_abc123"},
+        )
+        assert [message.content for message in messages] == [
+            "Calling tool: ouroboros_execute_seed",
+            "Prepared session:orch-123 seed:seed_abc123 ac:3",
+        ]
+        assert messages[-1].resume_handle is not None
+        assert messages[-1].resume_handle.metadata["ouroboros_latest_seed_id"] == "seed_abc123"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_plain_ooo_interview_without_topic_bypasses_native_dispatch(
+        self,
+        tmp_path,
+    ) -> None:
+        """A brand-new `ooo interview` without topic should fall through to normal SDK execution."""
+        adapter = ClaudeAgentAdapter(api_key="test", cwd=tmp_path)
+        query_calls: list[str] = []
+
+        async def mock_query(*, prompt: str, options: Any):
+            query_calls.append(prompt)
+            assert options is not None
+            yield _create_mock_sdk_message(
+                "SystemMessage",
+                subtype="init",
+                data={"session_id": "sess_789"},
+            )
+            yield _create_mock_sdk_message(
+                "ResultMessage",
+                result="Please share what you want to build.",
+                subtype="success",
+            )
+
+        sdk_modules = _build_mock_claude_agent_sdk(query_impl=mock_query)
+
+        with patch.dict("sys.modules", sdk_modules):
+            messages = [message async for message in adapter.execute_task("ooo interview")]
+
+        assert query_calls == ["ooo interview"]
+        assert messages[-1].content == "Please share what you want to build."
 
     @pytest.mark.asyncio
     async def test_execute_task_rejects_foreign_runtime_handle_before_sdk_dispatch_as_error_result(

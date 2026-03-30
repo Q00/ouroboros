@@ -20,10 +20,7 @@ from ouroboros.bigbang.interview import InterviewRound, InterviewState
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.core.types import Result
-from ouroboros.mcp.tools.pm_handler import (
-    PMInterviewHandler,
-    _save_pm_meta,
-)
+from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -209,8 +206,6 @@ class TestHandleGenerate:
             "cwd": str(tmp_path),
         }
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
-        # Manually save meta
-        _save_pm_meta.__wrapped__ if hasattr(_save_pm_meta, "__wrapped__") else None
         meta_path = tmp_path / "pm_meta_test-session-gen.json"
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         import json

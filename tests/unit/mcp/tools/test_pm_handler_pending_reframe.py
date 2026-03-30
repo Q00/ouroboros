@@ -21,19 +21,40 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
-from ouroboros.bigbang.pm_interview import PMInterviewEngine
+from ouroboros.bigbang.pm_interview import PMInterviewEngine, PMInterviewStateStore
 from ouroboros.core.types import Result
-from ouroboros.mcp.tools.pm_handler import (
-    PMInterviewHandler,
-    _load_pm_meta,
-    _meta_path,
-    _restore_engine_meta,
-    _save_pm_meta,
-)
+from ouroboros.mcp.layers.gate import AgentMode
+from ouroboros.mcp.tools.pm_handler import _DATA_DIR, PMInterviewHandler
 
 # ──────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────
+
+
+def _meta_path(session_id: str, data_dir: Path | None = None) -> Path:
+    return PMInterviewStateStore(data_dir=data_dir or _DATA_DIR).meta_path(session_id)
+
+
+def _save_pm_meta(
+    session_id: str,
+    engine: PMInterviewEngine | None = None,
+    cwd: str = "",
+    data_dir: Path | None = None,
+    *,
+    status: str | None = None,
+    extra: dict[str, object] | None = None,
+) -> None:
+    store = PMInterviewStateStore(data_dir=data_dir or _DATA_DIR)
+    meta = store.build_meta(engine=engine, cwd=cwd, status=status, extra=extra)
+    store.save_meta(session_id, meta)
+
+
+def _load_pm_meta(session_id: str, data_dir: Path | None = None) -> dict[str, object] | None:
+    return PMInterviewStateStore(data_dir=data_dir or _DATA_DIR).load_meta_dict(session_id)
+
+
+def _restore_engine_meta(engine: PMInterviewEngine, meta: dict[str, object]) -> None:
+    engine.restore_meta(meta)
 
 
 @pytest.fixture()
@@ -267,7 +288,7 @@ class TestPendingReframeInResponseMeta:
         self, mock_engine: PMInterviewEngine, tmp_data_dir: Path
     ) -> tuple[PMInterviewHandler, PMInterviewEngine]:
         """Create handler with mock engine."""
-        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
+        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir, agent_mode=AgentMode.INTERNAL)
         return handler, mock_engine
 
     async def test_start_response_includes_pending_reframe_when_reframed(
@@ -286,7 +307,7 @@ class TestPendingReframeInResponseMeta:
         mock_engine.ask_next_question = AsyncMock(side_effect=fake_ask_next)
         mock_engine.save_state = AsyncMock(return_value=Result.ok(Path("/tmp/state.json")))
 
-        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
+        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {"initial_context": "Build a chat app", "selected_repos": [], "cwd": "/tmp"}
@@ -309,7 +330,7 @@ class TestPendingReframeInResponseMeta:
         )
         mock_engine.save_state = AsyncMock(return_value=Result.ok(Path("/tmp/state.json")))
 
-        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
+        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {"initial_context": "Build a chat app", "selected_repos": [], "cwd": "/tmp"}
@@ -362,7 +383,7 @@ class TestPendingReframeInResponseMeta:
 
         mock_engine.record_response = AsyncMock(side_effect=fake_record_response)
 
-        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
+        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -425,7 +446,7 @@ class TestPendingReframeInResponseMeta:
             tmp_data_dir,
         )
 
-        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
+        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir, agent_mode=AgentMode.INTERNAL)
 
         result = await handler.handle(
             {
@@ -477,7 +498,7 @@ class TestPendingReframeCycle:
         mock_engine.ask_next_question = AsyncMock(side_effect=fake_ask_next_reframed)
         mock_engine.save_state = AsyncMock(return_value=Result.ok(Path("/tmp/state.json")))
 
-        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir)
+        handler = PMInterviewHandler(pm_engine=mock_engine, data_dir=tmp_data_dir, agent_mode=AgentMode.INTERNAL)
 
         start_result = await handler.handle(
             {

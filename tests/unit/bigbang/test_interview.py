@@ -775,6 +775,21 @@ class TestInterviewEngineSystemPrompt:
 
         assert "Build a task manager" in prompt
 
+    def test_system_prompt_requires_plain_text_question_output(self) -> None:
+        """Internal InterviewEngine prompt must forbid JSON output."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Build a task manager",
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "Return ONLY the next question as plain text." in prompt
+        assert "Do NOT return JSON" in prompt
+
     def test_system_prompt_includes_live_ambiguity_snapshot(self) -> None:
         """_build_system_prompt includes the latest ambiguity snapshot when available."""
         mock_adapter = MagicMock()

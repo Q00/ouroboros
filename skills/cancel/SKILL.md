@@ -19,7 +19,7 @@ Cancel stuck or orphaned executions by session ID, cancel all running sessions, 
 
 ## How It Works
 
-This skill interacts **directly with the event store** (not via MCP tool) to emit cancellation events. It uses the CLI command under the hood.
+This skill prefers the MCP cancellation tool when an explicit `execution_id` or `session_id` is known. The CLI remains a fallback for interactive listing because the MCP contract does not expose a "list active executions and pick one" action.
 
 Three modes:
 
@@ -31,20 +31,34 @@ Three modes:
 
 When the user invokes this skill:
 
-1. Determine which mode to use:
+1. **If `ToolSearch` is available** (Claude Code): load the cancel MCP tool first:
+   ```
+   ToolSearch query: "+ouroboros cancel execution"
+   ```
+   **If `ToolSearch` is not available** (Cursor, other runtimes): MCP tools are already loaded. Skip to step 2.
+
+2. Determine which mode to use:
    - If the user provided an execution/session ID: **Explicit mode**
    - If the user says "cancel all" or "cancel everything": **--all mode**
    - If no ID given and not "all": **Bare mode** (interactive listing)
 
-2. Run the appropriate CLI command using Bash:
+3. Use the appropriate mechanism:
 
-   **Bare mode** (interactive):
+   **Explicit mode** (preferred: MCP):
+   ```
+   Tool: ouroboros_cancel_execution
+   Arguments:
+     execution_id: <execution_id or session_id>
+     reason: <optional reason>
+   ```
+
+   **Bare mode** (interactive CLI fallback):
    ```bash
    ouroboros cancel execution
    ```
    This will list active executions and prompt for selection.
 
-   **Explicit mode** (specific execution):
+   **Explicit mode** (CLI fallback if MCP is unavailable):
    ```bash
    ouroboros cancel execution <execution_id>
    ```
@@ -59,12 +73,12 @@ When the user invokes this skill:
    ouroboros cancel execution <execution_id> --reason "Stuck for 2 hours"
    ```
 
-3. Present results to the user:
+4. Present results to the user:
    - Show which executions were cancelled
    - If bare mode, show the list and selection prompt
    - If no active executions, inform the user
 
-4. End with a next-step suggestion:
+5. End with a next-step suggestion:
    - After cancellation: `📍 Cancelled — use ooo status to verify, or ooo run to start fresh`
    - No active sessions: `📍 No active executions — use ooo run to start a new one`
 

@@ -20,6 +20,16 @@ ooo update
 
 When the user invokes this skill:
 
+### Step 0: Load Question Tool
+
+**If `ToolSearch` is not available** (Cursor, other runtimes): `AskUserQuestion` is already loaded. Skip to Step 1.
+
+**If `ToolSearch` is available** (Claude Code):
+```
+ToolSearch query: "select:AskUserQuestion"
+```
+Store whichever becomes available (`AskUserQuestion` or `AskQuestion`) as the **question tool**. If neither is available, use numbered markdown options as fallback.
+
 1. **Check current version**:
 
    First, try reading the version from the CLI binary (works for all install methods):
@@ -74,7 +84,10 @@ When the user invokes this skill:
    Changes: https://github.com/Q00/ouroboros/releases/tag/v0.X.Z
    ```
 
-   Then ask the user with AskUserQuestion:
+   **Ask using the question tool loaded in Step 0:**
+   - Prompt: `A newer Ouroboros version is available. Do you want to update now?`
+   - Options: `Update now`, `Skip`
+
    - **"Update now"** — Proceed with update
    - **"Skip"** — Do nothing
 

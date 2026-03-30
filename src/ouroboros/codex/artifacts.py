@@ -145,24 +145,40 @@ def _load_packaged_codex_skills(source_root: Path) -> tuple[CodexPackagedSkill, 
     raise FileNotFoundError(msg)
 
 
+def _looks_like_codex_skills_root(path: Path) -> bool:
+    """Return True when `path` looks like an Ouroboros skills source root."""
+
+    if not path.is_dir():
+        return False
+    return any(
+        child.is_dir() and (child / _SKILL_ENTRYPOINT).is_file()
+        for child in path.iterdir()
+    )
+
+
 @contextmanager
 def _packaged_codex_skills_dir(*, skills_dir: str | Path | None = None) -> Iterator[Path]:
-    """Resolve the packaged skills source directory for Codex skill installs."""
+    """Resolve the Codex skills source directory.
+
+    In source checkouts, prefer the repo-root `skills/` tree so packaged skill
+    resolution stays aligned with the live workspace rules. Built wheel assets
+    remain the fallback when a checkout-local skills tree is unavailable.
+    """
     if skills_dir is not None:
         yield Path(skills_dir).expanduser()
         return
+
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "skills"
+        if _looks_like_codex_skills_root(candidate):
+            yield candidate
+            return
 
     package_root = importlib.resources.files("ouroboros.codex")
     packaged_skills = package_root.joinpath("skills")
     if packaged_skills.is_dir():
         with importlib.resources.as_file(packaged_skills) as resolved_dir:
             yield resolved_dir
-            return
-
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "skills"
-        if candidate.is_dir():
-            yield candidate
             return
 
     msg = "Packaged Ouroboros skills directory could not be located"

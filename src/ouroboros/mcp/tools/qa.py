@@ -4,6 +4,10 @@ General-purpose quality assurance verdict for any artifact type.
 Returns structured JSON verdict with score, dimensions, differences,
 and actionable suggestions. Designed for iterative loop usage.
 
+Supports two execution modes via AgentMode:
+- internal: MCP calls LLM directly (compatibility mode)
+- native: MCP is pure state; platform-native agents handle reasoning
+
 Inspired by oh-my-codex $visual-verdict by @Yeachan-Heo.
 https://github.com/Yeachan-Heo/oh-my-codex/commit/6fd5471
 """
@@ -21,6 +25,7 @@ from ouroboros.config import get_qa_model
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.layers.gate import AgentMode, get_agent_mode
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -290,16 +295,63 @@ def _format_verdict_text(
     return "\n".join(lines)
 
 
+def _build_verdict_result(
+    verdict: QAVerdict,
+    pass_threshold: float,
+    iteration: int,
+    qa_session_id: str,
+) -> MCPToolResult:
+    """Build the final MCPToolResult from a parsed verdict (State Layer)."""
+    loop_action = _determine_loop_action(verdict, pass_threshold)
+    result_text = _format_verdict_text(
+        verdict, pass_threshold, loop_action, iteration, qa_session_id
+    )
+
+    iteration_entry = {
+        "iteration": iteration,
+        "score": verdict.score,
+        "verdict": verdict.verdict,
+        "loop_action": loop_action,
+    }
+
+    meta = {
+        "qa_session_id": qa_session_id,
+        "iteration": iteration,
+        "score": verdict.score,
+        "verdict": verdict.verdict,
+        "loop_action": loop_action,
+        "pass_threshold": pass_threshold,
+        "passed": verdict.score >= pass_threshold,
+        "dimensions": verdict.dimensions,
+        "differences": verdict.differences,
+        "suggestions": verdict.suggestions,
+        "reasoning": verdict.reasoning,
+        "iteration_entry": iteration_entry,
+    }
+
+    return MCPToolResult(
+        content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
+        is_error=False,
+        meta=meta,
+    )
+
+
 @dataclass
 class QAHandler:
     """Handler for the ouroboros_qa tool.
 
     Performs general-purpose QA verdict on any artifact type.
     Supports iterative loop until pass or max_iterations reached.
+
+    AgentMode:
+        NATIVE: agent_verdict is required; MCP parses it (no LLM call).
+        INTERNAL: if no agent_verdict, calls LLM internally (compatibility mode).
+        When agent_verdict is provided, parses it directly in both modes.
     """
 
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    agent_mode: AgentMode | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -376,6 +428,16 @@ class QAHandler:
                     description="Optional seed YAML for additional context (goal, constraints).",
                     required=False,
                 ),
+                MCPToolParameter(
+                    name="agent_verdict",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Pre-computed verdict from a subagent. When provided, "
+                        "skips internal LLM call and parses this directly. "
+                        "Used in subagent gate mode."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -383,23 +445,24 @@ class QAHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Handle a QA verdict request."""
+        """Handle a QA verdict request.
+
+        Flow:
+            1. If agent_verdict is provided → parse it (State Layer only, no LLM)
+            2. If no agent_verdict and mode is NATIVE → return error
+            3. If no agent_verdict and mode is INTERNAL → call LLM internally
+        """
+        # --- Input validation (State Layer) ---
         artifact = arguments.get("artifact")
         if not artifact:
             return Result.err(
-                MCPToolError(
-                    "artifact is required",
-                    tool_name="ouroboros_qa",
-                )
+                MCPToolError("artifact is required", tool_name="ouroboros_qa")
             )
 
         quality_bar = arguments.get("quality_bar")
         if not quality_bar:
             return Result.err(
-                MCPToolError(
-                    "quality_bar is required",
-                    tool_name="ouroboros_qa",
-                )
+                MCPToolError("quality_bar is required", tool_name="ouroboros_qa")
             )
 
         artifact_type = arguments.get("artifact_type", "code")
@@ -408,6 +471,7 @@ class QAHandler:
         qa_session_id = arguments.get("qa_session_id") or f"qa-{uuid.uuid4().hex[:8]}"
         iteration_history = arguments.get("iteration_history") or []
         seed_content = arguments.get("seed_content")
+        agent_verdict = arguments.get("agent_verdict")
 
         iteration = len(iteration_history) + 1
 
@@ -417,8 +481,71 @@ class QAHandler:
             artifact_type=artifact_type,
             iteration=iteration,
             pass_threshold=pass_threshold,
+            agent_mode=get_agent_mode(self.agent_mode).value,
+            has_agent_verdict=agent_verdict is not None,
         )
 
+        # --- Path 1: agent_verdict provided → parse only (State Layer) ---
+        if agent_verdict is not None:
+            return self._handle_agent_verdict(
+                agent_verdict, pass_threshold, iteration, qa_session_id
+            )
+
+        # --- Path 2: native mode requires agent_verdict ---
+        effective_mode = get_agent_mode(self.agent_mode)
+        if effective_mode == AgentMode.NATIVE:
+            return Result.err(
+                MCPToolError(
+                    "agent_verdict is required in native mode. "
+                    "The platform-native QA agent must provide a verdict.",
+                    tool_name="ouroboros_qa",
+                )
+            )
+
+        # --- Path 3: internal mode → call LLM directly (compatibility mode) ---
+        return await self._handle_internal_llm(
+            artifact, artifact_type, quality_bar, reference,
+            pass_threshold, iteration_history, seed_content,
+            qa_session_id, iteration,
+        )
+
+    def _handle_agent_verdict(
+        self,
+        agent_verdict: str | dict,
+        pass_threshold: float,
+        iteration: int,
+        qa_session_id: str,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Parse a pre-computed verdict from subagent (State Layer only)."""
+        # MCP may deliver agent_verdict as a parsed dict instead of a JSON string
+        if isinstance(agent_verdict, dict):
+            agent_verdict = json.dumps(agent_verdict)
+        parse_result = _parse_qa_response(agent_verdict, pass_threshold)
+        if parse_result.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to parse agent verdict: {parse_result.error}",
+                    tool_name="ouroboros_qa",
+                )
+            )
+
+        return Result.ok(
+            _build_verdict_result(parse_result.value, pass_threshold, iteration, qa_session_id)
+        )
+
+    async def _handle_internal_llm(
+        self,
+        artifact: str,
+        artifact_type: str,
+        quality_bar: str,
+        reference: str | None,
+        pass_threshold: float,
+        iteration_history: list[dict[str, Any]],
+        seed_content: str | None,
+        qa_session_id: str,
+        iteration: int,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Call LLM internally for a QA verdict in compatibility mode."""
         try:
             from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 
@@ -469,40 +596,9 @@ class QAHandler:
                     )
                 )
 
-            verdict = parse_result.value
-            loop_action = _determine_loop_action(verdict, pass_threshold)
-            result_text = _format_verdict_text(
-                verdict, pass_threshold, loop_action, iteration, qa_session_id
-            )
-
-            # Build iteration entry for history tracking
-            iteration_entry = {
-                "iteration": iteration,
-                "score": verdict.score,
-                "verdict": verdict.verdict,
-                "loop_action": loop_action,
-            }
-
-            meta = {
-                "qa_session_id": qa_session_id,
-                "iteration": iteration,
-                "score": verdict.score,
-                "verdict": verdict.verdict,
-                "loop_action": loop_action,
-                "pass_threshold": pass_threshold,
-                "passed": verdict.score >= pass_threshold,
-                "dimensions": verdict.dimensions,
-                "differences": verdict.differences,
-                "suggestions": verdict.suggestions,
-                "reasoning": verdict.reasoning,
-                "iteration_entry": iteration_entry,
-            }
-
             return Result.ok(
-                MCPToolResult(
-                    content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
-                    is_error=False,
-                    meta=meta,
+                _build_verdict_result(
+                    parse_result.value, pass_threshold, iteration, qa_session_id
                 )
             )
 
