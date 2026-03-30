@@ -1,104 +1,111 @@
-"""Tests for mcp_manager wiring through the dependency injection chain.
+"""Tests for mcp_manager wiring via BridgeAwareMixin and inject_bridge.
 
-Covers PR #264 review findings #4 and #5:
-- create_ouroboros_server with mcp_bridge injects manager into ExecuteSeedHandler
-- Factory functions propagate mcp_manager and mcp_tool_prefix
-- get_ouroboros_tools passes params to ExecuteSeedHandler
+Covers:
+- BridgeAwareMixin fields default to None/""
+- ExecuteSeedHandler inherits BridgeAwareMixin
+- inject_bridge auto-discovers and injects into mixin handlers
+- create_ouroboros_server loop-based bridge injection
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from ouroboros.mcp.tools.definitions import (
-    execute_seed_handler,
-    get_ouroboros_tools,
-    start_execute_seed_handler,
-)
+from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin, inject_bridge
+from ouroboros.mcp.tools.definitions import get_ouroboros_tools
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
 
 
-class TestExecuteSeedHandlerFields:
-    """Verify mcp_manager/mcp_tool_prefix fields on ExecuteSeedHandler."""
+class TestBridgeAwareMixin:
+    """Verify the mixin provides correct defaults."""
+
+    def test_handler_is_bridge_aware(self):
+        assert issubclass(ExecuteSeedHandler, BridgeAwareMixin)
 
     def test_defaults_to_none(self):
         handler = ExecuteSeedHandler()
         assert handler.mcp_manager is None
         assert handler.mcp_tool_prefix == ""
 
-    def test_accepts_mcp_manager(self):
+    def test_accepts_mcp_manager_directly(self):
         mock = MagicMock()
         handler = ExecuteSeedHandler(mcp_manager=mock, mcp_tool_prefix="pfx_")
         assert handler.mcp_manager is mock
         assert handler.mcp_tool_prefix == "pfx_"
 
 
-class TestFactoryFunctions:
-    """Verify factory functions propagate mcp_manager."""
+class TestInjectBridge:
+    """Verify inject_bridge auto-discovery and injection."""
 
-    def test_execute_seed_handler_factory(self):
-        mock = MagicMock()
-        h = execute_seed_handler(mcp_manager=mock, mcp_tool_prefix="a_")
-        assert h.mcp_manager is mock
-        assert h.mcp_tool_prefix == "a_"
+    def test_injects_into_bridge_aware_handler(self):
+        handler = ExecuteSeedHandler()
+        bridge = MagicMock()
+        bridge.manager = MagicMock(name="FakeManager")
+        bridge.tool_prefix = "ext_"
 
-    def test_execute_seed_handler_factory_defaults(self):
-        h = execute_seed_handler()
-        assert h.mcp_manager is None
-        assert h.mcp_tool_prefix == ""
+        result = inject_bridge(handler, bridge)
 
-    def test_start_execute_seed_handler_factory(self):
-        mock = MagicMock()
-        h = start_execute_seed_handler(mcp_manager=mock, mcp_tool_prefix="b_")
-        assert h.execute_handler.mcp_manager is mock
-        assert h.execute_handler.mcp_tool_prefix == "b_"
+        assert result is True
+        assert handler.mcp_manager is bridge.manager
+        assert handler.mcp_tool_prefix == "ext_"
+
+    def test_skips_non_bridge_aware_handler(self):
+        handler = MagicMock(spec=[])  # No BridgeAwareMixin
+        bridge = MagicMock()
+
+        result = inject_bridge(handler, bridge)
+        assert result is False
+
+    def test_skips_when_bridge_is_none(self):
+        handler = ExecuteSeedHandler()
+        result = inject_bridge(handler, None)
+        assert result is False
+        assert handler.mcp_manager is None
+
+    def test_handles_bridge_without_tool_prefix(self):
+        handler = ExecuteSeedHandler()
+        bridge = MagicMock(spec=["manager"])  # No tool_prefix attr
+        bridge.manager = MagicMock()
+
+        result = inject_bridge(handler, bridge)
+        assert result is True
+        assert handler.mcp_manager is bridge.manager
+        assert handler.mcp_tool_prefix == ""  # getattr fallback
 
 
 class TestGetOuroborosTools:
-    """Verify get_ouroboros_tools propagates mcp_manager to handlers."""
+    """Verify tools can be created and later injected."""
 
-    def test_with_mcp_manager(self):
-        mock = MagicMock()
-        tools = get_ouroboros_tools(mcp_manager=mock, mcp_tool_prefix="x_")
-        exec_handler = tools[0]
-        assert isinstance(exec_handler, ExecuteSeedHandler)
-        assert exec_handler.mcp_manager is mock
-        assert exec_handler.mcp_tool_prefix == "x_"
-
-    def test_without_mcp_manager(self):
+    def test_default_tools_have_no_manager(self):
         tools = get_ouroboros_tools()
         exec_handler = tools[0]
         assert isinstance(exec_handler, ExecuteSeedHandler)
         assert exec_handler.mcp_manager is None
-        assert exec_handler.mcp_tool_prefix == ""
 
     def test_tool_count_unchanged(self):
-        """Adding mcp_manager params does not change the number of tools."""
-        default_tools = get_ouroboros_tools()
-        with_mgr = get_ouroboros_tools(mcp_manager=MagicMock())
-        assert len(default_tools) == len(with_mgr)
+        tools = get_ouroboros_tools()
+        assert len(tools) >= 20  # Sanity check
 
 
 class TestCompositionRoot:
-    """Verify create_ouroboros_server wires bridge into handlers."""
+    """Verify create_ouroboros_server loop-based bridge injection."""
 
-    def test_bridge_manager_injected_into_execute_handler(self):
+    def test_bridge_injected_into_execute_handler(self):
         from ouroboros.mcp.server.adapter import create_ouroboros_server
 
         mock_bridge = MagicMock()
-        mock_bridge.manager = MagicMock(name="FakeMCPClientManager")
+        mock_bridge.manager = MagicMock(name="FakeManager")
         mock_bridge.tool_prefix = "ext_"
 
         server = create_ouroboros_server(mcp_bridge=mock_bridge)
 
-        # Find the ExecuteSeedHandler in registered tools
         exec_handler = None
         for handler in server._tool_handlers.values():
             if isinstance(handler, ExecuteSeedHandler):
                 exec_handler = handler
                 break
 
-        assert exec_handler is not None, "ExecuteSeedHandler not found in server"
+        assert exec_handler is not None
         assert exec_handler.mcp_manager is mock_bridge.manager
         assert exec_handler.mcp_tool_prefix == "ext_"
 
@@ -125,7 +132,6 @@ class TestCompositionRoot:
 
         assert exec_handler is not None
         assert exec_handler.mcp_manager is None
-        assert exec_handler.mcp_tool_prefix == ""
 
     def test_no_bridge_not_in_owned_resources(self):
         from ouroboros.mcp.server.adapter import create_ouroboros_server

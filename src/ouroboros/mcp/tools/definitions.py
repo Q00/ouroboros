@@ -60,15 +60,11 @@ def execute_seed_handler(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
-    mcp_manager: object | None = None,
-    mcp_tool_prefix: str = "",
 ) -> ExecuteSeedHandler:
     """Create an ExecuteSeedHandler instance."""
     return ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
-        mcp_manager=mcp_manager,
-        mcp_tool_prefix=mcp_tool_prefix,
     )
 
 
@@ -76,15 +72,11 @@ def start_execute_seed_handler(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
-    mcp_manager: object | None = None,
-    mcp_tool_prefix: str = "",
 ) -> StartExecuteSeedHandler:
     """Create a StartExecuteSeedHandler instance."""
     execute_handler = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
-        mcp_manager=mcp_manager,
-        mcp_tool_prefix=mcp_tool_prefix,
     )
     return StartExecuteSeedHandler(execute_handler=execute_handler)
 
@@ -200,15 +192,11 @@ def get_ouroboros_tools(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
-    mcp_manager: object | None = None,
-    mcp_tool_prefix: str = "",
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers."""
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
-        mcp_manager=mcp_manager,
-        mcp_tool_prefix=mcp_tool_prefix,
     )
     return (
         execute_seed,
