@@ -753,10 +753,18 @@ def create_ouroboros_server(
             cwd=task_cwd or Path.cwd(),
             llm_backend=llm_backend,
         )
+        _evo_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
+        _evo_mcp_prefix = (
+            mcp_bridge.tool_prefix
+            if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
+            else ""
+        )
         evolution_runner = OrchestratorRunner(
             adapter=runner_adapter,
             event_store=event_store,
             console=Console(stderr=True),
+            mcp_manager=_evo_mcp_manager,
+            mcp_tool_prefix=_evo_mcp_prefix,
             debug=False,
             enable_decomposition=True,
         )
