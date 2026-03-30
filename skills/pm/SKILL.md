@@ -120,6 +120,10 @@ Show the following to the user:
 PM document saved: <meta.pm_path>
 (Clipboard에 복사되었습니다)
 
+PM seed handoff artifact: <meta.pm_seed_path or meta.seed_path>
+This is not the runnable Seed yet.
+
 Next step:
-  ooo interview <meta.pm_path>
+  ooo interview <meta.pm_seed_path or meta.seed_path>
+  ooo seed
 ```

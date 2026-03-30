@@ -16,6 +16,7 @@ from ouroboros.cli.commands.init import (
     _load_pm_seed_as_context,
     _notify_pm_seed_detected,
     _prompt_pm_seed_selection,
+    start,
 )
 
 # ---------------------------------------------------------------------------
@@ -550,3 +551,36 @@ class TestPrdSeedConfirmationFlow:
         assert parsed["goal"] == "End-to-end testing"
         assert "Analytics" in parsed["deferred_items"]
         assert "Hosting provider" in parsed["decide_later_items"]
+
+
+class TestStartCommandPathResolution:
+    """Tests for starting the dev interview from a PM artifact path."""
+
+    def test_start_resolves_pm_seed_path_before_running_interview(self, tmp_path: Path) -> None:
+        seed_path = tmp_path / "pm_seed_taskflow.json"
+        seed_path.write_text(
+            """{
+  "pm_id": "pm_seed_taskflow",
+  "product_name": "TaskFlow",
+  "goal": "Help teams manage tasks",
+  "constraints": ["Offline support"],
+  "success_criteria": ["Tasks sync correctly"],
+  "user_stories": [],
+  "deferred_items": [],
+  "decide_later_items": []
+}
+""",
+            encoding="utf-8",
+        )
+
+        with (
+            patch.object(Path, "home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.init.asyncio.run"),
+            patch("ouroboros.cli.commands.init._run_interview") as mock_run_interview,
+            patch("ouroboros.cli.commands.init.print_info"),
+        ):
+            start(context=str(seed_path), resume=None)
+
+        resolved_context = mock_run_interview.call_args.args[0]
+        assert "TaskFlow" in resolved_context
+        assert str(seed_path) not in resolved_context

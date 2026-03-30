@@ -30,6 +30,7 @@ from ouroboros.bigbang.interview import (
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ValidationError
+from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
@@ -678,7 +679,16 @@ class InterviewHandler:
             # Start new interview
             if initial_context:
                 cwd = arguments.get("cwd") or os.getcwd()
-                result = await engine.start_interview(initial_context, cwd=cwd)
+                resolved_context = resolve_initial_context_input(initial_context, cwd=cwd)
+                if resolved_context.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(resolved_context.error),
+                            tool_name="ouroboros_interview",
+                        )
+                    )
+
+                result = await engine.start_interview(resolved_context.value, cwd=cwd)
                 if result.is_err:
                     return Result.err(
                         MCPToolError(
@@ -762,7 +772,7 @@ class InterviewHandler:
                 await self._emit_event(
                     interview_started(
                         state.interview_id,
-                        initial_context,
+                        resolved_context.value,
                     )
                 )
 

@@ -48,6 +48,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
+from ouroboros.pm.handoff import build_pm_dev_handoff_next_step
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger()
@@ -1230,6 +1231,7 @@ class PMInterviewHandler:
 
         seed = seed_result.value
 
+        # Save seed to ~/.ouroboros/seeds/ (idempotent — overwrites on retry)
         # Save seed and PM document with recovery contract
         try:
             seed_path = engine.save_pm_seed(seed)
@@ -1258,6 +1260,8 @@ class PMInterviewHandler:
                 )
             )
 
+        next_step = build_pm_dev_handoff_next_step(seed_path)
+
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -1265,10 +1269,13 @@ class PMInterviewHandler:
                         type=ContentType.TEXT,
                         text=(
                             f"PM seed generated: {seed.product_name}\n"
-                            f"Seed: {seed_path}\n"
+                            f"PM seed: {seed_path}\n"
                             f"PM document: {pm_path}\n\n"
+                            "This PM seed is a handoff artifact for the dev interview, "
+                            "not the runnable Seed.\n"
                             f"Deferred items: {len(seed.deferred_items)}\n"
-                            f"Decide-later items: {len(seed.decide_later_items)}"
+                            f"Decide-later items: {len(seed.decide_later_items)}\n"
+                            f"Next: {next_step}"
                         ),
                     ),
                 ),
@@ -1276,8 +1283,11 @@ class PMInterviewHandler:
                 meta={
                     "session_id": session_id,
                     "seed_path": str(seed_path),
+                    "pm_seed_path": str(seed_path),
                     "pm_path": str(pm_path),
-                    "next_step": f"Run 'ooo interview' to start a dev interview using {pm_path} as context",
+                    "artifact_kind": "pm_seed",
+                    "runnable": False,
+                    "next_step": next_step,
                 },
             )
         )

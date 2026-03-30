@@ -156,11 +156,12 @@ class TestHandleGenerate:
         assert meta["seed_path"] == str(seed_path)
 
     @pytest.mark.asyncio
-    async def test_generate_meta_has_exactly_two_keys(self, tmp_path: Path) -> None:
-        """Generate meta contains session_id, seed_path, and pm_path."""
+    async def test_generate_meta_has_canonical_handoff_keys(self, tmp_path: Path) -> None:
+        """Generate meta contains the canonical PM handoff metadata."""
         seed = _make_seed()
         state = _make_state()
-        engine = _make_engine_for_generate(state, seed)
+        seed_path = Path.home() / ".ouroboros" / "seeds" / "pm_seed_test123.json"
+        engine = _make_engine_for_generate(state, seed, seed_path=seed_path)
 
         handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
         result = await handler.handle(
@@ -173,7 +174,22 @@ class TestHandleGenerate:
 
         assert result.is_ok
         meta = result.value.meta
-        assert set(meta.keys()) == {"session_id", "seed_path", "pm_path", "next_step"}
+        assert set(meta.keys()) == {
+            "session_id",
+            "seed_path",
+            "pm_seed_path",
+            "pm_path",
+            "artifact_kind",
+            "runnable",
+            "next_step",
+        }
+        assert meta["artifact_kind"] == "pm_seed"
+        assert meta["runnable"] is False
+        assert meta["pm_seed_path"] == meta["seed_path"]
+        assert meta["next_step"] == (
+            f"Run 'ouroboros init start {seed_path}' to continue into the dev interview. "
+            "The runnable Seed is generated after that dev interview completes."
+        )
 
     @pytest.mark.asyncio
     async def test_generate_loads_interview_state(self, tmp_path: Path) -> None:
@@ -461,6 +477,31 @@ class TestHandleGenerate:
         # File should be at {cwd}/.ouroboros/pm.md
         assert pm_path.parent.name == ".ouroboros"
         assert pm_path.name == "pm.md"
+
+    @pytest.mark.asyncio
+    async def test_generate_next_step_uses_pm_seed_path(self, tmp_path: Path) -> None:
+        """The canonical next step should continue from the PMSeed artifact, not pm.md."""
+        seed = _make_seed()
+        state = _make_state()
+        seed_path = Path.home() / ".ouroboros" / "seeds" / "pm_seed_test123.json"
+        engine = _make_engine_for_generate(state, seed, seed_path=seed_path)
+
+        handler = PMInterviewHandler(pm_engine=engine, data_dir=tmp_path)
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": "test-session-gen",
+                "cwd": str(tmp_path),
+            }
+        )
+
+        assert result.is_ok
+        next_step = result.value.meta["next_step"]
+        assert next_step == (
+            f"Run 'ouroboros init start {seed_path}' to continue into the dev interview. "
+            "The runnable Seed is generated after that dev interview completes."
+        )
+        assert "pm.md" not in next_step
 
     @pytest.mark.asyncio
     async def test_generate_requires_session_id(self, tmp_path: Path) -> None:

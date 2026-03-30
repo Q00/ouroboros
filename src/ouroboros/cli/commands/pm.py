@@ -27,6 +27,7 @@ from ouroboros.cli.formatters.prompting import multiline_prompt_async
 from ouroboros.config import get_clarification_model, get_llm_backend
 from ouroboros.core.types import Result
 from ouroboros.observability import LoggingConfig, configure_logging
+from ouroboros.pm.handoff import build_pm_dev_handoff_command
 from ouroboros.providers.factory import (
     create_llm_adapter,
     resolve_llm_backend,
@@ -384,6 +385,32 @@ def _make_message_callback(debug: bool):
     return callback
 
 
+async def _continue_into_dev_interview(
+    seed_path: Path,
+    *,
+    debug: bool,
+    llm_backend: str | None,
+) -> None:
+    """Resolve a PM artifact path into interview context and start the dev interview."""
+    from ouroboros.cli.commands.init import _run_interview
+    from ouroboros.core.initial_context import resolve_initial_context_input
+
+    resolved_context = resolve_initial_context_input(str(seed_path), cwd=Path.cwd())
+    if resolved_context.is_err:
+        print_error(f"Failed to load PM seed for dev interview: {resolved_context.error.message}")
+        raise typer.Exit(code=1)
+
+    await _run_interview(
+        resolved_context.value,
+        resume_id=None,
+        state_dir=None,
+        use_orchestrator=False,
+        debug=debug,
+        workflow_runtime_backend=None,
+        llm_backend=llm_backend,
+    )
+
+
 async def _run_pm_interview(
     resume_id: str | None,
     model: str,
@@ -667,6 +694,22 @@ async def _run_pm_interview(
             pm_dir = Path(output_dir) if output_dir else Path.cwd() / ".ouroboros"
             pm_path = save_pm_document(seed, output_dir=pm_dir)
             print_success(f"PM document saved: {pm_path}")
+
+            print_info(
+                "The PM seed is a handoff artifact for the dev interview, not the runnable Seed."
+            )
+            print_info(f"Next: {build_pm_dev_handoff_command(seed_path)}")
+
+            continue_to_dev = Confirm.ask(
+                "Continue into the dev interview now?",
+                default=True,
+            )
+            if continue_to_dev:
+                await _continue_into_dev_interview(
+                    seed_path,
+                    debug=debug,
+                    llm_backend=backend,
+                )
         else:
             print_error(f"Failed to generate PM: {seed_result.error}")
     elif state.rounds and not state.is_complete:
