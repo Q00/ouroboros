@@ -43,6 +43,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.events import (
     create_drift_measured_event,
+    create_execution_terminal_event,
     create_mcp_tools_loaded_event,
     create_progress_event,
     create_session_completed_event,
@@ -1532,6 +1533,19 @@ class OrchestratorRunner:
                     )
                 )
 
+            # Mirror terminal state into the execution event stream so
+            # single-stream consumers (TUI) detect completion without
+            # polling the separate session aggregate.
+            terminal_event = create_execution_terminal_event(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                status="completed" if success else "failed",
+                summary=completion_summary if success else None,
+                error_message=final_message if not success else None,
+                messages_processed=messages_processed,
+            )
+            await self._event_store.append(terminal_event)
+
             log.info(
                 "orchestrator.runner.execute_completed",
                 execution_id=exec_id,
@@ -1585,6 +1599,15 @@ class OrchestratorRunner:
             await self._session_repo.mark_failed(
                 tracker.session_id,
                 str(e),
+            )
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=exec_id,
+                    session_id=tracker.session_id,
+                    status="failed",
+                    error_message=str(e),
+                    messages_processed=messages_processed,
+                )
             )
 
             return Result.err(
@@ -1800,6 +1823,17 @@ class OrchestratorRunner:
                     border_style="yellow",
                 )
             )
+
+        await self._event_store.append(
+            create_execution_terminal_event(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                status="completed" if success else "failed",
+                summary=execution_summary if success else None,
+                error_message=final_message if not success else None,
+                messages_processed=parallel_result.total_messages,
+            )
+        )
 
         log.info(
             "orchestrator.runner.parallel_completed",
@@ -2131,6 +2165,18 @@ Note: This is a resumed session. Please continue from where execution was interr
                     )
                 )
 
+            # Mirror terminal state into execution stream for TUI.
+            terminal_status = "completed" if success else ("paused" if recoverable_resume_failure else "failed")
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    status=terminal_status,
+                    error_message=final_message if not success else None,
+                    messages_processed=messages_processed,
+                )
+            )
+
             log.info(
                 "orchestrator.runner.resume_completed",
                 session_id=session_id,
@@ -2170,6 +2216,14 @@ Note: This is a resumed session. Please continue from where execution was interr
             self._unregister_session(tracker.execution_id, session_id)
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    status="failed",
+                    error_message=str(e),
+                )
+            )
 
             return Result.err(
                 OrchestratorError(
