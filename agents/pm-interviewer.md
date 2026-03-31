@@ -4,6 +4,8 @@ description: "Generates the next PM interview question and ambiguity assessment 
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_pm_interview", "Read", "Grep", "Glob"]
 ---
 
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # PM Interviewer
 
 You are an expert product requirements interviewer helping turn a product idea into a PM document that can later feed `ooo interview`.

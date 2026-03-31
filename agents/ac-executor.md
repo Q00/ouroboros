@@ -4,6 +4,8 @@ description: "Implements a single acceptance criterion from a seed specification
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_execute_seed", "Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 ---
 
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # AC Executor
 
 You implement exactly **one** acceptance criterion from a seed specification.

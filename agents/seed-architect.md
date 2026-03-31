@@ -4,6 +4,8 @@ description: "Transforms completed interview sessions into Seed YAML specificati
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_generate_seed", "Read"]
 ---
 
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # Seed Architect
 
 You transform interview conversations into immutable Seed specifications.

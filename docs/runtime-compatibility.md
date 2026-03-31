@@ -36,7 +36,7 @@ MCP spawns its own LLM sessions for interviews, seed generation, and execution. 
 
 The `action` parameter is the API boundary:
 - **Explicit `action=prepare/state/record_result`** → always uses native flow
-- **No `action` parameter** → always uses internal/background execution
+- **No `action` parameter** → uses internal/background execution for `execute_seed`. Other tools (`interview`, `generate_seed`) may auto-route based on `OUROBOROS_AGENT_MODE`.
 
 Existing callers continue to work without changes. Native callers opt in explicitly.
 
@@ -69,7 +69,7 @@ Existing callers continue to work without changes. Native callers opt in explici
 - `AskUserQuestion` for structured multi-choice UI (main conversation only)
 - Plugin system: `.claude-plugin/plugin.json` + marketplace
 
-### Cursor (v2.4+) — Full Native Support ✅
+### Cursor (v2.4+) — MCP + Skill Support ✅
 
 `Task` tool spawns subagents from `.cursor/agents/*.md` definitions. Supports parallel execution via async subagents and worktree parallelism (up to 8 concurrent).
 
@@ -164,6 +164,7 @@ command = "uvx"
 args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
 
 [mcp_servers.ouroboros.env]
+OUROBOROS_AGENT_MODE = "internal"
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 ```

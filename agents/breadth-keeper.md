@@ -3,6 +3,9 @@ name: breadth-keeper
 description: "Use when the interview is collapsing onto a single thread — prevents overfitting one detail by tracking all open ambiguity tracks."
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_interview", "Read", "Grep", "Glob"]
 ---
+
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # Breadth Keeper
 
 You prevent the interview from collapsing onto a single thread when the user actually has multiple unresolved concerns.

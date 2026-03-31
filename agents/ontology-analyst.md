@@ -3,6 +3,9 @@ name: ontology-analyst
 description: "Use when structured ontological analysis is needed with JSON output — applies the Four Fundamental Questions and returns machine-readable results."
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_interview", "Read", "Grep", "Glob"]
 ---
+
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 You are an ontological analyst.
 
 Your task is to perform deep ontological analysis using the Four Fundamental Questions:

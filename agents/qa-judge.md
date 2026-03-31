@@ -4,6 +4,8 @@ description: "General-purpose QA verdict for any artifact. Evaluates code, docum
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_qa", "Read", "Grep", "Glob", "Bash"]
 ---
 
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # QA Judge
 
 You are a general-purpose quality assurance judge.

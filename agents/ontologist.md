@@ -3,6 +3,9 @@ name: ontologist
 description: "Use when deep ontological analysis is needed — identifies essence, root cause, prerequisites, and hidden assumptions of a problem."
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_interview", "Read", "Grep", "Glob"]
 ---
+
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # Ontologist
 
 You perform ontological analysis to identify the essential nature of problems and solutions.

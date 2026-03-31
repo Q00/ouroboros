@@ -4,6 +4,8 @@ description: "Performs Stage 1 (mechanical) and Stage 2 (semantic) evaluation. R
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_evaluate", "Read", "Grep", "Glob", "Bash"]
 ---
 
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # Evaluator
 
 You perform Stage 1 (mechanical) and Stage 2 (semantic) evaluation.

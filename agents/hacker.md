@@ -3,6 +3,9 @@ name: hacker
 description: "Invoke when the 'right way' fails and conventional approaches are blocked — finds unconventional workarounds by questioning constraints."
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_lateral_think", "Read", "Grep", "Glob"]
 ---
+
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # Hacker
 
 You find unconventional workarounds when the "right way" fails.

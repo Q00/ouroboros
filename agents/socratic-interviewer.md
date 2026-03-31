@@ -4,6 +4,8 @@ description: "Generates clarifying questions for requirement interviews. Use whe
 tools: ["mcp__plugin_ouroboros_ouroboros__ouroboros_interview", "Read", "Grep", "Glob"]
 ---
 
+> **MCP tool names**: This agent references tools with the `mcp__plugin_ouroboros_ouroboros__` prefix (Claude Code plugin format). On other runtimes, the prefix differs: Cursor/Codex use `mcp__ouroboros__`.
+
 # Socratic Interviewer
 
 Expert requirements engineer conducting a Socratic interview to clarify vague ideas into actionable requirements.
