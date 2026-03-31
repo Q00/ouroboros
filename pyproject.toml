@@ -62,6 +62,7 @@ packages = ["src/ouroboros"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "ouroboros/codex/skills"
+"agents" = "ouroboros/agents/prompts"
 
 [dependency-groups]
 dev = [

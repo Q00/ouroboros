@@ -104,16 +104,21 @@ def load_agent_prompt(agent_name: str) -> str:
         content = path.read_text(encoding="utf-8")
         return _strip_frontmatter(content)
 
-    # Bundled fallback (legacy, no frontmatter)
-    package = importlib.resources.files("ouroboros.agents")
-    resource = package.joinpath(f"{agent_name}.md")
-    try:
-        return resource.read_text(encoding="utf-8")
-    except (FileNotFoundError, TypeError):
-        raise FileNotFoundError(
-            f"Agent prompt not found: {agent_name}.md "
-            f"(searched OUROBOROS_AGENTS_DIR, project agents/, and ouroboros.agents package)"
-        ) from None
+    # Bundled fallback: try the force-included prompts directory first,
+    # then legacy ouroboros.agents package for backward compat.
+    for pkg in ("ouroboros.agents.prompts", "ouroboros.agents"):
+        try:
+            package = importlib.resources.files(pkg)
+            resource = package.joinpath(f"{agent_name}.md")
+            content = resource.read_text(encoding="utf-8")
+            return _strip_frontmatter(content)
+        except (FileNotFoundError, TypeError, ModuleNotFoundError):
+            continue
+
+    raise FileNotFoundError(
+        f"Agent prompt not found: {agent_name}.md "
+        f"(searched OUROBOROS_AGENTS_DIR, project agents/, and ouroboros.agents package)"
+    )
 
 
 def clear_cache() -> None:

@@ -639,7 +639,7 @@ class ExecuteSeedHandler:
                                 tool_name="ouroboros_execute_seed",
                             )
                         )
-                    return self._action_record_result(
+                    return await self._action_record_result(
                         seed=seed,
                         tracker=tracker,
                         agent_execution_result=agent_execution_result,
@@ -1064,7 +1064,7 @@ class ExecuteSeedHandler:
             )
         )
 
-    def _action_record_result(
+    async def _action_record_result(
         self,
         *,
         seed: Seed,
@@ -1073,7 +1073,36 @@ class ExecuteSeedHandler:
         agent_qa_verdict: str | None,
         skip_qa: bool,
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Record execution result from native agent."""
+        """Record execution result from native agent and persist completion."""
+        # Persist completion state so subsequent action=state reflects it
+        event_store = self.event_store or EventStore()
+        owns_event_store = self.event_store is None
+        try:
+            await event_store.initialize()
+            session_repo = SessionRepository(event_store)
+            has_qa = agent_qa_verdict is not None or skip_qa
+            summary = {
+                "agent_execution_result": agent_execution_result[:2000],
+                "has_qa_verdict": agent_qa_verdict is not None,
+                "qa_skipped": skip_qa,
+            }
+            if has_qa:
+                await session_repo.mark_completed(tracker.session_id, summary=summary)
+            else:
+                await session_repo.track_progress(
+                    tracker.session_id,
+                    {"native_execution_result": agent_execution_result[:2000]},
+                )
+        except Exception as e:
+            log.warning(
+                "execution_handlers.record_result.persist_failed",
+                session_id=tracker.session_id,
+                error=str(e),
+            )
+        finally:
+            if owns_event_store:
+                await event_store.close()
+
         tracker_cwd = tracker_runtime_cwd(tracker)
         resolved_tracker_cwd = (
             str(self._resolve_dispatch_cwd(tracker_cwd)) if tracker_cwd else None
