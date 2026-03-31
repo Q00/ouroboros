@@ -99,3 +99,51 @@ class TestExtractJsonPayload:
         result = extract_json_payload(text)
         assert result is not None
         assert '"valid": true' in result
+
+
+class TestExtractJsonArray:
+    """extract_json_payload must also handle top-level JSON arrays."""
+
+    def test_pure_array(self):
+        text = '[{"a": 1}, {"b": 2}]'
+        result = extract_json_payload(text)
+        assert result is not None
+        assert '"a": 1' in result
+        assert result.startswith("[")
+
+    def test_array_in_code_fence(self):
+        text = '```json\n[{"item": "value"}]\n```'
+        result = extract_json_payload(text)
+        assert result is not None
+        assert result.startswith("[")
+
+    def test_prose_before_array(self):
+        text = 'Here are the results:\n[{"score": 0.9}, {"score": 0.8}]'
+        result = extract_json_payload(text)
+        assert result is not None
+        assert result.startswith("[")
+        assert '"score": 0.9' in result
+
+    def test_object_before_array_returns_object(self):
+        """When both object and array exist, return whichever comes first."""
+        text = '{"first": true} [1, 2, 3]'
+        result = extract_json_payload(text)
+        assert result is not None
+        assert '"first": true' in result
+
+    def test_array_before_object_returns_array(self):
+        text = '[1, 2] {"second": true}'
+        result = extract_json_payload(text)
+        assert result is not None
+        assert result == "[1, 2]"
+
+    def test_empty_array(self):
+        text = "prefix [] suffix"
+        result = extract_json_payload(text)
+        assert result == "[]"
+
+    def test_nested_array(self):
+        text = "[[1, 2], [3, 4]]"
+        result = extract_json_payload(text)
+        assert result is not None
+        assert result == "[[1, 2], [3, 4]]"

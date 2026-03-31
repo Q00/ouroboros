@@ -9,30 +9,41 @@ import re
 
 
 def extract_json_payload(text: str) -> str | None:
-    """Extract the first valid JSON object from text.
+    """Extract the first valid JSON object or array from text.
 
-    Tries each ``{`` position via brace-depth counting and validates
-    with ``json.loads``.  This handles LLM responses that contain
-    prose (with stray braces) before the actual JSON payload.
+    Tries each ``{`` or ``[`` position via bracket-depth counting and
+    validates with ``json.loads``.  This handles LLM responses that
+    contain prose before the actual JSON payload.
 
     Args:
-        text: Raw text potentially containing a JSON object
+        text: Raw text potentially containing a JSON object or array
 
     Returns:
-        Extracted JSON string, or None if no valid object is found
+        Extracted JSON string, or None if no valid JSON is found
     """
     # Strip code fences first (```json ... ```)
-    fence_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text)
+    fence_match = re.search(r"```(?:json)?\s*([\[{][\s\S]*?[}\]])\s*```", text)
     if fence_match:
         text = fence_match.group(1)
 
     pos = 0
     while True:
-        start = text.find("{", pos)
-        if start == -1:
+        # Find the next { or [ opener
+        obj_start = text.find("{", pos)
+        arr_start = text.find("[", pos)
+
+        if obj_start == -1 and arr_start == -1:
             return None
 
-        candidate = _brace_extract(text, start)
+        # Pick whichever comes first
+        if obj_start == -1:
+            start = arr_start
+        elif arr_start == -1:
+            start = obj_start
+        else:
+            start = min(obj_start, arr_start)
+
+        candidate = _bracket_extract(text, start)
         if candidate is not None:
             try:
                 json.loads(candidate)
@@ -43,12 +54,15 @@ def extract_json_payload(text: str) -> str | None:
         pos = start + 1
 
 
-def _brace_extract(text: str, start: int) -> str | None:
-    """Extract a brace-balanced substring starting at *start*.
+def _bracket_extract(text: str, start: int) -> str | None:
+    """Extract a bracket-balanced substring starting at *start*.
 
-    Returns the substring ``text[start:end+1]`` where *end* is the
-    position of the matching ``}``, or ``None`` if braces never balance.
+    Supports both ``{}`` (objects) and ``[]`` (arrays).  Returns the
+    substring ``text[start:end+1]`` where *end* is the position of
+    the matching closer, or ``None`` if brackets never balance.
     """
+    open_char = text[start]
+    close_char = "}" if open_char == "{" else "]"
     depth = 0
     in_string = False
     escape_next = False
@@ -69,9 +83,9 @@ def _brace_extract(text: str, start: int) -> str | None:
         if in_string:
             continue
 
-        if char == "{":
+        if char == open_char:
             depth += 1
-        elif char == "}":
+        elif char == close_char:
             depth -= 1
             if depth == 0:
                 return text[start : i + 1]
