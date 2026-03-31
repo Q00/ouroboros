@@ -417,7 +417,11 @@ class TestClaudeSetup:
         claude_dir.mkdir()
         claude_config = claude_dir / "mcp.json"
         claude_config.write_text(
-            json.dumps({"mcpServers": {"ouroboros": {"command": "uvx", "args": current_args}}}),
+            json.dumps({"mcpServers": {"ouroboros": {
+                "command": "uvx",
+                "args": current_args,
+                "env": {"OUROBOROS_AGENT_MODE": "native"},
+            }}}),
             encoding="utf-8",
         )
         mtime_before = claude_config.stat().st_mtime

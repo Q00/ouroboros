@@ -48,7 +48,7 @@ Existing callers continue to work without changes. Native callers opt in explici
 |:-----------|:----------:|:------:|:-----:|:-----------:|
 | Spawn subagents | ✅ `Agent` tool | ✅ `Task` tool | ✅ `spawn_agent` | ❌ |
 | Parallel AC execution | ✅ multiple `Agent` calls | ✅ async + worktrees (8x) | ✅ concurrent threads (6x) | ❌ |
-| Agent definitions | ✅ `.claude/agents/*.md` | ✅ `.cursor/agents/*.md` | ⚠️ TOML (`.codex/agents/`) | ❌ |
+| Agent definitions | ✅ `.claude/agents/*.md` | ✅ via plugin `agents/*.md` | ⚠️ TOML format required (not yet adapted) | ❌ |
 | MCP support | ✅ STDIO | ✅ STDIO | ✅ STDIO + HTTP | varies |
 | Deferred tool loading | ✅ `ToolSearch` | ❌ (pre-loaded) | ❌ (pre-loaded) | ❌ |
 | Structured user questions | ✅ `AskUserQuestion` | ✅ Q&A tool (non-blocking) | ❌ (free-form TUI) | ❌ |
@@ -71,7 +71,7 @@ Existing callers continue to work without changes. Native callers opt in explici
 
 ### Cursor (v2.4+) — MCP + Skill Support ✅
 
-`Task` tool spawns subagents from `.cursor/agents/*.md` definitions. Supports parallel execution via async subagents and worktree parallelism (up to 8 concurrent).
+Ouroboros works in Cursor via the Claude Code plugin, which provides agent definitions, skills, and MCP server registration. Cursor's `Task` tool spawns subagents with parallel execution via async subagents and worktrees (up to 8 concurrent).
 
 - No `ToolSearch` → MCP tools pre-loaded via `~/.cursor/mcp.json`
 - Q&A tool is non-blocking (agent continues working while waiting for user)
@@ -83,7 +83,7 @@ MCP tools work after `~/.codex/config.toml` registration. Internal mode (backgro
 
 | Area | Ouroboros Format | Codex Format | Gap |
 |------|-----------------|-------------|-----|
-| Agent definitions | `.md` with YAML frontmatter | TOML in `.codex/agents/` | Incompatible |
+| Agent definitions | `.md` with YAML frontmatter | TOML in `.codex/agents/` | Incompatible; setup installs rules/skills only |
 | Subagent spawning | `Agent` tool (SKILL.md) | `spawn_agent` + `wait_agent` | Different API |
 | Skill triggering | `ooo run` → Skill tool | `$run` (native matching) | Different convention |
 | MCP tool naming | `mcp__plugin_ouroboros_ouroboros__*` | `mcp__<server>__*` | Different prefix |
@@ -155,7 +155,7 @@ All runtimes use the same MCP server binary. Mode is selected by environment var
 }
 ```
 
-**Cursor** (`~/.cursor/mcp.json`): Same JSON format as Claude Code.
+**Cursor** (`~/.cursor/mcp.json`): Same JSON format, but uses `ouroboros-ai` (without `[claude]` extras).
 
 **Codex** (`~/.codex/config.toml`):
 ```toml

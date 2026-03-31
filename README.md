@@ -222,7 +222,7 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 | `ooo update` | `ouroboros update` | Check for updates + upgrade to latest |
 | `ooo brownfield` | *(skill)* | Scan and manage brownfield repo defaults |
 
-> All `ooo` commands work as native skills in Claude Code. Cursor support is available via MCP integration. Some commands (`evaluate`, `evolve`, `unstuck`, `ralph`) don't have standalone CLI equivalents.
+> All `ooo` commands work as native skills in Claude Code. Cursor is supported via the Claude Code plugin (MCP, agents, and skills). Some commands (`evaluate`, `evolve`, `unstuck`, `ralph`) don't have standalone CLI equivalents.
 
 See the [CLI reference](./docs/cli-reference.md) for full details.
 

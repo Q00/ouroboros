@@ -122,6 +122,13 @@ def _ensure_claude_mcp_entry() -> None:
                 needs_write = True
                 print_info("Updated MCP server entry to match current install method.")
 
+            # Ensure env block is present (added in native subagent refactor)
+            detected_env = detected.get("env")
+            if detected_env and existing.get("env") != detected_env:
+                existing["env"] = detected_env
+                needs_write = True
+                print_info("Updated MCP server env configuration.")
+
         if not needs_write:
             print_info("MCP server already registered.")
 
@@ -175,6 +182,7 @@ command = "uvx"
 args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
 
 [mcp_servers.ouroboros.env]
+OUROBOROS_AGENT_MODE = "internal"
 OUROBOROS_AGENT_RUNTIME = "codex"
 OUROBOROS_LLM_BACKEND = "codex"
 """
