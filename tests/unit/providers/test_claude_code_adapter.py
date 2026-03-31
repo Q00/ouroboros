@@ -338,6 +338,36 @@ class TestExecuteSingleRequestSystemPrompt:
         assert mock_execute.call_count == 1  # No retry needed
 
     @pytest.mark.asyncio
+    async def test_json_schema_array_gets_correct_prompt_steering(self) -> None:
+        """json_schema with top-level array should say 'JSON array', not 'JSON object'."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="List items")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"name": {"type": "string"}}},
+                },
+            },
+        )
+
+        mock_response = MagicMock(is_ok=True, is_err=False)
+        mock_response.value.content = '[{"name": "a"}]'
+        mock_execute = AsyncMock(return_value=mock_response)
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        prompt_arg = mock_execute.call_args.args[0]
+        assert "JSON array" in prompt_arg
+        assert "JSON object" not in prompt_arg
+        assert result.is_ok
+        assert result.value.content == '[{"name": "a"}]'
+
+    @pytest.mark.asyncio
     async def test_json_object_format_gets_prompt_steering(self) -> None:
         """json_object response_format should also get prompt steering."""
         adapter = ClaudeCodeAdapter()

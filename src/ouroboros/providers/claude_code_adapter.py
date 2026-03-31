@@ -254,8 +254,18 @@ class ClaudeCodeAdapter:
             fmt_type = config.response_format.get("type")
             if fmt_type == "json_schema":
                 schema = config.response_format.get("json_schema", {})
+                # Derive the expected top-level type from the schema so the
+                # prompt instruction matches the schema contract (object, array, etc.)
+                top_type = schema.get("type", "object")
+                if top_type == "array":
+                    type_noun = "JSON array"
+                elif top_type == "object":
+                    type_noun = "JSON object"
+                else:
+                    # Primitive schemas (string, number, boolean, null)
+                    type_noun = "JSON value"
                 schema_instruction = (
-                    "Respond with ONLY a valid JSON object that matches this schema. "
+                    f"Respond with ONLY a valid {type_noun} that matches this schema. "
                     "Do not use markdown fences, headers, or explanatory text.\n\n"
                     f"JSON schema:\n{json.dumps(schema, indent=2, sort_keys=True)}"
                 )
