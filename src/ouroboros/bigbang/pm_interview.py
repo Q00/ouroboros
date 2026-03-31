@@ -129,9 +129,16 @@ class PMInterviewStateStore:
     ) -> PMInterviewMeta:
         """Build a PM metadata snapshot from the engine."""
         if engine is not None:
+            # Merge deferred_items into decide_later_items at save time
+            # (canonical since v0.25 / PR #238).  restore_meta also merges
+            # for backward-compat with legacy persisted data.
+            merged_decide_later = list(engine.decide_later_items)
+            for item in engine.deferred_items:
+                if item not in merged_decide_later:
+                    merged_decide_later.append(item)
             payload: dict[str, Any] = {
-                "deferred_items": list(engine.deferred_items),
-                "decide_later_items": list(engine.decide_later_items),
+                "deferred_items": [],
+                "decide_later_items": merged_decide_later,
                 "codebase_context": engine.codebase_context,
                 "pending_reframe": engine.get_pending_reframe(),
                 "cwd": cwd,

@@ -280,25 +280,12 @@ class GenerateSeedHandler:
         )
 
     def _load_stored_ambiguity_score(self, state: InterviewState) -> AmbiguityScore | None:
-        """Load a persisted ambiguity score snapshot from interview state."""
-        if state.ambiguity_score is None:
-            return None
+        """Load a persisted ambiguity score snapshot from interview state.
 
-        if isinstance(state.ambiguity_breakdown, dict):
-            try:
-                breakdown = ScoreBreakdown.model_validate(state.ambiguity_breakdown)
-            except PydanticValidationError:
-                log.warning(
-                    "mcp.tool.generate_seed.invalid_stored_ambiguity_breakdown",
-                    session_id=state.interview_id,
-                )
-            else:
-                return AmbiguityScore(
-                    overall_score=state.ambiguity_score,
-                    breakdown=breakdown,
-                )
-
-        return self._build_ambiguity_score_from_value(state.ambiguity_score)
+        Delegates to the module-level ``_load_state_ambiguity_score`` which
+        contains the shared implementation.
+        """
+        return _load_state_ambiguity_score(state)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -332,8 +319,9 @@ class GenerateSeedHandler:
                     name="ambiguity_score",
                     type=ToolInputType.NUMBER,
                     description=(
-                        "Ambiguity score for the interview (0.0 = clear, 1.0 = ambiguous). "
-                        "Required if interview didn't calculate it. Generation fails if > 0.2."
+                        "DEPRECATED: This parameter is ignored. "
+                        "The stored ambiguity score from the interview session is always used instead. "
+                        "See #210."
                     ),
                     required=False,
                 ),

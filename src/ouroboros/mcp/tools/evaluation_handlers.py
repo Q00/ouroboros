@@ -935,6 +935,7 @@ class EvaluateHandler:
             EvaluationPipeline,
             PipelineConfig,
             SemanticConfig,
+            TriggerContext,
             build_mechanical_config,
         )
 
@@ -960,7 +961,15 @@ class EvaluateHandler:
             semantic=SemanticConfig(model=get_semantic_model(self.llm_backend)),
         )
         pipeline = EvaluationPipeline(llm_adapter, config)
-        result = await pipeline.evaluate(context)
+
+        trigger_ctx: TriggerContext | None = None
+        if trigger_consensus:
+            trigger_ctx = TriggerContext(
+                execution_id=session_id,
+                seed_modified=True,
+            )
+
+        result = await pipeline.evaluate(context, trigger_context=trigger_ctx)
 
         if result.is_err:
             return Result.err(

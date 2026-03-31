@@ -2801,15 +2801,17 @@ class TestPMNativeActions:
 
         assert result.is_ok
         assert result.value.meta["answered_rounds"] == 1
-        assert result.value.meta["deferred_count"] == 1
-        assert result.value.meta["decide_later_count"] == 1
+        # After PR #238 merge: deferred_items are merged into decide_later_items
+        assert result.value.meta["deferred_count"] == 0
+        assert result.value.meta["decide_later_count"] == 2
         assert result.value.meta["pending_reframe"] is None
 
         saved_meta = _load_pm_meta(session_id, tmp_path)
         assert saved_meta is not None
         assert saved_meta["classifications"] == ["reframed"]
-        assert saved_meta["deferred_items"] == ["What queue should we use?"]
-        assert saved_meta["decide_later_items"] == ["Which SSO vendor should we choose?"]
+        assert saved_meta["deferred_items"] == []  # Merged into decide_later_items
+        assert "What queue should we use?" in saved_meta["decide_later_items"]
+        assert "Which SSO vendor should we choose?" in saved_meta["decide_later_items"]
 
         state_store = handler._get_interview_state_store()
         state = (await state_store.load_state(session_id)).value

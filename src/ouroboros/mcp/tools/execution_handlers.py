@@ -146,6 +146,86 @@ def _build_default_stage_plan(ac_items: Sequence[dict[str, Any]]) -> list[dict[s
     ]
 
 
+async def _resolve_seed_content(
+    seed_content: str | None,
+    seed_path: str | None,
+    seed_id: str | None,
+    resolved_cwd: Path,
+    tool_name: str,
+) -> Result[str, MCPToolError]:
+    """Resolve seed content from seed_content, seed_path, or seed_id.
+
+    Handles seed_id -> seed_path resolution, path containment validation,
+    file reading, FileNotFoundError fallback to ~/.ouroboros/seeds/, and the
+    "not seed_content" error.  This is security-critical path validation
+    shared by both ExecuteSeedHandler and StartExecuteSeedHandler.
+    """
+    # Resolve seed_id to seed_path if provided
+    if not seed_content and not seed_path and seed_id:
+        seed_path = str(Path.home() / ".ouroboros" / "seeds" / f"{seed_id}.yaml")
+
+    if not seed_content and seed_path:
+        seed_candidate = Path(str(seed_path)).expanduser()
+        if not seed_candidate.is_absolute():
+            seed_candidate = resolved_cwd / seed_candidate
+
+        # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
+        ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
+        valid_cwd, _ = InputValidator.validate_path_containment(
+            seed_candidate,
+            resolved_cwd,
+        )
+        valid_home, _ = InputValidator.validate_path_containment(
+            seed_candidate,
+            ouroboros_seeds,
+        )
+        if not valid_cwd and not valid_home:
+            return Result.err(
+                MCPToolError(
+                    f"Seed path escapes allowed directories: "
+                    f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
+                    tool_name=tool_name,
+                )
+            )
+
+        try:
+            seed_content = await asyncio.to_thread(
+                seed_candidate.read_text,
+                encoding="utf-8",
+            )
+        except FileNotFoundError:
+            # Before treating as inline YAML, try ~/.ouroboros/seeds/<filename>
+            # (handles "ooo run seed_abc.yaml" where seed is stored by seed_id)
+            seeds_fallback = Path.home() / ".ouroboros" / "seeds" / Path(str(seed_path)).name
+            if seeds_fallback.exists():
+                try:
+                    seed_content = await asyncio.to_thread(
+                        seeds_fallback.read_text,
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    seed_content = str(seed_path)
+            else:
+                seed_content = str(seed_path)
+        except OSError as e:
+            return Result.err(
+                MCPToolError(
+                    f"Failed to read seed file: {e}",
+                    tool_name=tool_name,
+                )
+            )
+
+    if not seed_content:
+        return Result.err(
+            MCPToolError(
+                "seed_content, seed_path, or seed_id is required",
+                tool_name=tool_name,
+            )
+        )
+
+    return Result.ok(seed_content)
+
+
 @dataclass
 class ExecuteSeedHandler:
     """Handler for the execute_seed tool.
@@ -335,68 +415,13 @@ class ExecuteSeedHandler:
                 return Result.err(session_seed.error)
             _, _, seed_content = session_seed.value
 
-        # Resolve seed_id to seed_path if provided
-        if not seed_content and not seed_path and seed_id:
-            seed_path = str(Path.home() / ".ouroboros" / "seeds" / f"{seed_id}.yaml")
-
-        if not seed_content and seed_path:
-            seed_candidate = Path(str(seed_path)).expanduser()
-            if not seed_candidate.is_absolute():
-                seed_candidate = resolved_cwd / seed_candidate
-
-            # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
-            ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
-            valid_cwd, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                resolved_cwd,
-            )
-            valid_home, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                ouroboros_seeds,
-            )
-            if not valid_cwd and not valid_home:
-                return Result.err(
-                    MCPToolError(
-                        f"Seed path escapes allowed directories: "
-                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
-                        tool_name="ouroboros_execute_seed",
-                    )
-                )
-
-            try:
-                seed_content = await asyncio.to_thread(
-                    seed_candidate.read_text,
-                    encoding="utf-8",
-                )
-            except FileNotFoundError:
-                # Before treating as inline YAML, try ~/.ouroboros/seeds/<filename>
-                # (handles "ooo run seed_abc.yaml" where seed is stored by seed_id)
-                seeds_fallback = Path.home() / ".ouroboros" / "seeds" / Path(str(seed_path)).name
-                if seeds_fallback.exists():
-                    try:
-                        seed_content = await asyncio.to_thread(
-                            seeds_fallback.read_text,
-                            encoding="utf-8",
-                        )
-                    except OSError:
-                        seed_content = str(seed_path)
-                else:
-                    seed_content = str(seed_path)
-            except OSError as e:
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to read seed file: {e}",
-                        tool_name="ouroboros_execute_seed",
-                    )
-                )
-
-        if not seed_content:
-            return Result.err(
-                MCPToolError(
-                    "seed_content, seed_path, or seed_id is required",
-                    tool_name="ouroboros_execute_seed",
-                )
-            )
+        # Resolve seed content from seed_content / seed_path / seed_id
+        resolve_result = await _resolve_seed_content(
+            seed_content, seed_path, seed_id, resolved_cwd, "ouroboros_execute_seed",
+        )
+        if resolve_result.is_err:
+            return Result.err(resolve_result.error)
+        seed_content = resolve_result.value
 
         session_id = arguments.get("session_id")
         is_resume = bool(session_id)
@@ -1267,71 +1292,16 @@ class StartExecuteSeedHandler:
         seed_content = arguments.get("seed_content")
         seed_path = arguments.get("seed_path")
         seed_id = arguments.get("seed_id")
+        resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(arguments.get("cwd"))
 
-        # Resolve seed_id to seed_path if provided
-        if not seed_content and not seed_path and seed_id:
-            seed_path = str(Path.home() / ".ouroboros" / "seeds" / f"{seed_id}.yaml")
-
-        if not seed_content and seed_path:
-            resolved_cwd = ExecuteSeedHandler._resolve_dispatch_cwd(
-                arguments.get("cwd"),
-            )
-            seed_candidate = Path(str(seed_path)).expanduser()
-            if not seed_candidate.is_absolute():
-                seed_candidate = resolved_cwd / seed_candidate
-
-            # Allow seeds from cwd and the dedicated ~/.ouroboros/seeds/ directory
-            ouroboros_seeds = Path.home() / ".ouroboros" / "seeds"
-            valid_cwd, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                resolved_cwd,
-            )
-            valid_home, _ = InputValidator.validate_path_containment(
-                seed_candidate,
-                ouroboros_seeds,
-            )
-            if not valid_cwd and not valid_home:
-                return Result.err(
-                    MCPToolError(
-                        f"Seed path escapes allowed directories: "
-                        f"{seed_candidate} is not under {resolved_cwd} or {ouroboros_seeds}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-
-            try:
-                seed_content = await asyncio.to_thread(seed_candidate.read_text, encoding="utf-8")
-                arguments = {**arguments, "seed_content": seed_content}
-            except FileNotFoundError:
-                # Before treating as inline YAML, try ~/.ouroboros/seeds/<filename>
-                # (handles "ooo run seed_abc.yaml" where seed is stored by seed_id)
-                seeds_fallback = Path.home() / ".ouroboros" / "seeds" / Path(str(seed_path)).name
-                if seeds_fallback.exists():
-                    try:
-                        seed_content = await asyncio.to_thread(
-                            seeds_fallback.read_text,
-                            encoding="utf-8",
-                        )
-                    except OSError:
-                        seed_content = str(seed_path)
-                else:
-                    seed_content = str(seed_path)
-                arguments = {**arguments, "seed_content": seed_content}
-            except OSError as e:
-                return Result.err(
-                    MCPToolError(
-                        f"Failed to read seed file: {e}",
-                        tool_name="ouroboros_start_execute_seed",
-                    )
-                )
-
-        if not seed_content:
-            return Result.err(
-                MCPToolError(
-                    "seed_content, seed_path, or seed_id is required",
-                    tool_name="ouroboros_start_execute_seed",
-                )
-            )
+        # Resolve seed content from seed_content / seed_path / seed_id
+        resolve_result = await _resolve_seed_content(
+            seed_content, seed_path, seed_id, resolved_cwd, "ouroboros_start_execute_seed",
+        )
+        if resolve_result.is_err:
+            return Result.err(resolve_result.error)
+        seed_content = resolve_result.value
+        arguments = {**arguments, "seed_content": seed_content}
 
         await self._event_store.initialize()
 

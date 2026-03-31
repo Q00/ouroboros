@@ -1909,7 +1909,11 @@ class TestInterviewHandlerCwd:
         mock_scorer = MagicMock()
         mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
 
-        handler = InterviewHandler(interview_engine=mock_engine, llm_adapter=MagicMock())
+        handler = InterviewHandler(
+            interview_engine=mock_engine,
+            llm_adapter=MagicMock(),
+            agent_mode=AgentMode.INTERNAL,
+        )
         with patch(
             "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
             return_value=mock_scorer,

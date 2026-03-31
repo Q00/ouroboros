@@ -180,6 +180,9 @@ _LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
 _BOLD_RE = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
 _KV_RE = re.compile(r"(?im)^(\w[\w ]*?)[ \t]*[:=\-][ \t]*(.+)$")
 _SCORE_FALLBACK_RE = re.compile(r"(?im)\bscore\b[ \t]*(?:is|-)[ \t]*([0-9]*\.?[0-9]+)")
+_SECTION_RE = re.compile(r"(?i)^\s*#*\s*(suggestions?|differences?|dimensions?)\s*:?\s*$")
+_BULLET_RE = re.compile(r"(?m)^\s*(?:[-*]|\d+[.)])\s+(.+)$")
+_DIM_RE = re.compile(r"^(\w[\w ]*?)[:=\-]\s*([0-9]*\.?[0-9]+)\s*$")
 
 
 def _strip_line_decorations(text: str) -> str:
@@ -231,9 +234,6 @@ def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
 
     # Track which section we're in based on headers
     current_section = "differences"
-    _SECTION_RE = re.compile(r"(?i)^\s*#*\s*(suggestions?|differences?|dimensions?)\s*:?\s*$")
-    _BULLET_RE = re.compile(r"(?m)^\s*(?:[-*]|\d+[.)])\s+(.+)$")
-    _DIM_RE = re.compile(r"^(\w[\w ]*?)[:=\-]\s*([0-9]*\.?[0-9]+)\s*$")
 
     for line in response_text.splitlines():
         section_match = _SECTION_RE.match(line)
