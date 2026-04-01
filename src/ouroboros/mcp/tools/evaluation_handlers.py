@@ -409,10 +409,12 @@ class EvaluateHandler:
                 constraints=constraints,
             )
 
-            # Use injected or create services
+            # Use injected or create services.
+            # Evaluation reads multiple spec files (one Read call per AC), so
+            # max_turns must be well above 1.
             llm_adapter = self.llm_adapter or create_llm_adapter(
                 backend=self.llm_backend,
-                max_turns=1,
+                max_turns=20,
             )
             working_dir_str = arguments.get("working_dir")
             working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
