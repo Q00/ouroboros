@@ -168,7 +168,7 @@ class GeminiCLIAdapter:
         backoff = 2.0
 
         for attempt in range(self._max_retries):
-            result = await self._execute_request(prompt, model)
+            result = await self._execute_request(prompt, model, config)
 
             if result.is_ok:
                 if attempt > 0:
@@ -201,6 +201,7 @@ class GeminiCLIAdapter:
         self,
         prompt: str,
         model: str,
+        config: CompletionConfig | None = None,
     ) -> Result[CompletionResponse, ProviderError]:
         """Spawn ``gemini -p`` and parse the stream-json output.
 
@@ -210,12 +211,13 @@ class GeminiCLIAdapter:
         Args:
             prompt: The fully-formatted prompt string.
             model: The Gemini model identifier.
+            config: Optional completion configuration for generation controls.
 
         Returns:
             A :class:`~ouroboros.core.types.Result` with the completion or
             an error.
         """
-        cmd = self._build_command(prompt, model)
+        cmd = self._build_command(prompt, model, config)
         log.debug("gemini_cli_adapter.spawning", cmd=cmd)
 
         try:
@@ -378,7 +380,13 @@ class GeminiCLIAdapter:
                 )
             )
 
-        if error_seen:
+        # Prefer the aggregated result event; fall back to accumulated parts.
+        content = final_response if final_response is not None else "\n".join(content_parts)
+
+        # Only treat stream-level errors as fatal when there is no usable
+        # content.  Non-fatal warnings (e.g. deprecation notices) may appear
+        # alongside a valid response.
+        if error_seen and not content:
             return Result.err(
                 ProviderError(
                     message=f"Gemini CLI reported an error: {error_seen}",
@@ -386,9 +394,6 @@ class GeminiCLIAdapter:
                     details={"session_id": session_id},
                 )
             )
-
-        # Prefer the aggregated result event; fall back to accumulated parts.
-        content = final_response if final_response is not None else "\n".join(content_parts)
 
         if not content:
             return Result.err(
@@ -419,22 +424,76 @@ class GeminiCLIAdapter:
             )
         )
 
-    def _build_command(self, prompt: str, model: str) -> list[str]:
+    def _build_command(
+        self,
+        prompt: str,
+        model: str,
+        config: CompletionConfig | None = None,
+    ) -> list[str]:
         """Build the ``gemini`` subprocess command list.
+
+        Forwards generation controls (``temperature``, ``max_tokens``, etc.)
+        from *config* when the Gemini CLI supports them.  Controls that the
+        CLI does not accept are logged and silently dropped so callers get a
+        clear signal rather than a silent degradation.
 
         Args:
             prompt: The formatted prompt text.
             model: The Gemini model identifier.
+            config: Optional completion configuration.
 
         Returns:
             Argument list suitable for :func:`asyncio.create_subprocess_exec`.
         """
+        output_format = "stream-json"
+
+        # Use plain JSON when a structured schema is requested — the Gemini
+        # CLI's ``--output-format json`` returns a single object which is
+        # easier to parse for schema-constrained responses.
+        if config and config.response_format:
+            fmt_type = config.response_format.get("type", "")
+            if fmt_type in ("json_object", "json_schema"):
+                output_format = "json"
+                log.info(
+                    "gemini_cli_adapter.structured_output_requested",
+                    format_type=fmt_type,
+                    note="Gemini CLI does not support server-side JSON schema "
+                    "enforcement; output may not conform to the requested schema",
+                )
+
         cmd: list[str] = [
             str(self._cli_path),
-            "--output-format", "stream-json",
+            "--output-format", output_format,
             "--model", model,
             "-p", prompt,
         ]
+
+        # Forward generation controls that the Gemini CLI accepts.
+        # Unsupported controls are logged so callers can diagnose parity gaps.
+        if config:
+            _UNSUPPORTED: list[str] = []
+
+            if config.temperature != 0.7:  # non-default
+                # Gemini CLI does not expose --temperature yet
+                _UNSUPPORTED.append(f"temperature={config.temperature}")
+
+            if config.max_tokens != 4096:  # non-default
+                _UNSUPPORTED.append(f"max_tokens={config.max_tokens}")
+
+            if config.top_p != 1.0:  # non-default
+                _UNSUPPORTED.append(f"top_p={config.top_p}")
+
+            if config.stop:
+                _UNSUPPORTED.append(f"stop={config.stop}")
+
+            if _UNSUPPORTED:
+                log.warning(
+                    "gemini_cli_adapter.unsupported_generation_controls",
+                    controls=_UNSUPPORTED,
+                    hint="Gemini CLI does not yet expose these flags; "
+                    "the request will use model defaults",
+                )
+
         return cmd
 
     def _build_env(self) -> dict[str, str]:

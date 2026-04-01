@@ -208,6 +208,18 @@ class TestBuildCommand:
         assert "-p" in cmd
         assert "my prompt text" in cmd
 
+    def test_json_format_for_structured_output(self) -> None:
+        """Structured output requests switch to plain JSON format."""
+        from ouroboros.providers.base import CompletionConfig
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+        config = CompletionConfig(
+            model="gemini-2.5-flash",
+            response_format={"type": "json_schema", "json_schema": {"type": "object"}},
+        )
+        cmd = adapter._build_command("test", "gemini-2.5-flash", config)
+        assert "json" in cmd
+        assert "stream-json" not in cmd
+
     def test_cli_path_is_first_element(self) -> None:
         adapter = GeminiCLIAdapter(cli_path="/usr/local/bin/gemini")
         cmd = adapter._build_command("x", "gemini-2.5-flash")
@@ -325,6 +337,22 @@ class TestCollectResponse:
 
         assert not result.is_ok
         assert "empty" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_warning_with_valid_result_succeeds(self) -> None:
+        """A non-fatal warning alongside a valid result should not be treated as failure."""
+        stream = _make_stream([
+            _INIT_EVENT,
+            {"type": "error", "message": "Deprecation notice: model will be removed"},
+            _RESULT_EVENT,
+        ])
+        process = _FakeProcess(stdout=stream, returncode=0)
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+
+        result = await adapter._collect_response(process)
+
+        assert result.is_ok
+        assert result.value.content == "Hello, world!"
 
     @pytest.mark.asyncio
     async def test_on_message_callback_receives_tool_events(self) -> None:

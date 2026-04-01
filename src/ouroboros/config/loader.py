@@ -469,7 +469,8 @@ def get_gemini_cli_path() -> str | None:
 
     Priority:
         1. OUROBOROS_GEMINI_CLI_PATH environment variable
-        2. None (resolve from PATH at runtime)
+        2. config.yaml orchestrator.gemini_cli_path
+        3. None (resolve from PATH at runtime)
 
     Returns:
         Path to Gemini CLI binary or None.
@@ -477,6 +478,14 @@ def get_gemini_cli_path() -> str | None:
     env_path = os.environ.get("OUROBOROS_GEMINI_CLI_PATH", "").strip()
     if env_path:
         return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        gemini_path = getattr(config.orchestrator, "gemini_cli_path", None)
+        if gemini_path:
+            return gemini_path
+    except ConfigError:
+        pass
 
     return None
 
