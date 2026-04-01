@@ -288,6 +288,36 @@ class TestCollectResponse:
         assert result.value.raw_response == {"session_id": "sess-abc"}
 
     @pytest.mark.asyncio
+    async def test_successful_response_from_batch_json(self) -> None:
+        """Batch JSON format (--output-format json) returns a single object."""
+        batch_response = {"response": "Batch result!", "stats": {}, "error": None}
+        stream = json.dumps(batch_response) + "\n"
+        process = _FakeProcess(stdout=stream, returncode=0)
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+
+        result = await adapter._collect_response(process)
+
+        assert result.is_ok
+        assert result.value.content == "Batch result!"
+
+    @pytest.mark.asyncio
+    async def test_batch_json_with_error(self) -> None:
+        """Batch JSON with error and no response is treated as failure."""
+        batch_response = {
+            "response": None,
+            "stats": {},
+            "error": {"type": "AuthError", "message": "Invalid key"},
+        }
+        stream = json.dumps(batch_response) + "\n"
+        process = _FakeProcess(stdout=stream, returncode=0)
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+
+        result = await adapter._collect_response(process)
+
+        assert not result.is_ok
+        assert "Invalid key" in result.error.message
+
+    @pytest.mark.asyncio
     async def test_successful_response_from_message_events(self) -> None:
         """Falls back to accumulated message content when no result event."""
         stream = _make_stream([_INIT_EVENT, _MESSAGE_EVENT])

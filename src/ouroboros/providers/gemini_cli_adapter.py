@@ -317,6 +317,15 @@ class GeminiCLIAdapter:
 
             event_type = event.get("type", "")
 
+            # Handle batch JSON format (--output-format json): a single
+            # object with "response", "stats" and "error" fields, no "type".
+            if not event_type and "response" in event:
+                final_response = event.get("response") or None
+                if event.get("error"):
+                    err = event["error"]
+                    error_seen = err.get("message", str(err))
+                continue
+
             if event_type == "init":
                 session_id = event.get("session_id")
                 model_name = event.get("model")
