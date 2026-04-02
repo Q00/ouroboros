@@ -1699,7 +1699,10 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["completed"] is True
         assert result.value.meta["ambiguity_score"] == 0.18
         assert "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
-        mock_engine.ask_next_question.assert_not_called()
+        # With parallel execution (asyncio.gather), ask_next_question runs
+        # concurrently alongside scoring.  Its result is discarded when
+        # completion triggers.  See https://github.com/Q00/ouroboros/issues/286
+        mock_engine.ask_next_question.assert_called_once()
 
 
 class TestGenerateSeedHandlerAmbiguity:

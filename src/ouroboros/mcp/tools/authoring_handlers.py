@@ -5,6 +5,7 @@ Contains handlers for interview and seed generation tools:
 - InterviewHandler: Manages interactive requirement-clarification interviews.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -926,11 +927,17 @@ class InterviewHandler:
                     # Only score ambiguity when completion is actually
                     # possible.  Before MIN_ROUNDS_BEFORE_EARLY_EXIT the
                     # result cannot trigger early exit, so the LLM call
-                    # (~3-8 s) is pure waste.  The PM handler already
-                    # applies this guard (pm_interview.py:889).
+                    # (~3-8 s) is pure waste.  When scoring *is* needed,
+                    # run it in parallel with question generation to halve
+                    # per-step latency.  If scoring triggers early
+                    # completion the generated question is discarded (at
+                    # most once per interview).
                     answered = _count_answered_rounds(state)
                     if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-                        live_score = await self._score_interview_state(llm_adapter, state)
+                        live_score, question_result = await asyncio.gather(
+                            self._score_interview_state(llm_adapter, state),
+                            engine.ask_next_question(state),
+                        )
                         if live_score is not None and live_score.is_ready_for_seed:
                             return await self._complete_interview_response(
                                 engine,
@@ -940,11 +947,10 @@ class InterviewHandler:
                             )
                     else:
                         live_score = None
+                        question_result = await engine.ask_next_question(state)
                 else:
                     live_score = _load_state_ambiguity_score(state)
-
-                # Generate next question (whether resuming or after recording answer)
-                question_result = await engine.ask_next_question(state)
+                    question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
