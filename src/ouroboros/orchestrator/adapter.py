@@ -214,6 +214,8 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "claude_code": "claude",
     "codex": "codex_cli",
     "codex_cli": "codex_cli",
+    "gemini": "gemini_cli",
+    "gemini_cli": "gemini_cli",
     "opencode": "opencode",
     "opencode_cli": "opencode",
 }
