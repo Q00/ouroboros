@@ -39,6 +39,24 @@ def test_runtime_dependencies_configured():
     assert "all" in optional_deps, "Missing 'all' optional extra"
 
 
+def test_runtime_and_optional_dependencies_have_upper_bounds():
+    """Core/runtime-facing dependencies should carry explicit upper bounds."""
+    root = Path(__file__).parent.parent.parent
+    pyproject_path = root / "pyproject.toml"
+
+    content = pyproject_path.read_text()
+    pyproject = tomllib.loads(content)
+
+    runtime_deps = pyproject["project"]["dependencies"]
+    for dep in runtime_deps:
+        assert "<" in dep, f"Runtime dependency missing upper bound: {dep}"
+
+    optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
+    for extra_name in ("claude", "litellm", "mcp", "tui"):
+        for dep in optional_deps[extra_name]:
+            assert "<" in dep, f"Optional dependency '{extra_name}' missing upper bound: {dep}"
+
+
 def test_dev_dependencies_configured():
     """Test that dev dependencies are configured."""
     root = Path(__file__).parent.parent.parent
