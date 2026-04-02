@@ -113,6 +113,7 @@ uv run ouroboros --version            # verify CLI
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |
+| Gemini CLI backend | Python >= 3.12, `npm install -g @google/gemini-cli`, `GOOGLE_API_KEY` or `gcloud auth login` |
 
 ---
 
@@ -126,6 +127,9 @@ export ANTHROPIC_API_KEY="your-anthropic-key"
 
 # Codex-backed flows
 export OPENAI_API_KEY="your-openai-key"
+
+# Gemini-backed flows (API key — or use gcloud auth login for OAuth)
+export GOOGLE_API_KEY="your-google-api-key"
 ```
 
 > Claude Code plugin users: your Claude Code session provides credentials automatically. No export needed.
@@ -136,10 +140,10 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # claude | codex
+  runtime_backend: claude   # claude | codex | gemini
 
 llm:
-  backend: claude_code      # claude_code | codex | litellm
+  backend: claude_code      # claude_code | codex | gemini | litellm
 
 logging:
   level: info
@@ -292,20 +296,22 @@ ooo run
 
 ## Choosing a Runtime Backend
 
-Ouroboros delegates code execution to a pluggable runtime backend. Two ship out of the box:
+Ouroboros delegates code execution to a pluggable runtime backend. Three ship out of the box:
 
-| | Claude Code | Codex CLI |
-|---|---|---|
-| **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing |
-| **Install** | `pip install ouroboros-ai[claude]` | `pip install ouroboros-ai` + `npm install -g @openai/codex` |
-| **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills |
-| **Config value** | `claude` | `codex` |
+| | Claude Code | Codex CLI | Gemini CLI |
+|---|---|---|---|
+| **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing | Google ecosystem; free tier available |
+| **Install** | `pip install ouroboros-ai[claude]` | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `npm install -g @google/gemini-cli` |
+| **Auth** | Max Plan subscription | `OPENAI_API_KEY` | `GOOGLE_API_KEY` or `gcloud auth login` |
+| **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills | `ooo` after `ouroboros setup --runtime gemini` |
+| **Config value** | `claude` | `codex` | `gemini` |
 
-Both backends run the same core workflow engine (seed execution, TUI). However, user-facing commands still differ: Claude Code has native in-session `ooo` workflows, while Codex CLI relies on `ouroboros setup --runtime codex` to install managed rules/skills plus the MCP hookup. The `ouroboros` CLI remains the most universal terminal path, and some advanced operations are still MCP/Claude-only.
+All backends run the same core workflow engine (seed execution, TUI). User-facing commands differ slightly per runtime. The `ouroboros` CLI remains the most universal terminal path, and some advanced operations are still MCP/Claude-only.
 
 For backend-specific configuration:
 - [Claude Code runtime guide](runtime-guides/claude-code.md)
 - [Codex CLI runtime guide](runtime-guides/codex.md)
+- [Gemini CLI runtime guide](runtime-guides/gemini.md)
 
 ---
 
@@ -404,5 +410,6 @@ ouroboros cancel execution <session_id>
 - [Configuration Reference](config-reference.md) -- all config keys and defaults
 - [Claude Code runtime guide](runtime-guides/claude-code.md) -- backend-specific setup
 - [Codex CLI runtime guide](runtime-guides/codex.md) -- backend-specific setup
+- [Gemini CLI runtime guide](runtime-guides/gemini.md) -- backend-specific setup
 
 Need help? Open an issue on [GitHub](https://github.com/Q00/ouroboros/issues).
