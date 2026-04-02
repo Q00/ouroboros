@@ -4,6 +4,7 @@ This module implements the interview protocol that refines vague ideas into
 clear requirements through iterative questioning. Users control when to stop.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -420,6 +421,8 @@ class InterviewEngine:
         """Persist interview state to disk.
 
         Uses file locking to prevent race conditions during concurrent access.
+        The blocking file I/O is offloaded to a thread to avoid stalling the
+        asyncio event loop.
 
         Args:
             state: The interview state to save.
@@ -430,12 +433,14 @@ class InterviewEngine:
         try:
             file_path = self._state_file_path(state.interview_id)
             state.mark_updated()
+            # Serialize while still on the event-loop (CPU-bound, not I/O)
+            content = state.model_dump_json(indent=2)
 
-            # Use file locking to prevent race conditions
-            with _file_lock(file_path, exclusive=True):
-                # Write state as JSON
-                content = state.model_dump_json(indent=2)
-                file_path.write_text(content, encoding="utf-8")
+            def _sync_write() -> None:
+                with _file_lock(file_path, exclusive=True):
+                    file_path.write_text(content, encoding="utf-8")
+
+            await asyncio.to_thread(_sync_write)
 
             log.info(
                 "interview.state_saved",
@@ -461,6 +466,8 @@ class InterviewEngine:
         """Load interview state from disk.
 
         Uses file locking to prevent race conditions during concurrent access.
+        The blocking file I/O is offloaded to a thread to avoid stalling the
+        asyncio event loop.
 
         Args:
             interview_id: The interview ID to load.
@@ -480,9 +487,12 @@ class InterviewEngine:
             )
 
         try:
-            # Use shared lock for reading
-            with _file_lock(file_path, exclusive=False):
-                content = file_path.read_text(encoding="utf-8")
+
+            def _sync_read() -> str:
+                with _file_lock(file_path, exclusive=False):
+                    return file_path.read_text(encoding="utf-8")
+
+            content = await asyncio.to_thread(_sync_read)
 
             state = InterviewState.model_validate_json(content)
 
