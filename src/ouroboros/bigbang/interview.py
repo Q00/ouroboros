@@ -550,14 +550,20 @@ class InterviewEngine:
                 f"Initial context: {state.initial_context}\n"
             )
 
+        # Answer prefix hints — always present so the question generator
+        # can interpret enriched answers regardless of brownfield status.
+        dynamic_header += (
+            "\n\nAnswer prefixes the caller may use:\n"
+            "- [from-code]: Existing codebase state (factual, read from files).\n"
+            "- [from-user]: Human decisions/judgments.\n"
+            "- [from-research]: Externally researched information (API docs, pricing, compatibility)."
+        )
         # Brownfield hint: main session handles code reading, MCP just asks questions
         if state.is_brownfield:
             dynamic_header += (
                 "\n\nThis is a BROWNFIELD project. The caller (main session) has direct "
                 "codebase access and will enrich answers with code context. Focus your "
-                "questions on INTENT and DECISIONS, not on discovering what exists. "
-                "Answers prefixed with [from-code] describe existing code state. "
-                "Answers prefixed with [from-user] are human decisions."
+                "questions on INTENT and DECISIONS, not on discovering what exists."
             )
 
         ambiguity_snapshot = self._build_ambiguity_snapshot_prompt(state)

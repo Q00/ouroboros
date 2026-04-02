@@ -144,6 +144,30 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - If any part of the question requires judgment, route the ENTIRE question to user
    - Prefix answer with `[from-user]` (human made the decision)
 
+   **PATH 4 — Research Interlude** (external knowledge needed):
+   When the question asks about third-party APIs, pricing models, library
+   capabilities, version compatibility, security advisories, or industry
+   standards that are NOT answerable from the local codebase:
+   - Use WebFetch/WebSearch to gather external information
+   - Present findings to user as a **confirmation question** via AskUserQuestion
+     (same pattern as PATH 1, but with web sources instead of code):
+     ```json
+     {
+       "questions": [{
+         "question": "MCP asks: What rate limits does the Stripe API have?\n\nI found: Stripe allows 100 read ops/sec and 25 write ops/sec in live mode.\n\nIs this correct?",
+         "header": "Q<N> — Research Confirmation",
+         "options": [
+           {"label": "Yes, correct", "description": "Use this as the answer"},
+           {"label": "No, let me correct", "description": "I'll provide the right answer"}
+         ],
+         "multiSelect": false
+       }]
+     }
+     ```
+   - Prefix answer with `[from-research]` when sending to MCP
+   - **Facts, not decisions**: "Stripe rate limit is 100 req/s" is research.
+     "We should use Stripe" is a DECISION — route to PATH 2.
+
    **When in doubt, use PATH 2.** It's safer to ask the user than to guess.
 
 3. **Send the answer back to MCP**:
@@ -151,7 +175,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Tool: ouroboros_interview
    Arguments:
      session_id: <session ID>
-     answer: "[from-code] JWT-based auth in src/auth/jwt.py" or "[from-user] Stripe Billing"
+     answer: "[from-code] JWT-based auth in src/auth/jwt.py" or "[from-user] Stripe Billing" or "[from-research] Stripe: 100 read ops/sec live mode"
    ```
    MCP records the answer, generates the next question, and returns it.
 
@@ -169,10 +193,11 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 #### Dialectic Rhythm Guard
 
-Track consecutive PATH 1 (code confirmation) answers. If 3 consecutive questions
-were answered via PATH 1, the next question MUST be routed to PATH 2 (directly
-to user), even if it appears code-answerable. This preserves the Socratic
-dialectic rhythm — the interview is with the human, not the codebase.
+Track consecutive PATH 1/PATH 4 (code/research confirmation) answers. If 3
+consecutive questions were answered via PATH 1 or PATH 4, the next question MUST
+be routed to PATH 2 (directly to user), even if it appears code- or
+research-answerable. This preserves the Socratic dialectic rhythm — the interview
+is with the human, not the codebase or external docs.
 Reset the counter whenever user answers directly (PATH 2 or PATH 3).
 
 #### Retry on Failure
