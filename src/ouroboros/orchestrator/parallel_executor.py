@@ -46,6 +46,14 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     runtime_handle_tool_catalog,
 )
+from ouroboros.orchestrator.capabilities import (
+    build_capability_graph,
+    serialize_capability_graph,
+)
+from ouroboros.orchestrator.control_plane import (
+    build_control_plane_state,
+    serialize_control_plane_state,
+)
 from ouroboros.orchestrator.coordinator import CoordinatorReview, LevelCoordinator
 from ouroboros.orchestrator.events import (
     create_ac_stall_detected_event,
@@ -71,6 +79,12 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionResult,
     ParallelExecutionStageResult,
     StageExecutionOutcome,
+)
+from ouroboros.orchestrator.policy import (
+    PolicyContext,
+    PolicyExecutionPhase,
+    PolicySessionRole,
+    evaluate_capability_policy,
 )
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
@@ -677,6 +691,19 @@ class ParallelACExecutor:
         )
         if tool_catalog is not None:
             metadata["tool_catalog"] = serialize_tool_catalog(tool_catalog)
+            capability_graph = build_capability_graph(tool_catalog)
+            policy_context = PolicyContext(
+                runtime_backend=backend,
+                session_role=PolicySessionRole.IMPLEMENTATION,
+                execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
+            )
+            metadata["capability_graph"] = serialize_capability_graph(capability_graph)
+            metadata["control_plane"] = serialize_control_plane_state(
+                build_control_plane_state(
+                    capability_graph,
+                    evaluate_capability_policy(capability_graph, policy_context),
+                )
+            )
 
         if seeded_handle is not None:
             return replace(

@@ -180,6 +180,14 @@ class TestParallelACExecutor:
             "Read",
             "Edit",
         ]
+        assert [tool["name"] for tool in resume_handle.metadata["capability_graph"]] == [
+            "Read",
+            "Edit",
+        ]
+        assert [hint["name"] for hint in resume_handle.metadata["control_plane"]] == [
+            "Read",
+            "Edit",
+        ]
         assert resume_handle.metadata["session_scope_id"] == "orch_123_ac_2"
         assert resume_handle.metadata["session_attempt_id"] == "orch_123_ac_2_attempt_1"
         assert (
@@ -193,6 +201,10 @@ class TestParallelACExecutor:
         assert [
             tool["name"] for tool in started_event.data["runtime"]["metadata"]["tool_catalog"]
         ] == ["Read", "Edit"]
+        assert [tool["name"] for tool in started_event.data["runtime"]["metadata"]["capability_graph"]] == [
+            "Read",
+            "Edit",
+        ]
         assert started_event.data["session_attempt_id"] == "orch_123_ac_2_attempt_1"
         assert result.success is True
         assert result.session_id == "opencode-session-1"

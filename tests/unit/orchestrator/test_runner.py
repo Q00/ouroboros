@@ -366,6 +366,8 @@ class TestOrchestratorRunner:
         assert resume_handle.cwd == "/tmp/project"
         assert resume_handle.metadata["tool_catalog"][0]["name"] == "Read"
         assert resume_handle.metadata["tool_catalog"][0]["id"] == "builtin:Read"
+        assert resume_handle.metadata["capability_graph"][0]["name"] == "Read"
+        assert resume_handle.metadata["control_plane"][0]["name"] == "Read"
         assert "Edit" in {tool["name"] for tool in resume_handle.metadata["tool_catalog"]}
 
     @pytest.mark.asyncio

@@ -67,6 +67,8 @@ _OPENCODE_PERSISTED_METADATA_KEYS = frozenset(
         "session_role",
         "session_scope_id",
         "session_state_path",
+        "capability_graph",
+        "control_plane",
         "sub_ac_index",
         "tool_catalog",
         "turn_id",
@@ -312,6 +314,32 @@ def runtime_handle_tool_catalog(
     if not isinstance(tool_catalog, list):
         return None
     return list(tool_catalog)
+
+
+def runtime_handle_capability_graph(
+    runtime_handle: RuntimeHandle | None,
+) -> list[dict[str, Any]] | None:
+    """Return a copy of the serialized capability graph when present."""
+    if runtime_handle is None:
+        return None
+
+    capability_graph = runtime_handle.metadata.get("capability_graph")
+    if not isinstance(capability_graph, list):
+        return None
+    return list(capability_graph)
+
+
+def runtime_handle_control_plane(
+    runtime_handle: RuntimeHandle | None,
+) -> list[dict[str, Any]] | None:
+    """Return a copy of serialized control-plane hints when present."""
+    if runtime_handle is None:
+        return None
+
+    control_plane = runtime_handle.metadata.get("control_plane")
+    if not isinstance(control_plane, list):
+        return None
+    return list(control_plane)
 
 
 type RuntimeHandleObserver = Callable[["RuntimeHandle"], Awaitable[dict[str, Any]]]
@@ -1373,4 +1401,6 @@ __all__ = [
     "RuntimeHandle",
     "TaskResult",
     "runtime_handle_tool_catalog",
+    "runtime_handle_capability_graph",
+    "runtime_handle_control_plane",
 ]
