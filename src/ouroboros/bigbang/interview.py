@@ -517,15 +517,9 @@ class InterviewEngine:
         Returns:
             The system prompt.
         """
-        import os
-
         from ouroboros.agents.loader import load_agent_prompt
 
         round_info = f"Round {state.current_round_number}"
-        preferred_web_tool = os.environ.get("OUROBOROS_WEB_SEARCH_TOOL", "").strip()
-        web_search_hint = (
-            f"\n- PREFERRED: Use {preferred_web_tool} for web search" if preferred_web_tool else ""
-        )
 
         base_prompt = load_agent_prompt("socratic-interviewer")
 
@@ -545,9 +539,6 @@ class InterviewEngine:
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
                 f"Initial context: {state.initial_context}\n"
             )
-
-        if web_search_hint:
-            base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
 
         # Brownfield hint: main session handles code reading, MCP just asks questions
         if state.is_brownfield:
