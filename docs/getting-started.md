@@ -89,6 +89,7 @@ ouroboros --version                   # verify CLI
 
 > **Which extra do I need?** If you only use Claude Code as your runtime, `ouroboros-ai[claude]` is sufficient.
 > For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]`.
+> Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias during the extras transition.
 
 **One-liner alternative** (auto-detects your runtime and installs matching extras):
 ```bash

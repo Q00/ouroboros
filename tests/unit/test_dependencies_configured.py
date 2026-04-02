@@ -33,6 +33,7 @@ def test_runtime_dependencies_configured():
     optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
     assert "claude" in optional_deps, "Missing 'claude' optional extra"
     assert "litellm" in optional_deps, "Missing 'litellm' optional extra"
+    assert "dashboard" in optional_deps, "Missing 'dashboard' compatibility extra"
     assert "mcp" in optional_deps, "Missing 'mcp' optional extra"
     assert "tui" in optional_deps, "Missing 'tui' optional extra"
     assert "all" in optional_deps, "Missing 'all' optional extra"

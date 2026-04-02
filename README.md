@@ -101,6 +101,8 @@ pip install ouroboros-ai[all]           # everything
 ouroboros setup                         # configure runtime
 ```
 
+Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a no-op alias while extras migrate.
+
 See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
 
 </details>
