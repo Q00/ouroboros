@@ -706,7 +706,11 @@ class InterviewHandler:
 
                 state = result.value
                 _interview_id = state.interview_id
-                live_score = await self._score_interview_state(llm_adapter, state)
+                # No answers exist yet — scoring cannot trigger completion
+                # and would waste an LLM call (~3-8s). The PM handler
+                # already skips scoring before MIN_ROUNDS_BEFORE_EARLY_EXIT
+                # (pm_interview.py:889); apply the same optimisation here.
+                live_score = None
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
@@ -919,18 +923,28 @@ class InterviewHandler:
                     # question generation failures downstream
                     await engine.save_state(state)
 
-                    live_score = await self._score_interview_state(llm_adapter, state)
-                    if (
-                        live_score is not None
-                        and live_score.is_ready_for_seed
-                        and _count_answered_rounds(state) >= MIN_ROUNDS_BEFORE_EARLY_EXIT
-                    ):
-                        return await self._complete_interview_response(
-                            engine,
-                            state,
-                            session_id,
-                            live_score,
+                    # Only score ambiguity when completion is actually
+                    # possible.  Before MIN_ROUNDS_BEFORE_EARLY_EXIT the
+                    # result cannot trigger early exit, so the LLM call
+                    # (~3-8 s) is pure waste.  The PM handler already
+                    # applies this guard (pm_interview.py:889).
+                    answered = _count_answered_rounds(state)
+                    if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
+                        live_score = await self._score_interview_state(
+                            llm_adapter, state
                         )
+                        if (
+                            live_score is not None
+                            and live_score.is_ready_for_seed
+                        ):
+                            return await self._complete_interview_response(
+                                engine,
+                                state,
+                                session_id,
+                                live_score,
+                            )
+                    else:
+                        live_score = None
                 else:
                     live_score = _load_state_ambiguity_score(state)
 

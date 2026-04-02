@@ -1494,7 +1494,10 @@ class TestInterviewHandlerCwd:
         mock_engine.start_interview.assert_awaited_once()
         call_kwargs = mock_engine.start_interview.call_args
         assert call_kwargs[1]["cwd"] == str(tmp_path)
-        assert "(ambiguity: 0.67) First question?" in result.value.content[0].text
+        # Scoring is now skipped on interview start (0 answered rounds cannot
+        # trigger early completion), so the question appears without an
+        # ambiguity prefix.  See https://github.com/Q00/ouroboros/issues/283
+        assert "First question?" in result.value.content[0].text
 
     async def test_interview_handle_resolves_pm_seed_paths(self, tmp_path) -> None:
         """initial_context paths should load PMSeed content before starting the interview."""
@@ -1543,18 +1546,26 @@ class TestInterviewHandlerCwd:
         assert str(seed_path) not in resolved_context
 
     async def test_interview_handle_clears_stored_ambiguity_after_new_answer(self) -> None:
-        """Interview answers should refresh the ambiguity snapshot after rescoring."""
+        """Interview answers should refresh the ambiguity snapshot after rescoring.
+
+        Scoring only runs when answered rounds >= MIN_ROUNDS_BEFORE_EARLY_EXIT
+        (currently 3), so this test creates enough answered rounds to cross
+        the threshold.  See https://github.com/Q00/ouroboros/issues/283
+        """
         handler = InterviewHandler(llm_adapter=MagicMock())
         state = InterviewState(
             interview_id="sess-123",
             ambiguity_score=0.14,
             ambiguity_breakdown={"goal_clarity": {"name": "goal_clarity"}},
             rounds=[
+                InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+                InterviewRound(round_number=2, question="Q2?", user_response="A2"),
+                InterviewRound(round_number=3, question="Q3?", user_response="A3"),
                 InterviewRound(
-                    round_number=1,
+                    round_number=4,
                     question="What should it do?",
                     user_response=None,
-                )
+                ),
             ],
         )
         mock_engine = MagicMock()
