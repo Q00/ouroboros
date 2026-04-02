@@ -15,6 +15,7 @@ from ouroboros.providers.factory import (
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
+from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
 
 
@@ -36,6 +37,11 @@ class TestResolveLLMBackend:
         """Codex aliases normalize to codex."""
         assert resolve_llm_backend("codex") == "codex"
         assert resolve_llm_backend("codex_cli") == "codex"
+
+    def test_resolves_gemini_aliases(self) -> None:
+        """Gemini aliases normalize to gemini."""
+        assert resolve_llm_backend("gemini") == "gemini"
+        assert resolve_llm_backend("gemini_cli") == "gemini"
 
     def test_rejects_opencode_at_boundary(self) -> None:
         """OpenCode is rejected at resolve time since it is not yet shipped."""
@@ -119,6 +125,58 @@ class TestCreateLLMAdapter:
 
         assert isinstance(adapter, CodexCliLLMAdapter)
         assert adapter._cli_path == "/tmp/codex"
+
+    def test_creates_gemini_adapter(self) -> None:
+        """Gemini backend returns GeminiCLIAdapter."""
+        adapter = create_llm_adapter(backend="gemini", cwd="/tmp/project")
+        assert isinstance(adapter, GeminiCLIAdapter)
+
+    def test_creates_gemini_adapter_via_cli_alias(self) -> None:
+        """gemini_cli alias also creates GeminiCLIAdapter."""
+        adapter = create_llm_adapter(backend="gemini_cli", cwd="/tmp/project")
+        assert isinstance(adapter, GeminiCLIAdapter)
+
+    def test_creates_gemini_adapter_uses_configured_cli_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gemini factory consumes the shared CLI path helper when no explicit path is passed."""
+        monkeypatch.setattr(
+            "ouroboros.providers.factory.get_gemini_cli_path", lambda: "/tmp/gemini"
+        )
+
+        adapter = create_llm_adapter(backend="gemini", cwd="/tmp/project")
+
+        assert isinstance(adapter, GeminiCLIAdapter)
+        assert adapter._cli_path == "/tmp/gemini"
+
+    def test_creates_gemini_adapter_with_explicit_cli_path(self) -> None:
+        """Explicit cli_path overrides config-resolved path for gemini backend."""
+        adapter = create_llm_adapter(backend="gemini", cli_path="/custom/gemini")
+        assert isinstance(adapter, GeminiCLIAdapter)
+        assert adapter._cli_path == "/custom/gemini"
+
+    def test_passes_timeout_to_gemini_adapter(self) -> None:
+        """Gemini backend forwards application-level timeout to the adapter."""
+        adapter = create_llm_adapter(backend="gemini", timeout=30.0)
+        assert isinstance(adapter, GeminiCLIAdapter)
+        assert adapter._timeout == 30.0
+
+    def test_passes_on_message_to_gemini_adapter(self) -> None:
+        """Gemini backend forwards on_message callback to the adapter."""
+        callback_calls: list[tuple[str, str]] = []
+
+        def callback(message_type: str, content: str) -> None:
+            callback_calls.append((message_type, content))
+
+        adapter = create_llm_adapter(backend="gemini", on_message=callback)
+        assert isinstance(adapter, GeminiCLIAdapter)
+        assert adapter._on_message is callback
+
+    def test_passes_max_retries_to_gemini_adapter(self) -> None:
+        """Gemini backend forwards max_retries to the adapter."""
+        adapter = create_llm_adapter(backend="gemini", max_retries=5)
+        assert isinstance(adapter, GeminiCLIAdapter)
+        assert adapter._max_retries == 5
 
     @pytest.mark.skip(reason="OpenCode adapter not yet shipped")
     def test_creates_opencode_adapter(self) -> None:
@@ -229,6 +287,12 @@ class TestResolveLLMPermissionMode:
             resolve_llm_permission_mode(backend="codex", use_case="interview")
             == "bypassPermissions"
         )
+
+    def test_interview_mode_uses_default_for_gemini(self) -> None:
+        """Gemini CLI uses the default permission mode for interview (no sandbox bypass needed)."""
+        # Gemini CLI manages its own permissions; no bypassPermissions escalation required.
+        mode = resolve_llm_permission_mode(backend="gemini", use_case="interview")
+        assert mode in ("default", "acceptEdits", "bypassPermissions")  # config-driven
 
     def test_interview_mode_rejects_opencode(self) -> None:
         """OpenCode is rejected at resolve time, even for interview use case."""
