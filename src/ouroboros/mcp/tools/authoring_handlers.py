@@ -930,13 +930,8 @@ class InterviewHandler:
                     # applies this guard (pm_interview.py:889).
                     answered = _count_answered_rounds(state)
                     if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-                        live_score = await self._score_interview_state(
-                            llm_adapter, state
-                        )
-                        if (
-                            live_score is not None
-                            and live_score.is_ready_for_seed
-                        ):
+                        live_score = await self._score_interview_state(llm_adapter, state)
+                        if live_score is not None and live_score.is_ready_for_seed:
                             return await self._complete_interview_response(
                                 engine,
                                 state,

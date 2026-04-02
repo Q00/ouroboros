@@ -100,9 +100,7 @@ class TestScoringSkippedOnInterviewStart:
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_err=False, value="What framework?")
         )
-        mock_engine.save_state = AsyncMock(
-            return_value=MagicMock(is_err=False)
-        )
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
 
         with (
             patch.object(handler, "_score_interview_state", new_callable=AsyncMock) as mock_score,
@@ -119,9 +117,7 @@ class TestScoringSkippedOnInterviewStart:
                 return_value=MagicMock(is_err=False, value="Build a test app"),
             ),
         ):
-            await handler.handle(
-                {"initial_context": "Build a test app", "cwd": "/tmp"}
-            )
+            await handler.handle({"initial_context": "Build a test app", "cwd": "/tmp"})
 
             # Scoring should NOT have been called
             mock_score.assert_not_called()
@@ -141,18 +137,12 @@ class TestScoringSkippedOnEarlyRounds:
         state = _make_state(answered_rounds=1)
 
         mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
-        mock_engine.record_response = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
+        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
+        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_err=False, value="Next question?")
         )
-        mock_engine.save_state = AsyncMock(
-            return_value=MagicMock(is_err=False)
-        )
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
 
         with (
             patch.object(handler, "_score_interview_state", new_callable=AsyncMock) as mock_score,
@@ -166,9 +156,7 @@ class TestScoringSkippedOnEarlyRounds:
                 return_value=mock_engine,
             ),
         ):
-            await handler.handle(
-                {"session_id": "test-001", "answer": "React with TypeScript"}
-            )
+            await handler.handle({"session_id": "test-001", "answer": "React with TypeScript"})
 
             mock_score.assert_not_called()
             mock_engine.ask_next_question.assert_called_once()
@@ -181,18 +169,12 @@ class TestScoringSkippedOnEarlyRounds:
         state = _make_state(answered_rounds=2)
 
         mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
-        mock_engine.record_response = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
+        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
+        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_err=False, value="Next question?")
         )
-        mock_engine.save_state = AsyncMock(
-            return_value=MagicMock(is_err=False)
-        )
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
 
         with (
             patch.object(handler, "_score_interview_state", new_callable=AsyncMock) as mock_score,
@@ -206,9 +188,7 @@ class TestScoringSkippedOnEarlyRounds:
                 return_value=mock_engine,
             ),
         ):
-            await handler.handle(
-                {"session_id": "test-001", "answer": "PostgreSQL"}
-            )
+            await handler.handle({"session_id": "test-001", "answer": "PostgreSQL"})
 
             mock_score.assert_not_called()
 
@@ -224,18 +204,12 @@ class TestScoringRunsWhenCompletionPossible:
         state = _make_state(answered_rounds=MIN_ROUNDS_BEFORE_EARLY_EXIT)
 
         mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
-        mock_engine.record_response = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
+        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
+        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_err=False, value="Another question?")
         )
-        mock_engine.save_state = AsyncMock(
-            return_value=MagicMock(is_err=False)
-        )
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
 
         # overall_score=0.5 → is_ready_for_seed returns False (> 0.2)
         not_ready_score = AmbiguityScore(
@@ -265,9 +239,7 @@ class TestScoringRunsWhenCompletionPossible:
                 return_value=mock_engine,
             ),
         ):
-            await handler.handle(
-                {"session_id": "test-001", "answer": "Yes, that's the plan"}
-            )
+            await handler.handle({"session_id": "test-001", "answer": "Yes, that's the plan"})
 
             # Scoring SHOULD be called at threshold
             mock_score.assert_called_once()
