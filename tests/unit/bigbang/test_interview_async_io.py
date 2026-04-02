@@ -106,6 +106,7 @@ class TestLoadStateUsesThread:
         await engine.save_state(state)
 
         with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread:
+
             async def _run_sync(fn, *args, **kwargs):
                 return fn(*args, **kwargs)
 
@@ -139,16 +140,10 @@ class TestEventLoopNotBlocked:
         states = [_make_state(f"concurrent-{i}") for i in range(3)]
 
         # Save all concurrently
-        save_results = await asyncio.gather(
-            *[engine.save_state(s) for s in states]
-        )
+        save_results = await asyncio.gather(*[engine.save_state(s) for s in states])
         assert all(r.is_ok for r in save_results)
 
         # Load all concurrently
-        load_results = await asyncio.gather(
-            *[engine.load_state(s.interview_id) for s in states]
-        )
+        load_results = await asyncio.gather(*[engine.load_state(s.interview_id) for s in states])
         assert all(r.is_ok for r in load_results)
-        assert {r.value.interview_id for r in load_results} == {
-            s.interview_id for s in states
-        }
+        assert {r.value.interview_id for r in load_results} == {s.interview_id for s in states}
