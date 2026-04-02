@@ -49,7 +49,11 @@ class TestWebSearchHintRemoved:
 
         assert "mcp__tavily__search" not in prompt
         assert "PREFERRED: Use" not in prompt
-        assert "web search" not in prompt.lower().split("tool usage")[0] if "tool usage" in prompt.lower() else True
+        assert (
+            "web search" not in prompt.lower().split("tool usage")[0]
+            if "tool usage" in prompt.lower()
+            else True
+        )
 
     def test_system_prompt_without_env_var(self) -> None:
         """System prompt works normally without the env var."""
