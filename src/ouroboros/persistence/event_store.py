@@ -402,6 +402,65 @@ class EventStore:
                 table="events",
             ) from e
 
+    async def get_non_terminal_session_ids(self) -> list[str]:
+        """Return aggregate IDs of sessions that have no terminal event.
+
+        A session is "terminal" if it has at least one event of type
+        ``orchestrator.session.completed``, ``orchestrator.session.failed``,
+        or ``orchestrator.session.cancelled``.
+
+        This is an O(1)-ish index scan that avoids the expensive full-replay
+        needed by :meth:`get_all_sessions` + per-session ``replay()``.
+
+        Returns:
+            List of session aggregate_ids that may still be active.
+
+        Raises:
+            PersistenceError: If the query fails.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="get_non_terminal_session_ids",
+            )
+
+        _TERMINAL_TYPES = (
+            "orchestrator.session.completed",
+            "orchestrator.session.failed",
+            "orchestrator.session.cancelled",
+        )
+
+        try:
+            async with self._engine.begin() as conn:
+                # Subquery: session IDs that already reached a terminal state.
+                terminal_ids = (
+                    select(events_table.c.aggregate_id)
+                    .where(events_table.c.aggregate_type == "session")
+                    .where(events_table.c.event_type.in_(_TERMINAL_TYPES))
+                    .distinct()
+                    .scalar_subquery()
+                )
+
+                # All started sessions minus those already terminal.
+                query = (
+                    select(events_table.c.aggregate_id)
+                    .where(events_table.c.aggregate_type == "session")
+                    .where(
+                        events_table.c.event_type == "orchestrator.session.started"
+                    )
+                    .where(events_table.c.aggregate_id.not_in(terminal_ids))
+                    .distinct()
+                )
+
+                result = await conn.execute(query)
+                return [row[0] for row in result.fetchall()]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to get non-terminal session IDs: {e}",
+                operation="select",
+                table="events",
+            ) from e
+
     async def get_all_sessions(self) -> list[BaseEvent]:
         """Get all session lifecycle events.
 
