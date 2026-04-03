@@ -10,6 +10,7 @@ MCP server startup in _run_mcp_server(), ensuring:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -94,6 +95,7 @@ class TestMCPStartupAutoCleanup:
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
+            await asyncio.sleep(0)  # let background cleanup task run
 
         mock_repo.cancel_orphaned_sessions.assert_called_once()
         mock_server.serve.assert_called_once()
@@ -134,6 +136,7 @@ class TestMCPStartupAutoCleanup:
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
+            await asyncio.sleep(0)  # let background cleanup task run
 
         mock_repo.cancel_orphaned_sessions.assert_called_once()
         mock_console.print.assert_any_call("[yellow]Auto-cancelled 2 orphaned session(s)[/yellow]")
@@ -142,13 +145,18 @@ class TestMCPStartupAutoCleanup:
     @pytest.mark.asyncio
     async def test_cleanup_failure_does_not_prevent_startup(self) -> None:
         """Test that auto-cleanup failure doesn't block server startup."""
-        mock_es, _, mock_server = self._create_patches()
-        mock_es.initialize = AsyncMock(side_effect=Exception("DB connection failed"))
+        mock_es, mock_repo, mock_server = self._create_patches(
+            cancel_side_effect=Exception("DB connection failed")
+        )
 
         with (
             patch(
                 "ouroboros.persistence.event_store.EventStore",
                 return_value=mock_es,
+            ),
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
             ),
             patch(
                 "ouroboros.mcp.server.adapter.create_ouroboros_server",
@@ -159,6 +167,7 @@ class TestMCPStartupAutoCleanup:
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
+            await asyncio.sleep(0)  # let background cleanup task run
 
         mock_server.serve.assert_called_once()
         warning_calls = [str(call) for call in mock_console.print.call_args_list]
@@ -189,6 +198,7 @@ class TestMCPStartupAutoCleanup:
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
+            await asyncio.sleep(0)  # let background cleanup task run
 
         mock_server.serve.assert_called_once()
         warning_calls = [str(call) for call in mock_console.print.call_args_list]
@@ -235,6 +245,9 @@ class TestMCPStartupAutoCleanup:
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
+            # initialize runs synchronously, cleanup is deferred
+            assert "initialize" in call_order
+            await asyncio.sleep(0)  # let background task run
 
         assert call_order == ["initialize", "cancel_orphaned"]
 
@@ -350,6 +363,7 @@ class TestMCPStartupAutoCleanup:
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
+            await asyncio.sleep(0)  # let background cleanup task run
 
         mock_console.print.assert_any_call("[yellow]Auto-cancelled 1 orphaned session(s)[/yellow]")
 
@@ -389,6 +403,7 @@ class TestFindOrphanedSessionsEdgeCases:
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
         store.get_all_sessions = AsyncMock(return_value=[])
+        store.get_non_terminal_session_ids = AsyncMock(return_value=[])
         return store
 
     @pytest.fixture
@@ -460,6 +475,7 @@ class TestFindOrphanedSessionsEdgeCases:
         )
 
         mock_event_store.get_all_sessions.return_value = [start_1, start_2, start_3]
+        mock_event_store.get_non_terminal_session_ids.return_value = []
 
         async def mock_replay(aggregate_type: str, aggregate_id: str) -> list:
             return {
@@ -487,6 +503,7 @@ class TestFindOrphanedSessionsEdgeCases:
         last_event.timestamp = None
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["s1"]
         mock_event_store.replay.return_value = [start_event, last_event]
 
         result = await repository.find_orphaned_sessions()
@@ -507,6 +524,7 @@ class TestFindOrphanedSessionsEdgeCases:
         last_event.timestamp = None
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["s1"]
         mock_event_store.replay.return_value = [start_event, last_event]
 
         result = await repository.find_orphaned_sessions()
@@ -525,6 +543,7 @@ class TestFindOrphanedSessionsEdgeCases:
         start_event.timestamp = old_naive  # Ensure it's naive
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["s1"]
         mock_event_store.replay.return_value = [start_event]
 
         result = await repository.find_orphaned_sessions()
@@ -544,6 +563,7 @@ class TestFindOrphanedSessionsEdgeCases:
         start_event = self._make_start_event("s1", timestamp=recent_time)
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["s1"]
         mock_event_store.replay.return_value = [start_event]
 
         result = await repository.find_orphaned_sessions()
@@ -561,6 +581,7 @@ class TestFindOrphanedSessionsEdgeCases:
         start_event = self._make_start_event("s1", timestamp=stale_time)
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["s1"]
         mock_event_store.replay.return_value = [start_event]
 
         result = await repository.find_orphaned_sessions()
@@ -576,6 +597,7 @@ class TestFindOrphanedSessionsEdgeCases:
         start_event = self._make_start_event("s1")
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["s1"]
         mock_event_store.replay.return_value = []  # No events replayed
 
         result = await repository.find_orphaned_sessions()
@@ -595,6 +617,7 @@ class TestFindOrphanedSessionsEdgeCases:
         start_event = self._make_start_event("s1", timestamp=old_time)
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["s1"]
         mock_event_store.replay.return_value = [start_event]
 
         # Patch reconstruct_session to fail
@@ -618,6 +641,7 @@ class TestCancelOrphanedSessionsEdgeCases:
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
         store.get_all_sessions = AsyncMock(return_value=[])
+        store.get_non_terminal_session_ids = AsyncMock(return_value=[])
         return store
 
     @pytest.fixture

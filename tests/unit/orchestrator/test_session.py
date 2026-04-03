@@ -932,6 +932,7 @@ class TestFindOrphanedSessions:
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
         store.get_all_sessions = AsyncMock(return_value=[])
+        store.get_non_terminal_session_ids = AsyncMock(return_value=[])
         return store
 
     @pytest.fixture
@@ -1008,6 +1009,7 @@ class TestFindOrphanedSessions:
         progress_event = self._make_progress_event("sess_1", timestamp=now - timedelta(minutes=5))
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event, progress_event]
 
         result = await repository.find_orphaned_sessions()
@@ -1029,6 +1031,7 @@ class TestFindOrphanedSessions:
         )
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event, progress_event]
 
         result = await repository.find_orphaned_sessions()
@@ -1079,6 +1082,7 @@ class TestFindOrphanedSessions:
         }
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event, completed_progress]
 
         result = await repository.find_orphaned_sessions()
@@ -1139,6 +1143,7 @@ class TestFindOrphanedSessions:
         )
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event, paused_event]
 
         result = await repository.find_orphaned_sessions()
@@ -1168,6 +1173,7 @@ class TestFindOrphanedSessions:
         progress_3 = self._make_progress_event("sess_3", timestamp=now - timedelta(minutes=2))
 
         mock_event_store.get_all_sessions.return_value = [start_1, start_2, start_3]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1", "sess_3"]
 
         replay_data = {
             "sess_1": [start_1],
@@ -1197,6 +1203,7 @@ class TestFindOrphanedSessions:
         start_event = self._make_start_event("sess_1", timestamp=now - timedelta(minutes=30))
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event]
 
         # With default 1-hour threshold: NOT orphaned
@@ -1219,6 +1226,7 @@ class TestFindOrphanedSessions:
         start_2 = self._make_start_event("sess_2", timestamp=old_time)
 
         mock_event_store.get_all_sessions.return_value = [start_1, start_2]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1", "sess_2"]
 
         async def mock_replay(aggregate_type: str, aggregate_id: str) -> list:
             if aggregate_id == "sess_1":
@@ -1239,7 +1247,7 @@ class TestFindOrphanedSessions:
         mock_event_store: AsyncMock,
     ) -> None:
         """Test that event store failure returns empty list gracefully."""
-        mock_event_store.get_all_sessions.side_effect = Exception("DB connection lost")
+        mock_event_store.get_non_terminal_session_ids.side_effect = Exception("DB connection lost")
 
         result = await repository.find_orphaned_sessions()
 
@@ -1264,6 +1272,7 @@ class TestFindOrphanedSessions:
         start_event = self._make_start_event("sess_boundary", timestamp=fixed_now - threshold)
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_boundary"]
         mock_event_store.replay.return_value = [start_event]
 
         # Freeze time so find_orphaned_sessions sees the same 'now'
@@ -1295,6 +1304,7 @@ class TestCancelOrphanedSessions:
         store.append = AsyncMock()
         store.replay = AsyncMock(return_value=[])
         store.get_all_sessions = AsyncMock(return_value=[])
+        store.get_non_terminal_session_ids = AsyncMock(return_value=[])
         return store
 
     @pytest.fixture
@@ -1345,6 +1355,7 @@ class TestCancelOrphanedSessions:
         start_event = self._make_start_event("sess_1", timestamp=old_time)
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event]
 
         result = await repository.cancel_orphaned_sessions()
@@ -1372,6 +1383,7 @@ class TestCancelOrphanedSessions:
         start_2 = self._make_start_event("sess_2", timestamp=old_time)
 
         mock_event_store.get_all_sessions.return_value = [start_1, start_2]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1", "sess_2"]
 
         async def mock_replay(aggregate_type: str, aggregate_id: str) -> list:
             if aggregate_id == "sess_1":
@@ -1400,6 +1412,7 @@ class TestCancelOrphanedSessions:
         start_event = self._make_start_event("sess_1", timestamp=old_time)
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event]
         # Make append fail (cancellation fails)
         mock_event_store.append.side_effect = Exception("DB write error")
@@ -1421,6 +1434,7 @@ class TestCancelOrphanedSessions:
         start_event = self._make_start_event("sess_1", timestamp=old_time)
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event]
 
         await repository.cancel_orphaned_sessions()
@@ -1440,6 +1454,7 @@ class TestCancelOrphanedSessions:
         start_event = self._make_start_event("sess_1", timestamp=old_time)
 
         mock_event_store.get_all_sessions.return_value = [start_event]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_1"]
         mock_event_store.replay.return_value = [start_event]
 
         await repository.cancel_orphaned_sessions()
@@ -1459,6 +1474,7 @@ class TestCancelOrphanedSessions:
         start_2 = self._make_start_event("sess_b", timestamp=old_time)
 
         mock_event_store.get_all_sessions.return_value = [start_1, start_2]
+        mock_event_store.get_non_terminal_session_ids.return_value = ["sess_a", "sess_b"]
 
         async def mock_replay(aggregate_type: str, aggregate_id: str) -> list:
             if aggregate_id == "sess_a":

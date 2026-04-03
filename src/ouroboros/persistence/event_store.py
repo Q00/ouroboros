@@ -445,9 +445,7 @@ class EventStore:
                 query = (
                     select(events_table.c.aggregate_id)
                     .where(events_table.c.aggregate_type == "session")
-                    .where(
-                        events_table.c.event_type == "orchestrator.session.started"
-                    )
+                    .where(events_table.c.event_type == "orchestrator.session.started")
                     .where(events_table.c.aggregate_id.not_in(terminal_ids))
                     .distinct()
                 )
