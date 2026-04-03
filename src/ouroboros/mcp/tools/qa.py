@@ -605,11 +605,10 @@ class QAHandler:
 
         except Exception as e:
             tb = traceback.format_exc()
-            error_msg = f"{e}\n\nTraceback:\n{tb}"
             log.error("mcp.tool.qa.error", error=str(e), traceback=tb)
             return Result.err(
                 MCPToolError(
-                    f"QA evaluation failed: {error_msg}",
+                    "QA evaluation failed due to an internal error. Check server logs for details.",
                     tool_name="ouroboros_qa",
                 )
             )

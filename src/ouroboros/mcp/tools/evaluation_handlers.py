@@ -474,11 +474,10 @@ class EvaluateHandler:
             )
         except Exception as e:
             tb = traceback.format_exc()
-            error_msg = f"{e}\n\nTraceback:\n{tb}"
             log.error("mcp.tool.evaluate.error", error=str(e), traceback=tb)
             return Result.err(
                 MCPToolError(
-                    f"Evaluation failed: {error_msg}",
+                    "Evaluation failed due to an internal error. Check server logs for details.",
                     tool_name="ouroboros_evaluate",
                 )
             )
