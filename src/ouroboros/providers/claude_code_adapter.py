@@ -555,7 +555,9 @@ class ClaudeCodeAdapter:
                     structured = getattr(sdk_message, "structured_output", None)
                     if structured is not None:
                         content = (
-                            json.dumps(structured) if not isinstance(structured, str) else structured
+                            json.dumps(structured)
+                            if not isinstance(structured, str)
+                            else structured
                         )
 
                     # Final result - use result content if we don't have content yet
@@ -578,9 +580,7 @@ class ClaudeCodeAdapter:
                                 "session_id": session_id,
                                 "stderr": "\n".join(stderr_lines[-20:]) if stderr_lines else "",
                                 "claudecode_present": claudecode_present,
-                                "claude_code_entrypoint": os.environ.get(
-                                    "CLAUDE_CODE_ENTRYPOINT"
-                                ),
+                                "claude_code_entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
                             },
                         )
         except Exception as exc:
