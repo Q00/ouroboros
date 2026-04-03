@@ -39,6 +39,30 @@ from ouroboros.providers.base import LLMAdapter
 log = structlog.get_logger(__name__)
 
 
+def _format_error_details(error: Any) -> str:
+    """Render error details in a compact, user-visible form."""
+    details = getattr(error, "details", None)
+    if not isinstance(details, dict) or not details:
+        return str(error)
+
+    rendered: list[str] = [str(error)]
+    for key in (
+        "error_type",
+        "session_id",
+        "claudecode_present",
+        "claude_code_entrypoint",
+        "stderr",
+    ):
+        value = details.get(key)
+        if not value:
+            continue
+        if key == "stderr":
+            rendered.append(f"stderr tail:\n{value}")
+        else:
+            rendered.append(f"{key}: {value}")
+    return "\n".join(rendered)
+
+
 @dataclass
 class MeasureDriftHandler:
     """Handler for the measure_drift tool.
@@ -411,6 +435,14 @@ class EvaluateHandler:
             )
             working_dir_str = arguments.get("working_dir")
             working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
+            log.info(
+                "mcp.tool.evaluate.started",
+                session_id=session_id,
+                artifact_type=artifact_type,
+                working_dir=str(working_dir),
+                llm_backend=self.llm_backend,
+                adapter_type=type(llm_adapter).__name__,
+            )
             mechanical_config = build_mechanical_config(working_dir)
             config = PipelineConfig(
                 mechanical=mechanical_config,
@@ -420,9 +452,17 @@ class EvaluateHandler:
             result = await pipeline.evaluate(context)
 
             if result.is_err:
+                rendered_error = _format_error_details(result.error)
+                log.warning(
+                    "mcp.tool.evaluate.pipeline_failed",
+                    session_id=session_id,
+                    working_dir=str(working_dir),
+                    llm_backend=self.llm_backend,
+                    error=rendered_error,
+                )
                 return Result.err(
                     MCPToolError(
-                        f"Evaluation failed: {result.error}",
+                        f"Evaluation failed: {rendered_error}",
                         tool_name="ouroboros_evaluate",
                     )
                 )

@@ -267,6 +267,12 @@ class ClaudeCodeAdapter:
             prompt_preview=prompt[:100],
             message_count=len(messages),
             has_system_prompt=system_prompt is not None,
+            max_turns=self._max_turns,
+            model=config.model,
+            cwd=str(self._cwd) if self._cwd else None,
+            cli_path=str(self._cli_path) if self._cli_path else None,
+            claudecode_present=bool(os.environ.get("CLAUDECODE")),
+            claude_code_entrypoint=os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
         )
 
         last_error: ProviderError | None = None
@@ -429,8 +435,9 @@ class ClaudeCodeAdapter:
         # session check).  The Agent SDK sets CLAUDE_CODE_ENTRYPOINT=sdk-py
         # to signal it's an SDK call, but the older check on CLAUDECODE fires
         # first, causing silent empty responses.  Strip it via env override.
+        claudecode_present = bool(os.environ.get("CLAUDECODE"))
         env_overrides: dict[str, str] = {}
-        if os.environ.get("CLAUDECODE"):
+        if claudecode_present:
             env_overrides["CLAUDECODE"] = ""
 
         stderr_lines: list[str] = []
@@ -479,6 +486,20 @@ class ClaudeCodeAdapter:
 
         options = ClaudeAgentOptions(**options_kwargs)
 
+        log.debug(
+            "claude_code_adapter.sdk_request_configured",
+            max_turns=self._max_turns,
+            model=options_kwargs.get("model"),
+            cwd=str(self._cwd) if self._cwd else None,
+            cli_path=str(self._cli_path) if self._cli_path else None,
+            permission_mode=self._permission_mode,
+            allowed_tools=self._allowed_tools,
+            disallowed_tools=disallowed,
+            claudecode_present=claudecode_present,
+            claude_code_entrypoint=os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
+            env_override_keys=sorted(env_overrides.keys()),
+        )
+
         # Collect the response - let the generator run to completion
         content = ""
         session_id = None
@@ -500,58 +521,91 @@ class ClaudeCodeAdapter:
                 except StopAsyncIteration:
                     break
 
-        async for sdk_message in _safe_query():
-            class_name = type(sdk_message).__name__
+        try:
+            async for sdk_message in _safe_query():
+                class_name = type(sdk_message).__name__
 
-            if class_name == "SystemMessage":
-                # Capture session ID from init
-                msg_data = getattr(sdk_message, "data", {})
-                session_id = msg_data.get("session_id")
+                if class_name == "SystemMessage":
+                    # Capture session ID from init
+                    msg_data = getattr(sdk_message, "data", {})
+                    session_id = msg_data.get("session_id")
 
-            elif class_name == "AssistantMessage":
-                # Extract text content and tool use
-                content_blocks = getattr(sdk_message, "content", [])
-                for block in content_blocks:
-                    block_type = type(block).__name__
-                    if block_type == "TextBlock":
-                        text = getattr(block, "text", "")
-                        content += text
-                        # Callback for thinking/reasoning
-                        if self._on_message and text.strip():
-                            self._on_message("thinking", text.strip())
-                    elif block_type == "ToolUseBlock":
-                        tool_name = getattr(block, "name", "unknown")
-                        tool_input = getattr(block, "input", {})
-                        # Format tool info with key details
-                        tool_info = self._format_tool_info(tool_name, tool_input)
-                        # Callback for tool usage
-                        if self._on_message:
-                            self._on_message("tool", tool_info)
+                elif class_name == "AssistantMessage":
+                    # Extract text content and tool use
+                    content_blocks = getattr(sdk_message, "content", [])
+                    for block in content_blocks:
+                        block_type = type(block).__name__
+                        if block_type == "TextBlock":
+                            text = getattr(block, "text", "")
+                            content += text
+                            # Callback for thinking/reasoning
+                            if self._on_message and text.strip():
+                                self._on_message("thinking", text.strip())
+                        elif block_type == "ToolUseBlock":
+                            tool_name = getattr(block, "name", "unknown")
+                            tool_input = getattr(block, "input", {})
+                            # Format tool info with key details
+                            tool_info = self._format_tool_info(tool_name, tool_input)
+                            # Callback for tool usage
+                            if self._on_message:
+                                self._on_message("tool", tool_info)
 
-            elif class_name == "ResultMessage":
-                # Check for structured output first (from json_schema output_format)
-                structured = getattr(sdk_message, "structured_output", None)
-                if structured is not None:
-                    content = (
-                        json.dumps(structured) if not isinstance(structured, str) else structured
-                    )
+                elif class_name == "ResultMessage":
+                    # Check for structured output first (from json_schema output_format)
+                    structured = getattr(sdk_message, "structured_output", None)
+                    if structured is not None:
+                        content = (
+                            json.dumps(structured) if not isinstance(structured, str) else structured
+                        )
 
-                # Final result - use result content if we don't have content yet
-                elif not content:
-                    content = getattr(sdk_message, "result", "") or ""
+                    # Final result - use result content if we don't have content yet
+                    elif not content:
+                        content = getattr(sdk_message, "result", "") or ""
 
-                # Check for errors - don't break, just record
-                is_error = getattr(sdk_message, "is_error", False)
-                if is_error:
-                    error_msg = content or "Unknown error from Claude Agent SDK"
-                    log.warning(
-                        "claude_code_adapter.sdk_error",
-                        error=error_msg,
-                    )
-                    error_result = ProviderError(
-                        message=error_msg,
-                        details={"session_id": session_id},
-                    )
+                    # Check for errors - don't break, just record
+                    is_error = getattr(sdk_message, "is_error", False)
+                    if is_error:
+                        error_msg = content or "Unknown error from Claude Agent SDK"
+                        log.warning(
+                            "claude_code_adapter.sdk_error",
+                            error=error_msg,
+                            session_id=session_id,
+                            stderr_lines=len(stderr_lines),
+                        )
+                        error_result = ProviderError(
+                            message=error_msg,
+                            details={
+                                "session_id": session_id,
+                                "stderr": "\n".join(stderr_lines[-20:]) if stderr_lines else "",
+                                "claudecode_present": claudecode_present,
+                                "claude_code_entrypoint": os.environ.get(
+                                    "CLAUDE_CODE_ENTRYPOINT"
+                                ),
+                            },
+                        )
+        except Exception as exc:
+            stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
+            log.exception(
+                "claude_code_adapter.sdk_request_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                session_id=session_id,
+                stderr_lines=len(stderr_lines),
+                claudecode_present=claudecode_present,
+                claude_code_entrypoint=os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
+            )
+            return Result.err(
+                ProviderError(
+                    message=f"Claude Agent SDK request failed: {exc}",
+                    details={
+                        "error_type": type(exc).__name__,
+                        "session_id": session_id,
+                        "stderr": stderr_tail,
+                        "claudecode_present": claudecode_present,
+                        "claude_code_entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
+                    },
+                )
+            )
 
         # After generator completes naturally, check for errors
         if error_result:
