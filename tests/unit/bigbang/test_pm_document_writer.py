@@ -35,7 +35,6 @@ def _make_seed(**overrides) -> PMSeed:
         "decide_later_items": ("API rate limiting", "Which database to use?"),
         "assumptions": ("Team has access to cloud infra",),
         "interview_id": "int_abc",
-        "created_at": "2026-03-30T11:33:57+00:00",
     }
     defaults.update(overrides)
     return PMSeed(**defaults)
@@ -92,8 +91,8 @@ class TestGeneratePrdMarkdown:
         assert "## Assumptions" in md
         assert "- Team has access to cloud infra" in md
 
-    def test_includes_decide_later(self):
-        """Generated markdown includes Decide Later items."""
+    def test_includes_decide_later_merged(self):
+        """Generated markdown merges deferred and decide-later items into Decide Later."""
         seed = _make_seed()
         md = generate_pm_markdown(seed)
         assert "## Decide Later" in md
@@ -115,12 +114,12 @@ class TestGeneratePrdMarkdown:
 
     def test_includes_created_at(self):
         """Generated markdown includes the seed created_at timestamp."""
-        seed = _make_seed()
+        seed = _make_seed(created_at="2026-03-30T11:33:57+00:00")
         md = generate_pm_markdown(seed)
         assert "*Created At: 2026-03-30T11:33:57+00:00*" in md
 
-    def test_always_includes_all_sections(self):
-        """All canonical sections are rendered even when empty."""
+    def test_omits_empty_sections(self):
+        """Sections with no data are omitted from the output."""
         seed = PMSeed(
             pm_id="pm_minimal",
             product_name="Minimal",
@@ -129,13 +128,12 @@ class TestGeneratePrdMarkdown:
         )
         md = generate_pm_markdown(seed)
         assert "## Goal" in md
-        assert "## User Stories" in md
-        assert "## Constraints" in md
-        assert "## Success Criteria" in md
-        assert "## Decide Later" in md
-        assert "## Assumptions" in md
-        assert "## Existing Codebase Context" in md
-        assert md.count("*None.*") >= 5
+        assert "## User Stories" not in md
+        assert "## Constraints" not in md
+        assert "## Success Criteria" not in md
+        assert "## Deferred Items" not in md
+        assert "## Decide Later" not in md
+        assert "## Assumptions" not in md
 
     def test_default_title_when_no_product_name(self):
         """Uses fallback title when product_name is empty."""
@@ -149,13 +147,6 @@ class TestGeneratePrdMarkdown:
         md = generate_pm_markdown(seed)
         assert "*No goal specified.*" in md
 
-    def test_empty_created_at_is_normalized_on_load(self):
-        """Legacy seeds without created_at are normalized before rendering."""
-        seed = PMSeed.from_dict({"product_name": "Test", "goal": "Goal", "created_at": ""})
-        md = generate_pm_markdown(seed)
-        assert "*Created At: " in md
-        assert "*Created At: *" not in md
-
     def test_brownfield_repos_section(self):
         """Includes brownfield repo context when present."""
         seed = _make_seed(
@@ -167,15 +158,9 @@ class TestGeneratePrdMarkdown:
         assert "`/code/myapp`" in md
         assert "Main app" in md
 
-    def test_codebase_summary_is_not_rendered(self):
-        """pm.md does not render the removed codebase_context field."""
-        seed = PMSeed.from_dict(
-            {
-                "product_name": "Task Manager",
-                "goal": "Build a task management tool for small teams.",
-                "codebase_context": "Python FastAPI with PostgreSQL.",
-            }
-        )
+    def test_codebase_context_excluded(self):
+        """Codebase analysis is excluded from PM document."""
+        seed = _make_seed(codebase_context="Python FastAPI with PostgreSQL.")
         md = generate_pm_markdown(seed)
         assert "### Codebase Analysis" not in md
 

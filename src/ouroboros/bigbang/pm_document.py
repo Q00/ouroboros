@@ -96,67 +96,57 @@ def generate_pm_markdown(seed: PMSeed) -> str:
     lines.append("")
 
     # User Stories
-    lines.append("## User Stories")
-    lines.append("")
     if seed.user_stories:
+        lines.append("## User Stories")
+        lines.append("")
         for i, story in enumerate(seed.user_stories, 1):
             lines.append(
                 f"{i}. **As a** {story.persona}, **I want to** {story.action}, **so that** {story.benefit}."
             )
-    else:
-        lines.append("*None.*")
-    lines.append("")
+        lines.append("")
 
     # Constraints
-    lines.append("## Constraints")
-    lines.append("")
     if seed.constraints:
+        lines.append("## Constraints")
+        lines.append("")
         for constraint in seed.constraints:
             lines.append(f"- {constraint}")
-    else:
-        lines.append("*None.*")
-    lines.append("")
+        lines.append("")
 
     # Success Criteria
-    lines.append("## Success Criteria")
-    lines.append("")
     if seed.success_criteria:
+        lines.append("## Success Criteria")
+        lines.append("")
         for i, criterion in enumerate(seed.success_criteria, 1):
             lines.append(f"{i}. {criterion}")
-    else:
-        lines.append("*None.*")
-    lines.append("")
+        lines.append("")
 
     # Assumptions
-    lines.append("## Assumptions")
-    lines.append("")
     if seed.assumptions:
+        lines.append("## Assumptions")
+        lines.append("")
         for assumption in seed.assumptions:
             lines.append(f"- {assumption}")
-    else:
-        lines.append("*None.*")
-    lines.append("")
+        lines.append("")
 
     # Decide Later
     all_decide_later = list(seed.decide_later_items or [])
-    lines.append("## Decide Later")
-    lines.append("")
-    lines.append(
-        "The following items were deferred or identified as premature at this stage. "
-        "They should be revisited when more context is available:"
-    )
-    lines.append("")
     if all_decide_later:
+        lines.append("## Decide Later")
+        lines.append("")
+        lines.append(
+            "The following items were deferred or identified as premature at this stage. "
+            "They should be revisited when more context is available:"
+        )
+        lines.append("")
         for item in all_decide_later:
             lines.append(f"- {item}")
-    else:
-        lines.append("*None.*")
-    lines.append("")
+        lines.append("")
 
     # Brownfield Context
-    lines.append("## Existing Codebase Context")
-    lines.append("")
     if seed.brownfield_repos:
+        lines.append("## Existing Codebase Context")
+        lines.append("")
         for repo in seed.brownfield_repos:
             name = repo.get("name", repo.get("path", "Unknown"))
             desc = repo.get("desc", "")
@@ -164,9 +154,7 @@ def generate_pm_markdown(seed: PMSeed) -> str:
             lines.append(f"- **{name}** (`{path}`)")
             if desc:
                 lines.append(f"  {desc}")
-    else:
-        lines.append("*None.*")
-    lines.append("")
+        lines.append("")
 
     # Footer
     lines.append("---")
