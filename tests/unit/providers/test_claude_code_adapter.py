@@ -311,7 +311,9 @@ class TestExecuteSingleRequestSystemPrompt:
         )
 
         # 1 initial + 3 retries = 4 calls total
-        mock_execute = AsyncMock(return_value=_ok_completion_result("I cannot produce JSON right now"))
+        mock_execute = AsyncMock(
+            return_value=_ok_completion_result("I cannot produce JSON right now")
+        )
         adapter._execute_single_request = mock_execute
 
         with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
