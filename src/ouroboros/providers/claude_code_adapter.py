@@ -583,6 +583,8 @@ class ClaudeCodeAdapter:
                                 "claude_code_entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
                             },
                         )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
             log.exception(

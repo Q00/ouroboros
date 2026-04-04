@@ -99,6 +99,34 @@ class ProviderError(OuroborosError):
         error.__cause__ = exc  # Preserve original traceback
         return error
 
+    def format_details(self) -> str:
+        """Render error details in a compact, user-visible form.
+
+        Formats the error message along with key diagnostic fields from
+        the details dict (error_type, session_id, environment markers,
+        stderr tail). Useful for surfacing rich diagnostics in tool
+        error responses.
+        """
+        if not isinstance(self.details, dict) or not self.details:
+            return str(self)
+
+        rendered: list[str] = [str(self)]
+        for key in (
+            "error_type",
+            "session_id",
+            "claudecode_present",
+            "claude_code_entrypoint",
+            "stderr",
+        ):
+            value = self.details.get(key)
+            if not value:
+                continue
+            if key == "stderr":
+                rendered.append(f"stderr tail:\n{value}")
+            else:
+                rendered.append(f"{key}: {value}")
+        return "\n".join(rendered)
+
 
 class ConfigError(OuroborosError):
     """Error from configuration operations.

@@ -7,10 +7,12 @@ being embedded as XML in the user prompt.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.errors import ProviderError
 from ouroboros.providers.base import (
     CompletionConfig,
     Message,
@@ -356,3 +358,231 @@ class TestExecuteSingleRequestSystemPrompt:
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert options_call_kwargs["allowed_tools"] == []
         assert "Read" in options_call_kwargs["disallowed_tools"]
+
+
+class TestErrorDiagnostics:
+    """Tests for error diagnostic paths in _execute_single_request."""
+
+    @pytest.mark.asyncio
+    async def test_sdk_exception_produces_provider_error_with_details(self) -> None:
+        """SDK exception is caught and returns ProviderError with diagnostic details."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def failing_query(*args, **kwargs):
+            raise RuntimeError("SDK connection lost")
+            yield  # noqa: unreachable — makes this an async generator
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=failing_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        error = result.error
+        assert isinstance(error, ProviderError)
+        assert "SDK connection lost" in error.message
+        assert error.details["error_type"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_sdk_exception_includes_stderr_in_details(self) -> None:
+        """SDK exception captures stderr lines in error details."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def failing_query(*args, **kwargs):
+            raise subprocess.CalledProcessError(1, "claude")
+            yield  # noqa: unreachable
+
+        import subprocess
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=failing_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert "stderr" in result.error.details
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_is_not_swallowed(self) -> None:
+        """asyncio.CancelledError propagates instead of being wrapped."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def cancelled_query(*args, **kwargs):
+            raise asyncio.CancelledError()
+            yield  # noqa: unreachable
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=cancelled_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ), pytest.raises(asyncio.CancelledError):
+            await adapter._execute_single_request("test prompt", config)
+
+    @pytest.mark.asyncio
+    async def test_empty_response_with_session_id(self) -> None:
+        """Empty response with session_id returns descriptive error."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def empty_query(*args, **kwargs):
+            # SystemMessage with session_id but no content
+            sys_msg = MagicMock()
+            type(sys_msg).__name__ = "SystemMessage"
+            sys_msg.data = {"session_id": "sess_abc123"}
+            yield sys_msg
+            # ResultMessage with empty content
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = ""
+            result_msg.is_error = False
+            yield result_msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=empty_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert "sess_abc123" in result.error.details.get("session_id", "")
+        assert "Empty response" in result.error.message
+
+    @pytest.mark.asyncio
+    async def test_empty_response_without_session_id(self) -> None:
+        """Empty response without session_id suggests retry."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def empty_no_session_query(*args, **kwargs):
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = ""
+            result_msg.is_error = False
+            yield result_msg
+
+        sdk_module = _make_sdk_mock(
+            mock_options_cls, MagicMock(side_effect=empty_no_session_query)
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert "retry" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_sdk_error_message_includes_stderr(self) -> None:
+        """SDK is_error result includes stderr in ProviderError details."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def error_query(*args, **kwargs):
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = "Rate limit exceeded"
+            result_msg.is_error = True
+            yield result_msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=error_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert "Rate limit exceeded" in result.error.message
+        assert "stderr" in result.error.details
+
+
+class TestProviderErrorFormatDetails:
+    """Tests for ProviderError.format_details method."""
+
+    def test_format_details_with_all_fields(self) -> None:
+        """format_details renders all diagnostic fields."""
+        error = ProviderError(
+            message="SDK failed",
+            details={
+                "error_type": "RuntimeError",
+                "session_id": "sess_abc",
+                "claudecode_present": True,
+                "claude_code_entrypoint": "sdk-py",
+                "stderr": "error: auth failed",
+            },
+        )
+        rendered = error.format_details()
+        assert "SDK failed" in rendered
+        assert "error_type: RuntimeError" in rendered
+        assert "session_id: sess_abc" in rendered
+        assert "stderr tail:\nerror: auth failed" in rendered
+
+    def test_format_details_without_details(self) -> None:
+        """format_details falls back to str(error) when no details."""
+        error = ProviderError(message="Simple error")
+        rendered = error.format_details()
+        assert rendered == str(error)
+
+    def test_format_details_skips_empty_values(self) -> None:
+        """format_details skips fields with falsy values."""
+        error = ProviderError(
+            message="Partial error",
+            details={
+                "error_type": "ValueError",
+                "session_id": "",
+                "stderr": "",
+            },
+        )
+        rendered = error.format_details()
+        assert "error_type: ValueError" in rendered
+        # Empty values should not get their own formatted lines
+        assert "session_id:" not in rendered
+        assert "stderr tail:" not in rendered

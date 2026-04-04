@@ -39,30 +39,6 @@ from ouroboros.providers.base import LLMAdapter
 log = structlog.get_logger(__name__)
 
 
-def _format_error_details(error: Any) -> str:
-    """Render error details in a compact, user-visible form."""
-    details = getattr(error, "details", None)
-    if not isinstance(details, dict) or not details:
-        return str(error)
-
-    rendered: list[str] = [str(error)]
-    for key in (
-        "error_type",
-        "session_id",
-        "claudecode_present",
-        "claude_code_entrypoint",
-        "stderr",
-    ):
-        value = details.get(key)
-        if not value:
-            continue
-        if key == "stderr":
-            rendered.append(f"stderr tail:\n{value}")
-        else:
-            rendered.append(f"{key}: {value}")
-    return "\n".join(rendered)
-
-
 @dataclass
 class MeasureDriftHandler:
     """Handler for the measure_drift tool.
@@ -452,7 +428,11 @@ class EvaluateHandler:
             result = await pipeline.evaluate(context)
 
             if result.is_err:
-                rendered_error = _format_error_details(result.error)
+                rendered_error = (
+                    result.error.format_details()
+                    if hasattr(result.error, "format_details")
+                    else str(result.error)
+                )
                 log.warning(
                     "mcp.tool.evaluate.pipeline_failed",
                     session_id=session_id,
