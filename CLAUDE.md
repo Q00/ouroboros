@@ -31,6 +31,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo update` | Read `skills/update/SKILL.md` and follow it |
 | `ooo pm` or `ooo pm ...` | Read `skills/pm/SKILL.md` and follow it |
 | `ooo brownfield` or `ooo brownfield ...` | Read `skills/brownfield/SKILL.md` and follow it |
+| `ooo publish` or `ooo publish ...` | Read `skills/publish/SKILL.md` and follow it |
 
 **Important**: Do NOT use the Skill tool. Read the file with the Read tool and execute its instructions directly.
 
@@ -79,6 +80,7 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 | `ooo setup` | — |
 | `ooo help` | — |
 | `ooo update` | PyPI version check + upgrade |
+| `ooo publish` | `gh` CLI — Seed to GitHub Issues |
 
 ## Agents
 

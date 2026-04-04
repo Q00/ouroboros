@@ -90,18 +90,17 @@ def _resolve_cli_path(data: dict) -> str | None:
 
 
 def _resolve_db_path(data: dict, config_path: Path) -> str:
-    """Return the actual database path.
-
-    EventStore defaults to ``~/.ouroboros/ouroboros.db`` regardless of
-    ``persistence.database_path`` in the config model. Show the real path.
-    """
+    """Return a user-facing database path summary."""
     db_path = data.get("persistence", {}).get("database_path")
     if db_path:
         path = Path(db_path)
         if not path.is_absolute():
-            path = config_path.parent / path
+            resolved = config_path.parent / path
+            return f"{db_path} ({resolved})"
         return str(path)
-    return str(config_path.parent / "ouroboros.db")
+
+    resolved = config_path.parent / "ouroboros.db"
+    return f"ouroboros.db ({resolved})"
 
 
 @app.command()

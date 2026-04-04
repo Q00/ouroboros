@@ -129,14 +129,24 @@ echo
 echo "Installing ${INSTALL_SPEC} ..."
 
 # 3. Install (or upgrade if already installed)
+# uv tool install has issues with [extras] syntax — use --with for reliability.
 INSTALL_METHOD=""
 if [ "$HAS_UV" = true ]; then
   INSTALL_METHOD="uv"
+  UV_ARGS=(tool install --upgrade "$PACKAGE_NAME")
   if [ -n "$PRE_FLAG" ]; then
-    uv tool install --upgrade --prerelease=allow "$INSTALL_SPEC"
-  else
-    uv tool install --upgrade "$INSTALL_SPEC"
+    UV_ARGS+=(--prerelease=allow)
   fi
+  # Map extras to explicit --with flags for uv
+  case "$EXTRAS" in
+    "[claude]")
+      UV_ARGS+=(--with "claude-agent-sdk>=0.1.0" --with "anthropic>=0.52.0")
+      ;;
+    "[all]")
+      UV_ARGS+=(--with "claude-agent-sdk>=0.1.0" --with "anthropic>=0.52.0" --with "litellm>=1.80.0,<=1.82.6")
+      ;;
+  esac
+  uv "${UV_ARGS[@]}"
 elif [ "$HAS_PIPX" = true ]; then
   INSTALL_METHOD="pipx"
   if [ -n "$PRE_FLAG" ]; then
@@ -182,11 +192,21 @@ if command -v claude &>/dev/null; then
 
   # MCP command matches the installer that actually ran in step 3
   if [ "$INSTALL_METHOD" = "uv" ]; then
-    OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[claude]","ouroboros","mcp","serve"]}'
+    case "$EXTRAS" in
+      "[claude]")
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","--with","claude-agent-sdk>=0.1.0","--with","anthropic>=0.52.0","ouroboros","mcp","serve"]}'
+        ;;
+      "[all]")
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","--with","claude-agent-sdk>=0.1.0","--with","anthropic>=0.52.0","--with","litellm>=1.80.0,<=1.82.6","ouroboros","mcp","serve"]}'
+        ;;
+      *)
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
+        ;;
+    esac
   elif [ "$INSTALL_METHOD" = "pipx" ]; then
     OUROBOROS_ENTRY='{"command":"ouroboros","args":["mcp","serve"]}'
   else
-    OUROBOROS_ENTRY='{"command":"python3","args":["-m","ouroboros","mcp","serve"]}'
+    OUROBOROS_ENTRY='{"command":"'"${PYTHON:-python3}"'","args":["-m","ouroboros","mcp","serve"]}'
   fi
 
   # Find a working Python: system python3, or uv-managed python

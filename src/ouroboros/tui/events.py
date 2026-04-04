@@ -665,6 +665,14 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             data=data,
         )
 
+    elif event_type == "execution.terminal":
+        return ExecutionUpdated(
+            execution_id=event.aggregate_id,
+            session_id=data.get("session_id", ""),
+            status=data.get("status", "completed"),
+            data=data,
+        )
+
     elif event_type == "execution.phase.completed":
         return PhaseChanged(
             execution_id=event.aggregate_id,

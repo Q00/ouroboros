@@ -37,12 +37,7 @@ class TestInitWorkflowRuntimeHandoff:
         """CLI wiring forwards the explicit LLM backend into the interview coroutine."""
         mock_run_interview = AsyncMock()
 
-        with (
-            patch("ouroboros.cli.commands.init._run_interview", new=mock_run_interview),
-            patch("ouroboros.cli.commands.init.asyncio.run") as mock_asyncio_run,
-        ):
-            mock_asyncio_run.return_value = None
-
+        with patch("ouroboros.cli.commands.init._run_interview", new=mock_run_interview):
             result = runner.invoke(
                 app,
                 [
@@ -58,8 +53,8 @@ class TestInitWorkflowRuntimeHandoff:
             )
 
         assert result.exit_code == 0
-        assert mock_run_interview.call_args.args[6] == "codex"
-        assert mock_run_interview.call_args.args[5] == "codex"
+        assert mock_run_interview.await_args.args[6] == "codex"
+        assert mock_run_interview.await_args.args[5] == "codex"
 
     def test_get_adapter_uses_interview_use_case_for_codex(self) -> None:
         """Interview adapter creation stays backend-neutral for Codex."""

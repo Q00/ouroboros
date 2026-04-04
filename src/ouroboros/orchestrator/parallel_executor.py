@@ -894,6 +894,34 @@ class ParallelACExecutor:
         )
         self._ac_runtime_handles.pop(runtime_identity.cache_key, None)
 
+    async def _terminate_runtime_handle(
+        self,
+        runtime_handle: RuntimeHandle | None,
+        *,
+        runtime_scope_id: str,
+    ) -> None:
+        """Best-effort termination for live AC-scoped runtimes."""
+        if runtime_handle is None or not runtime_handle.can_terminate:
+            return
+
+        try:
+            terminated = await runtime_handle.terminate()
+        except Exception as exc:
+            log.warning(
+                "parallel_executor.runtime_handle_terminate_failed",
+                runtime_scope_id=runtime_scope_id,
+                backend=runtime_handle.backend,
+                error=str(exc),
+            )
+            return
+
+        if terminated:
+            log.info(
+                "parallel_executor.runtime_handle_terminated",
+                runtime_scope_id=runtime_scope_id,
+                backend=runtime_handle.backend,
+            )
+
     @staticmethod
     def _resolve_ac_runtime_identity(
         ac_index: int,
@@ -2959,6 +2987,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                     silent_seconds=STALL_TIMEOUT_SECONDS,
                     message_count=message_count,
                 )
+                clear_cached_runtime_handle = True
                 return ACExecutionResult(
                     ac_index=ac_index,
                     ac_content=ac_content,
@@ -3063,6 +3092,10 @@ When complete, explicitly state: [TASK_COMPLETE]
             )
         finally:
             if clear_cached_runtime_handle:
+                await self._terminate_runtime_handle(
+                    runtime_handle,
+                    runtime_scope_id=runtime_identity.session_scope_id,
+                )
                 self._forget_ac_runtime_handle(
                     ac_index,
                     execution_context_id=execution_context_id,

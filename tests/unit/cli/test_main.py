@@ -1,7 +1,7 @@
 """Unit tests for CLI main module."""
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from typer.testing import CliRunner
 
@@ -210,13 +210,16 @@ class TestShorthandCommands:
         seed_file = tmp_path / "seed.yaml"
         seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
 
-        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
-            mock_run.return_value = None
+        mock_run_orchestrator = AsyncMock()
 
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=mock_run_orchestrator,
+        ):
             runner.invoke(app, ["run", str(seed_file)])
 
-            # Should invoke workflow command (orchestrator by default calls asyncio.run)
-            assert mock_run.called
+        # Should invoke workflow command (orchestrator by default calls _run_orchestrator)
+        mock_run_orchestrator.assert_awaited_once()
 
     def test_run_shorthand_with_no_orchestrator(self, tmp_path: Path) -> None:
         """Test that 'ouroboros run seed.yaml --no-orchestrator' uses placeholder mode."""
@@ -256,8 +259,10 @@ class TestShorthandCommands:
     def test_init_list_subcommand_still_works(self) -> None:
         """Test backward compat: 'ouroboros init list' still routes to list."""
         with patch("ouroboros.cli.commands.init.create_llm_adapter"):
-            with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
-                mock_run.return_value = []
+            with patch(
+                "ouroboros.cli.commands.init.InterviewEngine.list_interviews",
+                new=AsyncMock(return_value=[]),
+            ):
                 result = runner.invoke(app, ["init", "list"])
                 assert result.exit_code == 0
 
@@ -272,11 +277,14 @@ class TestShorthandCommands:
         seed_file = tmp_path / "seed.yaml"
         seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
 
-        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
-            mock_run.return_value = None
+        mock_run_orchestrator = AsyncMock()
 
+        with patch(
+            "ouroboros.cli.commands.run._run_orchestrator",
+            new=mock_run_orchestrator,
+        ):
             # No --orchestrator flag needed
             runner.invoke(app, ["run", "workflow", str(seed_file)])
 
-            # asyncio.run should be called (orchestrator path)
-            assert mock_run.called
+        # _run_orchestrator should be awaited by the default orchestrator path
+        mock_run_orchestrator.assert_awaited_once()

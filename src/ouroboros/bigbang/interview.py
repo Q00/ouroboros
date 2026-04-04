@@ -4,6 +4,7 @@ This module implements the interview protocol that refines vague ideas into
 clear requirements through iterative questioning. Users control when to stop.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -420,6 +421,8 @@ class InterviewEngine:
         """Persist interview state to disk.
 
         Uses file locking to prevent race conditions during concurrent access.
+        The blocking file I/O is offloaded to a thread to avoid stalling the
+        asyncio event loop.
 
         Args:
             state: The interview state to save.
@@ -430,12 +433,14 @@ class InterviewEngine:
         try:
             file_path = self._state_file_path(state.interview_id)
             state.mark_updated()
+            # Serialize while still on the event-loop (CPU-bound, not I/O)
+            content = state.model_dump_json(indent=2)
 
-            # Use file locking to prevent race conditions
-            with _file_lock(file_path, exclusive=True):
-                # Write state as JSON
-                content = state.model_dump_json(indent=2)
-                file_path.write_text(content, encoding="utf-8")
+            def _sync_write() -> None:
+                with _file_lock(file_path, exclusive=True):
+                    file_path.write_text(content, encoding="utf-8")
+
+            await asyncio.to_thread(_sync_write)
 
             log.info(
                 "interview.state_saved",
@@ -461,6 +466,8 @@ class InterviewEngine:
         """Load interview state from disk.
 
         Uses file locking to prevent race conditions during concurrent access.
+        The blocking file I/O is offloaded to a thread to avoid stalling the
+        asyncio event loop.
 
         Args:
             interview_id: The interview ID to load.
@@ -480,9 +487,12 @@ class InterviewEngine:
             )
 
         try:
-            # Use shared lock for reading
-            with _file_lock(file_path, exclusive=False):
-                content = file_path.read_text(encoding="utf-8")
+
+            def _sync_read() -> str:
+                with _file_lock(file_path, exclusive=False):
+                    return file_path.read_text(encoding="utf-8")
+
+            content = await asyncio.to_thread(_sync_read)
 
             state = InterviewState.model_validate_json(content)
 
@@ -517,15 +527,9 @@ class InterviewEngine:
         Returns:
             The system prompt.
         """
-        import os
-
         from ouroboros.agents.loader import load_agent_prompt
 
         round_info = f"Round {state.current_round_number}"
-        preferred_web_tool = os.environ.get("OUROBOROS_WEB_SEARCH_TOOL", "").strip()
-        web_search_hint = (
-            f"\n- PREFERRED: Use {preferred_web_tool} for web search" if preferred_web_tool else ""
-        )
 
         base_prompt = load_agent_prompt("socratic-interviewer")
 
@@ -546,17 +550,20 @@ class InterviewEngine:
                 f"Initial context: {state.initial_context}\n"
             )
 
-        if web_search_hint:
-            base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
-
+        # Answer prefix hints — always present so the question generator
+        # can interpret enriched answers regardless of brownfield status.
+        dynamic_header += (
+            "\n\nAnswer prefixes the caller may use:\n"
+            "- [from-code]: Existing codebase state (factual, read from files).\n"
+            "- [from-user]: Human decisions/judgments.\n"
+            "- [from-research]: Externally researched information (API docs, pricing, compatibility)."
+        )
         # Brownfield hint: main session handles code reading, MCP just asks questions
         if state.is_brownfield:
             dynamic_header += (
                 "\n\nThis is a BROWNFIELD project. The caller (main session) has direct "
                 "codebase access and will enrich answers with code context. Focus your "
-                "questions on INTENT and DECISIONS, not on discovering what exists. "
-                "Answers prefixed with [from-code] describe existing code state. "
-                "Answers prefixed with [from-user] are human decisions."
+                "questions on INTENT and DECISIONS, not on discovering what exists."
             )
 
         ambiguity_snapshot = self._build_ambiguity_snapshot_prompt(state)

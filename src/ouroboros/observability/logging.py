@@ -89,6 +89,21 @@ _configured: bool = False
 _current_config: LoggingConfig | None = None
 
 
+def _close_root_handlers() -> None:
+    """Detach and close all handlers currently attached to the root logger."""
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+        try:
+            handler.flush()
+        except Exception:
+            pass
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+
 def _get_mode_from_env() -> LogMode:
     """Get logging mode from environment variable.
 
@@ -273,15 +288,15 @@ def _get_console_processors(mode: LogMode) -> list[Any]:
     """
     processors = _get_shared_processors()
 
-    # Format exceptions nicely for console
-    processors.append(structlog.processors.format_exc_info)
-
     # Add final renderer based on mode
     if mode == LogMode.DEV:
-        # Human-readable console output for development
+        # Human-readable console output for development.
+        # ConsoleRenderer handles exc_info itself and warns if format_exc_info
+        # is also present in the processor chain.
         processors.append(structlog.dev.ConsoleRenderer(colors=True))
     else:
         # JSON output for production
+        processors.append(structlog.processors.format_exc_info)
         processors.append(structlog.processors.JSONRenderer())
 
     return processors
@@ -468,8 +483,7 @@ def configure_logging(config: LoggingConfig | None = None) -> None:
     root_logger.setLevel(log_level)
 
     # Remove existing handlers to avoid duplicates on reconfigure
-    for handler in root_logger.handlers[:]:
-        root_logger.removeHandler(handler)
+    _close_root_handlers()
 
     # Add file handler if enabled
     file_handler = _setup_file_handler(config)
@@ -600,6 +614,7 @@ def reset_logging() -> None:
     global _configured, _current_config
     _configured = False
     _current_config = None
+    _close_root_handlers()
     # Clear any bound context
     structlog.contextvars.clear_contextvars()
     # Reset structlog configuration

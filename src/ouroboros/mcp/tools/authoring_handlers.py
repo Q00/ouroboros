@@ -5,6 +5,7 @@ Contains handlers for interview and seed generation tools:
 - InterviewHandler: Manages interactive requirement-clarification interviews.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -466,6 +467,7 @@ class InterviewHandler:
 
     def __post_init__(self) -> None:
         """Initialize event store."""
+        self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._initialized = False
 
@@ -474,6 +476,12 @@ class InterviewHandler:
         if not self._initialized:
             await self._event_store.initialize()
             self._initialized = True
+
+    async def close(self) -> None:
+        """Close the event store if this handler owns it."""
+        if self._owns_event_store:
+            await self._event_store.close()
+            self._initialized = False
 
     async def _emit_event(self, event: Any) -> None:
         """Emit event to store. Swallows errors to not break interview flow."""
@@ -699,7 +707,11 @@ class InterviewHandler:
 
                 state = result.value
                 _interview_id = state.interview_id
-                live_score = await self._score_interview_state(llm_adapter, state)
+                # No answers exist yet — scoring cannot trigger completion
+                # and would waste an LLM call (~3-8s). The PM handler
+                # already skips scoring before MIN_ROUNDS_BEFORE_EARLY_EXIT
+                # (pm_interview.py:889); apply the same optimisation here.
+                live_score = None
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
@@ -912,23 +924,33 @@ class InterviewHandler:
                     # question generation failures downstream
                     await engine.save_state(state)
 
-                    live_score = await self._score_interview_state(llm_adapter, state)
-                    if (
-                        live_score is not None
-                        and live_score.is_ready_for_seed
-                        and _count_answered_rounds(state) >= MIN_ROUNDS_BEFORE_EARLY_EXIT
-                    ):
-                        return await self._complete_interview_response(
-                            engine,
-                            state,
-                            session_id,
-                            live_score,
+                    # Only score ambiguity when completion is actually
+                    # possible.  Before MIN_ROUNDS_BEFORE_EARLY_EXIT the
+                    # result cannot trigger early exit, so the LLM call
+                    # (~3-8 s) is pure waste.  When scoring *is* needed,
+                    # run it in parallel with question generation to halve
+                    # per-step latency.  If scoring triggers early
+                    # completion the generated question is discarded (at
+                    # most once per interview).
+                    answered = _count_answered_rounds(state)
+                    if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
+                        live_score, question_result = await asyncio.gather(
+                            self._score_interview_state(llm_adapter, state),
+                            engine.ask_next_question(state),
                         )
+                        if live_score is not None and live_score.is_ready_for_seed:
+                            return await self._complete_interview_response(
+                                engine,
+                                state,
+                                session_id,
+                                live_score,
+                            )
+                    else:
+                        live_score = None
+                        question_result = await engine.ask_next_question(state)
                 else:
                     live_score = _load_state_ambiguity_score(state)
-
-                # Generate next question (whether resuming or after recording answer)
-                question_result = await engine.ask_next_question(state)
+                    question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
@@ -1043,3 +1065,6 @@ class InterviewHandler:
                     tool_name="ouroboros_interview",
                 )
             )
+        finally:
+            if self._owns_event_store:
+                await self.close()

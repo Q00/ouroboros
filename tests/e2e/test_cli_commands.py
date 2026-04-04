@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
+import typer
 from typer.testing import CliRunner
 
 from ouroboros.cli.main import app
@@ -21,6 +22,26 @@ if TYPE_CHECKING:
 
 
 runner = CliRunner()
+
+
+def _consume_asyncio_run(
+    *,
+    return_value: Any = None,
+    side_effect: Exception | None = None,
+):
+    """Build an asyncio.run replacement that disposes the passed coroutine."""
+
+    def _runner(coro: Any) -> Any:
+        try:
+            if side_effect is not None:
+                raise side_effect
+            return return_value
+        finally:
+            close = getattr(coro, "close", None)
+            if callable(close):
+                close()
+
+    return _runner
 
 
 class TestCLIBasics:
@@ -97,10 +118,10 @@ class TestInitCommand:
                     mock_confirm.ask.return_value = False  # Don't continue
 
                     # Mock asyncio.run to run the coroutine
-                    with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
-                        # Just verify the command structure works
-                        mock_run.return_value = None
-
+                    with patch(
+                        "ouroboros.cli.commands.init.asyncio.run",
+                        side_effect=_consume_asyncio_run(),
+                    ) as mock_run:
                         _result = runner.invoke(
                             app,
                             [
@@ -118,9 +139,10 @@ class TestInitCommand:
     def test_init_list_no_interviews(self, temp_state_dir: Path) -> None:
         """Test init list when no interviews exist."""
         with patch("ouroboros.cli.commands.init.create_llm_adapter"):
-            with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
-                mock_run.return_value = []
-
+            with patch(
+                "ouroboros.cli.commands.init.asyncio.run",
+                side_effect=_consume_asyncio_run(return_value=[]),
+            ):
                 result = runner.invoke(
                     app,
                     ["init", "list", "--state-dir", str(temp_state_dir)],
@@ -135,12 +157,11 @@ class TestInitCommand:
             mock_adapter = MagicMock()
             mock_adapter_factory.return_value = mock_adapter
 
-            with patch("ouroboros.cli.commands.init.asyncio.run") as mock_run:
+            with patch(
+                "ouroboros.cli.commands.init.asyncio.run",
+                side_effect=_consume_asyncio_run(side_effect=typer.Exit(code=1)),
+            ):
                 # The function should raise typer.Exit on error
-                import typer
-
-                mock_run.side_effect = typer.Exit(code=1)
-
                 result = runner.invoke(
                     app,
                     [
@@ -193,10 +214,10 @@ class TestRunWorkflowCommand:
 
     def test_run_workflow_verbose(self, temp_seed_file: Path) -> None:
         """Test run workflow with --verbose flag."""
-        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
-            # Mock successful execution for orchestrator mode
-            mock_run.return_value = None
-
+        with patch(
+            "ouroboros.cli.commands.run.asyncio.run",
+            side_effect=_consume_asyncio_run(),
+        ) as mock_run:
             result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--debug"],
@@ -209,10 +230,10 @@ class TestRunWorkflowCommand:
 
     def test_run_workflow_orchestrator_mode(self, temp_seed_file: Path) -> None:
         """Test run workflow with --orchestrator flag."""
-        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
-            # Mock successful execution
-            mock_run.return_value = None
-
+        with patch(
+            "ouroboros.cli.commands.run.asyncio.run",
+            side_effect=_consume_asyncio_run(),
+        ) as mock_run:
             _result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--orchestrator"],
@@ -223,9 +244,10 @@ class TestRunWorkflowCommand:
 
     def test_run_workflow_orchestrator_with_resume(self, temp_seed_file: Path) -> None:
         """Test run workflow with --orchestrator and --resume flags."""
-        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
-            mock_run.return_value = None
-
+        with patch(
+            "ouroboros.cli.commands.run.asyncio.run",
+            side_effect=_consume_asyncio_run(),
+        ) as mock_run:
             _result = runner.invoke(
                 app,
                 [
@@ -242,9 +264,10 @@ class TestRunWorkflowCommand:
 
     def test_run_workflow_resume_without_orchestrator_warns(self, temp_seed_file: Path) -> None:
         """Test that --resume without --orchestrator shows warning."""
-        with patch("ouroboros.cli.commands.run.asyncio.run") as mock_run:
-            mock_run.return_value = None
-
+        with patch(
+            "ouroboros.cli.commands.run.asyncio.run",
+            side_effect=_consume_asyncio_run(),
+        ) as mock_run:
             result = runner.invoke(
                 app,
                 ["run", "workflow", str(temp_seed_file), "--resume", "sess_123"],

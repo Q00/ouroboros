@@ -120,6 +120,44 @@ class _TerminableProcess:
         return -1 if self.returncode is None else self.returncode
 
 
+class _ControlledBlockingStream:
+    def __init__(self, done: asyncio.Event) -> None:
+        self._done = done
+
+    async def readline(self) -> bytes:
+        await self._done.wait()
+        return b""
+
+    async def read(self, n: int = -1) -> bytes:
+        del n
+        await self._done.wait()
+        return b""
+
+
+class _TimeoutTerminableProcess:
+    def __init__(self) -> None:
+        self._done = asyncio.Event()
+        self.stdout = _ControlledBlockingStream(self._done)
+        self.stderr = _ControlledBlockingStream(self._done)
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+        self._done.set()
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self._done.set()
+
+    async def wait(self) -> int:
+        await self._done.wait()
+        return -1 if self.returncode is None else self.returncode
+
+
 class TestCodexCliRuntime:
     """Tests for CodexCliRuntime."""
 
@@ -828,6 +866,26 @@ class TestCodexCliRuntime:
             with pytest.raises(asyncio.CancelledError):
                 await consumer
 
+        assert process.terminated or process.killed
+
+    @pytest.mark.asyncio
+    async def test_execute_task_times_out_when_codex_never_emits_output(self) -> None:
+        """Silent Codex startups should fail fast instead of hanging forever."""
+        runtime = CodexCliRuntime(cli_path="codex", cwd="/tmp/project")
+        runtime._startup_output_timeout_seconds = 0.01
+        runtime._stdout_idle_timeout_seconds = 0.01
+        process = _TimeoutTerminableProcess()
+
+        with patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            messages = [message async for message in runtime.execute_task("Do the work")]
+
+        assert len(messages) == 1
+        assert messages[0].type == "result"
+        assert messages[0].is_error
+        assert messages[0].data["error_type"] == "TimeoutError"
         assert process.terminated or process.killed
 
     @pytest.mark.asyncio

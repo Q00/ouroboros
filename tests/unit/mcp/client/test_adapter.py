@@ -1,9 +1,10 @@
 """Tests for MCP client adapter."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from ouroboros.mcp.client.adapter import MCPClientAdapter
 from ouroboros.mcp.errors import MCPConnectionError
+from ouroboros.mcp.types import MCPServerConfig, TransportType
 
 
 class TestMCPClientAdapter:
@@ -47,6 +48,31 @@ class TestMCPClientAdapter:
         result = await adapter.read_resource("ouroboros://test")
         assert result.is_err
         assert "Not connected" in str(result.error)
+
+    async def test_disconnect_closes_transport_context(self) -> None:
+        """disconnect closes both session and stdio transport context."""
+        adapter = MCPClientAdapter()
+        adapter._config = MCPServerConfig(
+            name="test-server",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        session = AsyncMock()
+        transport_cm = AsyncMock()
+        adapter._session = session
+        adapter._transport_cm = transport_cm
+        adapter._read_stream = object()
+        adapter._write_stream = object()
+
+        result = await adapter.disconnect()
+
+        assert result.is_ok
+        session.__aexit__.assert_awaited_once()
+        transport_cm.__aexit__.assert_awaited_once()
+        assert adapter._session is None
+        assert adapter._transport_cm is None
+        assert adapter._read_stream is None
+        assert adapter._write_stream is None
 
 
 class TestMCPClientAdapterParsing:

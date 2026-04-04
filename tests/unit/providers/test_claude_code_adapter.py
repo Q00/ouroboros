@@ -13,10 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
+    CompletionResponse,
     Message,
     MessageRole,
+    UsageInfo,
 )
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 
@@ -159,6 +162,19 @@ def _make_sdk_mock(mock_options_cls: MagicMock, mock_query: MagicMock) -> MagicM
     return sdk_module
 
 
+def _ok_completion_result(content: str) -> Result[CompletionResponse, object]:
+    """Build a successful completion result with realistic typed payloads."""
+    return Result.ok(
+        CompletionResponse(
+            content=content,
+            model="claude-sonnet-4-6",
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            finish_reason="stop",
+            raw_response={"id": "resp_123"},
+        )
+    )
+
+
 class TestExecuteSingleRequestSystemPrompt:
     """Test that _execute_single_request passes system_prompt to ClaudeAgentOptions."""
 
@@ -245,8 +261,7 @@ class TestExecuteSingleRequestSystemPrompt:
             },
         )
 
-        mock_execute = AsyncMock()
-        mock_execute.return_value = MagicMock(is_ok=True)
+        mock_execute = AsyncMock(return_value=_ok_completion_result('{"score": 0.9}'))
         adapter._execute_single_request = mock_execute
 
         with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
@@ -255,6 +270,196 @@ class TestExecuteSingleRequestSystemPrompt:
         prompt_arg = mock_execute.call_args.args[0]
         assert "Respond with ONLY a valid JSON object" in prompt_arg
         assert '"score"' in prompt_arg
+
+    @pytest.mark.asyncio
+    async def test_json_retry_on_prose_response(self) -> None:
+        """When response_format requires JSON but LLM returns prose, adapter retries."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Evaluate this")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        mock_execute = AsyncMock(
+            side_effect=[
+                _ok_completion_result("Let me verify the acceptance criteria..."),
+                _ok_completion_result('{"score": 0.85}'),
+            ]
+        )
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_ok
+        assert result.value.content == '{"score": 0.85}'
+        assert mock_execute.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_json_retry_exhausted_returns_error(self) -> None:
+        """When all JSON retries fail, return a ProviderError, not prose."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Evaluate this")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        # 1 initial + 3 retries = 4 calls total
+        mock_execute = AsyncMock(
+            return_value=_ok_completion_result("I cannot produce JSON right now")
+        )
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_err
+        assert "JSON format required" in result.error.message
+        assert mock_execute.call_count == 4  # 1 initial + 3 retries
+
+    @pytest.mark.asyncio
+    async def test_json_extracted_from_prose_wrapped_response(self) -> None:
+        """When response contains valid JSON wrapped in prose, extract and normalize."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Evaluate this")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        mock_execute = AsyncMock(
+            return_value=_ok_completion_result('Here is the result:\n{"score": 0.85}\nDone.')
+        )
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_ok
+        assert result.value.content == '{"score": 0.85}'
+        assert mock_execute.call_count == 1  # No retry needed
+
+    def test_normalize_json_content_rebuilds_frozen_completion_response(self) -> None:
+        """Normalization must not mutate the frozen CompletionResponse dataclass."""
+        adapter = ClaudeCodeAdapter()
+        response = CompletionResponse(
+            content='Here is the result:\n{"score": 0.85}\nDone.',
+            model="claude-sonnet-4-6",
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            finish_reason="stop",
+            raw_response={"id": "resp_123", "meta": {"attempt": 1}},
+        )
+
+        result = adapter._normalize_json_content(Result.ok(response))
+
+        assert result is not None
+        assert result.is_ok
+        assert result.value.content == '{"score": 0.85}'
+        assert result.value is not response
+        assert response.content == 'Here is the result:\n{"score": 0.85}\nDone.'
+        assert result.value.model == response.model
+        assert result.value.usage == response.usage
+        assert result.value.finish_reason == response.finish_reason
+        assert result.value.raw_response is not response.raw_response
+        assert result.value.raw_response["meta"] is not response.raw_response["meta"]
+
+        result.value.raw_response["meta"]["attempt"] = 2
+        assert response.raw_response["meta"]["attempt"] == 1
+
+    @pytest.mark.asyncio
+    async def test_json_normalization_rebuilds_response_without_aliasing_raw_response(self) -> None:
+        """complete() should normalize JSON without aliasing nested raw_response data."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Evaluate this")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        original_response = CompletionResponse(
+            content='Here is the result:\n{"score": 0.85}\nDone.',
+            model="claude-sonnet-4-6",
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            finish_reason="stop",
+            raw_response={"id": "resp_123", "meta": {"attempt": 1}},
+        )
+        mock_execute = AsyncMock(return_value=Result.ok(original_response))
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_ok
+        assert result.value.content == '{"score": 0.85}'
+        assert result.value is not original_response
+        assert result.value.raw_response == original_response.raw_response
+        assert result.value.raw_response is not original_response.raw_response
+        assert result.value.raw_response["meta"] is not original_response.raw_response["meta"]
+
+        result.value.raw_response["meta"]["attempt"] = 2
+        assert original_response.raw_response["meta"]["attempt"] == 1
+        assert mock_execute.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_json_schema_array_gets_correct_prompt_steering(self) -> None:
+        """json_schema with top-level array should say 'JSON array', not 'JSON object'."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="List items")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"name": {"type": "string"}}},
+                },
+            },
+        )
+
+        mock_execute = AsyncMock(return_value=_ok_completion_result('[{"name": "a"}]'))
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        prompt_arg = mock_execute.call_args.args[0]
+        assert "JSON array" in prompt_arg
+        assert "JSON object" not in prompt_arg
+        assert result.is_ok
+        assert result.value.content == '[{"name": "a"}]'
+
+    @pytest.mark.asyncio
+    async def test_json_object_format_gets_prompt_steering(self) -> None:
+        """json_object response_format should also get prompt steering."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Return data")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={"type": "json_object"},
+        )
+
+        mock_execute = AsyncMock(return_value=_ok_completion_result('{"data": "value"}'))
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            await adapter.complete(messages, config)
+
+        prompt_arg = mock_execute.call_args.args[0]
+        assert "Respond with ONLY a valid JSON object" in prompt_arg
 
     @pytest.mark.asyncio
     async def test_execute_single_request_omits_output_format(self) -> None:

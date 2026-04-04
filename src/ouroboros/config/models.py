@@ -114,7 +114,9 @@ class LLMConfig(BaseModel, frozen=True):
         context_compression_model: Default model for workflow context compression
     """
 
-    backend: Literal["claude", "claude_code", "litellm", "codex", "opencode"] = "claude_code"
+    backend: Literal["claude", "claude_code", "litellm", "codex", "gemini", "opencode"] = (
+        "claude_code"
+    )
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     qa_model: str = "claude-sonnet-4-20250514"

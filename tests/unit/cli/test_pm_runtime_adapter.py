@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import typer
 
@@ -133,9 +133,9 @@ def test_pm_command_uses_backend_safe_default_model() -> None:
             return_value="bypassPermissions",
         ),
         patch(
-            "ouroboros.cli.commands.pm._run_pm_interview", new=Mock(return_value=object())
+            "ouroboros.cli.commands.pm._run_pm_interview",
+            new=AsyncMock(return_value=None),
         ) as mock_run,
-        patch("ouroboros.cli.commands.pm.asyncio.run"),
         patch("ouroboros.cli.commands.pm.print_warning") as mock_warning,
     ):
         pm_command(
@@ -146,7 +146,7 @@ def test_pm_command_uses_backend_safe_default_model() -> None:
             debug=False,
         )
 
-    mock_run.assert_called_once_with(
+    mock_run.assert_awaited_once_with(
         resume_id=None,
         model="backend-safe-default",
         backend="codex",
@@ -181,7 +181,7 @@ def test_pm_command_formats_factory_errors() -> None:
             raise AssertionError("Expected typer.Exit for backend configuration errors")
 
     mock_error.assert_called_once_with(
-        "OpenCode LLM adapter is not yet available. Supported backends: claude_code, codex, litellm"
+        "OpenCode LLM adapter is not yet available. Supported backends: claude_code, codex, gemini, litellm"
     )
 
 

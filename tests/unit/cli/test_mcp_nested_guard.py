@@ -9,7 +9,7 @@ Ensures that:
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from typer.testing import CliRunner
 
@@ -38,13 +38,14 @@ def test_serve_sets_nested_env_var(monkeypatch):
     # Patch asyncio.run to capture os.environ state when it's called
     captured_env = {}
 
-    def mock_asyncio_run(coro):
-        # Capture the environment at the time asyncio.run is called
+    async def mock_run_mcp_server(*args, **kwargs):
+        # Capture the environment at the time the coroutine is actually awaited
         captured_env["_OUROBOROS_NESTED"] = os.environ.get("_OUROBOROS_NESTED")
-        # Don't actually run anything
-        return None
 
-    with patch("ouroboros.cli.commands.mcp.asyncio.run", side_effect=mock_asyncio_run):
+    with patch(
+        "ouroboros.cli.commands.mcp._run_mcp_server",
+        new=AsyncMock(side_effect=mock_run_mcp_server),
+    ):
         result = runner.invoke(app, ["serve"])
 
     # Should exit cleanly (no exception)

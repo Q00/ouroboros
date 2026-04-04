@@ -42,8 +42,7 @@ def _make_seed(**overrides) -> PMSeed:
         ),
         "constraints": ("Must support 1000+ concurrent users",),
         "success_criteria": ("P95 latency < 200ms",),
-        "deferred_items": ("Offline mode",),
-        "decide_later_items": ("Which charting library to use?",),
+        "decide_later_items": ("Offline mode", "Which charting library to use?"),
         "assumptions": ("Users have modern browsers",),
         "interview_id": "int_renderer_test",
     }

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any
 import uuid
 
@@ -170,6 +171,99 @@ def _unwrap_verdict_data(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+_LINE_DECORATION_RE = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)")
+_BOLD_RE = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
+_KV_RE = re.compile(r"(?im)^(\w[\w ]*?)[ \t]*[:=\-][ \t]*(.+)$")
+_SCORE_FALLBACK_RE = re.compile(r"(?im)\bscore\b[ \t]*(?:is|-)[ \t]*([0-9]*\.?[0-9]+)")
+
+
+def _strip_line_decorations(text: str) -> str:
+    """Strip markdown/bullet formatting so downstream parsing stays simple."""
+    lines = []
+    for line in text.splitlines():
+        line = _LINE_DECORATION_RE.sub("", line)
+        line = _BOLD_RE.sub(r"\1", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _extract_kv_fields(text: str) -> dict[str, str]:
+    """Extract ``Key: Value`` or ``Key = Value`` pairs from cleaned text."""
+    fields: dict[str, str] = {}
+    for m in _KV_RE.finditer(text):
+        fields.setdefault(m.group(1).strip().lower(), m.group(2).strip())
+    return fields
+
+
+def _parse_non_json_qa_response(response_text: str) -> dict[str, Any] | None:
+    """Parse QA verdicts from plain-text fallbacks.
+
+    Some providers occasionally ignore structured-output constraints and return
+    readable prose such as ``Score: 0.84`` / ``Verdict: pass`` instead of JSON.
+    When that happens we still want the tool to degrade gracefully rather than
+    failing the whole QA step.
+    """
+    cleaned = _strip_line_decorations(response_text)
+    fields = _extract_kv_fields(cleaned)
+
+    raw_score = fields.get("score")
+    if raw_score:
+        score_num = re.match(r"([0-9]*\.?[0-9]+)", raw_score)
+    else:
+        # Fallback: "score is 0.85" / "score - 0.85" (word-bounded, not in KV)
+        score_num = _SCORE_FALLBACK_RE.search(cleaned)
+
+    if not score_num:
+        return None
+    try:
+        score = float(score_num.group(1))
+    except ValueError:
+        return None
+
+    differences: list[str] = []
+    suggestions: list[str] = []
+    dimensions: dict[str, float] = {}
+
+    # Track which section we're in based on headers
+    current_section = "differences"
+    _SECTION_RE = re.compile(r"(?i)^\s*#*\s*(suggestions?|differences?|dimensions?)\s*:?\s*$")
+    _BULLET_RE = re.compile(r"(?m)^\s*(?:[-*]|\d+[.)])\s+(.+)$")
+    _DIM_RE = re.compile(r"^(\w[\w ]*?)[:=\-]\s*([0-9]*\.?[0-9]+)\s*$")
+
+    for line in response_text.splitlines():
+        section_match = _SECTION_RE.match(line)
+        if section_match:
+            header = section_match.group(1).lower().rstrip("s")
+            if header == "suggestion":
+                current_section = "suggestions"
+            elif header == "dimension":
+                current_section = "dimensions"
+            else:
+                current_section = "differences"
+            continue
+
+        bullet_match = _BULLET_RE.match(line)
+        if bullet_match:
+            item = bullet_match.group(1).strip()
+            # Check if this bullet is a dimension (e.g. "accuracy: 0.9")
+            dim_match = _DIM_RE.match(item)
+            if dim_match and current_section == "dimensions":
+                dimensions[dim_match.group(1).strip().lower()] = float(dim_match.group(2))
+            elif current_section == "suggestions":
+                suggestions.append(item)
+            else:
+                differences.append(item)
+
+    return {
+        "score": score,
+        "verdict": fields.get("verdict", ""),
+        "dimensions": dimensions,
+        "differences": differences,
+        "suggestions": suggestions,
+        "reasoning": fields.get("reasoning", ""),
+    }
+
+
 def _parse_qa_response(
     response_text: str,
     pass_threshold: float = DEFAULT_PASS_THRESHOLD,
@@ -180,13 +274,15 @@ def _parse_qa_response(
         Result containing QAVerdict or error string.
     """
     json_str = extract_json_payload(response_text)
-    if not json_str:
-        return Result.err("Could not find JSON in QA response")
-
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        return Result.err(f"Invalid JSON in QA response: {e}")
+    if json_str:
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError as e:
+            return Result.err(f"Invalid JSON in QA response: {e}")
+    else:
+        data = _parse_non_json_qa_response(response_text)
+        if data is None:
+            return Result.err("Could not find JSON in QA response")
 
     # Unwrap nested verdict objects (e.g. {"qa_verdict": {...}})
     data = _unwrap_verdict_data(data)
@@ -506,11 +602,21 @@ class QAHandler:
                 )
             )
 
-        except Exception as e:
-            log.error("mcp.tool.qa.error", error=str(e))
+        except (ValueError, RuntimeError) as e:
+            # Configuration/bootstrap errors (unsupported backend, missing
+            # provider install) — actionable by the user, safe to surface.
+            log.warning("mcp.tool.qa.config_error", error=str(e))
             return Result.err(
                 MCPToolError(
-                    f"QA evaluation failed: {e}",
+                    f"QA setup failed: {e}",
+                    tool_name="ouroboros_qa",
+                )
+            )
+        except Exception:
+            log.exception("mcp.tool.qa.error")
+            return Result.err(
+                MCPToolError(
+                    "QA evaluation failed due to an internal error. Check server logs for details.",
                     tool_name="ouroboros_qa",
                 )
             )

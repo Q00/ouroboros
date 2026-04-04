@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -35,6 +37,7 @@ from pathlib import Path
 import structlog
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -48,6 +51,7 @@ log = structlog.get_logger(__name__)
 
 # Retry configuration for transient API errors
 _MAX_RETRIES = 5
+_MAX_JSON_RETRIES = 3  # Extra retries when response_format requires JSON but LLM returns prose
 _INITIAL_BACKOFF_SECONDS = 2.0  # Increased for custom CLI startup
 _RETRYABLE_ERROR_PATTERNS = (
     "concurrency",
@@ -244,13 +248,35 @@ class ClaudeCodeAdapter:
         # output. When callers request a schema, reinforce the requirement in the
         # prompt text and let downstream parsers extract JSON from the plain-text
         # response rather than depending on SDK-level structured_output.
-        if config.response_format and config.response_format.get("type") == "json_schema":
-            schema = config.response_format.get("json_schema", {})
-            schema_instruction = (
-                "Respond with ONLY a valid JSON object that matches this schema. "
-                "Do not use markdown fences, headers, or explanatory text.\n\n"
-                f"JSON schema:\n{json.dumps(schema, indent=2, sort_keys=True)}"
-            )
+        requires_json = bool(
+            config.response_format
+            and config.response_format.get("type") in ("json_schema", "json_object")
+        )
+        if requires_json:
+            fmt_type = config.response_format.get("type")
+            if fmt_type == "json_schema":
+                schema = config.response_format.get("json_schema", {})
+                # Derive the expected top-level type from the schema so the
+                # prompt instruction matches the schema contract (object, array, etc.)
+                top_type = schema.get("type", "object")
+                if top_type == "array":
+                    type_noun = "JSON array"
+                elif top_type == "object":
+                    type_noun = "JSON object"
+                else:
+                    # Primitive schemas (string, number, boolean, null)
+                    type_noun = "JSON value"
+                schema_instruction = (
+                    f"Respond with ONLY a valid {type_noun} that matches this schema. "
+                    "Do not use markdown fences, headers, or explanatory text.\n\n"
+                    f"JSON schema:\n{json.dumps(schema, indent=2, sort_keys=True)}"
+                )
+            else:
+                # json_object — no schema, but still steer toward JSON
+                schema_instruction = (
+                    "Respond with ONLY a valid JSON object. "
+                    "Do not use markdown fences, headers, or explanatory text."
+                )
             if system_prompt:
                 system_prompt = f"{system_prompt}\n\n{schema_instruction}"
             else:
@@ -275,6 +301,103 @@ class ClaudeCodeAdapter:
             claude_code_entrypoint=os.environ.get("CLAUDE_CODE_ENTRYPOINT"),
         )
 
+        result = await self._complete_with_transient_retry(prompt, config, system_prompt)
+
+        # JSON enforcement layer: if response_format requires JSON,
+        # normalize or retry until we get valid JSON.
+        if requires_json and result.is_ok:
+            result = await self._enforce_json(result, prompt, config, system_prompt)
+
+        return result
+
+    def _normalize_json_content(
+        self, result: Result[CompletionResponse, ProviderError]
+    ) -> Result[CompletionResponse, ProviderError] | None:
+        """Try to extract and normalize JSON from a successful result.
+
+        Returns:
+            Normalized result if JSON found, None if no valid JSON in content.
+        """
+        if result.is_err:
+            return result
+        extracted = extract_json_payload(result.value.content)
+        if extracted:
+            response = result.value
+            normalized_response = replace(
+                response,
+                content=extracted,
+                raw_response=deepcopy(response.raw_response),
+            )
+            return Result.ok(normalized_response)
+        return None
+
+    async def _enforce_json(
+        self,
+        result: Result[CompletionResponse, ProviderError],
+        prompt: str,
+        config: CompletionConfig,
+        system_prompt: str | None,
+    ) -> Result[CompletionResponse, ProviderError]:
+        """Normalize JSON content or retry until valid JSON is obtained.
+
+        If the response contains valid JSON (even wrapped in prose/fences),
+        extract and return just the JSON. If no valid JSON, retry up to
+        _MAX_JSON_RETRIES times. If all retries fail, return an error.
+        """
+        # Try to normalize the initial result
+        normalized = self._normalize_json_content(result)
+        if normalized is not None:
+            return normalized
+
+        log.warning(
+            "claude_code_adapter.json_not_found",
+            max_json_retries=_MAX_JSON_RETRIES,
+            response_preview=result.value.content[:120],
+        )
+
+        for json_attempt in range(1, _MAX_JSON_RETRIES + 1):
+            log.info(
+                "claude_code_adapter.json_retry",
+                attempt=json_attempt,
+                max_json_retries=_MAX_JSON_RETRIES,
+            )
+            result = await self._complete_with_transient_retry(prompt, config, system_prompt)
+            if result.is_err:
+                return result
+            normalized = self._normalize_json_content(result)
+            if normalized is not None:
+                return normalized
+
+        # All retries exhausted — return error instead of prose
+        log.error(
+            "claude_code_adapter.json_retries_exhausted",
+            max_json_retries=_MAX_JSON_RETRIES,
+            response_preview=result.value.content[:120] if result.is_ok else "N/A",
+        )
+        return Result.err(
+            ProviderError(
+                message=(
+                    f"JSON format required but LLM returned prose after {_MAX_JSON_RETRIES} retries"
+                ),
+                details={
+                    "last_response_preview": (
+                        result.value.content[:200] if result.is_ok else "N/A"
+                    ),
+                },
+            )
+        )
+
+    async def _complete_with_transient_retry(
+        self,
+        prompt: str,
+        config: CompletionConfig,
+        system_prompt: str | None,
+    ) -> Result[CompletionResponse, ProviderError]:
+        """Inner retry loop for transient API errors (rate limits, timeouts, etc.).
+
+        This handles infrastructure-level failures only. JSON format
+        enforcement is handled by the caller.
+        """
         last_error: ProviderError | None = None
 
         for attempt in range(_MAX_RETRIES):

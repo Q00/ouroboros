@@ -7,6 +7,7 @@ This module contains handlers for seed execution:
 
 import asyncio
 from dataclasses import dataclass, field
+import inspect
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -31,6 +32,7 @@ from ouroboros.core.worktree import (
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -96,7 +98,7 @@ def _extract_inherited_effective_tools(arguments: dict[str, Any]) -> list[str] |
 
 
 @dataclass
-class ExecuteSeedHandler:
+class ExecuteSeedHandler(BridgeAwareMixin):
     """Handler for the execute_seed tool.
 
     Executes a seed (task specification) in the Ouroboros system.
@@ -393,6 +395,8 @@ class ExecuteSeedHandler:
                     adapter=agent_adapter,
                     event_store=event_store,
                     console=console,
+                    mcp_manager=self.mcp_manager,
+                    mcp_tool_prefix=self.mcp_tool_prefix,
                     debug=False,
                     enable_decomposition=True,
                     inherited_runtime_handle=inherited_runtime_handle,
@@ -508,7 +512,9 @@ class ExecuteSeedHandler:
                             release_lock(_workspace.lock_path)
                         if _owns_event_store:
                             try:
-                                await _event_store.close()
+                                close_result = _event_store.close()
+                                if inspect.isawaitable(close_result):
+                                    await close_result
                             except Exception:
                                 log.exception("mcp.tool.execute_seed.event_store_close_error")
 
@@ -564,6 +570,13 @@ class ExecuteSeedHandler:
             finally:
                 if workspace is not None and not launched:
                     release_lock(workspace.lock_path)
+                if owns_event_store and not launched:
+                    try:
+                        close_result = event_store.close()
+                        if inspect.isawaitable(close_result):
+                            await close_result
+                    except Exception:
+                        log.exception("mcp.tool.execute_seed.event_store_close_error")
         except Exception as e:
             log.error("mcp.tool.execute_seed.error", error=str(e))
             return Result.err(

@@ -11,6 +11,7 @@ This module provides a skill registry that:
 from __future__ import annotations
 
 import asyncio
+import atexit
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -121,6 +122,16 @@ if WATCHDOG_AVAILABLE:
             self._registry = registry
             self._loop = asyncio.new_event_loop()
             self._loop_thread: Any = None
+
+        def close(self) -> None:
+            """Release watcher-owned event loop resources."""
+            if self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+                if self._loop_thread is not None:
+                    self._loop_thread.join(timeout=1.0)
+                    self._loop_thread = None
+            if not self._loop.is_closed():
+                self._loop.close()
 
         def _schedule_reload(self, skill_path: Path) -> None:
             """Schedule a reload task in the event loop.
@@ -380,6 +391,16 @@ class SkillRegistry:
             self._observer.join(timeout=1.0)
             self._observer = None
             log.info("plugin.skill.watcher_stopped")
+        if self._watcher is not None and hasattr(self._watcher, "close"):
+            self._watcher.close()
+            self._watcher = None
+
+    def __del__(self) -> None:
+        """Best-effort watcher cleanup for test and process shutdown."""
+        try:
+            self.stop_watcher()
+        except Exception:
+            pass
 
     async def _load_skill(self, skill_md_path: Path) -> SkillInstance:
         """Load a skill from its SKILL.md file.
@@ -707,3 +728,16 @@ def get_registry(skill_dir: Path | None = None) -> SkillRegistry:
         if _global_registry is None:
             _global_registry = SkillRegistry(skill_dir)
         return _global_registry
+
+
+def _cleanup_global_registry() -> None:
+    """Release watcher resources held by the module-level singleton."""
+    global _global_registry
+
+    with _registry_lock:
+        if _global_registry is not None:
+            _global_registry.stop_watcher()
+            _global_registry = None
+
+
+atexit.register(_cleanup_global_registry)

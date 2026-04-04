@@ -545,9 +545,48 @@ def create_drift_measured_event(
     )
 
 
+def create_execution_terminal_event(
+    execution_id: str,
+    session_id: str,
+    status: str,
+    *,
+    summary: dict[str, Any] | None = None,
+    error_message: str | None = None,
+    messages_processed: int = 0,
+) -> BaseEvent:
+    """Mirror a session terminal state into the execution event stream.
+
+    The orchestrator stores lifecycle events (started/completed/failed)
+    under ``aggregate_type="session"`` while runtime progress events use
+    ``aggregate_type="execution"``.  TUI and other consumers that poll
+    only the execution stream would never see the terminal transition.
+
+    This helper emits an ``execution.terminal`` event under the execution
+    aggregate so that a single-stream consumer can detect completion
+    without polling a second channel.
+    """
+    data: dict[str, Any] = {
+        "session_id": session_id,
+        "status": status,
+        "messages_processed": messages_processed,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    if summary is not None:
+        data["summary"] = summary
+    if error_message is not None:
+        data["error_message"] = error_message
+    return BaseEvent(
+        type="execution.terminal",
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data=data,
+    )
+
+
 __all__ = [
     "create_ac_stall_detected_event",
     "create_drift_measured_event",
+    "create_execution_terminal_event",
     "create_heartbeat_event",
     "create_mcp_tools_loaded_event",
     "create_progress_event",

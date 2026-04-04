@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+import inspect
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -200,7 +201,7 @@ class MockMCPSession:
 
         # Execute handler if provided
         if handler is not None:
-            if asyncio.iscoroutinefunction(handler):
+            if inspect.iscoroutinefunction(handler):
                 text = await handler(arguments)
             else:
                 text = handler(arguments)

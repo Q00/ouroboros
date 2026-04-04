@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -42,6 +43,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.events import (
     create_drift_measured_event,
+    create_execution_terminal_event,
     create_mcp_tools_loaded_event,
     create_progress_event,
     create_session_completed_event,
@@ -676,6 +678,37 @@ class OrchestratorRunner:
         recovery = data.get("recovery")
         return isinstance(recovery, dict) and recovery.get("kind") == "resume_retry"
 
+    async def _terminate_runtime_handle(
+        self,
+        runtime_handle: RuntimeHandle | None,
+        *,
+        session_id: str,
+        context: str,
+    ) -> None:
+        """Best-effort live runtime termination for handles that remain controllable."""
+        if runtime_handle is None or not runtime_handle.can_terminate:
+            return
+
+        try:
+            terminated = await runtime_handle.terminate()
+        except Exception as exc:
+            log.warning(
+                "orchestrator.runner.runtime_handle_terminate_failed",
+                session_id=session_id,
+                context=context,
+                backend=runtime_handle.backend,
+                error=str(exc),
+            )
+            return
+
+        if terminated:
+            log.info(
+                "orchestrator.runner.runtime_handle_terminated",
+                session_id=session_id,
+                context=context,
+                backend=runtime_handle.backend,
+            )
+
     def _should_emit_progress_event(
         self,
         message: AgentMessage,
@@ -1113,6 +1146,17 @@ class OrchestratorRunner:
                     error=str(cancel_result.error),
                 )
 
+        # Mirror cancellation into execution stream for TUI.
+        await self._event_store.append(
+            create_execution_terminal_event(
+                execution_id=execution_id,
+                session_id=session_id,
+                status="cancelled",
+                error_message="Execution cancelled by external request",
+                messages_processed=messages_processed,
+            )
+        )
+
         # Display cancellation notice
         self._console.print(
             Panel(
@@ -1302,6 +1346,9 @@ class OrchestratorRunner:
 
             last_tool: str | None = None
             last_completed_count = 0
+            runtime_handle: RuntimeHandle | None = None
+
+            cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
             with Status(
                 f"[bold cyan]Executing: {seed.goal[:50]}...[/]",
@@ -1311,128 +1358,141 @@ class OrchestratorRunner:
                 runtime_handle = self._seed_runtime_handle(
                     self._inherited_runtime_handle, tool_catalog=tool_catalog
                 )
-                async for message in self._adapter.execute_task(
-                    prompt=task_prompt,
-                    tools=merged_tools,
-                    system_prompt=system_prompt,
-                    resume_handle=runtime_handle,
-                ):
-                    messages_processed += 1
-                    projected = project_runtime_message(message)
-
-                    # Check for cancellation periodically
-                    if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
-                        if await self._check_cancellation(tracker.session_id):
-                            return await self._handle_cancellation(
-                                session_id=tracker.session_id,
-                                execution_id=exec_id,
-                                messages_processed=messages_processed,
-                                start_time=start_time,
-                            )
-
-                    tracker = await self._update_and_persist_progress(
-                        tracker,
-                        message,
-                        messages_processed,
-                        tracker.session_id,
+                async with aclosing(
+                    self._adapter.execute_task(  # type: ignore[type-var]
+                        prompt=task_prompt,
+                        tools=merged_tools,
+                        system_prompt=system_prompt,
+                        resume_handle=runtime_handle,
                     )
+                ) as message_stream:
+                    async for message in message_stream:
+                        messages_processed += 1
+                        projected = project_runtime_message(message)
 
-                    # Update workflow state tracker
-                    state_tracker.process_runtime_message(message)
+                        # Check for cancellation periodically
+                        if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
+                            if await self._check_cancellation(tracker.session_id):
+                                cancelled_result = await self._handle_cancellation(
+                                    session_id=tracker.session_id,
+                                    execution_id=exec_id,
+                                    messages_processed=messages_processed,
+                                    start_time=start_time,
+                                )
+                                break
 
-                    # Print log-style output for tool calls and agent messages
-                    if projected.tool_name and projected.tool_name != last_tool:
-                        status.stop()
-                        self._console.print(f"  [yellow]🔧 {projected.tool_name}[/yellow]")
-                        status.start()
-                        last_tool = projected.tool_name
-                    elif (
-                        projected.message_type == "assistant"
-                        and projected.content
-                        and not projected.tool_name
-                    ):
-                        # Show agent thinking/reasoning
-                        content = projected.content.strip()
-                        status.stop()
-                        self._console.print(f"  [dim]💭 {content}[/dim]")
-                        status.start()
-
-                    # Print when AC is completed
-                    current_completed = state_tracker.state.completed_count
-                    if current_completed > last_completed_count:
-                        status.stop()
-                        self._console.print(f"  [green]✓ AC {current_completed} completed[/green]")
-                        status.start()
-                        last_completed_count = current_completed
-
-                    # Update status with current activity
-                    ac_progress = (
-                        f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
-                    )
-                    tool_info = f" | {projected.tool_name}" if projected.tool_name else ""
-                    status.update(
-                        f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]"
-                    )
-
-                    # Emit workflow progress event for TUI
-                    # Use exec_id defined at start of function (not execution_id param)
-                    progress_data = state_tracker.state.to_tui_message_data(execution_id=exec_id)
-                    workflow_event = create_workflow_progress_event(
-                        execution_id=exec_id,
-                        session_id=tracker.session_id,
-                        acceptance_criteria=progress_data["acceptance_criteria"],
-                        completed_count=progress_data["completed_count"],
-                        total_count=progress_data["total_count"],
-                        current_ac_index=progress_data["current_ac_index"],
-                        current_phase=progress_data["current_phase"],
-                        activity=progress_data["activity"],
-                        activity_detail=progress_data["activity_detail"],
-                        elapsed_display=progress_data["elapsed_display"],
-                        estimated_remaining=progress_data["estimated_remaining"],
-                        messages_count=progress_data["messages_count"],
-                        tool_calls_count=progress_data["tool_calls_count"],
-                        estimated_tokens=progress_data["estimated_tokens"],
-                        estimated_cost_usd=progress_data["estimated_cost_usd"],
-                        last_update=progress_data.get("last_update"),
-                    )
-                    await self._event_store.append(workflow_event)
-
-                    tool_event = self._build_tool_called_event(tracker.session_id, message)
-                    if tool_event is not None:
-                        await self._event_store.append(tool_event)
-
-                    if self._should_emit_progress_event(message, messages_processed):
-                        progress_event = self._build_progress_event(
-                            tracker.session_id,
+                        tracker = await self._update_and_persist_progress(
+                            tracker,
                             message,
-                            step=messages_processed,
+                            messages_processed,
+                            tracker.session_id,
                         )
-                        await self._event_store.append(progress_event)
+                        if message.resume_handle is not None:
+                            runtime_handle = message.resume_handle
 
-                    # Measure and emit drift periodically
-                    if messages_processed % PROGRESS_EMIT_INTERVAL == 0:
-                        # Measure and emit drift
-                        drift_measurement = DriftMeasurement()
-                        drift_metrics = drift_measurement.measure(
-                            current_output=message.content,
-                            constraint_violations=[],  # TODO: track violations
-                            current_concepts=[],  # TODO: extract concepts
-                            seed=seed,
+                        # Update workflow state tracker
+                        state_tracker.process_runtime_message(message)
+
+                        # Print log-style output for tool calls and agent messages
+                        if projected.tool_name and projected.tool_name != last_tool:
+                            status.stop()
+                            self._console.print(f"  [yellow]🔧 {projected.tool_name}[/yellow]")
+                            status.start()
+                            last_tool = projected.tool_name
+                        elif (
+                            projected.message_type == "assistant"
+                            and projected.content
+                            and not projected.tool_name
+                        ):
+                            # Show agent thinking/reasoning
+                            content = projected.content.strip()
+                            status.stop()
+                            self._console.print(f"  [dim]💭 {content}[/dim]")
+                            status.start()
+
+                        # Print when AC is completed
+                        current_completed = state_tracker.state.completed_count
+                        if current_completed > last_completed_count:
+                            status.stop()
+                            self._console.print(
+                                f"  [green]✓ AC {current_completed} completed[/green]"
+                            )
+                            status.start()
+                            last_completed_count = current_completed
+
+                        # Update status with current activity
+                        ac_progress = f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
+                        tool_info = f" | {projected.tool_name}" if projected.tool_name else ""
+                        status.update(
+                            f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]"
                         )
-                        drift_event = create_drift_measured_event(
+
+                        # Emit workflow progress event for TUI
+                        # Use exec_id defined at start of function (not execution_id param)
+                        progress_data = state_tracker.state.to_tui_message_data(
+                            execution_id=exec_id
+                        )
+                        workflow_event = create_workflow_progress_event(
                             execution_id=exec_id,
-                            goal_drift=drift_metrics.goal_drift,
-                            constraint_drift=drift_metrics.constraint_drift,
-                            ontology_drift=drift_metrics.ontology_drift,
-                            combined_drift=drift_metrics.combined_drift,
-                            is_acceptable=drift_metrics.is_acceptable,
+                            session_id=tracker.session_id,
+                            acceptance_criteria=progress_data["acceptance_criteria"],
+                            completed_count=progress_data["completed_count"],
+                            total_count=progress_data["total_count"],
+                            current_ac_index=progress_data["current_ac_index"],
+                            current_phase=progress_data["current_phase"],
+                            activity=progress_data["activity"],
+                            activity_detail=progress_data["activity_detail"],
+                            elapsed_display=progress_data["elapsed_display"],
+                            estimated_remaining=progress_data["estimated_remaining"],
+                            messages_count=progress_data["messages_count"],
+                            tool_calls_count=progress_data["tool_calls_count"],
+                            estimated_tokens=progress_data["estimated_tokens"],
+                            estimated_cost_usd=progress_data["estimated_cost_usd"],
+                            last_update=progress_data.get("last_update"),
                         )
-                        await self._event_store.append(drift_event)
+                        await self._event_store.append(workflow_event)
 
-                    # Handle final message
-                    if message.is_final:
-                        final_message = message.content
-                        success = not message.is_error
+                        tool_event = self._build_tool_called_event(tracker.session_id, message)
+                        if tool_event is not None:
+                            await self._event_store.append(tool_event)
+
+                        if self._should_emit_progress_event(message, messages_processed):
+                            progress_event = self._build_progress_event(
+                                tracker.session_id,
+                                message,
+                                step=messages_processed,
+                            )
+                            await self._event_store.append(progress_event)
+
+                        # Measure and emit drift periodically
+                        if messages_processed % PROGRESS_EMIT_INTERVAL == 0:
+                            # Measure and emit drift
+                            drift_measurement = DriftMeasurement()
+                            drift_metrics = drift_measurement.measure(
+                                current_output=message.content,
+                                constraint_violations=[],  # TODO: track violations
+                                current_concepts=[],  # TODO: extract concepts
+                                seed=seed,
+                            )
+                            drift_event = create_drift_measured_event(
+                                execution_id=exec_id,
+                                goal_drift=drift_metrics.goal_drift,
+                                constraint_drift=drift_metrics.constraint_drift,
+                                ontology_drift=drift_metrics.ontology_drift,
+                                combined_drift=drift_metrics.combined_drift,
+                                is_acceptable=drift_metrics.is_acceptable,
+                            )
+                            await self._event_store.append(drift_event)
+
+                        # Handle final message
+                        if message.is_final:
+                            final_message = message.content
+                            success = not message.is_error
+
+            # If cancelled, return the cancellation result now that the
+            # generator has been properly closed via aclosing.
+            if cancelled_result is not None:
+                return cancelled_result
 
             # Calculate duration
             duration = (datetime.now(UTC) - start_time).total_seconds()
@@ -1483,6 +1543,19 @@ class OrchestratorRunner:
                         border_style="red",
                     )
                 )
+
+            # Mirror terminal state into the execution event stream so
+            # single-stream consumers (TUI) detect completion without
+            # polling the separate session aggregate.
+            terminal_event = create_execution_terminal_event(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                status="completed" if success else "failed",
+                summary=completion_summary if success else None,
+                error_message=final_message if not success else None,
+                messages_processed=messages_processed,
+            )
+            await self._event_store.append(terminal_event)
 
             log.info(
                 "orchestrator.runner.execute_completed",
@@ -1538,6 +1611,15 @@ class OrchestratorRunner:
                 tracker.session_id,
                 str(e),
             )
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=exec_id,
+                    session_id=tracker.session_id,
+                    status="failed",
+                    error_message=str(e),
+                    messages_processed=messages_processed,
+                )
+            )
 
             return Result.err(
                 OrchestratorError(
@@ -1548,6 +1630,12 @@ class OrchestratorRunner:
                         "messages_processed": messages_processed,
                     },
                 )
+            )
+        finally:
+            await self._terminate_runtime_handle(
+                runtime_handle,
+                session_id=tracker.session_id,
+                context="execute",
             )
 
     async def _execute_parallel(
@@ -1747,6 +1835,17 @@ class OrchestratorRunner:
                 )
             )
 
+        await self._event_store.append(
+            create_execution_terminal_event(
+                execution_id=exec_id,
+                session_id=tracker.session_id,
+                status="completed" if success else "failed",
+                summary=execution_summary if success else None,
+                error_message=final_message if not success else None,
+                messages_processed=parallel_result.total_messages,
+            )
+        )
+
         log.info(
             "orchestrator.runner.parallel_completed",
             execution_id=exec_id,
@@ -1912,115 +2011,128 @@ Note: This is a resumed session. Please continue from where execution was interr
 
             last_tool: str | None = None
             last_completed_count = state_tracker.state.completed_count
+            live_runtime_handle = runtime_handle
+            cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
             with Status(
                 f"[bold cyan]Resuming: {seed.goal[:50]}...[/]",
                 console=self._console,
                 spinner="dots",
             ) as status:
-                async for message in self._adapter.execute_task(
-                    prompt=resume_prompt,
-                    tools=merged_tools,
-                    system_prompt=system_prompt,
-                    resume_handle=runtime_handle,
-                ):
-                    messages_processed += 1
-                    projected = project_runtime_message(message)
+                async with aclosing(
+                    self._adapter.execute_task(  # type: ignore[type-var]
+                        prompt=resume_prompt,
+                        tools=merged_tools,
+                        system_prompt=system_prompt,
+                        resume_handle=runtime_handle,
+                    )
+                ) as message_stream:
+                    async for message in message_stream:
+                        messages_processed += 1
+                        projected = project_runtime_message(message)
 
-                    # Check for cancellation periodically
-                    if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
-                        if await self._check_cancellation(session_id):
-                            return await self._handle_cancellation(
-                                session_id=session_id,
-                                execution_id=tracker.execution_id,
-                                messages_processed=messages_processed,
-                                start_time=start_time,
+                        # Check for cancellation periodically
+                        if messages_processed % CANCELLATION_CHECK_INTERVAL == 0:
+                            if await self._check_cancellation(session_id):
+                                cancelled_result = await self._handle_cancellation(
+                                    session_id=session_id,
+                                    execution_id=tracker.execution_id,
+                                    messages_processed=messages_processed,
+                                    start_time=start_time,
+                                )
+                                break
+
+                        tracker = await self._update_and_persist_progress(
+                            tracker,
+                            message,
+                            messages_processed,
+                            session_id,
+                        )
+                        if message.resume_handle is not None:
+                            live_runtime_handle = message.resume_handle
+
+                        # Update workflow state tracker
+                        state_tracker.process_runtime_message(message)
+
+                        # Print log-style output for tool calls and agent messages
+                        if projected.tool_name and projected.tool_name != last_tool:
+                            status.stop()
+                            self._console.print(f"  [yellow]🔧 {projected.tool_name}[/yellow]")
+                            status.start()
+                            last_tool = projected.tool_name
+                        elif (
+                            projected.message_type == "assistant"
+                            and projected.content
+                            and not projected.tool_name
+                        ):
+                            # Show agent thinking/reasoning
+                            content = projected.content.strip()
+                            status.stop()
+                            self._console.print(f"  [dim]💭 {content}[/dim]")
+                            status.start()
+
+                        # Print when AC is completed
+                        current_completed = state_tracker.state.completed_count
+                        if current_completed > last_completed_count:
+                            status.stop()
+                            self._console.print(
+                                f"  [green]✓ AC {current_completed} completed[/green]"
+                            )
+                            status.start()
+                            last_completed_count = current_completed
+
+                        # Update status with current activity
+                        ac_progress = f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
+                        tool_info = f" | {projected.tool_name}" if projected.tool_name else ""
+                        status.update(
+                            f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]"
+                        )
+
+                        # Emit workflow progress event for TUI
+                        progress_data = state_tracker.state.to_tui_message_data(
+                            execution_id=session_id  # Use session_id as execution_id for resume
+                        )
+                        workflow_event = create_workflow_progress_event(
+                            execution_id=session_id,
+                            session_id=session_id,
+                            acceptance_criteria=progress_data["acceptance_criteria"],
+                            completed_count=progress_data["completed_count"],
+                            total_count=progress_data["total_count"],
+                            current_ac_index=progress_data["current_ac_index"],
+                            current_phase=progress_data["current_phase"],
+                            activity=progress_data["activity"],
+                            activity_detail=progress_data["activity_detail"],
+                            elapsed_display=progress_data["elapsed_display"],
+                            estimated_remaining=progress_data["estimated_remaining"],
+                            messages_count=progress_data["messages_count"],
+                            tool_calls_count=progress_data["tool_calls_count"],
+                            estimated_tokens=progress_data["estimated_tokens"],
+                            estimated_cost_usd=progress_data["estimated_cost_usd"],
+                            last_update=progress_data.get("last_update"),
+                        )
+                        await self._event_store.append(workflow_event)
+
+                        tool_event = self._build_tool_called_event(session_id, message)
+                        if tool_event is not None:
+                            await self._event_store.append(tool_event)
+
+                        if self._should_emit_progress_event(message, messages_processed):
+                            progress_event = self._build_progress_event(
+                                session_id,
+                                message,
+                                step=messages_processed,
+                            )
+                            await self._event_store.append(progress_event)
+
+                        if message.is_final:
+                            final_message = message.content
+                            success = not message.is_error
+                            recoverable_resume_failure = self._is_recoverable_resume_failure(
+                                message
                             )
 
-                    tracker = await self._update_and_persist_progress(
-                        tracker,
-                        message,
-                        messages_processed,
-                        session_id,
-                    )
-
-                    # Update workflow state tracker
-                    state_tracker.process_runtime_message(message)
-
-                    # Print log-style output for tool calls and agent messages
-                    if projected.tool_name and projected.tool_name != last_tool:
-                        status.stop()
-                        self._console.print(f"  [yellow]🔧 {projected.tool_name}[/yellow]")
-                        status.start()
-                        last_tool = projected.tool_name
-                    elif (
-                        projected.message_type == "assistant"
-                        and projected.content
-                        and not projected.tool_name
-                    ):
-                        # Show agent thinking/reasoning
-                        content = projected.content.strip()
-                        status.stop()
-                        self._console.print(f"  [dim]💭 {content}[/dim]")
-                        status.start()
-
-                    # Print when AC is completed
-                    current_completed = state_tracker.state.completed_count
-                    if current_completed > last_completed_count:
-                        status.stop()
-                        self._console.print(f"  [green]✓ AC {current_completed} completed[/green]")
-                        status.start()
-                        last_completed_count = current_completed
-
-                    # Update status with current activity
-                    ac_progress = (
-                        f"{state_tracker.state.completed_count}/{state_tracker.state.total_count}"
-                    )
-                    tool_info = f" | {projected.tool_name}" if projected.tool_name else ""
-                    status.update(
-                        f"[bold cyan]AC {ac_progress}{tool_info} | {messages_processed} msgs[/]"
-                    )
-
-                    # Emit workflow progress event for TUI
-                    progress_data = state_tracker.state.to_tui_message_data(
-                        execution_id=session_id  # Use session_id as execution_id for resume
-                    )
-                    workflow_event = create_workflow_progress_event(
-                        execution_id=session_id,
-                        session_id=session_id,
-                        acceptance_criteria=progress_data["acceptance_criteria"],
-                        completed_count=progress_data["completed_count"],
-                        total_count=progress_data["total_count"],
-                        current_ac_index=progress_data["current_ac_index"],
-                        current_phase=progress_data["current_phase"],
-                        activity=progress_data["activity"],
-                        activity_detail=progress_data["activity_detail"],
-                        elapsed_display=progress_data["elapsed_display"],
-                        estimated_remaining=progress_data["estimated_remaining"],
-                        messages_count=progress_data["messages_count"],
-                        tool_calls_count=progress_data["tool_calls_count"],
-                        estimated_tokens=progress_data["estimated_tokens"],
-                        estimated_cost_usd=progress_data["estimated_cost_usd"],
-                        last_update=progress_data.get("last_update"),
-                    )
-                    await self._event_store.append(workflow_event)
-
-                    tool_event = self._build_tool_called_event(session_id, message)
-                    if tool_event is not None:
-                        await self._event_store.append(tool_event)
-
-                    if self._should_emit_progress_event(message, messages_processed):
-                        progress_event = self._build_progress_event(
-                            session_id,
-                            message,
-                            step=messages_processed,
-                        )
-                        await self._event_store.append(progress_event)
-
-                    if message.is_final:
-                        final_message = message.content
-                        success = not message.is_error
-                        recoverable_resume_failure = self._is_recoverable_resume_failure(message)
+            if cancelled_result is not None:
+                return cancelled_result
 
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
@@ -2064,6 +2176,20 @@ Note: This is a resumed session. Please continue from where execution was interr
                     )
                 )
 
+            # Mirror terminal state into execution stream for TUI.
+            terminal_status = (
+                "completed" if success else ("paused" if recoverable_resume_failure else "failed")
+            )
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    status=terminal_status,
+                    error_message=final_message if not success else None,
+                    messages_processed=messages_processed,
+                )
+            )
+
             log.info(
                 "orchestrator.runner.resume_completed",
                 session_id=session_id,
@@ -2103,12 +2229,26 @@ Note: This is a resumed session. Please continue from where execution was interr
             self._unregister_session(tracker.execution_id, session_id)
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=tracker.execution_id,
+                    session_id=session_id,
+                    status="failed",
+                    error_message=str(e),
+                )
+            )
 
             return Result.err(
                 OrchestratorError(
                     message=f"Session resume failed: {e}",
                     details={"session_id": session_id},
                 )
+            )
+        finally:
+            await self._terminate_runtime_handle(
+                live_runtime_handle,
+                session_id=session_id,
+                context="resume",
             )
 
 

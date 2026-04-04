@@ -361,6 +361,9 @@ class EvaluateHandler:
             trigger_consensus=trigger_consensus,
         )
 
+        store = self.event_store
+        owns_event_store = False
+
         try:
             # Extract goal/constraints from seed if provided
             goal = ""
@@ -380,7 +383,9 @@ class EvaluateHandler:
 
             # Try to enrich from session repository if event_store available
             if not goal:
-                store = self.event_store or EventStore()
+                if store is None:
+                    store = EventStore()
+                    owns_event_store = True
                 try:
                     await store.initialize()
                     repo = SessionRepository(store)
@@ -404,10 +409,12 @@ class EvaluateHandler:
                 constraints=constraints,
             )
 
-            # Use injected or create services
+            # Use injected or create services.
+            # Evaluation reads multiple spec files (one Read call per AC), so
+            # max_turns must be well above 1.
             llm_adapter = self.llm_adapter or create_llm_adapter(
                 backend=self.llm_backend,
-                max_turns=1,
+                max_turns=20,
             )
             working_dir_str = arguments.get("working_dir")
             working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
@@ -484,14 +491,27 @@ class EvaluateHandler:
                     meta=meta,
                 )
             )
-        except Exception as e:
-            log.error("mcp.tool.evaluate.error", error=str(e))
+        except (ValueError, RuntimeError) as e:
+            # Configuration/bootstrap errors (unsupported backend, missing
+            # provider install) — actionable by the user, safe to surface.
+            log.warning("mcp.tool.evaluate.config_error", error=str(e))
             return Result.err(
                 MCPToolError(
-                    f"Evaluation failed: {e}",
+                    f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
                 )
             )
+        except Exception:
+            log.exception("mcp.tool.evaluate.error")
+            return Result.err(
+                MCPToolError(
+                    "Evaluation failed due to an internal error. Check server logs for details.",
+                    tool_name="ouroboros_evaluate",
+                )
+            )
+        finally:
+            if owns_event_store and store is not None:
+                await store.close()
 
     async def _has_code_changes(self, working_dir: Path) -> bool | None:
         """Detect whether the working tree has code changes.

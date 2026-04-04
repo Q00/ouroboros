@@ -130,8 +130,8 @@ def generate_pm_markdown(seed: PMSeed) -> str:
             lines.append(f"- {assumption}")
         lines.append("")
 
-    # Decide Later (merged: deferred + decide-later)
-    all_decide_later = list(seed.deferred_items or []) + list(seed.decide_later_items or [])
+    # Decide Later
+    all_decide_later = list(seed.decide_later_items or [])
     if all_decide_later:
         lines.append("## Decide Later")
         lines.append("")
@@ -439,7 +439,7 @@ class PMDocumentGenerator:
                 parts.append(f"- {a}")
             parts.append("")
 
-        all_decide_later = list(seed.deferred_items or []) + list(seed.decide_later_items or [])
+        all_decide_later = list(seed.decide_later_items or [])
         if all_decide_later:
             parts.append("**Decide Later:**")
             for item in all_decide_later:

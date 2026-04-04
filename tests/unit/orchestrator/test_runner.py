@@ -368,6 +368,54 @@ class TestOrchestratorRunner:
         assert resume_handle.metadata["tool_catalog"][0]["id"] == "builtin:Read"
         assert "Edit" in {tool["name"] for tool in resume_handle.metadata["tool_catalog"]}
 
+    @pytest.mark.asyncio
+    async def test_execute_seed_terminates_live_runtime_handle_after_completion(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Sequential runs should best-effort terminate live runtime handles on exit."""
+        from ouroboros.core.types import Result
+
+        terminate_calls = 0
+
+        async def _terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="oc-session-live",
+        ).bind_controls(terminate_callback=_terminate)
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="[TASK_COMPLETE]",
+                data={"subtype": "success"},
+                resume_handle=live_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+        assert terminate_calls == 1
+
     def test_build_progress_update_serializes_opencode_tool_result_metadata(
         self,
         runner: OrchestratorRunner,
