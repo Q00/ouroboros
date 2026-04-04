@@ -23,6 +23,7 @@ from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
 _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
 _GEMINI_BACKENDS = {"gemini", "gemini_cli"}
+_KIRO_BACKENDS = {"kiro", "kiro_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _LITELLM_BACKENDS = {"litellm", "openai", "openrouter"}
 _LLM_USE_CASES = frozenset({"default", "interview"})
@@ -37,6 +38,8 @@ def resolve_llm_backend(backend: str | None = None) -> str:
         return "codex"
     if candidate in _GEMINI_BACKENDS:
         return "gemini"
+    if candidate in _KIRO_BACKENDS:
+        return "kiro"
     if candidate in _OPENCODE_BACKENDS:
         msg = (
             "OpenCode LLM adapter is not yet available. "
@@ -69,6 +72,8 @@ def resolve_llm_permission_mode(
         # Interview uses LLM to generate questions — no file writes, but
         # CLI sandbox modes block LLM output entirely. Must bypass.
         return "bypassPermissions"
+    if resolved == "kiro":
+        return "default"
 
     return get_llm_permission_mode(backend=resolved)
 
@@ -122,6 +127,16 @@ def create_llm_adapter(
             cwd=cwd,
             max_turns=max_turns,
             on_message=on_message,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    if resolved_backend == "kiro":
+        from ouroboros.config import get_kiro_cli_path
+        from ouroboros.providers.kiro_adapter import KiroCodeAdapter
+
+        return KiroCodeAdapter(
+            cli_path=cli_path or get_kiro_cli_path(),
+            cwd=cwd,
             timeout=timeout,
             max_retries=max_retries,
         )

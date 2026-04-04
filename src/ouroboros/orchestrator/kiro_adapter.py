@@ -1,0 +1,385 @@
+"""Kiro CLI agent runtime adapter via subprocess.
+
+Calls ``kiro-cli chat --no-interactive --trust-all-tools`` for autonomous
+code execution tasks.  Implements the AgentRuntime protocol so it can be
+used as a drop-in replacement for ClaudeAgentAdapter / CodexCliRuntime.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections import deque
+from collections.abc import AsyncIterator
+import contextlib
+import os
+from pathlib import Path
+import shutil
+
+from ouroboros.core.errors import ProviderError
+from ouroboros.core.types import Result
+from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    RuntimeHandle,
+    TaskResult,
+)
+
+log = get_logger(__name__)
+
+_DEFAULT_TIMEOUT = 600.0
+_DEFAULT_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 2
+_RETRYABLE_EXIT_CODES = (1, 137)
+_PROCESS_SHUTDOWN_TIMEOUT = 5.0
+
+_MODEL_NAME_MAP: dict[str, str] = {
+    "claude-sonnet-4-6": "claude-sonnet-4.6",
+    "claude-opus-4-6": "claude-opus-4.6",
+    "claude-sonnet-4-5": "claude-sonnet-4.5",
+    "claude-opus-4-5": "claude-opus-4.5",
+    "claude-haiku-4-5": "claude-haiku-4.5",
+}
+
+# Environment keys stripped from child processes to prevent recursive MCP
+# startup and nested session detection conflicts.
+_STRIPPED_ENV_KEYS = (
+    "OUROBOROS_AGENT_RUNTIME",
+    "OUROBOROS_LLM_BACKEND",
+    "CLAUDECODE",
+)
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+    """Gracefully terminate, then force-kill a subprocess."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+        await asyncio.wait_for(proc.wait(), timeout=_PROCESS_SHUTDOWN_TIMEOUT)
+    except (TimeoutError, ProcessLookupError):
+        pass
+    if proc.returncode is None:
+        try:
+            proc.kill()
+            await asyncio.wait_for(proc.wait(), timeout=_PROCESS_SHUTDOWN_TIMEOUT)
+        except (TimeoutError, ProcessLookupError):
+            pass
+
+
+class KiroAgentAdapter:
+    """Agent runtime using Kiro CLI subprocess.
+
+    Implements the AgentRuntime protocol for autonomous task execution.
+    Maps ``permission_mode`` onto kiro-cli ``--trust-tools`` / ``--trust-all-tools``
+    flags to honor the runtime safety contract.
+    """
+
+    _runtime_backend_name = "kiro"
+    _max_ouroboros_depth = 5
+    _startup_output_timeout = 60.0
+    _stdout_idle_timeout = 300.0
+    _max_stderr_lines = 512
+
+    def __init__(
+        self,
+        *,
+        cli_path: str | Path | None = None,
+        model: str | None = None,
+        cwd: str | Path | None = None,
+        permission_mode: str | None = None,
+        skill_dispatcher: object | None = None,
+        llm_backend: str | None = None,
+        **_kwargs: object,  # absorb extra kwargs from factory for forward compat
+    ) -> None:
+        self._cli_path = self._resolve_cli_path(cli_path)
+        self._model = model
+        self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
+        self._permission_mode = permission_mode or "acceptEdits"
+        self._skill_dispatcher = skill_dispatcher
+        self._llm_backend = llm_backend or "kiro"
+        log.info("kiro_agent.init", cli_path=self._cli_path, cwd=self._cwd)
+
+    # -- AgentRuntime protocol properties --
+
+    @property
+    def runtime_backend(self) -> str:
+        return self._runtime_backend_name
+
+    @property
+    def working_directory(self) -> str | None:
+        return self._cwd
+
+    @property
+    def permission_mode(self) -> str | None:
+        return self._permission_mode
+
+    # -- Internal helpers --
+
+    def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
+        if cli_path:
+            return str(cli_path)
+        from ouroboros.config import get_kiro_cli_path
+
+        configured = get_kiro_cli_path()
+        if configured:
+            return configured
+        return shutil.which("kiro-cli") or "kiro-cli"
+
+    def _build_child_env(self) -> dict[str, str]:
+        """Build an isolated environment for the child kiro-cli process.
+
+        Strips keys that would cause recursive MCP startup or nested session
+        conflicts, and enforces a recursion depth ceiling.
+        """
+        env = os.environ.copy()
+        for key in _STRIPPED_ENV_KEYS:
+            env.pop(key, None)
+        try:
+            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        except (ValueError, TypeError):
+            depth = 1
+        if depth > self._max_ouroboros_depth:
+            msg = f"Maximum Ouroboros nesting depth ({self._max_ouroboros_depth}) exceeded"
+            raise RuntimeError(msg)
+        env["_OUROBOROS_DEPTH"] = str(depth)
+        env["OUROBOROS_SUBAGENT"] = "1"
+        return env
+
+    def _build_permission_args(self) -> list[str]:
+        """Map permission_mode onto kiro-cli trust flags.
+
+        Mapping:
+        - ``default``           → ``--trust-tools=''`` (no tool trust)
+        - ``acceptEdits``       → ``--trust-all-tools`` (full auto)
+        - ``bypassPermissions`` → ``--trust-all-tools``
+        """
+        if self._permission_mode == "default":
+            return ["--trust-tools="]
+        return ["--trust-all-tools"]
+
+    def _build_cmd(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        tools: list[str] | None = None,
+        resume_session_id: str | None = None,
+    ) -> list[str]:
+        cmd = [self._cli_path, "chat", "--no-interactive"]
+        cmd.extend(self._build_permission_args())
+        if self._model:
+            mapped = _MODEL_NAME_MAP.get(self._model, self._model)
+            cmd.extend(["--model", mapped])
+        if resume_session_id:
+            cmd.append("--resume")
+
+        parts: list[str] = []
+        if system_prompt:
+            parts.append(f"<system>\n{system_prompt}\n</system>")
+        if tools is not None and len(tools) == 0:
+            parts.append(
+                "IMPORTANT: You MUST NOT use any tools in this response. Respond with text only."
+            )
+        elif tools is not None and len(tools) > 0:
+            allowed = ", ".join(tools)
+            parts.append(
+                f"You may ONLY use the following tools: {allowed}. Do not use any other tools."
+            )
+        parts.append(prompt)
+        cmd.append("\n\n".join(parts))
+        return cmd
+
+    async def _collect_stderr(
+        self,
+        stream: asyncio.StreamReader | None,
+    ) -> list[str]:
+        """Drain stderr concurrently without blocking stdout processing."""
+        if stream is None:
+            return []
+        lines: deque[str] = deque(maxlen=self._max_stderr_lines)
+        try:
+            async for raw_line in stream:
+                line = raw_line.decode(errors="replace").rstrip()
+                if line:
+                    lines.append(line)
+        except Exception:
+            pass
+        return list(lines)
+
+    def _build_runtime_handle(self, proc: asyncio.subprocess.Process) -> RuntimeHandle:
+        return RuntimeHandle(
+            backend=self._runtime_backend_name,
+            native_session_id=None,
+            metadata={"pid": getattr(proc, "pid", None)},
+        )
+
+    # -- AgentRuntime protocol methods --
+
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+    ) -> AsyncIterator[AgentMessage]:
+        """Execute a task and stream normalized messages."""
+        cmd = self._build_cmd(prompt, system_prompt, tools, resume_session_id)
+        env = self._build_child_env()
+        current_handle: RuntimeHandle | None = None
+
+        yield AgentMessage(
+            type="system",
+            content=f"Starting Kiro CLI: {self._cli_path}",
+            data={"subtype": "init", "cli_path": self._cli_path},
+            resume_handle=current_handle,
+        )
+
+        proc: asyncio.subprocess.Process | None = None
+        stderr_task: asyncio.Task[list[str]] | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._cwd,
+                env=env,
+            )
+            current_handle = self._build_runtime_handle(proc)
+
+            # H2: drain stderr concurrently to prevent pipe buffer deadlock
+            stderr_task = asyncio.create_task(self._collect_stderr(proc.stderr))
+
+            # C1: read stdout with per-line idle timeout
+            collected: list[str] = []
+            saw_output = False
+            while True:
+                timeout = (
+                    self._startup_output_timeout if not saw_output else self._stdout_idle_timeout
+                )
+                try:
+                    raw_line = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=timeout,
+                    )
+                except TimeoutError:
+                    phase = "startup" if not saw_output else "idle"
+                    log.warning("kiro_agent.stdout_timeout", phase=phase, timeout=timeout)
+                    await _terminate_process(proc)
+                    stderr_lines = await stderr_task if stderr_task else []
+                    detail = "\n".join(stderr_lines).strip()
+                    yield AgentMessage(
+                        type="result",
+                        content=f"Kiro CLI became unresponsive ({phase} timeout): {detail}"
+                        if detail
+                        else f"Kiro CLI became unresponsive ({phase} timeout after {timeout}s)",
+                        data={"subtype": "error", "error_type": "TimeoutError"},
+                        resume_handle=current_handle,
+                    )
+                    return
+
+                if not raw_line:  # EOF
+                    break
+
+                line = raw_line.decode(errors="replace").rstrip()
+                if line:
+                    saw_output = True
+                    collected.append(line)
+                    yield AgentMessage(
+                        type="assistant",
+                        content=line,
+                        resume_handle=current_handle,
+                    )
+
+            # Normal completion — wait for process exit
+            await asyncio.wait_for(proc.wait(), timeout=_PROCESS_SHUTDOWN_TIMEOUT)
+            stderr_lines = await stderr_task if stderr_task else []
+
+            if proc.returncode == 0:
+                final = "\n".join(collected)
+                yield AgentMessage(
+                    type="result",
+                    content=final,
+                    data={"subtype": "success"},
+                    resume_handle=current_handle,
+                )
+            else:
+                stderr_text = "\n".join(stderr_lines).strip()
+                yield AgentMessage(
+                    type="result",
+                    content=f"Kiro CLI failed (exit {proc.returncode}): {stderr_text}",
+                    data={"subtype": "error", "exit_code": proc.returncode},
+                    resume_handle=current_handle,
+                )
+
+        except asyncio.CancelledError:
+            # C2: clean up subprocess on task cancellation
+            if proc is not None:
+                log.warning("kiro_agent.task_cancelled", cwd=self._cwd)
+                await _terminate_process(proc)
+            raise
+        except FileNotFoundError:
+            yield AgentMessage(
+                type="result",
+                content=f"Kiro CLI not found at: {self._cli_path}",
+                data={"subtype": "error"},
+                resume_handle=current_handle,
+            )
+        finally:
+            if proc is not None:
+                await _terminate_process(proc)
+            if stderr_task is not None and not stderr_task.done():
+                stderr_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await stderr_task
+
+    async def execute_task_to_result(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+    ) -> Result[TaskResult, ProviderError]:
+        """Execute with retry logic, return collected result."""
+        last_error: ProviderError | None = None
+
+        for attempt in range(_DEFAULT_MAX_RETRIES):
+            messages: list[AgentMessage] = []
+            async for msg in self.execute_task(
+                prompt, tools, system_prompt, resume_handle, resume_session_id
+            ):
+                messages.append(msg)
+
+            if not messages:
+                last_error = ProviderError("No messages from Kiro CLI")
+                continue
+
+            final = messages[-1]
+            if final.is_final and not final.is_error:
+                return Result.ok(
+                    TaskResult(
+                        success=True,
+                        final_message=final.content,
+                        messages=tuple(messages),
+                        resume_handle=final.resume_handle,
+                    )
+                )
+
+            error_msg = final.content if final.is_final else "Unknown error"
+            if not self._is_retryable(error_msg) or attempt >= _DEFAULT_MAX_RETRIES - 1:
+                return Result.err(ProviderError(error_msg))
+
+            last_error = ProviderError(error_msg)
+            log.warning("kiro_agent.retrying", attempt=attempt + 1, error=error_msg)
+            await asyncio.sleep(_RETRY_BASE_DELAY**attempt)
+
+        return Result.err(last_error or ProviderError("Max retries exceeded"))
+
+    @staticmethod
+    def _is_retryable(error_msg: str) -> bool:
+        return "timed out" in error_msg.lower() or any(
+            f"exit {code}" in error_msg for code in _RETRYABLE_EXIT_CODES
+        )
+
+
+__all__ = ["KiroAgentAdapter"]
