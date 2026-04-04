@@ -59,6 +59,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
+    GEMINI = "gemini"
 
 
 def _derive_quality_bar(seed: "Seed") -> str:
@@ -418,7 +419,7 @@ def workflow(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator mode (claude or codex).",
+            help="Agent runtime backend for orchestrator mode (claude, codex, or gemini).",
             case_sensitive=False,
         ),
     ] = None,

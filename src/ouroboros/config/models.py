@@ -295,6 +295,10 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - Absolute path: /path/to/opencode
             - ~ expansion: ~/.local/bin/opencode
             - None: Resolve from PATH at runtime
+        gemini_cli_path: Path to Gemini CLI binary. Supports:
+            - Absolute path: /path/to/gemini
+            - ~ expansion: ~/.local/bin/gemini
+            - None: Resolve from PATH at runtime
         default_max_turns: Default max turns for agent execution
         use_worktrees: Whether mutating workflows run in dedicated git worktrees
         worktree_root: Root directory for managed task worktrees
@@ -302,7 +306,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
         worktree_lock_stale_after_minutes: Staleness threshold for task lock recovery
     """
 
-    runtime_backend: Literal["claude", "codex", "opencode"] = "claude"
+    runtime_backend: Literal["claude", "codex", "opencode", "gemini"] = "claude"
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = (
         "bypassPermissions"
@@ -310,13 +314,14 @@ class OrchestratorConfig(BaseModel, frozen=True):
     cli_path: str | None = None
     codex_cli_path: str | None = None
     opencode_cli_path: str | None = None
+    gemini_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
     use_worktrees: bool = True
     worktree_root: str = "~/.ouroboros/worktrees"
     worktree_cleanup: Literal["keep"] = "keep"
     worktree_lock_stale_after_minutes: int = Field(default=60, ge=1)
 
-    @field_validator("cli_path", "codex_cli_path", "opencode_cli_path")
+    @field_validator("cli_path", "codex_cli_path", "opencode_cli_path", "gemini_cli_path")
     @classmethod
     def expand_cli_path(cls, v: str | None) -> str | None:
         """Expand ~ in cli_path."""

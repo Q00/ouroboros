@@ -9,6 +9,7 @@ from ouroboros.config import (
     get_agent_runtime_backend,
     get_cli_path,
     get_codex_cli_path,
+    get_gemini_cli_path,
     get_llm_backend,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
@@ -17,9 +18,11 @@ from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
 # TODO: uncomment when OpenCode runtime is shipped
 # from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.command_dispatcher import create_codex_command_dispatcher
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 
 _CLAUDE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
+_GEMINI_BACKENDS = {"gemini", "gemini_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 
 
@@ -30,6 +33,8 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
         return "claude"
     if candidate in _CODEX_BACKENDS:
         return "codex"
+    if candidate in _GEMINI_BACKENDS:
+        return "gemini"
     if candidate in _OPENCODE_BACKENDS:
         msg = "OpenCode runtime is not yet available. Supported backends: claude, codex"
         raise ValueError(msg)
@@ -75,6 +80,11 @@ def create_agent_runtime(
     if resolved_backend == "codex":
         return CodexCliRuntime(
             cli_path=cli_path or get_codex_cli_path(),
+            **runtime_kwargs,
+        )
+    if resolved_backend == "gemini":
+        return GeminiCLIRuntime(
+            cli_path=cli_path or get_gemini_cli_path(),
             **runtime_kwargs,
         )
 

@@ -29,6 +29,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
+    GEMINI = "gemini"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -37,6 +38,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
+    GEMINI = "gemini"
 
 
 def _write_pid_file() -> bool:
@@ -262,7 +264,7 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or gemini).",
             case_sensitive=False,
         ),
     ] = None,
@@ -271,7 +273,7 @@ def serve(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or gemini)."
             ),
             case_sensitive=False,
         ),
@@ -349,7 +351,7 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or gemini).",
             case_sensitive=False,
         ),
     ] = None,
@@ -358,7 +360,7 @@ def info(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or gemini)."
             ),
             case_sensitive=False,
         ),

@@ -31,6 +31,7 @@ Functions:
     get_cli_path: Get Claude CLI path from env var or config
     get_codex_cli_path: Get Codex CLI path from env var or config
     get_opencode_cli_path: Get OpenCode CLI path from env var or config
+    get_gemini_cli_path: Get Gemini CLI path from env var or config
 """
 
 import os
@@ -57,7 +58,9 @@ from ouroboros.core.errors import ConfigError  # noqa: E402
 
 _CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
+_GEMINI_LLM_BACKENDS = frozenset({"gemini", "gemini_cli"})
 _CODEX_DEFAULT_MODEL = "default"
+_GEMINI_DEFAULT_MODEL = "gemini-2.5-pro"
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
     "openrouter/anthropic/claude-opus-4-6",
@@ -481,9 +484,8 @@ def get_gemini_cli_path() -> str | None:
 
     try:
         config = load_config()
-        gemini_path = getattr(config.orchestrator, "gemini_cli_path", None)
-        if gemini_path:
-            return gemini_path
+        if config.orchestrator.gemini_cli_path:
+            return config.orchestrator.gemini_cli_path
     except ConfigError:
         pass
 
@@ -553,6 +555,8 @@ def _default_model_for_backend(
     """Map generic defaults to a backend-safe sentinel when needed."""
     if _resolve_llm_backend_for_models(backend) in _CODEX_LLM_BACKENDS:
         return _CODEX_DEFAULT_MODEL
+    if _resolve_llm_backend_for_models(backend) in _GEMINI_LLM_BACKENDS:
+        return _GEMINI_DEFAULT_MODEL
     return default_model
 
 
@@ -582,6 +586,12 @@ def _normalize_configured_model_for_backend(
     ):
         return _CODEX_DEFAULT_MODEL
 
+    if (
+        _resolve_llm_backend_for_models(backend) in _GEMINI_LLM_BACKENDS
+        and candidate == default_model
+    ):
+        return _GEMINI_DEFAULT_MODEL
+
     return candidate
 
 
@@ -598,6 +608,12 @@ def _normalize_configured_models_for_backend(
 
     if (
         _resolve_llm_backend_for_models(backend) in _CODEX_LLM_BACKENDS
+        and normalized == default_models
+    ):
+        return _default_models_for_backend(default_models, backend=backend)
+
+    if (
+        _resolve_llm_backend_for_models(backend) in _GEMINI_LLM_BACKENDS
         and normalized == default_models
     ):
         return _default_models_for_backend(default_models, backend=backend)

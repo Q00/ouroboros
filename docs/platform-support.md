@@ -25,6 +25,7 @@ For installation instructions, see [Getting Started](getting-started.md).
 |--------------------|-------|-------|------------------|-------------------|
 | Claude Code        | Yes   | Yes   | Yes              | Experimental      |
 | Codex CLI          | Yes   | Yes   | Yes              | Not supported     |
+| Gemini CLI         | Yes   | Untested | Untested         | Experimental      |
 | *(custom adapter)* | Depends on adapter | Depends on adapter | Depends on adapter | Depends on adapter |
 
 See the [runtime capability matrix](runtime-capability-matrix.md) for a feature comparison across backends.

@@ -229,8 +229,8 @@ class TestBuildCommand:
 
     def test_cli_path_is_first_element(self) -> None:
         adapter = GeminiCLIAdapter(cli_path="/usr/local/bin/gemini")
-        cmd = adapter._build_command("x", "gemini-2.5-flash")
-        assert cmd[0] == "/usr/local/bin/gemini"
+        cmd = adapter._build_command("x", "gemini-3-flash-preview")
+        assert cmd[0] == str(Path("/usr/local/bin/gemini").resolve())
 
 
 class TestIsRetryable:

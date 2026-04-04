@@ -22,8 +22,8 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_VALID_BACKENDS = ("claude", "codex", "opencode")
-_SWITCHABLE_BACKENDS = ("claude", "codex")
+_VALID_BACKENDS = ("claude", "codex", "opencode", "gemini")
+_SWITCHABLE_BACKENDS = ("claude", "codex", "gemini")
 
 
 def _load_config() -> tuple[dict, Path]:
@@ -86,6 +86,8 @@ def _resolve_cli_path(data: dict) -> str | None:
     backend = data.get("orchestrator", {}).get("runtime_backend", "claude")
     if backend == "codex":
         return data.get("orchestrator", {}).get("codex_cli_path")
+    if backend == "gemini":
+        return data.get("orchestrator", {}).get("gemini_cli_path")
     return data.get("orchestrator", {}).get("cli_path")
 
 
@@ -146,7 +148,7 @@ def show(
 def backend(
     new_backend: Annotated[
         str | None,
-        typer.Argument(help="Backend to switch to (claude, codex)."),
+        typer.Argument(help="Backend to switch to (claude, codex, gemini)."),
     ] = None,
 ) -> None:
     """Show or switch the runtime backend.
@@ -170,7 +172,7 @@ def backend(
         cli_path = _resolve_cli_path(data)
         if cli_path:
             console.print(f"[bold]CLI path:[/bold]        [dim]{cli_path}[/dim]")
-        console.print("\n[dim]Switch with: ouroboros config backend <claude|codex>[/dim]\n")
+        console.print("\n[dim]Switch with: ouroboros config backend <claude|codex|gemini>[/dim]\n")
         return
 
     # Validate
@@ -188,7 +190,7 @@ def backend(
         return
 
     # Detect CLI path
-    cli_name = "claude" if new_backend == "claude" else "codex"
+    cli_name = "claude" if new_backend == "claude" else new_backend
     cli_path = shutil.which(cli_name)
     if not cli_path:
         print_error(f"{cli_name} CLI not found in PATH.\nInstall it first, then retry.")
@@ -200,7 +202,7 @@ def backend(
     # Suppress setup output; detect non-exception failures by monkey-patching
     # print_error to set a flag.
     from ouroboros.cli.commands import setup as setup_mod
-    from ouroboros.cli.commands.setup import _setup_claude, _setup_codex
+    from ouroboros.cli.commands.setup import _setup_claude, _setup_codex, _setup_gemini
 
     _setup_had_errors = False
     _orig_print_error = setup_mod.print_error
@@ -219,6 +221,8 @@ def backend(
             _setup_claude(cli_path)
         elif new_backend == "codex":
             _setup_codex(cli_path)
+        elif new_backend == "gemini":
+            _setup_gemini(cli_path)
     except Exception as exc:
         setup_failed = True
         console.quiet = prev_quiet
@@ -414,6 +418,10 @@ def validate() -> None:
         cli = data.get("orchestrator", {}).get("codex_cli_path")
         if cli and not Path(cli).exists():
             issues.append(f"Codex CLI path does not exist: {cli}")
+    elif backend_val == "gemini":
+        cli = data.get("orchestrator", {}).get("gemini_cli_path")
+        if cli and not Path(cli).exists():
+            issues.append(f"Gemini CLI path does not exist: {cli}")
     elif backend_val == "opencode":
         cli = data.get("orchestrator", {}).get("opencode_cli_path")
         if cli and not Path(cli).exists():

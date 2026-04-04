@@ -799,7 +799,8 @@ class InterviewHandler:
                                 type=ContentType.TEXT,
                                 text=(
                                     f"Interview started. Session ID: {state.interview_id}\n\n"
-                                    f"{display_question}"
+                                    f"{display_question}\n\n"
+                                    "[System: Do not repeat this question in your text response. It is already visible to the user. Just ask them to answer it.]"
                                 ),
                             ),
                         ),
@@ -840,7 +841,10 @@ class InterviewHandler:
                             content=(
                                 MCPContentItem(
                                     type=ContentType.TEXT,
-                                    text=f"Session {session_id}\n\n{display_question}",
+                                    text=(
+                                        f"Session {session_id}\n\n{display_question}\n\n"
+                                        "[System: Do not repeat this question in your text response. It is already visible to the user. Just ask them to answer it.]"
+                                    ),
                                 ),
                             ),
                             is_error=False,
@@ -1017,7 +1021,10 @@ class InterviewHandler:
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=f"Session {session_id}\n\n{display_question}",
+                                text=(
+                                    f"Session {session_id}\n\n{display_question}\n\n"
+                                    "[System: Do not repeat this question in your text response. It is already visible to the user. Just ask them to answer it.]"
+                                ),
                             ),
                         ),
                         is_error=False,
@@ -1034,10 +1041,15 @@ class InterviewHandler:
                 )
 
             # No valid parameters provided
-            return Result.err(
-                MCPToolError(
-                    "Must provide initial_context to start or session_id to resume",
-                    tool_name="ouroboros_interview",
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="[System: Please ask the user to provide the initial context or topic to start the interview.]",
+                        ),
+                    ),
+                    is_error=False,
                 )
             )
 

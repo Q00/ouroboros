@@ -152,7 +152,7 @@ def _get_current_backend() -> str | None:
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH."""
     runtimes: dict[str, str | None] = {}
-    for name in ("claude", "codex", "opencode"):
+    for name in ("claude", "codex", "opencode", "gemini"):
         path = shutil.which(name)
         runtimes[name] = path
     return runtimes
@@ -367,6 +367,84 @@ def _setup_claude(claude_path: str) -> None:
     _ensure_claude_mcp_entry()
 
     print_success(f"Configured Claude Code runtime (CLI: {claude_path})")
+    print_info(f"Config saved to: {config_path}")
+
+
+def _ensure_gemini_mcp_entry() -> None:
+    """Ensure ~/.gemini/settings.json has a correct ouroboros MCP entry."""
+    import json
+
+    mcp_config_path = Path.home() / ".gemini" / "settings.json"
+    mcp_config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    mcp_data: dict = {}
+    if mcp_config_path.exists():
+        try:
+            mcp_data = json.loads(mcp_config_path.read_text())
+        except json.JSONDecodeError:
+            pass
+
+    mcp_data.setdefault("mcpServers", {})
+
+    existing = mcp_data["mcpServers"].get("ouroboros")
+    detected = _detect_mcp_entry()
+
+    if existing is None:
+        if detected is None:
+            print_warning(
+                "Cannot register MCP server: no working ouroboros installation found.\n"
+                "Install with: pipx install ouroboros-ai"
+            )
+            return
+        mcp_data["mcpServers"]["ouroboros"] = detected
+        print_success("Registered MCP server in ~/.gemini/settings.json")
+    else:
+        _KNOWN_COMMANDS = {"uvx", "ouroboros", "python3", "python"}
+        needs_write = False
+        if detected is not None and existing.get("command") in _KNOWN_COMMANDS:
+            if (
+                existing.get("command") != detected["command"]
+                or existing.get("args") != detected["args"]
+            ):
+                existing["command"] = detected["command"]
+                existing["args"] = detected["args"]
+                needs_write = True
+                print_info("Updated MCP server entry in ~/.gemini/settings.json.")
+
+        if not needs_write:
+            print_info("Gemini MCP server already registered.")
+            return
+
+    with mcp_config_path.open("w") as f:
+        json.dump(mcp_data, f, indent=2)
+
+
+def _setup_gemini(gemini_path: str) -> None:
+    """Configure Ouroboros for the Gemini CLI runtime."""
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text()) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text()) or {}
+
+    config_dict.setdefault("orchestrator", {})
+    config_dict["orchestrator"]["runtime_backend"] = "gemini"
+    config_dict["orchestrator"]["gemini_cli_path"] = gemini_path
+
+    config_dict.setdefault("llm", {})
+    config_dict["llm"]["backend"] = "gemini"
+
+    with config_path.open("w") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    _ensure_gemini_mcp_entry()
+
+    print_success(f"Configured Gemini CLI runtime (CLI: {gemini_path})")
     print_info(f"Config saved to: {config_path}")
 
 
@@ -635,6 +713,12 @@ def setup(
             print_error("Codex CLI not found in PATH.")
             raise typer.Exit(1)
         _setup_codex(codex_path)
+    elif selected in ("gemini", "gemini_cli"):
+        gemini_path = available.get("gemini")
+        if not gemini_path:
+            print_error("Gemini CLI not found in PATH.")
+            raise typer.Exit(1)
+        _setup_gemini(gemini_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)
