@@ -181,7 +181,7 @@ def test_pm_command_formats_factory_errors() -> None:
             raise AssertionError("Expected typer.Exit for backend configuration errors")
 
     mock_error.assert_called_once_with(
-        "OpenCode LLM adapter is not yet available. Supported backends: claude_code, codex, litellm"
+        "OpenCode LLM adapter is not yet available. Supported backends: claude_code, codex, gemini, litellm"
     )
 
 
