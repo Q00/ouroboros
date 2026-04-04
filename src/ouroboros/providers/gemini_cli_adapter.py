@@ -27,12 +27,12 @@ Custom CLI path::
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import json
 import os
+from pathlib import Path
 import re
 import shutil
-from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -254,7 +254,7 @@ class GeminiCLIAdapter:
                 self._collect_response(process),
                 timeout=self._timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await terminate_process(
                 process,
                 shutdown_timeout=self._process_shutdown_timeout_seconds,
@@ -303,7 +303,9 @@ class GeminiCLIAdapter:
 
             total_bytes += len(line)
             if total_bytes > _MAX_RESPONSE_BYTES:
-                await terminate_process(process, shutdown_timeout=self._process_shutdown_timeout_seconds)
+                await terminate_process(
+                    process, shutdown_timeout=self._process_shutdown_timeout_seconds
+                )
                 return Result.err(
                     ProviderError(
                         message=f"Gemini CLI response exceeded {_MAX_RESPONSE_BYTES} bytes",
@@ -438,7 +440,7 @@ class GeminiCLIAdapter:
                 content=content,
                 model=model_name or self._model,
                 usage=UsageInfo(
-                    prompt_tokens=0,   # Gemini CLI does not expose token counts
+                    prompt_tokens=0,  # Gemini CLI does not expose token counts
                     completion_tokens=0,
                     total_tokens=0,
                 ),
@@ -486,9 +488,12 @@ class GeminiCLIAdapter:
 
         cmd: list[str] = [
             str(self._cli_path),
-            "--output-format", output_format,
-            "--model", model,
-            "-p", prompt,
+            "--output-format",
+            output_format,
+            "--model",
+            model,
+            "-p",
+            prompt,
         ]
 
         # Forward generation controls that the Gemini CLI accepts.
@@ -565,7 +570,7 @@ class GeminiCLIAdapter:
         # Strip optional provider prefix
         for prefix in ("gemini/", "google/"):
             if config_model.startswith(prefix):
-                config_model = config_model[len(prefix):]
+                config_model = config_model[len(prefix) :]
         if not _SAFE_MODEL_NAME_PATTERN.match(config_model):
             log.warning(
                 "gemini_cli_adapter.unsafe_model_name",

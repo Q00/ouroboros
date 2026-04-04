@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -11,7 +10,6 @@ import pytest
 
 from ouroboros.providers.base import CompletionConfig, Message, MessageRole
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
-
 
 # ---------------------------------------------------------------------------
 # Fake async stream helpers
@@ -29,7 +27,7 @@ class _FakeStream:
         if self._cursor >= len(self._buffer):
             return b""
         end = min(self._cursor + chunk_size, len(self._buffer))
-        chunk = self._buffer[self._cursor:end]
+        chunk = self._buffer[self._cursor : end]
         self._cursor = end
         return chunk
 
@@ -101,7 +99,9 @@ class TestGeminiCLIAdapterInit:
         adapter = GeminiCLIAdapter(cli_path=str(fake_bin))
         assert adapter._cli_path == fake_bin.resolve()
 
-    def test_env_var_overrides_path_lookup(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_var_overrides_path_lookup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         fake_bin = tmp_path / "gemini"
         fake_bin.touch()
         monkeypatch.setenv("OUROBOROS_GEMINI_CLI_PATH", str(fake_bin))
@@ -127,32 +127,38 @@ class TestBuildPrompt:
 
     def test_system_is_wrapped(self) -> None:
         adapter = GeminiCLIAdapter(cli_path="gemini")
-        prompt = adapter._build_prompt([
-            Message(role=MessageRole.SYSTEM, content="Be concise."),
-            Message(role=MessageRole.USER, content="Hi"),
-        ])
+        prompt = adapter._build_prompt(
+            [
+                Message(role=MessageRole.SYSTEM, content="Be concise."),
+                Message(role=MessageRole.USER, content="Hi"),
+            ]
+        )
         assert "<system>" in prompt
         assert "Be concise." in prompt
         assert "User: Hi" in prompt
 
     def test_multi_turn_dialogue(self) -> None:
         adapter = GeminiCLIAdapter(cli_path="gemini")
-        prompt = adapter._build_prompt([
-            Message(role=MessageRole.USER, content="First"),
-            Message(role=MessageRole.ASSISTANT, content="Second"),
-            Message(role=MessageRole.USER, content="Third"),
-        ])
+        prompt = adapter._build_prompt(
+            [
+                Message(role=MessageRole.USER, content="First"),
+                Message(role=MessageRole.ASSISTANT, content="Second"),
+                Message(role=MessageRole.USER, content="Third"),
+            ]
+        )
         assert "User: First" in prompt
         assert "Assistant: Second" in prompt
         assert "User: Third" in prompt
 
     def test_multiple_system_messages_merged(self) -> None:
         adapter = GeminiCLIAdapter(cli_path="gemini")
-        prompt = adapter._build_prompt([
-            Message(role=MessageRole.SYSTEM, content="Rule one."),
-            Message(role=MessageRole.SYSTEM, content="Rule two."),
-            Message(role=MessageRole.USER, content="Go"),
-        ])
+        prompt = adapter._build_prompt(
+            [
+                Message(role=MessageRole.SYSTEM, content="Rule one."),
+                Message(role=MessageRole.SYSTEM, content="Rule two."),
+                Message(role=MessageRole.USER, content="Go"),
+            ]
+        )
         assert "Rule one." in prompt
         assert "Rule two." in prompt
 
@@ -211,6 +217,7 @@ class TestBuildCommand:
     def test_json_format_for_structured_output(self) -> None:
         """Structured output requests switch to plain JSON format."""
         from ouroboros.providers.base import CompletionConfig
+
         adapter = GeminiCLIAdapter(cli_path="gemini")
         config = CompletionConfig(
             model="gemini-2.5-flash",
@@ -229,23 +236,29 @@ class TestBuildCommand:
 class TestIsRetryable:
     """Transient error detection."""
 
-    @pytest.mark.parametrize("msg", [
-        "rate limit exceeded",
-        "Resource exhausted",
-        "quota exceeded",
-        "server temporarily unavailable",
-        "request timeout",
-        "server overloaded — try again",
-    ])
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "rate limit exceeded",
+            "Resource exhausted",
+            "quota exceeded",
+            "server temporarily unavailable",
+            "request timeout",
+            "server overloaded — try again",
+        ],
+    )
     def test_retryable_messages(self, msg: str) -> None:
         assert GeminiCLIAdapter._is_retryable(msg)
 
-    @pytest.mark.parametrize("msg", [
-        "authentication failed",
-        "invalid prompt",
-        "model not found",
-        "bad request",
-    ])
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "authentication failed",
+            "invalid prompt",
+            "model not found",
+            "bad request",
+        ],
+    )
     def test_non_retryable_messages(self, msg: str) -> None:
         assert not GeminiCLIAdapter._is_retryable(msg)
 
@@ -371,11 +384,13 @@ class TestCollectResponse:
     @pytest.mark.asyncio
     async def test_warning_with_valid_result_succeeds(self) -> None:
         """A non-fatal warning alongside a valid result should not be treated as failure."""
-        stream = _make_stream([
-            _INIT_EVENT,
-            {"type": "error", "message": "Deprecation notice: model will be removed"},
-            _RESULT_EVENT,
-        ])
+        stream = _make_stream(
+            [
+                _INIT_EVENT,
+                {"type": "error", "message": "Deprecation notice: model will be removed"},
+                _RESULT_EVENT,
+            ]
+        )
         process = _FakeProcess(stdout=stream, returncode=0)
         adapter = GeminiCLIAdapter(cli_path="gemini")
 
@@ -441,9 +456,11 @@ class TestCompleteIntegration:
     async def test_complete_retries_on_rate_limit(self) -> None:
         calls: list[int] = []
 
-        rate_limit_stream = _make_stream([
-            {"type": "error", "message": "rate limit exceeded"},
-        ])
+        rate_limit_stream = _make_stream(
+            [
+                {"type": "error", "message": "rate limit exceeded"},
+            ]
+        )
         ok_stream = _make_stream([_INIT_EVENT, _RESULT_EVENT])
 
         async def _fake_exec(*args, **kwargs):  # noqa: ANN002
@@ -494,6 +511,7 @@ class TestRecursionGuard:
 
     def test_depth_exceeds_limit_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from ouroboros.core.errors import ProviderError
+
         monkeypatch.setenv("_OUROBOROS_DEPTH", "5")
         adapter = GeminiCLIAdapter(cli_path="gemini")
         with pytest.raises(ProviderError, match="nesting depth"):
