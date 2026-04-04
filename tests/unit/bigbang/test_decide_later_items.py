@@ -280,15 +280,17 @@ class TestDecideLaterInPMDocument:
         assert "- What caching strategy should we use?" in md
         assert "- How should we handle data migration?" in md
 
-    def test_pm_document_no_decide_later_when_empty(self):
-        """PM document omits 'Decide Later' section when no items."""
+    def test_pm_document_renders_empty_decide_later_section(self):
+        """PM document always renders 'Decide Later' section, even when empty."""
         seed = PMSeed(
             product_name="Test Product",
             goal="Test goal",
             decide_later_items=(),
         )
         md = generate_pm_markdown(seed)
-        assert "## Decide Later" not in md
+        assert "## Decide Later" in md
+        assert "deferred or identified as premature" in md
+        assert "*None.*" in md
 
     def test_pm_document_renders_multiple_decide_later_items(self):
         """PM document renders all decide-later items in a single section."""
