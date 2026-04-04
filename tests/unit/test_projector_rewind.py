@@ -229,6 +229,50 @@ class TestProjectRewind:
         assert len(lineage.rewind_history) == 1
         assert lineage.rewind_history[0].discarded_generations == ()
 
+    def test_completed_event_backfills_seed_quality_canary_feedback_from_evaluation(self) -> None:
+        """Replay should preserve depth-warning canaries even for legacy events."""
+        projector = LineageProjector()
+
+        ontology = {
+            "name": "Test",
+            "description": "Test model",
+            "fields": [
+                {"name": "x", "field_type": "string", "description": "field", "required": True},
+            ],
+        }
+
+        events = [
+            _make_event("lineage.created", {"goal": "Build something"}),
+            _make_event(
+                "lineage.generation.completed",
+                {
+                    "generation_number": 1,
+                    "seed_id": "seed_1",
+                    "ontology_snapshot": ontology,
+                    "evaluation_summary": {
+                        "final_approved": False,
+                        "highest_stage_passed": 2,
+                        "feedback_metadata": [
+                            {
+                                "code": "decomposition_depth_warning",
+                                "severity": "warning",
+                                "message": "Depth safety net forced atomic execution.",
+                                "source": "parallel_executor",
+                                "details": {"max_depth": 3, "affected_count": 1},
+                            }
+                        ],
+                    },
+                },
+            ),
+        ]
+
+        lineage = projector.project(events)
+
+        assert lineage is not None
+        assert [
+            feedback.code for feedback in lineage.generations[0].seed_quality_canary_feedback
+        ] == ["decomposition_depth_warning"]
+
     def test_failure_error_preserved(self) -> None:
         """failure_error from lineage.generation.failed event is stored in GenerationRecord."""
         projector = LineageProjector()

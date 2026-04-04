@@ -2,37 +2,67 @@
 
 from __future__ import annotations
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
-from prompt_toolkit.patch_stdout import patch_stdout
+import asyncio
+from contextlib import contextmanager
+import sys
+from typing import TextIO
 
 from ouroboros.cli.formatters import console
 
 
 async def multiline_prompt_async(prompt_text: str) -> str:
     """Get multiline-safe input while allowing logs above the active prompt."""
-    bindings = KeyBindings()
-
-    @bindings.add("c-j")
-    def insert_newline(event: KeyPressEvent) -> None:
-        event.current_buffer.insert_text("\n")
-
-    @bindings.add("c-m")
-    def submit(event: KeyPressEvent) -> None:
-        event.current_buffer.validate_and_handle()
-
-    console.print(f"[bold green]{prompt_text}[/] [dim](Enter: submit, Ctrl+J: newline)[/]")
-
-    session: PromptSession[str] = PromptSession(
-        message="> ",
-        multiline=True,
-        prompt_continuation="  ",
-        key_bindings=bindings,
+    console.print(
+        f"[bold green]{prompt_text}[/] [dim](Ctrl+D/Ctrl+Z then Enter: submit; "
+        "Enter inserts newline)[/]"
     )
+    with _patched_stdio():
+        return await asyncio.to_thread(_read_multiline_from_stdin)
 
-    # prompt_toolkit proxies both stdout and stderr above the prompt.
-    with patch_stdout(raw=True):
-        return await session.prompt_async()
+
+def _read_multiline_from_stdin() -> str:
+    lines: list[str] = []
+    prompt = "> "
+    continuation = "  "
+
+    while True:
+        try:
+            line = input(prompt if not lines else continuation)
+        except EOFError:
+            print()
+            return "\n".join(lines)
+        lines.append(line)
+
+
+@contextmanager
+def _patched_stdio() -> TextIO:
+    stdout = sys.stdout
+    stderr = sys.stderr
+    sys.stdout = _StreamProxy(stdout)
+    sys.stderr = _StreamProxy(stderr)
+    try:
+        yield stdout
+    finally:
+        sys.stdout = stdout
+        sys.stderr = stderr
+
+
+class _StreamProxy:
+    def __init__(self, target: TextIO) -> None:
+        self._target = target
+
+    def write(self, data: str) -> int:
+        return self._target.write(data)
+
+    def flush(self) -> None:
+        self._target.flush()
+
+    def isatty(self) -> bool:
+        return self._target.isatty()
+
+    @property
+    def encoding(self) -> str | None:
+        return getattr(self._target, "encoding", None)
 
 
 __all__ = ["multiline_prompt_async"]

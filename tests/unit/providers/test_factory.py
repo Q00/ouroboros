@@ -124,7 +124,7 @@ class TestCreateLLMAdapter:
     def test_creates_opencode_adapter(self) -> None:
         """OpenCode backend returns OpenCodeLLMAdapter."""
         adapter = create_llm_adapter(backend="opencode", cwd="/tmp/project")
-        assert isinstance(adapter, OpenCodeLLMAdapter)  # noqa: F821
+        assert isinstance(adapter, OpenCodeLLMAdapter)  # type: ignore[name-defined]  # noqa: F821
         assert adapter._cwd == "/tmp/project"
         assert adapter._permission_mode == "acceptEdits"
 
@@ -140,7 +140,7 @@ class TestCreateLLMAdapter:
 
         adapter = create_llm_adapter(backend="opencode", cwd="/tmp/project")
 
-        assert isinstance(adapter, OpenCodeLLMAdapter)  # noqa: F821
+        assert isinstance(adapter, OpenCodeLLMAdapter)  # type: ignore[name-defined]  # noqa: F821
         assert adapter._cli_path == "/tmp/opencode"
 
     @pytest.mark.skip(reason="OpenCode adapter not yet shipped")
@@ -156,7 +156,7 @@ class TestCreateLLMAdapter:
 
         adapter = create_llm_adapter(cwd="/tmp/project", allowed_tools=["Read"], max_turns=2)
 
-        assert isinstance(adapter, OpenCodeLLMAdapter)  # noqa: F821
+        assert isinstance(adapter, OpenCodeLLMAdapter)  # type: ignore[name-defined]  # noqa: F821
         assert adapter._cwd == "/tmp/project"
         assert adapter._permission_mode == "acceptEdits"
         assert adapter._allowed_tools == ["Read"]
@@ -209,7 +209,7 @@ class TestCreateLLMAdapter:
 
         adapter = create_llm_adapter(backend="opencode", cwd="/tmp/project")
 
-        assert isinstance(adapter, OpenCodeLLMAdapter)  # noqa: F821
+        assert isinstance(adapter, OpenCodeLLMAdapter)  # type: ignore[name-defined]  # noqa: F821
         assert adapter._permission_mode == "acceptEdits"
 
 

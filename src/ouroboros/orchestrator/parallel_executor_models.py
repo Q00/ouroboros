@@ -47,6 +47,8 @@ class ACExecutionResult:
         is_decomposed: Whether this AC was decomposed into Sub-ACs.
         sub_results: Results from Sub-AC parallel executions.
         depth: Depth in decomposition tree (0 = root AC).
+        decomposition_depth_warning: True when decomposition was skipped because
+            the soft depth safety net forced atomic execution.
         outcome: Normalized result classification for aggregation.
         runtime_handle: Backend-neutral runtime handle for same-attempt resume.
     """
@@ -63,6 +65,7 @@ class ACExecutionResult:
     is_decomposed: bool = False
     sub_results: tuple[ACExecutionResult, ...] = field(default_factory=tuple)
     depth: int = 0
+    decomposition_depth_warning: bool = False
     outcome: ACExecutionOutcome | None = None
     runtime_handle: RuntimeHandle | None = None
 

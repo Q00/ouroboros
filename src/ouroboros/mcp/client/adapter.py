@@ -9,9 +9,9 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any, Self
 
-import stamina
 import structlog
 
+from ouroboros.core.retry import retry_async
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import (
     MCPClientError,
@@ -49,7 +49,7 @@ class MCPClientAdapter:
     """Concrete implementation of MCPClient protocol.
 
     Uses the MCP SDK to connect to MCP servers and provides automatic retry
-    logic using stamina for transient failures.
+    logic for transient failures.
 
     Example:
         config = MCPServerConfig(
@@ -126,7 +126,7 @@ class MCPClientAdapter:
         """Connect to an MCP server.
 
         Establishes a connection using the appropriate transport (stdio, SSE, etc.)
-        and initializes the session. Uses stamina for automatic retries.
+        and initializes the session. Uses internal retry logic for transient failures.
 
         Args:
             config: Configuration for the server connection.
@@ -144,7 +144,7 @@ class MCPClientAdapter:
 
         self._config = config
 
-        @stamina.retry(
+        @retry_async(
             on=RETRIABLE_EXCEPTIONS,
             attempts=self._max_retries,
             wait_initial=self._retry_wait_initial,
@@ -200,7 +200,7 @@ class MCPClientAdapter:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
         except ImportError as e:
-            msg = "mcp package not installed. Install with: pip install mcp"
+            msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
             raise ImportError(msg) from e
 
         if config.transport == TransportType.STDIO:

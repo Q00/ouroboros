@@ -80,8 +80,9 @@ No Python, pip, or API key configuration needed -- Claude Code handles the runti
 pip install ouroboros-ai              # Base package (core engine)
 pip install ouroboros-ai[claude]      # + Claude Code runtime deps (anthropic, claude-agent-sdk)
 pip install ouroboros-ai[litellm]     # + LiteLLM multi-provider support (100+ models)
-pip install ouroboros-ai[dashboard]   # + Streamlit analytics dashboard (streamlit, plotly, pandas)
-pip install ouroboros-ai[all]         # Everything (claude + litellm + dashboard)
+pip install ouroboros-ai[mcp]         # + MCP server/client runtime support
+pip install ouroboros-ai[tui]         # + Textual terminal UI
+pip install ouroboros-ai[all]         # Everything (claude + litellm + mcp + tui)
 
 ouroboros --version                   # verify CLI
 ```

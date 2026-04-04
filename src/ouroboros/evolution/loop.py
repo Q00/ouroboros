@@ -372,6 +372,11 @@ class EvolutionaryLoop:
                     seed_json=json.dumps(result.seed.to_dict()),
                     execution_output=result.execution_output,
                     parent_seed_id=result.seed.metadata.parent_seed_id,
+                    seed_quality_canary_feedback=[
+                        feedback.model_dump(mode="json")
+                        for feedback in record.seed_quality_canary_feedback
+                    ]
+                    or None,
                 )
             )
 
@@ -737,6 +742,11 @@ class EvolutionaryLoop:
                 seed_json=json.dumps(result.seed.to_dict()),
                 execution_output=result.execution_output,
                 parent_seed_id=result.seed.metadata.parent_seed_id,
+                seed_quality_canary_feedback=[
+                    feedback.model_dump(mode="json")
+                    for feedback in record.seed_quality_canary_feedback
+                ]
+                or None,
             )
         )
 

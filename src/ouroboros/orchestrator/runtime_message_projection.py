@@ -7,7 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ouroboros.mcp.types import MCPToolResult
-from ouroboros.orchestrator.adapter import AgentMessage, runtime_handle_tool_catalog
+from ouroboros.orchestrator.adapter import (
+    AgentMessage,
+    runtime_handle_capability_graph,
+    runtime_handle_control_plane,
+    runtime_handle_tool_catalog,
+)
 from ouroboros.orchestrator.mcp_tools import serialize_tool_definition, serialize_tool_result
 
 _RUNTIME_SESSION_STARTED_EVENT_TYPES = frozenset({"session.started", "thread.started"})
@@ -224,6 +229,12 @@ def serialize_runtime_message_metadata(
         tool_catalog = runtime_handle_tool_catalog(runtime_handle)
         if tool_catalog is not None:
             metadata["tool_catalog"] = tool_catalog
+        capability_graph = runtime_handle_capability_graph(runtime_handle)
+        if capability_graph is not None:
+            metadata["capability_graph"] = capability_graph
+        control_plane = runtime_handle_control_plane(runtime_handle)
+        if control_plane is not None:
+            metadata["control_plane"] = control_plane
         turn_id = runtime_handle.metadata.get("turn_id")
         if isinstance(turn_id, str) and turn_id.strip():
             metadata["turn_id"] = turn_id.strip()

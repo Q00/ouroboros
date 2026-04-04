@@ -8,10 +8,10 @@ import os
 from typing import Any
 
 import litellm
-import stamina
 import structlog
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.retry import retry_async
 from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
@@ -223,10 +223,7 @@ class LiteLLMAdapter:
         messages: list[Message],
         config: CompletionConfig,
     ) -> litellm.ModelResponse:
-        """Make the raw completion call with stamina retry.
-
-        This method is decorated with stamina retry for transient errors.
-        Exceptions bubble up for stamina to handle.
+        """Make the raw completion call.
 
         Args:
             messages: The conversation messages.
@@ -307,7 +304,7 @@ class LiteLLMAdapter:
     ) -> Result[CompletionResponse, ProviderError]:
         """Make a completion request to the LLM provider.
 
-        This method handles retries internally using stamina and converts
+        This method handles retries internally and converts
         all expected failures to Result.err(ProviderError).
 
         Args:
@@ -319,7 +316,7 @@ class LiteLLMAdapter:
         """
 
         # Create the retry-decorated function with instance's max_retries
-        @stamina.retry(
+        @retry_async(
             on=RETRIABLE_EXCEPTIONS,
             attempts=self._max_retries,
             wait_initial=1.0,

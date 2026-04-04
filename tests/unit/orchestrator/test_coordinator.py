@@ -21,6 +21,7 @@ from ouroboros.orchestrator.coordinator import (
     _build_review_prompt,
     _collect_file_modifications,
     _parse_review_response,
+    derive_coordinator_tools,
 )
 from ouroboros.orchestrator.level_context import (
     ACContextSummary,
@@ -255,6 +256,10 @@ class TestDetectFileConflicts:
         assert conflicts[0].file_path == "src/app.py"
         assert conflicts[0].ac_indices == (0, 1)
         assert conflicts[0].resolved is False
+
+
+def test_derive_coordinator_tools_matches_policy_envelope() -> None:
+    assert derive_coordinator_tools("opencode") == ["Read", "Edit", "Bash", "Glob", "Grep"]
 
     def test_multiple_conflicts(self):
         results = [

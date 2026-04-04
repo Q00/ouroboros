@@ -1,0 +1,159 @@
+goal: Build ouroboros_ac_tree_hud MCP tool that returns a render-ready, cursor-based
+  AC tree snapshot as compact markdown for live execution monitoring, supporting recursive
+  depth up to 3 levels, delta rendering (one-liner when unchanged), and graceful error
+  handling, replacing verbose job_wait polling for Codex/Claude Code environments
+  without TUI.
+task_type: code
+brownfield_context:
+  project_type: brownfield
+  context_references:
+  - path: src/ouroboros/events.py
+    role: primary
+    summary: EventStore with get_events_after pattern using last_row_id cursor, TUIState
+      dataclass, workflow.progress.updated event definitions
+  - path: src/ouroboros/app.py
+    role: reference
+    summary: Main app owning _state.ac_tree as SSOT, _merge_ac_progress for AC tree
+      state management
+  - path: src/ouroboros/tui/screens/dashboard_v3.py
+    role: reference
+    summary: Existing AC tree rendering logic in TUI with SelectableACTree widget
+      for visual reference
+  - path: src/ouroboros/workflow_state_tracker.py
+    role: reference
+    summary: Computes messages_count, tool_calls_count, estimated_tokens, estimated_cost_usd,
+      elapsed_display metrics emitted with progress events
+  existing_patterns:
+  - EventStore row ID cursor pattern from job_wait (get_events_after with last_row_id)
+  - workflow.progress.updated events carry full AC data including metrics
+  - _merge_ac_progress preserves children_ids when updating status
+  - AC tree owned as SSOT in app state
+  - MCP tool pattern for Codex/Claude Code integration
+  existing_dependencies:
+  - EventStore
+  - WorkflowStateTracker
+  - workflow.progress.updated event payload
+  - Existing AC tree data structures with recursive children_ids
+constraints:
+- Python 3.14+ with uv run
+- Must integrate with existing EventStore and workflow.progress.updated events
+- Cursor is EventStore row ID integer, consistent with existing job_wait cursor semantics
+- Depth visualization up to 3 levels (matches MAX_DECOMPOSITION_DEPTH), collapse deeper
+  with "... (+N sub-tasks)"
+- Footer metrics are best-effort decorations, omit missing/zero fields rather than
+  showing N/A
+- Error cases return graceful markdown, not structured errors
+- No TUI dependency — pure markdown string output
+- max_nodes default 50 as hard cap
+- Must not regress existing tests
+acceptance_criteria:
+- AC tree renders correctly for depth 1 trees
+- AC tree renders correctly for depth 2 trees
+- AC tree renders correctly for depth 3 trees
+- Cursor returns delta one-liner when no new workflow.progress.updated events since
+  cursor row ID
+- Full render returned when state has changed since cursor
+- Truncation shows all ACs when total <= 12
+- Truncation shows executing AC ± 2 neighbors + first + last + ellipsis when total
+  > 12
+- max_nodes param caps output for pathological cases and is caller-overridable
+- Invalid session_id returns graceful markdown warning
+- No execution linked returns graceful markdown warning
+- No AC tree yet returns waiting message
+- Completed session shows final tree with all statuses and completion footer
+- Footer line includes elapsed time, message count, tool call count, and cost from
+  workflow.progress.updated payload
+- 'Status icons render correctly: done, executing, pending, failed'
+- Current tool activity shown inline for executing ACs
+- Run skill can use this tool instead of verbose job_wait polling
+ontology_schema:
+  name: ACTreeHUD
+  description: Domain model for a cursor-based acceptance criteria tree HUD that renders
+    compact markdown snapshots of workflow execution progress
+  fields:
+  - name: session_id
+    type: string
+    description: Session identifier for the execution being monitored
+    required: true
+  - name: cursor
+    type: number
+    description: EventStore row ID integer, 0 or omitted for first call, returned
+      by tool for subsequent calls
+    required: true
+  - name: max_nodes
+    type: number
+    description: Hard cap on rendered tree nodes, default 50, caller-overridable
+    required: true
+  - name: ac_id
+    type: string
+    description: Unique identifier for an acceptance criterion node
+    required: true
+  - name: ac_label
+    type: string
+    description: Human-readable label for the AC
+    required: true
+  - name: ac_status
+    type: string
+    description: One of done, executing, pending, failed
+    required: true
+  - name: ac_depth
+    type: number
+    description: Nesting depth of the AC node in the tree (1-3+)
+    required: true
+  - name: children_ids
+    type: array
+    description: Ordered list of child AC IDs for recursive decomposition
+    required: true
+  - name: render_mode
+    type: string
+    description: Either full (tree changed) or delta (one-liner, unchanged)
+    required: true
+evaluation_principles:
+- name: visual_correctness
+  description: Rendered markdown matches the specified format with correct icons,
+    tree prefixes, indentation, and inline tool activity
+  weight: 0.25
+- name: cursor_semantics
+  description: Cursor-based delta detection correctly distinguishes changed vs unchanged
+    state using EventStore row IDs
+  weight: 0.2
+- name: truncation_logic
+  description: Smart focus truncation correctly handles small trees (show all), large
+    trees (executing ± 2 + first + last), and depth > 3 collapse
+  weight: 0.2
+- name: error_graceful
+  description: All error cases return human-readable graceful markdown lines, never
+    structured errors or stack traces
+  weight: 0.15
+- name: integration_fidelity
+  description: Correctly sources all data from existing EventStore workflow.progress.updated
+    events and WorkflowStateTracker metrics
+  weight: 0.1
+- name: compactness
+  description: Output is compact enough to replace verbose job_wait polling, footer
+    omits zero/missing fields
+  weight: 0.1
+exit_conditions:
+- name: all_ac_rendered
+  description: All acceptance criteria pass and tool renders correctly at all depth
+    levels
+  criteria: AC tree renders for depth 1, 2, 3 with correct icons and tree structure
+- name: delta_working
+  description: Cursor-based delta detection returns one-liner when unchanged and full
+    render when changed
+  criteria: Two consecutive calls with no intervening events produce one-liner on
+    second call
+- name: errors_graceful
+  description: All four error cases produce correct graceful markdown
+  criteria: Invalid session, no execution, no AC tree yet, and completed session all
+    return specified markdown
+- name: no_regression
+  description: Existing test suite passes without regression
+  criteria: All pre-existing tests pass after integration
+metadata:
+  seed_id: seed_78c8e6e41813
+  version: 1.0.0
+  created_at: '2026-04-04T18:09:30.786879Z'
+  ambiguity_score: 0.1105
+  interview_id: interview_20260404_180516
+  parent_seed_id: null

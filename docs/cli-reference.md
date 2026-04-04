@@ -161,6 +161,10 @@ ouroboros init start --resume interview_20260116_120000
 ouroboros init
 ```
 
+> **Interactive multiline input:** when `init` or other interview-style commands prompt for a
+> longer response, press `Ctrl+D` (macOS/Linux) or `Ctrl+Z` then Enter (Windows) to submit the
+> full response. Plain Enter inserts a newline.
+
 ### `init list`
 
 List all interview sessions.

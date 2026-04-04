@@ -1,0 +1,125 @@
+goal: Refactor parallel_executor.py AC tree execution to support recursive decomposition
+  by making _execute_single_ac the sole recursive entry point, eliminating _execute_sub_acs,
+  scoping stall retry to atomic execution only, and adding decomposition depth warning
+  as evolutionary loop feedback canary
+task_type: code
+brownfield_context:
+  project_type: brownfield
+  context_references:
+  - path: parallel_executor.py
+    role: primary
+    summary: Contains _execute_sub_acs, _execute_single_ac, _execute_ac, _execute_atomic_ac
+      — the core execution methods being refactored
+  existing_patterns:
+  - anyio task groups for parallel AC execution
+  - _execute_single_ac as entry point for individual AC execution
+  - _execute_atomic_ac for leaf node execution
+  - ACExecutionResult as the result container
+  - Claude ATOMIC/COMPOSITE judgment for decomposition decisions
+  - Stall retry logic for atomic execution recovery
+  - EventStore-based event flow for state propagation
+  existing_dependencies:
+  - claude_agent_sdk
+  - anyio
+  - textual
+constraints:
+- Python >= 3.14
+- Uses Claude Agent SDK
+- Uses anyio task groups for parallel execution
+- Maximum recursion depth is 3 (soft safety net, not hard stop)
+- Claude's ATOMIC judgment is the real recursion termination condition
+- Must preserve existing parallel execution semantics
+- No new external dependencies
+acceptance_criteria:
+- _execute_single_ac is the sole recursive entry point handling both atomic and composite
+  ACs
+- _execute_sub_acs is eliminated and its loop is inlined into _execute_ac
+- Children ACs are dispatched via _execute_single_ac recursion
+- Stall retry logic wraps only atomic execution at leaf nodes, not recursive dispatch
+- At depth >= 3 execution is forced atomic with no further decomposition
+- decomposition_depth_warning flag is set on ACExecutionResult when depth limit is
+  reached
+- Depth warning flows through Evaluate stage to evolutionary loop as seed quality
+  feedback
+- Recursive decomposition works beyond depth 1 up to depth limit
+- ATOMIC judgment from Claude still terminates recursion at any depth
+ontology_schema:
+  name: ACRecursiveExecution
+  description: Domain model for recursive acceptance criteria tree execution with
+    depth-aware decomposition and evolutionary feedback
+  fields:
+  - name: ac_id
+    type: string
+    description: Unique identifier for an acceptance criterion node
+    required: true
+  - name: ac_type
+    type: string
+    description: Whether AC is ATOMIC or COMPOSITE as judged by Claude
+    required: true
+  - name: execution_depth
+    type: number
+    description: Current recursion depth of this AC in the decomposition tree
+    required: true
+  - name: max_depth
+    type: number
+    description: Maximum allowed recursion depth before forcing atomic execution
+    required: true
+  - name: decomposition_depth_warning
+    type: boolean
+    description: Flag indicating depth limit was reached and atomic was forced
+    required: true
+  - name: children_ids
+    type: array
+    description: List of child AC IDs produced by decomposition
+    required: true
+  - name: execution_result
+    type: object
+    description: The ACExecutionResult containing output and metadata
+    required: true
+  - name: stall_retry_count
+    type: number
+    description: Number of stall retries attempted for atomic execution
+    required: true
+  - name: is_forced_atomic
+    type: boolean
+    description: Whether this AC was forced atomic due to depth limit rather than
+      Claude judgment
+    required: true
+evaluation_principles:
+- name: single_entry_point
+  description: _execute_single_ac is the only method that recurses into AC execution,
+    no alternate paths exist
+  weight: 0.3
+- name: sub_acs_eliminated
+  description: _execute_sub_acs function is completely removed and its logic inlined
+    into _execute_ac
+  weight: 0.2
+- name: stall_retry_scoping
+  description: Stall retry logic wraps only atomic leaf execution, never recursive
+    composite dispatch
+  weight: 0.2
+- name: depth_canary_correctness
+  description: At depth >= 3 execution forces atomic and sets decomposition_depth_warning
+    on ACExecutionResult
+  weight: 0.2
+- name: behavioral_preservation
+  description: Existing parallel execution behavior via anyio task groups is preserved
+    for non-depth-limited cases
+  weight: 0.1
+exit_conditions:
+- name: all_criteria_met
+  description: All four refactoring goals are implemented and passing
+  criteria: All acceptance criteria evaluate as satisfied
+- name: recursive_depth_works
+  description: Recursive decomposition demonstrably works beyond depth 1
+  criteria: AC tree can recurse to depth 2 without forced atomic
+- name: canary_signal_flows
+  description: Depth warning propagates to evaluation
+  criteria: decomposition_depth_warning is set and accessible in Evaluate stage
+metadata:
+  seed_id: seed_73827177a2a3
+  version: 1.0.0
+  created_at: '2026-04-04T16:54:00.213513Z'
+  ambiguity_score: 0.1225
+  interview_id: interview_20260404_165002
+  parent_seed_id: null

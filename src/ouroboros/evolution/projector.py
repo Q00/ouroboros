@@ -94,6 +94,7 @@ class LineageProjector:
                     parent_seed_id=data.get("parent_seed_id"),
                     ontology_snapshot=ontology,
                     evaluation_summary=eval_summary,
+                    seed_quality_canary_feedback=data.get("seed_quality_canary_feedback", ()),
                     wonder_questions=tuple(data.get("wonder_questions", [])),
                     phase=GenerationPhase.COMPLETED,
                     created_at=event.timestamp,

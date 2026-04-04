@@ -563,7 +563,7 @@ class TestLiteLLMAdapterComplete:
 
 
 class TestLiteLLMAdapterRetryBehavior:
-    """Test retry behavior using stamina."""
+    """Test retry behavior for transient provider failures."""
 
     async def test_retries_on_rate_limit(self) -> None:
         """Retries on rate limit error before giving up."""

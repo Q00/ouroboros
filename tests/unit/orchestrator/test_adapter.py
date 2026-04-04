@@ -986,14 +986,14 @@ class TestCloneRuntimeHandleData:
 
     def test_clones_nested_dict_list_structures(self) -> None:
         """Nested mutable structures should be fully detached from the source."""
-        source = {"a": [{"b": 1}, {"c": [2, 3]}], "d": {"e": "f"}}
+        source: dict[str, Any] = {"a": [{"b": 1}, {"c": [2, 3]}], "d": {"e": "f"}}
         cloned = _clone_runtime_handle_data(source)
 
         assert cloned == source
         cloned["a"][0]["b"] = 99
         cloned["d"]["e"] = "changed"
-        assert source["a"][0]["b"] == 1
-        assert source["d"]["e"] == "f"
+        assert source["a"][0]["b"] == 1  # type: ignore[index]
+        assert source["d"]["e"] == "f"  # type: ignore[index]
 
     def test_clones_tuple_contents(self) -> None:
         """Tuple values should be recursively cloned."""
@@ -1089,8 +1089,8 @@ class TestBuildRuntimeHandleFreshPath:
         assert handle is not None
         handle.metadata["tools"][0]["name"] = "Write"
         handle.metadata["config"]["key"] = "changed"
-        assert nested_metadata["tools"][0]["name"] == "Read"
-        assert nested_metadata["config"]["key"] == "val"
+        assert nested_metadata["tools"][0]["name"] == "Read"  # type: ignore[index]
+        assert nested_metadata["config"]["key"] == "val"  # type: ignore[index]
 
 
 class TestNonStringSelectorErrorMessage:

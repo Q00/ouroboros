@@ -41,6 +41,14 @@ from ouroboros.orchestrator.adapter import (
     AgentRuntime,
     RuntimeHandle,
 )
+from ouroboros.orchestrator.capabilities import (
+    build_capability_graph,
+    serialize_capability_graph,
+)
+from ouroboros.orchestrator.control_plane import (
+    build_control_plane_state,
+    serialize_control_plane_state,
+)
 from ouroboros.orchestrator.events import (
     create_drift_measured_event,
     create_execution_terminal_event,
@@ -57,6 +65,13 @@ from ouroboros.orchestrator.mcp_tools import (
     SessionToolCatalog,
     assemble_session_tool_catalog,
     serialize_tool_catalog,
+)
+from ouroboros.orchestrator.policy import (
+    PolicyContext,
+    PolicyExecutionPhase,
+    PolicySessionRole,
+    allowed_capability_names,
+    evaluate_capability_policy,
 )
 from ouroboros.orchestrator.runtime_message_projection import (
     message_tool_input,
@@ -474,6 +489,17 @@ class OrchestratorRunner:
         metadata = dict(runtime_handle.metadata) if runtime_handle is not None else {}
         if tool_catalog is not None:
             metadata["tool_catalog"] = serialize_tool_catalog(tool_catalog)
+            capability_graph = build_capability_graph(tool_catalog)
+            policy_context = PolicyContext(
+                runtime_backend=backend,
+                session_role=PolicySessionRole.IMPLEMENTATION,
+                execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
+            )
+            policy_decisions = evaluate_capability_policy(capability_graph, policy_context)
+            metadata["capability_graph"] = serialize_capability_graph(capability_graph)
+            metadata["control_plane"] = serialize_control_plane_state(
+                build_control_plane_state(capability_graph, policy_decisions)
+            )
 
         cwd = self._effective_cwd(runtime_handle)
         approval_mode = self._adapter.permission_mode
@@ -995,7 +1021,15 @@ class OrchestratorRunner:
                 if tool_name not in base_tools:
                     base_tools.append(tool_name)
         session_catalog = assemble_session_tool_catalog(base_tools)
-        merged_tools = [tool.name for tool in session_catalog.tools]
+        capability_graph = build_capability_graph(session_catalog)
+        merged_tools = allowed_capability_names(
+            capability_graph,
+            PolicyContext(
+                runtime_backend=self._adapter.runtime_backend,
+                session_role=PolicySessionRole.IMPLEMENTATION,
+                execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
+            ),
+        )
 
         if self._mcp_manager is None:
             return merged_tools, None, session_catalog
@@ -1024,7 +1058,15 @@ class OrchestratorRunner:
             return merged_tools, provider, session_catalog
 
         session_catalog = provider.session_catalog
-        merged_tools = [tool.name for tool in session_catalog.tools]
+        capability_graph = build_capability_graph(session_catalog)
+        merged_tools = allowed_capability_names(
+            capability_graph,
+            PolicyContext(
+                runtime_backend=self._adapter.runtime_backend,
+                session_role=PolicySessionRole.IMPLEMENTATION,
+                execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
+            ),
+        )
         mcp_tool_names = [t.name for t in mcp_tools]
 
         # Log conflicts

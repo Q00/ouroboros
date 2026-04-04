@@ -22,8 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-import stamina
-
+from ouroboros.core.retry import retry_async
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import (
     MCPClientError,
@@ -2059,7 +2058,7 @@ class MCPToolProvider:
         )
 
         try:
-            # Use stamina for retries on transient failures
+            # Retry transient failures with bounded backoff
             result = await self._call_with_retry(
                 tool_info=tool_info,
                 arguments=arguments or {},
@@ -2091,7 +2090,7 @@ class MCPToolProvider:
     ) -> Result[MCPToolResult, MCPToolError]:
         """Call tool with retry logic for transient failures.
 
-        Uses stamina for exponential backoff retries on:
+        Uses internal exponential backoff retries on:
         - Connection errors
         - Timeout errors (if marked retriable)
         - Other transient MCPClientErrors
@@ -2105,7 +2104,7 @@ class MCPToolProvider:
             Result containing MCPToolResult or MCPToolError.
         """
 
-        @stamina.retry(
+        @retry_async(
             on=(MCPConnectionError, asyncio.TimeoutError),
             attempts=MAX_RETRIES,
             wait_initial=RETRY_WAIT_MIN,

@@ -11,6 +11,7 @@ from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
 from ouroboros.mcp.server.adapter import (
     VALID_TRANSPORTS,
     MCPServerAdapter,
+    _extract_feedback_metadata_from_artifact,
     _project_dir_from_artifact,
     _project_dir_from_seed,
     validate_transport,
@@ -117,6 +118,28 @@ class TestMCPServerAdapter:
         artifact = f"Write: {nested_dir / 'app.tsx'}"
 
         assert _project_dir_from_artifact(artifact) == str(project_dir)
+
+    def test_extract_feedback_metadata_from_artifact_parses_structured_warning(self) -> None:
+        """Execution artifacts should expose structured evaluation feedback metadata."""
+        artifact = """
+Parallel Execution Verification Report
+Success: 1/1
+
+## Feedback Metadata
+Feedback Metadata JSON: {"feedback_metadata": [{"code": "decomposition_depth_warning", "details": {"affected_ac_paths": ["1.1.1"], "affected_count": 1, "max_depth": 3}, "message": "Recursive decomposition reached the soft depth safety net; affected leaves were forced to atomic execution.", "severity": "warning", "source": "parallel_executor"}]}
+
+## AC Results
+### AC 1: [PASS] Ship feature
+""".strip()
+
+        feedback = _extract_feedback_metadata_from_artifact(artifact)
+
+        assert len(feedback) == 1
+        assert feedback[0].code == "decomposition_depth_warning"
+        assert feedback[0].severity == "warning"
+        assert feedback[0].source == "parallel_executor"
+        assert feedback[0].details["max_depth"] == 3
+        assert feedback[0].details["affected_ac_paths"] == ["1.1.1"]
 
 
 class TestMCPServerAdapterTools:

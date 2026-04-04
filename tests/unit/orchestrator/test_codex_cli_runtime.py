@@ -89,11 +89,13 @@ class _FakeProcess:
 
 class _BlockingStream:
     async def readline(self) -> bytes:
-        await asyncio.Future()
+        await asyncio.Future()  # type: ignore[misc]
+        return b""  # unreachable, satisfies mypy
 
     async def read(self, n: int = -1) -> bytes:
         del n
-        await asyncio.Future()
+        await asyncio.Future()  # type: ignore[misc]
+        return b""  # unreachable, satisfies mypy
 
 
 class _TerminableProcess:

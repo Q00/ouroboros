@@ -51,6 +51,39 @@ def validate_transport(transport: str) -> str:
     return transport
 
 
+def _extract_feedback_metadata_from_artifact(artifact: str) -> tuple[Any, ...]:
+    """Extract structured feedback metadata emitted inside execution artifacts."""
+    import json
+    import re
+
+    from ouroboros.core.lineage import FeedbackMetadata
+
+    matches = re.findall(r"^Feedback Metadata JSON:\s*(\{.+\})$", artifact, flags=re.MULTILINE)
+    if not matches:
+        return ()
+
+    feedback_items: list[FeedbackMetadata] = []
+    for payload in matches:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+        raw_feedback = parsed.get("feedback_metadata")
+        if not isinstance(raw_feedback, list):
+            continue
+
+        for item in raw_feedback:
+            if not isinstance(item, dict):
+                continue
+            try:
+                feedback_items.append(FeedbackMetadata.model_validate(item))
+            except Exception:
+                continue
+
+    return tuple(feedback_items)
+
+
 # Map MCPToolParameter types to Python annotations for FastMCP schema inference.
 _TOOL_TYPE_MAP: dict[ToolInputType, type] = {
     ToolInputType.STRING: str,
@@ -468,7 +501,7 @@ class MCPServerAdapter:
         try:
             from mcp.server.fastmcp import FastMCP
         except ImportError as e:
-            msg = "mcp package not installed. Install with: pip install mcp"
+            msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
             raise ImportError(msg) from e
 
         # Pass host/port at construction time — FastMCP reads these from
@@ -816,6 +849,7 @@ def create_ouroboros_server(
             return None
 
         seed_acs = getattr(seed, "acceptance_criteria", None) or ()
+        feedback_metadata = _extract_feedback_metadata_from_artifact(artifact)
 
         ac_results: list[ACResult] = []
         for ac_num_str, status, description in ac_line_matches:
@@ -851,6 +885,7 @@ def create_ouroboros_server(
             drift_score=1.0 - score,
             failure_reason=failure_reason,
             ac_results=tuple(ac_results),
+            feedback_metadata=feedback_metadata,
         )
 
     spec_extractor = AssertionExtractor(

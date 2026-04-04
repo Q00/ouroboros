@@ -117,7 +117,7 @@ class TestCreateAgentRuntime:
                 cwd="/tmp/project",
             )
 
-        assert isinstance(runtime, OpenCodeRuntime)  # noqa: F821
+        assert isinstance(runtime, OpenCodeRuntime)  # type: ignore[name-defined]  # noqa: F821
         assert runtime._cli_path == "/tmp/opencode"
         assert runtime._cwd == "/tmp/project"
         assert runtime._skill_dispatcher is mock_dispatcher
@@ -153,7 +153,7 @@ class TestCreateAgentRuntime:
         ):
             runtime = create_agent_runtime(cwd="/tmp/project")
 
-        assert isinstance(runtime, OpenCodeRuntime)  # noqa: F821
+        assert isinstance(runtime, OpenCodeRuntime)  # type: ignore[name-defined]  # noqa: F821
         assert runtime._cli_path == "/tmp/opencode"
         assert runtime._cwd == "/tmp/project"
         assert runtime._permission_mode == "acceptEdits"
@@ -187,7 +187,7 @@ class TestCreateAgentRuntime:
         ):
             runtime = create_agent_runtime(backend="opencode")
 
-        assert isinstance(runtime, OpenCodeRuntime)  # noqa: F821
+        assert isinstance(runtime, OpenCodeRuntime)  # type: ignore[name-defined]  # noqa: F821
         assert runtime._permission_mode == "bypassPermissions"
         assert mock_get_permission_mode.call_args.kwargs["backend"] == "opencode"
 

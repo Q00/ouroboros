@@ -167,6 +167,8 @@ class TestRuntimeMessageProjection:
                 approval_mode="acceptEdits",
                 metadata={
                     "server_session_id": "server-303",
+                    "capability_graph": [{"name": "Read"}],
+                    "control_plane": [{"name": "Read", "execution_mode": "parallel"}],
                     "session_scope_id": "orch_123_ac_3",
                     "session_state_path": (
                         "execution.workflows.orch_123.acceptance_criteria."
@@ -185,6 +187,10 @@ class TestRuntimeMessageProjection:
         assert projected.runtime_metadata["session_id"] == "oc-session-3"
         assert projected.runtime_metadata["server_session_id"] == "server-303"
         assert projected.runtime_metadata["resume_session_id"] == "oc-session-3"
+        assert projected.runtime_metadata["capability_graph"] == [{"name": "Read"}]
+        assert projected.runtime_metadata["control_plane"] == [
+            {"name": "Read", "execution_mode": "parallel"}
+        ]
         assert projected.runtime_metadata["runtime"] == {
             "backend": "opencode",
             "kind": "implementation_session",
@@ -193,6 +199,8 @@ class TestRuntimeMessageProjection:
             "approval_mode": "acceptEdits",
             "metadata": {
                 "server_session_id": "server-303",
+                "capability_graph": [{"name": "Read"}],
+                "control_plane": [{"name": "Read", "execution_mode": "parallel"}],
                 "session_scope_id": "orch_123_ac_3",
                 "session_state_path": (
                     "execution.workflows.orch_123.acceptance_criteria.ac_3.implementation_session"

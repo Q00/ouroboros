@@ -1,6 +1,12 @@
 """Unit tests for ouroboros.core.lineage module."""
 
-from ouroboros.core.lineage import ACResult, EvaluationSummary
+from ouroboros.core.lineage import (
+    ACResult,
+    EvaluationSummary,
+    FeedbackMetadata,
+    GenerationRecord,
+)
+from ouroboros.core.seed import OntologySchema
 
 
 class TestEvaluationSummary:
@@ -43,6 +49,91 @@ class TestEvaluationSummary:
 
         assert payload["execution_completion_status"] == "completed"
         assert payload["approval_status"] == "rejected"
+
+    def test_feedback_metadata_serializes_as_structured_output(self) -> None:
+        """Structured feedback metadata should survive round-trip serialization."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            feedback_metadata=(
+                FeedbackMetadata(
+                    code="decomposition_depth_warning",
+                    severity="warning",
+                    message="Depth safety net forced atomic execution.",
+                    source="parallel_executor",
+                    details={"max_depth": 3, "affected_count": 2},
+                ),
+            ),
+        )
+
+        payload = summary.model_dump(mode="json")
+
+        assert payload["feedback_metadata"] == [
+            {
+                "code": "decomposition_depth_warning",
+                "severity": "warning",
+                "message": "Depth safety net forced atomic execution.",
+                "source": "parallel_executor",
+                "details": {"max_depth": 3, "affected_count": 2},
+            }
+        ]
+
+    def test_seed_quality_canary_feedback_filters_depth_warning(self) -> None:
+        """Depth warnings should be exposed as seed-quality canary feedback."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            feedback_metadata=(
+                FeedbackMetadata(
+                    code="decomposition_depth_warning",
+                    severity="warning",
+                    message="Depth safety net forced atomic execution.",
+                    source="parallel_executor",
+                    details={"max_depth": 3, "affected_count": 2},
+                ),
+                FeedbackMetadata(
+                    code="unrelated_warning",
+                    severity="warning",
+                    message="Ignore me",
+                    source="evaluation",
+                ),
+            ),
+        )
+
+        assert [feedback.code for feedback in summary.seed_quality_canary_feedback] == [
+            "decomposition_depth_warning"
+        ]
+
+    def test_generation_record_backfills_seed_quality_canary_feedback(self) -> None:
+        """Generation records should derive canary feedback from evaluation summaries."""
+        summary = EvaluationSummary(
+            final_approved=False,
+            highest_stage_passed=2,
+            feedback_metadata=(
+                FeedbackMetadata(
+                    code="decomposition_depth_warning",
+                    severity="warning",
+                    message="Depth safety net forced atomic execution.",
+                    source="parallel_executor",
+                    details={"max_depth": 3, "affected_count": 2},
+                ),
+            ),
+        )
+
+        record = GenerationRecord(
+            generation_number=1,
+            seed_id="seed_1",
+            ontology_snapshot=OntologySchema(
+                name="test",
+                description="test",
+                fields=(),
+            ),
+            evaluation_summary=summary,
+        )
+
+        assert [feedback.code for feedback in record.seed_quality_canary_feedback] == [
+            "decomposition_depth_warning"
+        ]
 
     def test_run_verdict_prefers_ac_results_over_final_approved(self) -> None:
         """Summary verdict should follow the detailed AC verdict source."""

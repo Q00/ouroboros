@@ -197,6 +197,21 @@ Guidelines:
         parts.append(f"  Drift: {eval_summary.drift_score}")
         if eval_summary.failure_reason:
             parts.append(f"  Failure: {eval_summary.failure_reason}")
+        if eval_summary.feedback_metadata:
+            parts.append("  Feedback Signals:")
+            for feedback in eval_summary.feedback_metadata:
+                details: list[str] = []
+                max_depth = feedback.details.get("max_depth")
+                if isinstance(max_depth, int):
+                    details.append(f"max_depth={max_depth}")
+                affected_count = feedback.details.get("affected_count")
+                if isinstance(affected_count, int):
+                    details.append(f"affected_count={affected_count}")
+                detail_suffix = f" ({', '.join(details)})" if details else ""
+                parts.append(
+                    f"    - [{feedback.severity.upper()}] {feedback.code}: "
+                    f"{feedback.message}{detail_suffix}"
+                )
         if eval_summary.ac_results:
             parts.append("\n  Per-AC Breakdown:")
             for ac in eval_summary.ac_results:

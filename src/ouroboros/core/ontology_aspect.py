@@ -32,9 +32,8 @@ from enum import StrEnum
 import logging
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
-from cachetools import TTLCache
-
 from ouroboros.core.errors import OuroborosError
+from ouroboros.core.ttl_cache import TTLCache
 from ouroboros.core.types import Result
 
 if TYPE_CHECKING:

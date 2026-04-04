@@ -58,7 +58,7 @@ def monitor_command(
         from ouroboros.tui import OuroborosTUI
     except ImportError as e:
         print_error(
-            "TUI dependencies not installed. Install with: pip install 'ouroboros[tui]'",
+            "TUI dependencies not installed. Install with: pip install 'ouroboros-ai[tui]'",
         )
         raise typer.Exit(1) from e
 

@@ -46,6 +46,14 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
     runtime_handle_tool_catalog,
 )
+from ouroboros.orchestrator.capabilities import (
+    build_capability_graph,
+    serialize_capability_graph,
+)
+from ouroboros.orchestrator.control_plane import (
+    build_control_plane_state,
+    serialize_control_plane_state,
+)
 from ouroboros.orchestrator.coordinator import CoordinatorReview, LevelCoordinator
 from ouroboros.orchestrator.events import (
     create_ac_stall_detected_event,
@@ -72,6 +80,12 @@ from ouroboros.orchestrator.parallel_executor_models import (
     ParallelExecutionStageResult,
     StageExecutionOutcome,
 )
+from ouroboros.orchestrator.policy import (
+    PolicyContext,
+    PolicyExecutionPhase,
+    PolicySessionRole,
+    evaluate_capability_policy,
+)
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
@@ -89,7 +103,8 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 # Decomposition constants
-MAX_DECOMPOSITION_DEPTH = 2
+# Depth >= MAX_DECOMPOSITION_DEPTH forces atomic execution as a soft safety net.
+MAX_DECOMPOSITION_DEPTH = 3
 MIN_SUB_ACS = 2
 MAX_SUB_ACS = 5
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
@@ -291,6 +306,26 @@ def _render_ac_section(
     return lines
 
 
+def _collect_decomposition_depth_warning_paths(
+    result: ACExecutionResult,
+    *,
+    index_path: tuple[int, ...],
+) -> list[str]:
+    """Collect dotted AC paths that hit the soft decomposition depth safety net."""
+    warning_paths: list[str] = []
+    if result.decomposition_depth_warning:
+        warning_paths.append(".".join(str(i) for i in index_path))
+
+    for idx, sub_result in enumerate(result.sub_results, start=1):
+        warning_paths.extend(
+            _collect_decomposition_depth_warning_paths(
+                sub_result,
+                index_path=index_path + (idx,),
+            )
+        )
+    return warning_paths
+
+
 def render_parallel_verification_report(
     parallel_result: ParallelExecutionResult,
     total_acceptance_criteria: int,
@@ -304,6 +339,38 @@ def render_parallel_verification_report(
         lines.append(f"Failed: {parallel_result.failure_count}")
     if parallel_result.skipped_count > 0:
         lines.append(f"Skipped: {parallel_result.skipped_count}")
+
+    warning_paths: list[str] = []
+    for result in parallel_result.results:
+        warning_paths.extend(
+            _collect_decomposition_depth_warning_paths(
+                result,
+                index_path=(result.ac_index + 1,),
+            )
+        )
+
+    if warning_paths:
+        feedback_metadata = {
+            "feedback_metadata": [
+                {
+                    "code": "decomposition_depth_warning",
+                    "severity": "warning",
+                    "message": (
+                        "Recursive decomposition reached the soft depth safety net; "
+                        "affected leaves were forced to atomic execution."
+                    ),
+                    "source": "parallel_executor",
+                    "details": {
+                        "max_depth": MAX_DECOMPOSITION_DEPTH,
+                        "affected_count": len(warning_paths),
+                        "affected_ac_paths": warning_paths,
+                    },
+                }
+            ]
+        }
+        lines.append("")
+        lines.append("## Feedback Metadata")
+        lines.append(f"Feedback Metadata JSON: {json.dumps(feedback_metadata, sort_keys=True)}")
 
     lines.append("")
     lines.append("## AC Results")
@@ -677,6 +744,19 @@ class ParallelACExecutor:
         )
         if tool_catalog is not None:
             metadata["tool_catalog"] = serialize_tool_catalog(tool_catalog)
+            capability_graph = build_capability_graph(tool_catalog)
+            policy_context = PolicyContext(
+                runtime_backend=backend,
+                session_role=PolicySessionRole.IMPLEMENTATION,
+                execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
+            )
+            metadata["capability_graph"] = serialize_capability_graph(capability_graph)
+            metadata["control_plane"] = serialize_control_plane_state(
+                build_control_plane_state(
+                    capability_graph,
+                    evaluate_capability_policy(capability_graph, policy_context),
+                )
+            )
 
         if seeded_handle is not None:
             return replace(
@@ -1957,8 +2037,11 @@ class ParallelACExecutor:
         sibling_acs: list[str] | None = None,
         retry_attempt: int = 0,
         execution_counters: dict[str, int] | None = None,
+        is_sub_ac: bool = False,
+        parent_ac_index: int | None = None,
+        sub_ac_index: int | None = None,
     ) -> ACExecutionResult:
-        """Execute a single AC, decomposing into parallel Sub-ACs if complex.
+        """Execute a single AC via the sole recursive AC execution entry point.
 
         Flow:
         1. Ask Claude to analyze if AC needs decomposition
@@ -2018,24 +2101,75 @@ class ParallelACExecutor:
                         status="pending",
                     )
 
-                # Execute Sub-ACs sequentially (memory optimization)
-                sub_results = await self._execute_sub_acs(
-                    parent_ac_index=ac_index,
-                    sub_acs=sub_acs,
-                    session_id=session_id,
-                    tools=tools,
-                    tool_catalog=tool_catalog,
-                    system_prompt=system_prompt,
-                    seed_goal=seed_goal,
-                    depth=depth + 1,
-                    execution_id=execution_id,
-                    level_contexts=level_contexts,
-                    retry_attempt=retry_attempt,
-                    execution_counters=execution_counters,
+                # Execute Sub-ACs sequentially (memory optimization) while
+                # re-entering this same method for both composite and atomic children.
+                self._console.print(
+                    f"    [green]Starting {len(sub_acs)} Sub-ACs sequentially...[/green]"
+                )
+
+                sub_results: list[ACExecutionResult | BaseException] = [None] * len(sub_acs)
+                sub_depth = depth + 1
+
+                for idx, sub_ac in enumerate(sub_acs):
+                    try:
+                        child_is_sub_ac = depth == 0 and not is_sub_ac
+                        await self._emit_subtask_event(
+                            execution_id=execution_id,
+                            ac_index=ac_index,
+                            sub_task_index=idx + 1,
+                            sub_task_desc=sub_ac[:50],
+                            status="executing",
+                        )
+
+                        sub_results[idx] = await self._execute_single_ac(
+                            ac_index=ac_index * 100 + idx,
+                            ac_content=sub_ac,
+                            session_id=session_id,
+                            tools=tools,
+                            tool_catalog=tool_catalog,
+                            system_prompt=system_prompt,
+                            seed_goal=seed_goal,
+                            depth=sub_depth,
+                            execution_id=execution_id,
+                            level_contexts=level_contexts,
+                            retry_attempt=retry_attempt,
+                            execution_counters=execution_counters,
+                            is_sub_ac=child_is_sub_ac,
+                            parent_ac_index=ac_index if child_is_sub_ac else None,
+                            sub_ac_index=idx if child_is_sub_ac else None,
+                        )
+                    except BaseException as e:
+                        if isinstance(e, anyio.get_cancelled_exc_class()):
+                            raise
+                        sub_results[idx] = e
+
+                # Convert exceptions and None sentinels to failed results
+                final_sub_results: list[ACExecutionResult] = []
+                for i, result in enumerate(sub_results):
+                    if isinstance(result, BaseException) or result is None:
+                        final_sub_results.append(
+                            ACExecutionResult(
+                                ac_index=ac_index * 100 + i,
+                                ac_content=sub_acs[i],
+                                success=False,
+                                error=str(result)
+                                if isinstance(result, BaseException)
+                                else "Task cancelled or produced no result",
+                                retry_attempt=retry_attempt,
+                                depth=sub_depth,
+                            )
+                        )
+                    else:
+                        final_sub_results.append(result)
+
+                success_count = sum(1 for result in final_sub_results if result.success)
+                self._console.print(
+                    f"    [{'green' if success_count == len(sub_acs) else 'yellow'}]"
+                    f"Sub-ACs completed: {success_count}/{len(sub_acs)} succeeded[/]"
                 )
 
                 # Update TUI with final statuses
-                for i, result in enumerate(sub_results):
+                for i, result in enumerate(final_sub_results):
                     status = "completed" if result.success else "failed"
                     await self._emit_subtask_event(
                         execution_id=execution_id,
@@ -2046,7 +2180,7 @@ class ParallelACExecutor:
                     )
 
                 duration = (datetime.now(UTC) - start_time).total_seconds()
-                all_success = all(r.success for r in sub_results)
+                all_success = all(result.success for result in final_sub_results)
 
                 return ACExecutionResult(
                     ac_index=ac_index,
@@ -2062,7 +2196,7 @@ class ParallelACExecutor:
                                 messages=(),
                                 duration_seconds=duration,
                                 is_decomposed=True,
-                                sub_results=tuple(sub_results),
+                                sub_results=tuple(final_sub_results),
                                 depth=depth,
                             ),
                             index_path=(ac_index + 1,),
@@ -2073,27 +2207,86 @@ class ParallelACExecutor:
                     duration_seconds=duration,
                     retry_attempt=retry_attempt,
                     is_decomposed=True,
-                    sub_results=tuple(sub_results),
+                    sub_results=tuple(final_sub_results),
                     depth=depth,
                 )
 
-        # Execute atomic AC directly
-        return await self._execute_atomic_ac(
-            ac_index=ac_index,
-            ac_content=ac_content,
-            session_id=session_id,
-            tools=tools,
-            tool_catalog=tool_catalog,
-            system_prompt=system_prompt,
-            seed_goal=seed_goal,
-            depth=depth,
-            start_time=start_time,
-            execution_id=execution_id,
-            level_contexts=level_contexts,
-            sibling_acs=sibling_acs,
-            retry_attempt=retry_attempt,
-            execution_counters=execution_counters,
+        # Depth-limit canary: execution is forced atomic once the soft recursion
+        # safety net is reached, so downstream stages can detect decomposition pressure.
+        decomposition_depth_warning = (
+            self._enable_decomposition and depth >= MAX_DECOMPOSITION_DEPTH
         )
+
+        # Stall recovery belongs to atomic leaves only. Once this method decides
+        # to execute atomically, it can retry the leaf without re-running the
+        # decomposition/dispatch branch above.
+        atomic_retry_attempt = retry_attempt
+        max_attempts = retry_attempt + MAX_STALL_RETRIES + 1
+        execution_context_id = execution_id or session_id
+
+        while True:
+            atomic_result = await self._execute_atomic_ac(
+                ac_index=ac_index,
+                ac_content=ac_content,
+                session_id=session_id,
+                tools=tools,
+                tool_catalog=tool_catalog,
+                system_prompt=system_prompt,
+                seed_goal=seed_goal,
+                depth=depth,
+                start_time=start_time,
+                execution_id=execution_id,
+                level_contexts=level_contexts,
+                sibling_acs=sibling_acs,
+                retry_attempt=atomic_retry_attempt,
+                execution_counters=execution_counters,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+            )
+            if atomic_result.error != _STALL_SENTINEL:
+                if decomposition_depth_warning:
+                    return replace(atomic_result, decomposition_depth_warning=True)
+                return atomic_result
+
+            runtime_identity = build_ac_runtime_identity(
+                ac_index,
+                execution_context_id=execution_context_id,
+                is_sub_ac=is_sub_ac,
+                parent_ac_index=parent_ac_index,
+                sub_ac_index=sub_ac_index,
+                retry_attempt=atomic_retry_attempt,
+            )
+            should_retry = atomic_retry_attempt - retry_attempt < MAX_STALL_RETRIES
+            await self._safe_emit_event(
+                create_ac_stall_detected_event(
+                    session_id=session_id,
+                    ac_index=ac_index,
+                    ac_id=runtime_identity.ac_id,
+                    silent_seconds=STALL_TIMEOUT_SECONDS,
+                    attempt=runtime_identity.attempt_number,
+                    max_attempts=max_attempts,
+                    action="restart" if should_retry else "abandon",
+                )
+            )
+
+            if not should_retry:
+                log.error(
+                    "parallel_executor.ac.stall_abandoned",
+                    session_id=session_id,
+                    ac_index=ac_index,
+                    depth=depth,
+                    retry_attempt=atomic_retry_attempt,
+                )
+                failed_result = replace(
+                    atomic_result,
+                    error=f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)",
+                )
+                if decomposition_depth_warning:
+                    return replace(failed_result, decomposition_depth_warning=True)
+                return failed_result
+
+            atomic_retry_attempt += 1
 
     async def _try_decompose_ac(
         self,
@@ -2195,152 +2388,6 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 error=str(e),
             )
             return None
-
-    async def _execute_sub_acs(
-        self,
-        parent_ac_index: int,
-        sub_acs: list[str],
-        session_id: str,
-        tools: list[str],
-        tool_catalog: tuple[MCPToolDefinition, ...] | None,
-        system_prompt: str,
-        seed_goal: str,
-        depth: int,
-        execution_id: str,
-        level_contexts: list[LevelContext] | None = None,
-        retry_attempt: int = 0,
-        execution_counters: dict[str, int] | None = None,
-    ) -> list[ACExecutionResult]:
-        """Execute Sub-ACs sequentially to limit memory usage.
-
-        Returns:
-            List of ACExecutionResult for each Sub-AC.
-        """
-        self._console.print(f"    [green]Starting {len(sub_acs)} Sub-ACs sequentially...[/green]")
-
-        sub_results: list[ACExecutionResult | BaseException] = [None] * len(sub_acs)
-
-        for idx, sub_ac in enumerate(sub_acs):
-            try:
-                await self._emit_subtask_event(
-                    execution_id=execution_id,
-                    ac_index=parent_ac_index,
-                    sub_task_index=idx + 1,
-                    sub_task_desc=sub_ac[:50],
-                    status="executing",
-                )
-
-                sub_ac_id = f"sub_ac_{parent_ac_index}_{idx}"
-                result = None
-                for attempt in range(MAX_STALL_RETRIES + 1):
-                    result = await self._execute_atomic_ac(
-                        ac_index=parent_ac_index * 100 + idx,
-                        ac_content=sub_ac,
-                        session_id=session_id,
-                        tools=tools,
-                        tool_catalog=tool_catalog,
-                        system_prompt=system_prompt,
-                        seed_goal=seed_goal,
-                        depth=depth,
-                        start_time=datetime.now(UTC),
-                        execution_id=execution_id,
-                        is_sub_ac=True,
-                        parent_ac_index=parent_ac_index,
-                        sub_ac_index=idx,
-                        level_contexts=level_contexts,
-                        retry_attempt=retry_attempt,
-                        execution_counters=execution_counters,
-                    )
-                    if isinstance(result, ACExecutionResult) and result.error == _STALL_SENTINEL:
-                        if attempt < MAX_STALL_RETRIES:
-                            await self._safe_emit_event(
-                                create_ac_stall_detected_event(
-                                    session_id=session_id,
-                                    ac_index=parent_ac_index,
-                                    ac_id=sub_ac_id,
-                                    silent_seconds=STALL_TIMEOUT_SECONDS,
-                                    attempt=attempt + 1,
-                                    max_attempts=MAX_STALL_RETRIES + 1,
-                                    action="restart",
-                                )
-                            )
-                            log.warning(
-                                "parallel_executor.sub_ac.stall_retry",
-                                parent_ac=parent_ac_index,
-                                sub_ac=idx,
-                                attempt=attempt + 1,
-                                max_retries=MAX_STALL_RETRIES,
-                            )
-                            self._console.print(
-                                f"    [yellow]Sub-AC {idx + 1}: Stall detected "
-                                f"(attempt {attempt + 1}/{MAX_STALL_RETRIES + 1}), "
-                                f"retrying...[/yellow]"
-                            )
-                            continue
-                        else:
-                            # Exhausted retries → normalize to descriptive failure
-                            await self._safe_emit_event(
-                                create_ac_stall_detected_event(
-                                    session_id=session_id,
-                                    ac_index=parent_ac_index,
-                                    ac_id=sub_ac_id,
-                                    silent_seconds=STALL_TIMEOUT_SECONDS,
-                                    attempt=attempt + 1,
-                                    max_attempts=MAX_STALL_RETRIES + 1,
-                                    action="abandon",
-                                )
-                            )
-                            result = ACExecutionResult(
-                                ac_index=parent_ac_index * 100 + idx,
-                                ac_content=sub_ac,
-                                success=False,
-                                error=(
-                                    f"Sub-AC stalled after {MAX_STALL_RETRIES + 1} "
-                                    f"attempts (no activity for "
-                                    f"{STALL_TIMEOUT_SECONDS:.0f}s)"
-                                ),
-                                depth=depth,
-                                retry_attempt=retry_attempt,
-                            )
-                            log.error(
-                                "parallel_executor.sub_ac.stall_abandoned",
-                                parent_ac=parent_ac_index,
-                                sub_ac=idx,
-                                total_attempts=MAX_STALL_RETRIES + 1,
-                            )
-                    break
-                sub_results[idx] = result
-            except BaseException as e:
-                if isinstance(e, anyio.get_cancelled_exc_class()):
-                    raise
-                sub_results[idx] = e
-
-        # Convert exceptions and None sentinels to failed results
-        final_results: list[ACExecutionResult] = []
-        for i, result in enumerate(sub_results):
-            if isinstance(result, BaseException) or result is None:
-                final_results.append(
-                    ACExecutionResult(
-                        ac_index=parent_ac_index * 100 + i,
-                        ac_content=sub_acs[i],
-                        success=False,
-                        error=str(result)
-                        if isinstance(result, BaseException)
-                        else "Task cancelled or produced no result",
-                        retry_attempt=retry_attempt,
-                        depth=depth,
-                    )
-                )
-            else:
-                final_results.append(result)
-
-        success_count = sum(1 for r in final_results if r.success)
-        self._console.print(
-            f"    [{'green' if success_count == len(sub_acs) else 'yellow'}]"
-            f"Sub-ACs completed: {success_count}/{len(sub_acs)} succeeded[/]"
-        )
-
-        return final_results
 
     @staticmethod
     def _format_tool_detail(tool_name: str, tool_input: dict[str, Any]) -> str:

@@ -108,6 +108,28 @@ class ACResult(BaseModel, frozen=True):
         return None
 
 
+class FeedbackMetadata(BaseModel, frozen=True):
+    """Structured evaluation feedback that downstream loops can react to."""
+
+    code: str = Field(description="Stable machine-readable feedback identifier.")
+    severity: str = Field(
+        default="info",
+        description="Feedback severity (for example: info, warning, error).",
+    )
+    message: str = Field(description="Human-readable explanation of the feedback signal.")
+    source: str = Field(
+        default="evaluation",
+        description="Subsystem that emitted this feedback signal.",
+    )
+    details: dict[str, Any] = Field(
+        default_factory=dict,
+        description="JSON-safe structured payload with feedback-specific details.",
+    )
+
+
+_SEED_QUALITY_CANARY_CODES = frozenset({"decomposition_depth_warning"})
+
+
 class EvaluationSummary(BaseModel, frozen=True):
     """Typed summary of evaluation results for a generation.
 
@@ -128,6 +150,13 @@ class EvaluationSummary(BaseModel, frozen=True):
     )
     failure_reason: str | None = None
     ac_results: tuple[ACResult, ...] = ()
+    feedback_metadata: tuple[FeedbackMetadata, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Structured evaluation feedback signals for downstream loops, "
+            "including canaries such as decomposition-depth pressure."
+        ),
+    )
     execution_completion_status: str = Field(
         description="Whether execution finished successfully. Cross-reference with approval_status for full run verdict.",
     )
@@ -178,6 +207,15 @@ class EvaluationSummary(BaseModel, frozen=True):
     def run_verdict(self) -> str:
         """Human-readable aggregate verdict."""
         return "PASS" if self.run_verdict_passed else "FAIL"
+
+    @property
+    def seed_quality_canary_feedback(self) -> tuple[FeedbackMetadata, ...]:
+        """Feedback signals that indicate seed-quality pressure in execution."""
+        return tuple(
+            feedback
+            for feedback in self.feedback_metadata
+            if feedback.code in _SEED_QUALITY_CANARY_CODES
+        )
 
 
 class FieldModification(BaseModel, frozen=True):
@@ -288,9 +326,34 @@ class GenerationRecord(BaseModel, frozen=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     seed_json: str | None = None
     execution_output: str | None = None
+    seed_quality_canary_feedback: tuple[FeedbackMetadata, ...] = Field(
+        default_factory=tuple,
+        description=(
+            "Subset of evaluation feedback that acts as a seed-quality canary, "
+            "such as recursive decomposition depth pressure."
+        ),
+    )
     failure_error: str | None = None
     last_completed_phase: str | None = None
     partial_state: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _backfill_seed_quality_canary_feedback(cls, data: Any) -> Any:
+        """Derive canary feedback from evaluation metadata when callers omit it."""
+        if not isinstance(data, dict):
+            return data
+        if data.get("seed_quality_canary_feedback"):
+            return data
+
+        eval_summary = data.get("evaluation_summary")
+        if isinstance(eval_summary, EvaluationSummary):
+            data["seed_quality_canary_feedback"] = eval_summary.seed_quality_canary_feedback
+        elif isinstance(eval_summary, dict):
+            data["seed_quality_canary_feedback"] = EvaluationSummary.model_validate(
+                eval_summary
+            ).seed_quality_canary_feedback
+        return data
 
 
 class RewindRecord(BaseModel, frozen=True):

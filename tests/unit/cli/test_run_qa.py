@@ -53,7 +53,7 @@ VALID_SEED_DATA_WITH_RELATIVE_PROJECT = {
     },
 }
 
-FAKE_QA_RESULT = Result.ok(
+FAKE_QA_RESULT: Result[MCPToolResult, str] = Result.ok(
     MCPToolResult(
         content=(MCPContentItem(type=ContentType.TEXT, text="QA Verdict [PASS]"),),
         is_error=False,

@@ -33,18 +33,14 @@ Functions:
     get_opencode_cli_path: Get OpenCode CLI path from env var or config
 """
 
+import ast
 import os
 from pathlib import Path
 import stat
 from typing import Any
 
-from dotenv import load_dotenv
 from pydantic import ValidationError as PydanticValidationError
 import yaml
-
-# Load .env file from current directory and ~/.ouroboros/
-load_dotenv()  # Current directory .env
-load_dotenv(Path.home() / ".ouroboros" / ".env")  # Global .env
 
 from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
@@ -66,6 +62,48 @@ _DEFAULT_CONSENSUS_MODELS = (
 _DEFAULT_CONSENSUS_ADVOCATE_MODEL = "openrouter/anthropic/claude-opus-4-6"
 _DEFAULT_CONSENSUS_DEVIL_MODEL = "openrouter/openai/gpt-4o"
 _DEFAULT_CONSENSUS_JUDGE_MODEL = "openrouter/google/gemini-2.5-pro"
+
+
+def _parse_env_value(raw_value: str) -> str:
+    candidate = raw_value.strip()
+    if not candidate:
+        return ""
+
+    if candidate[0] in {'"', "'"} and candidate[-1:] == candidate[0]:
+        try:
+            parsed = ast.literal_eval(candidate)
+        except (SyntaxError, ValueError):
+            return candidate[1:-1]
+        return str(parsed)
+
+    comment_index = candidate.find(" #")
+    if comment_index != -1:
+        candidate = candidate[:comment_index]
+    return candidate.rstrip()
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if not key or any(ch.isspace() for ch in key):
+            continue
+        os.environ.setdefault(key, _parse_env_value(raw_value))
+
+
+for env_path in (Path(".env"), Path.home() / ".ouroboros" / ".env"):
+    _load_env_file(env_path)
 
 
 def ensure_config_dir() -> Path:

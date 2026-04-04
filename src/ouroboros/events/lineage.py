@@ -54,6 +54,7 @@ def lineage_generation_completed(
     seed_json: str | None = None,
     execution_output: str | None = None,
     parent_seed_id: str | None = None,
+    seed_quality_canary_feedback: list[dict] | None = None,
 ) -> BaseEvent:
     """Create event when a generation completes successfully."""
     data = {
@@ -63,6 +64,8 @@ def lineage_generation_completed(
         "evaluation_summary": evaluation_summary,
         "wonder_questions": wonder_questions or [],
     }
+    if seed_quality_canary_feedback is not None:
+        data["seed_quality_canary_feedback"] = seed_quality_canary_feedback
     if parent_seed_id is not None:
         data["parent_seed_id"] = parent_seed_id
     if seed_json is not None:
