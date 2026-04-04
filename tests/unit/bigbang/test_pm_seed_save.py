@@ -55,8 +55,8 @@ def _make_seed(pm_id: str = "pm_seed_abc123def456") -> PMSeed:
         ),
         assumptions=("Users have internet for initial sync",),
         interview_id="interview_xyz",
-        codebase_context="existing Flask app",
         brownfield_repos=({"path": "/code/app", "name": "app", "desc": "main"},),
+        created_at="2026-03-30T11:33:57+00:00",
     )
 
 
@@ -151,10 +151,10 @@ class TestPMSeedSaveJSON:
         ]
         assert loaded["assumptions"] == ["Users have internet for initial sync"]
         assert loaded["interview_id"] == "interview_xyz"
-        assert loaded["codebase_context"] == "existing Flask app"
         assert loaded["brownfield_repos"] == [{"path": "/code/app", "name": "app", "desc": "main"}]
-        assert "created_at" in loaded
+        assert loaded["created_at"] == "2026-03-30T11:33:57+00:00"
         # Removed fields must not appear
+        assert "codebase_context" not in loaded
         assert "deferred_items" not in loaded
         assert "deferred_decisions" not in loaded
         assert "referenced_repos" not in loaded

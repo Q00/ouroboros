@@ -86,7 +86,8 @@ def generate_pm_markdown(seed: PMSeed) -> str:
     title = seed.product_name or "Product Requirements Document"
     lines.append(f"# {title}")
     lines.append("")
-    lines.append(f"*Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}*")
+    created_at = seed.created_at or datetime.now(UTC).isoformat()
+    lines.append(f"*Created At: {created_at}*")
     lines.append(f"*PM ID: {seed.pm_id}*")
     lines.append("")
 

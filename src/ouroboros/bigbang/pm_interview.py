@@ -1221,6 +1221,5 @@ Include them as original question text in "decide_later_items":
             decide_later_items=tuple(all_decide_later),
             assumptions=tuple(data.get("assumptions", [])),
             interview_id=interview_id,
-            codebase_context=self.codebase_context,
             brownfield_repos=brownfield_repos,
         )

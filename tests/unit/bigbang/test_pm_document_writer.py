@@ -35,6 +35,7 @@ def _make_seed(**overrides) -> PMSeed:
         "decide_later_items": ("API rate limiting", "Which database to use?"),
         "assumptions": ("Team has access to cloud infra",),
         "interview_id": "int_abc",
+        "created_at": "2026-03-30T11:33:57+00:00",
     }
     defaults.update(overrides)
     return PMSeed(**defaults)
@@ -91,8 +92,8 @@ class TestGeneratePrdMarkdown:
         assert "## Assumptions" in md
         assert "- Team has access to cloud infra" in md
 
-    def test_includes_decide_later_merged(self):
-        """Generated markdown merges deferred and decide-later items into Decide Later."""
+    def test_includes_decide_later(self):
+        """Generated markdown includes Decide Later items."""
         seed = _make_seed()
         md = generate_pm_markdown(seed)
         assert "## Decide Later" in md
@@ -111,6 +112,12 @@ class TestGeneratePrdMarkdown:
         seed = _make_seed()
         md = generate_pm_markdown(seed)
         assert "*PM ID: pm_seed_test123*" in md
+
+    def test_includes_created_at(self):
+        """Generated markdown includes the seed created_at timestamp."""
+        seed = _make_seed()
+        md = generate_pm_markdown(seed)
+        assert "*Created At: 2026-03-30T11:33:57+00:00*" in md
 
     def test_omits_empty_sections(self):
         """Sections with no data are omitted from the output."""
@@ -152,9 +159,15 @@ class TestGeneratePrdMarkdown:
         assert "`/code/myapp`" in md
         assert "Main app" in md
 
-    def test_codebase_context_excluded(self):
-        """Codebase analysis is excluded from PM document."""
-        seed = _make_seed(codebase_context="Python FastAPI with PostgreSQL.")
+    def test_codebase_summary_is_not_rendered(self):
+        """pm.md does not render the removed codebase_context field."""
+        seed = PMSeed.from_dict(
+            {
+                "product_name": "Task Manager",
+                "goal": "Build a task management tool for small teams.",
+                "codebase_context": "Python FastAPI with PostgreSQL.",
+            }
+        )
         md = generate_pm_markdown(seed)
         assert "### Codebase Analysis" not in md
 
