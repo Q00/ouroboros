@@ -34,3 +34,19 @@ def test_load_env_file_does_not_override_existing_values(
     _load_env_file(env_file)
 
     assert os.environ["FIRST"] == "existing"
+
+
+def test_load_env_file_skips_template_placeholders(tmp_path: Path, monkeypatch) -> None:
+    """Template placeholders should not block later env values from loading."""
+    repo_env = tmp_path / "repo.env"
+    home_env = tmp_path / "home.env"
+
+    repo_env.write_text("OPENROUTER_API_KEY=YOUR_OPENROUTER_API_KEY")
+    home_env.write_text("OPENROUTER_API_KEY=real-key")
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    _load_env_file(repo_env)
+    _load_env_file(home_env)
+
+    assert os.environ["OPENROUTER_API_KEY"] == "real-key"

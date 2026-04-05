@@ -40,7 +40,7 @@ def _ensure_lockfile_content(handle: TextIO) -> None:
 def _acquire_lock(handle: TextIO, *, exclusive: bool = True) -> None:
     if os.name == "nt":  # pragma: no cover - exercised on Windows
         handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_RLCK if not exclusive else msvcrt.LK_LOCK, 1)
         return
 
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)

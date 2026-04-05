@@ -54,6 +54,8 @@ from ouroboros.core.errors import ConfigError  # noqa: E402
 _CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
+_PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
+_PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
     "openrouter/anthropic/claude-opus-4-6",
@@ -82,6 +84,16 @@ def _parse_env_value(raw_value: str) -> str:
     return candidate.rstrip()
 
 
+def _is_placeholder_api_key(value: str) -> bool:
+    """Treat common template placeholders as unset."""
+    candidate = value.strip()
+    return bool(
+        candidate
+        and candidate.startswith(_PLACEHOLDER_API_KEY_PREFIX)
+        and candidate.endswith(_PLACEHOLDER_API_KEY_SUFFIX)
+    )
+
+
 def _load_env_file(path: Path) -> None:
     if not path.exists():
         return
@@ -99,7 +111,14 @@ def _load_env_file(path: Path) -> None:
         key = key.strip()
         if not key or any(ch.isspace() for ch in key):
             continue
-        os.environ.setdefault(key, _parse_env_value(raw_value))
+
+        parsed_value = _parse_env_value(raw_value)
+        if not parsed_value or _is_placeholder_api_key(parsed_value):
+            continue
+
+        current_value = os.environ.get(key)
+        if current_value is None or _is_placeholder_api_key(current_value):
+            os.environ[key] = parsed_value
 
 
 for env_path in (Path(".env"), Path.home() / ".ouroboros" / ".env"):

@@ -6,10 +6,12 @@ handling, and server lifecycle.
 """
 
 import asyncio
+import keyword
 from collections.abc import Sequence
 import inspect
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import structlog
@@ -105,13 +107,50 @@ def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.S
     By setting __signature__ with explicit parameters, FastMCP generates the
     correct schema and clients can send flat argument dicts.
     """
+    signature, _ = _build_tool_signature_with_aliases(parameters)
+    return signature
+
+
+def _to_safe_signature_name(name: str) -> str:
+    """Return a valid Python identifier for a tool parameter name."""
+    if name.isidentifier() and not keyword.iskeyword(name):
+        return name
+
+    # Replace invalid characters with underscore and avoid starting with a digit.
+    sanitized = re.sub(r"[^0-9a-zA-Z_]", "_", name)
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+    if not sanitized or sanitized[0].isdigit():
+        sanitized = f"_{sanitized or 'param'}"
+
+    if keyword.iskeyword(sanitized):
+        sanitized = f"_{sanitized}"
+
+    return sanitized
+
+
+def _build_tool_signature_with_aliases(
+    parameters: tuple[MCPToolParameter, ...],
+) -> tuple[inspect.Signature, dict[str, str]]:
+    """Build signature plus map from schema args to original MCP parameter names."""
+
     sig_params = []
+    alias_counts: dict[str, int] = {}
+    alias_to_original: dict[str, str] = {}
+
     for p in parameters:
+        parameter_name = _to_safe_signature_name(p.name)
+        alias_count = alias_counts.get(parameter_name, 0) + 1
+        alias_counts[parameter_name] = alias_count
+        if alias_count > 1:
+            parameter_name = f"{parameter_name}_{alias_count}"
+
+        alias_to_original[parameter_name] = p.name
+
         python_type = _TOOL_TYPE_MAP.get(p.type, Any)
         if p.required:
             sig_params.append(
                 inspect.Parameter(
-                    name=p.name,
+                    name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
                     annotation=python_type,
                 )
@@ -120,13 +159,14 @@ def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.S
             default = p.default if p.default is not None else None
             sig_params.append(
                 inspect.Parameter(
-                    name=p.name,
+                    name=parameter_name,
                     kind=inspect.Parameter.KEYWORD_ONLY,
                     default=default,
                     annotation=python_type | None,
                 )
             )
-    return inspect.Signature(parameters=sig_params)
+
+    return inspect.Signature(parameters=sig_params), alias_to_original
 
 
 _PROJECT_ROOT_MARKERS = (
@@ -200,11 +240,13 @@ def _project_dir_from_artifact(artifact: str) -> str | None:
     from pathlib import Path
     import re
 
-    # Match quoted paths (spaces allowed) or unquoted paths (no spaces).
+    # Match quoted paths (spaces allowed) and unquoted paths.
     # Examples:  Write: /foo/bar.py  |  File: "/path with spaces/bar.py"
     write_matches: list[str] = []
-    for m in re.finditer(r'(?:Write|Edit|File): (?:"([^"]+)"|(/[^\s]+))', artifact):
-        write_matches.append(m.group(1) or m.group(2))
+    for m in re.finditer(r'(?:Write|Edit|File): (?:"([^"]+)"|(.+))', artifact):
+        path_candidate = m.group(1) or m.group(2)
+        if path_candidate:
+            write_matches.append(path_candidate.strip())
     for path_str in write_matches:
         candidate = Path(path_str).parent
         for _ in range(10):
@@ -529,7 +571,18 @@ class MCPServerAdapter:
                         and isinstance(kwargs["kwargs"], dict)
                     ):
                         kwargs = kwargs["kwargs"]
-                    result = await h.handle(kwargs)
+
+                    _, alias_to_original = _build_tool_signature_with_aliases(
+                        h.definition.parameters,
+                    )
+                    normalized_kwargs: dict[str, Any] = {}
+                    for alias_key, original_key in alias_to_original.items():
+                        if alias_key in kwargs:
+                            normalized_kwargs[original_key] = kwargs[alias_key]
+                    for key, value in kwargs.items():
+                        normalized_kwargs.setdefault(key, value)
+
+                    result = await h.handle(normalized_kwargs)
                     if result.is_ok:
                         # Convert MCPToolResult to FastMCP format
                         tool_result = result.value
