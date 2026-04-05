@@ -72,6 +72,11 @@ class OpenClawWorkflowAdapter:
                 channel_id=event.channel_id,
                 guild_id=event.guild_id,
             )
+        elif parsed.action == "wait":
+            command = OpenClawWorkflowCommand.wait(
+                channel_id=event.channel_id,
+                guild_id=event.guild_id,
+            )
         else:
             command = OpenClawWorkflowCommand(
                 action="message",

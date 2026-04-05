@@ -47,10 +47,24 @@ class FakeInterviewHandler(InterviewHandler):
 class FakeGenerateSeedHandler(GenerateSeedHandler):
     def __init__(self) -> None:
         self.should_fail = False
+        self.invalid_format = False
 
     async def handle(self, arguments: dict[str, str]):
         if self.should_fail:
             return Result.err(Exception("seed generation failed"))
+        if self.invalid_format:
+            return Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="Seed Generated Successfully\nSeed ID: seed_1\n(no yaml marker)",
+                        ),
+                    ),
+                    is_error=False,
+                    meta={"seed_id": "seed_1"},
+                )
+            )
         return Result.ok(
             MCPToolResult(
                 content=(
@@ -264,6 +278,35 @@ async def test_interview_completion_generates_seed_and_starts_execution(
 
 
 @pytest.mark.asyncio
+async def test_plain_message_resumes_active_interview(handler: ChannelWorkflowHandler) -> None:
+    await handler.handle(
+        {"action": "set_repo", "guild_id": "g1", "channel_id": "plain", "repo": "/repo/demo"}
+    )
+    await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "plain",
+            "user_id": "u1",
+            "message": "work on feature x",
+        }
+    )
+
+    result = await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "plain",
+            "user_id": "u1",
+            "message": "use stripe",
+        }
+    )
+
+    assert result.is_ok
+    assert result.value.meta["stage"] == "executing"
+
+
+@pytest.mark.asyncio
 async def test_seed_like_input_skips_interview(handler: ChannelWorkflowHandler) -> None:
     await handler.handle(
         {"action": "set_repo", "guild_id": "g1", "channel_id": "c2", "repo": "/repo/demo"}
@@ -461,6 +504,39 @@ async def test_duplicate_delivery_reuses_existing_workflow(handler: ChannelWorkf
 
 
 @pytest.mark.asyncio
+async def test_duplicate_delivery_reuses_existing_workflow_for_message_id(
+    handler: ChannelWorkflowHandler,
+) -> None:
+    await handler.handle(
+        {"action": "set_repo", "guild_id": "g1", "channel_id": "dup-id", "repo": "/repo/demo"}
+    )
+    first = await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "dup-id",
+            "user_id": "u1",
+            "message": "work on feature x",
+            "message_id": "m-1",
+        }
+    )
+    duplicate = await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "dup-id",
+            "user_id": "u1",
+            "message": "work on feature x",
+            "message_id": "m-1",
+        }
+    )
+
+    assert first.is_ok and duplicate.is_ok
+    assert duplicate.value.meta["duplicate_delivery"] is True
+    assert duplicate.value.meta["duplicate_of"] == first.value.meta["workflow_id"]
+
+
+@pytest.mark.asyncio
 async def test_interview_completion_surfaces_seed_generation_failure(
     handler: ChannelWorkflowHandler,
 ) -> None:
@@ -609,3 +685,36 @@ async def test_poll_failed_job_reports_failure_and_starts_next_queued(
     assert result.is_ok
     assert result.value.meta["next_workflow_started"] is True
     assert "failed" in result.value.content[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_invalid_seed_format_marks_workflow_failed(handler: ChannelWorkflowHandler) -> None:
+    handler._fake_generate.invalid_format = True  # type: ignore[attr-defined]
+    await handler.handle(
+        {"action": "set_repo", "guild_id": "g1", "channel_id": "badseed", "repo": "/repo/demo"}
+    )
+    await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "badseed",
+            "user_id": "u1",
+            "message": "work on feature x",
+        }
+    )
+
+    result = await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "badseed",
+            "user_id": "u1",
+            "message": "done",
+            "mode": "answer",
+        }
+    )
+
+    assert result.is_err
+    status = await handler.handle({"action": "status", "guild_id": "g1", "channel_id": "badseed"})
+    assert status.is_ok
+    assert "failed" in status.value.content[0].text.lower()

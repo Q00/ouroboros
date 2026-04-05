@@ -388,14 +388,16 @@ class ChannelWorkflowManager:
         message: str,
         repo: str,
         entry_point: WorkflowEntryPoint,
+        message_id: str | None = None,
+        event_id: str | None = None,
     ) -> ChannelWorkflowRecord | None:
         fingerprint = request_fingerprint(
             user_id=user_id,
             message=message,
             repo=repo,
             entry_point=entry_point,
-            message_id=None,
-            event_id=None,
+            message_id=message_id,
+            event_id=event_id,
         )
         row = self._store.inflight_duplicate(channel.key, fingerprint)
         return ChannelWorkflowRecord.from_json(row) if row is not None else None

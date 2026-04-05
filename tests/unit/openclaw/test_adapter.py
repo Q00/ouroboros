@@ -86,6 +86,24 @@ async def test_handle_event_routes_answer_mode() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_event_routes_wait_mode() -> None:
+    client = FakeClient()
+    adapter = OpenClawWorkflowAdapter(client=client)
+
+    result = await adapter.handle_event(
+        OpenClawChannelEvent(
+            channel_id="c1",
+            guild_id="g1",
+            user_id="u1",
+            message="/ouro wait",
+        )
+    )
+
+    assert result.is_ok
+    assert client.calls[0][1]["action"] == "wait"
+
+
+@pytest.mark.asyncio
 async def test_handle_event_validates_repo_set_usage() -> None:
     client = FakeClient()
     adapter = OpenClawWorkflowAdapter(client=client)

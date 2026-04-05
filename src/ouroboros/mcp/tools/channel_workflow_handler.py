@@ -346,14 +346,6 @@ class ChannelWorkflowHandler:
         normalized_message = message.strip()
         mode = str(arguments.get("mode", "auto"))
         active = self._workflow_manager.active_for_channel(channel)
-        if (
-            active is not None
-            and active.stage == WorkflowStage.INTERVIEWING
-            and active.interview_session_id
-            and mode == "answer"
-        ):
-            return await self._runtime.resume_interview(active, normalized_message)
-
         repo = arguments.get("repo") or self._repo_registry.get(channel) or (active.repo if active else None)
         if not isinstance(repo, str) or not repo.strip():
             return Result.err(
@@ -375,6 +367,8 @@ class ChannelWorkflowHandler:
             message=normalized_message,
             repo=repo,
             entry_point=detection.entry_point,
+            message_id=(str(arguments["message_id"]) if arguments.get("message_id") is not None else None),
+            event_id=(str(arguments["event_id"]) if arguments.get("event_id") is not None else None),
         )
         if duplicate is not None:
             return self._ok(
@@ -390,6 +384,15 @@ class ChannelWorkflowHandler:
                     duplicate_of=duplicate.workflow_id,
                 ),
             )
+
+        if (
+            active is not None
+            and active.stage == WorkflowStage.INTERVIEWING
+            and active.interview_session_id
+            and mode != "new"
+            and (active.user_id is None or user_id == active.user_id)
+        ):
+            return await self._runtime.resume_interview(active, normalized_message)
 
         record = self._workflow_manager.enqueue(
             ChannelWorkflowRequest(

@@ -40,6 +40,7 @@ def test_set_repo_command_serializes_to_tool_arguments() -> None:
 def test_status_and_poll_commands_are_minimal() -> None:
     status = OpenClawWorkflowCommand.status(channel_id="c1", guild_id="g1")
     poll = OpenClawWorkflowCommand.poll(channel_id="c1", guild_id="g1")
+    wait = OpenClawWorkflowCommand.wait(channel_id="c1", guild_id="g1", timeout_seconds=15)
 
     assert status.to_tool_arguments() == {
         "action": "status",
@@ -51,3 +52,25 @@ def test_status_and_poll_commands_are_minimal() -> None:
         "channel_id": "c1",
         "guild_id": "g1",
     }
+    assert wait.to_tool_arguments() == {
+        "action": "wait",
+        "channel_id": "c1",
+        "guild_id": "g1",
+        "timeout_seconds": 15,
+    }
+
+
+def test_from_event_preserves_transport_ids() -> None:
+    event = OpenClawChannelEvent(
+        channel_id="c1",
+        guild_id="g1",
+        user_id="u1",
+        message="work on feature x",
+        message_id="m1",
+        event_id="e1",
+    )
+
+    command = OpenClawWorkflowCommand.from_event(event)
+
+    assert command.message_id == "m1"
+    assert command.event_id == "e1"

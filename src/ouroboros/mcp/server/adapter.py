@@ -669,8 +669,8 @@ def create_ouroboros_server(
 
     # Create state directory for interviews
     if state_dir is None:
-        state_dir = Path.home() / ".ouroboros" / "data"
-        state_dir.mkdir(parents=True, exist_ok=True)
+        state_dir = Path.cwd() / ".ouroboros" / "data"
+    state_dir.mkdir(parents=True, exist_ok=True)
 
     # Create core service instances
     interview_engine = InterviewEngine(
@@ -1125,7 +1125,7 @@ def create_ouroboros_server(
         validator=_evolution_validator,
     )
     job_manager = JobManager(event_store)
-    openclaw_db_path = Path.cwd() / ".ouroboros" / "openclaw.db"
+    openclaw_db_path = state_dir / "openclaw.db"
     workflow_manager = ChannelWorkflowManager(openclaw_db_path)
     repo_registry = ChannelRepoRegistry(openclaw_db_path)
 

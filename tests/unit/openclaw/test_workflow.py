@@ -175,6 +175,56 @@ def test_duplicate_detection_ignores_terminal_workflow(tmp_path: Path) -> None:
     assert duplicate is None
 
 
+def test_duplicate_detection_uses_transport_message_id(tmp_path: Path) -> None:
+    manager = ChannelWorkflowManager(tmp_path / "state.json")
+    channel = ChannelRef(channel_id="chan-1", guild_id="guild-1")
+    manager.enqueue(
+        ChannelWorkflowRequest(
+            channel=channel,
+            user_id="u1",
+            message="work on feature A",
+            repo="/repo/a",
+            entry_point=WorkflowEntryPoint.INTERVIEW,
+            message_id="msg-1",
+        )
+    )
+
+    duplicate = manager.find_inflight_duplicate(
+        channel,
+        user_id="u1",
+        message="work on feature A",
+        repo="/repo/a",
+        entry_point=WorkflowEntryPoint.INTERVIEW,
+        message_id="msg-1",
+    )
+    assert duplicate is not None
+
+
+def test_duplicate_detection_uses_transport_event_id(tmp_path: Path) -> None:
+    manager = ChannelWorkflowManager(tmp_path / "state.json")
+    channel = ChannelRef(channel_id="chan-1", guild_id="guild-1")
+    manager.enqueue(
+        ChannelWorkflowRequest(
+            channel=channel,
+            user_id="u1",
+            message="work on feature A",
+            repo="/repo/a",
+            entry_point=WorkflowEntryPoint.INTERVIEW,
+            event_id="evt-1",
+        )
+    )
+
+    duplicate = manager.find_inflight_duplicate(
+        channel,
+        user_id="u1",
+        message="different text is okay for event dedupe",
+        repo="/repo/a",
+        entry_point=WorkflowEntryPoint.INTERVIEW,
+        event_id="evt-1",
+    )
+    assert duplicate is not None
+
+
 def test_changing_default_repo_does_not_rewrite_existing_queued_workflow(tmp_path: Path) -> None:
     registry = ChannelRepoRegistry(tmp_path / "repos.json")
     state_path = tmp_path / "state.json"

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ouroboros.core.types import Result
-from ouroboros.mcp.errors import MCPServerError
+from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.job_handlers import JobResultHandler
@@ -236,7 +236,13 @@ class ChannelWorkflowRuntime:
                 return Result.err(seed_result.error)
 
             seed_text = seed_result.value.content[0].text
-            seed_yaml = extract_seed_yaml(seed_text)
+            try:
+                seed_yaml = extract_seed_yaml(seed_text)
+            except ValueError as exc:
+                self.workflow_manager.mark_failed(record.workflow_id, error=str(exc))
+                return Result.err(
+                    MCPToolError(str(exc), tool_name="ouroboros_channel_workflow")
+                )
             self.workflow_manager.set_seed(
                 record.workflow_id,
                 seed_id=seed_result.value.meta.get("seed_id"),
@@ -258,20 +264,7 @@ class ChannelWorkflowRuntime:
                 session_id=execute_meta.get("session_id"),
                 execution_id=execute_meta.get("execution_id"),
             )
-            combined_text = (
-                f"{seed_text}\n\n"
-                f"{render_result_message(executing) if executing.stage == 'completed' else ''}".strip()
-            )
-            if not combined_text.strip():
-                combined_text = (
-                    f"{seed_text}\n\n"
-                    f"{execute_result.value.content[0].text}"
-                )
-            else:
-                combined_text = (
-                    f"{seed_text}\n\n"
-                    f"{execute_result.value.content[0].text}"
-                )
+            combined_text = f"{seed_text}\n\n{execute_result.value.content[0].text}"
             return Result.ok(
                 MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text=combined_text),),

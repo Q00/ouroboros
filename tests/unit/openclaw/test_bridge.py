@@ -50,6 +50,8 @@ def test_event_from_payload_normalizes_fields() -> None:
             "guild_id": " g1 ",
             "user_id": " u1 ",
             "message": " hello ",
+            "message_id": " m1 ",
+            "event_id": " e1 ",
         }
     )
 
@@ -58,6 +60,8 @@ def test_event_from_payload_normalizes_fields() -> None:
         guild_id="g1",
         user_id="u1",
         message="hello",
+        message_id="m1",
+        event_id="e1",
     )
 
 
