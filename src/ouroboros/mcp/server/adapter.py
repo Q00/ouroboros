@@ -1216,6 +1216,10 @@ def create_ouroboros_server(
                 event_store=event_store,
                 job_manager=job_manager,
             ),
+            job_wait_handler=JobWaitHandler(
+                event_store=event_store,
+                job_manager=job_manager,
+            ),
             job_result_handler=JobResultHandler(
                 event_store=event_store,
                 job_manager=job_manager,

@@ -34,6 +34,7 @@ class OpenClawWorkflowCommand:
     seed_content: str | None = None
     seed_path: str | None = None
     mode: str | None = None
+    timeout_seconds: int | None = None
 
     @classmethod
     def from_event(
@@ -102,6 +103,22 @@ class OpenClawWorkflowCommand:
             guild_id=guild_id,
         )
 
+    @classmethod
+    def wait(
+        cls,
+        *,
+        channel_id: str,
+        guild_id: str | None,
+        timeout_seconds: int = 30,
+    ) -> OpenClawWorkflowCommand:
+        """Build a change-driven wait command."""
+        return cls(
+            action="wait",
+            channel_id=channel_id,
+            guild_id=guild_id,
+            timeout_seconds=timeout_seconds,
+        )
+
     def to_tool_arguments(self) -> dict[str, Any]:
         """Convert to flat MCP tool arguments."""
         data = {
@@ -114,5 +131,6 @@ class OpenClawWorkflowCommand:
             "seed_content": self.seed_content,
             "seed_path": self.seed_path,
             "mode": self.mode,
+            "timeout_seconds": self.timeout_seconds,
         }
         return {key: value for key, value in data.items() if value is not None}

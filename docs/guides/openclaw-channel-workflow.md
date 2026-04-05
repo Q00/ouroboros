@@ -11,7 +11,7 @@ This guide explains how an OpenClaw/Discord adapter can drive the
 - default repository mapping per channel
 - input-detected entry points
 - in-channel interview bridging
-- execution polling and result reporting
+- change-driven execution waiting and result reporting
 
 It is designed to sit **between** an OpenClaw message adapter and the existing
 Ouroboros interview / seed / execution pipeline.
@@ -74,17 +74,18 @@ result = await mcp_client.call_tool("ouroboros_channel_workflow", tool_args)
 channel_reply = result.text_content
 ```
 
-### 4. Poll for updates
+### 4. Wait for execution changes
 
-Long-running execution should be polled periodically:
+Long-running execution should use the wait-style action rather than tight polling:
 
 ```python
-poll_args = OpenClawWorkflowCommand.poll(
+wait_args = OpenClawWorkflowCommand.wait(
     channel_id="1234567890",
     guild_id="guild-1",
+    timeout_seconds=30,
 ).to_tool_arguments()
 
-result = await mcp_client.call_tool("ouroboros_channel_workflow", poll_args)
+result = await mcp_client.call_tool("ouroboros_channel_workflow", wait_args)
 ```
 
 ## Thin adapter example
@@ -128,6 +129,7 @@ Supported explicit commands:
 - `/ouro status`
 - `/ouro queue`
 - `/ouro poll`
+- `/ouro wait`
 - `/ouro new <message>`
 - `/ouro answer <message>`
 
@@ -168,13 +170,23 @@ Optional:
 - `mode`
 
 ### `action="poll"`
-Poll the active workflow for execution updates.
+Return the current active workflow state immediately.
 
 Required:
 - `channel_id`
 
 Optional:
 - `guild_id`
+
+### `action="wait"`
+Wait for execution state to change using the underlying job wait mechanism.
+
+Required:
+- `channel_id`
+
+Optional:
+- `guild_id`
+- `timeout_seconds`
 
 ## Entry point behavior
 
@@ -199,13 +211,30 @@ An adapter should:
 1. normalize inbound message events
 2. call `ouroboros_channel_workflow`
 3. post the returned text back into the originating channel
-4. poll while execution is active
+4. wait for execution changes while a job is active
 
 An adapter does **not** need to:
 
 - implement its own queue
 - generate its own stage machine
 - manually decide interview vs execution for most inputs
+
+## Recommended runtime shape
+
+Use a hybrid structure:
+
+- **inbound messages** -> event-driven
+- **execution updates** -> change-driven waiting
+
+In practice:
+
+1. inbound Discord/OpenClaw message arrives
+2. adapter calls `ouroboros_channel_workflow(action="message", ...)`
+3. if execution starts, adapter repeatedly calls `action="wait"`
+4. adapter posts updates only when the returned text/meta actually change
+
+This gives users an event-driven experience without forcing the transport layer
+to implement its own workflow state machine.
 
 ## Current limitation
 

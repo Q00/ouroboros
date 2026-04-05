@@ -134,6 +134,7 @@ def channel_workflow_handler(*, llm_backend: str | None = None) -> ChannelWorkfl
         interview_handler=InterviewHandler(llm_backend=llm_backend),
         generate_seed_handler=GenerateSeedHandler(llm_backend=llm_backend),
         start_execute_seed_handler=StartExecuteSeedHandler(execute_handler=execute_handler),
+        job_wait_handler=JobWaitHandler(),
     )
 
 

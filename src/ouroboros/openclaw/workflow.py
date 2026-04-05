@@ -88,6 +88,7 @@ class ChannelWorkflowRecord:
     seed_content: str | None = None
     seed_path: str | None = None
     job_id: str | None = None
+    last_job_cursor: int = 0
     session_id: str | None = None
     execution_id: str | None = None
     pr_url: str | None = None
@@ -368,9 +369,13 @@ class ChannelWorkflowManager:
             stage=WorkflowStage.EXECUTING,
             started_at=started_at,
             job_id=job_id,
+            last_job_cursor=0,
             session_id=session_id,
             execution_id=execution_id,
         )
+
+    def set_job_cursor(self, workflow_id: str, cursor: int) -> ChannelWorkflowRecord:
+        return self.update(workflow_id, last_job_cursor=cursor)
 
     def mark_completed(
         self,

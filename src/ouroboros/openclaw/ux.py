@@ -23,6 +23,7 @@ def parse_channel_command(message: str) -> ParsedChannelCommand | None:
     - `/ouro status`
     - `/ouro queue`
     - `/ouro poll`
+    - `/ouro wait`
     - `/ouro new <message>`
     - `/ouro answer <message>`
     """
@@ -46,6 +47,9 @@ def parse_channel_command(message: str) -> ParsedChannelCommand | None:
 
     if body == "poll":
         return ParsedChannelCommand(action="poll")
+
+    if body == "wait":
+        return ParsedChannelCommand(action="wait")
 
     if body.startswith("new "):
         payload = body[len("new ") :].strip()

@@ -6,7 +6,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.channel_workflow_handler import ChannelWorkflowHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
-from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler
+from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler, JobWaitHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.openclaw.workflow import ChannelRepoRegistry, ChannelWorkflowManager
 
@@ -109,6 +109,28 @@ class FakeJobStatusHandler(JobStatusHandler):
         )
 
 
+class FakeJobWaitHandler(JobWaitHandler):
+    def __init__(self) -> None:
+        self.status = "completed"
+        self.text = "Job wait: completed"
+        self.cursor = 1
+        self.changed = True
+
+    async def handle(self, arguments: dict[str, str]):
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=self.text),),
+                is_error=False,
+                meta={
+                    "job_id": "job_1",
+                    "status": self.status,
+                    "cursor": self.cursor,
+                    "changed": self.changed,
+                },
+            )
+        )
+
+
 class FakeJobResultHandler(JobResultHandler):
     def __init__(self) -> None:
         self.text = "Draft PR ready: https://example.com/pr/123"
@@ -134,6 +156,7 @@ def handler(tmp_path: Path) -> ChannelWorkflowHandler:
     generate = FakeGenerateSeedHandler()
     execute = FakeStartExecuteSeedHandler()
     job_status = FakeJobStatusHandler()
+    job_wait = FakeJobWaitHandler()
     job_result = FakeJobResultHandler()
     tool = ChannelWorkflowHandler(
         workflow_manager=ChannelWorkflowManager(tmp_path / "state.json"),
@@ -142,12 +165,14 @@ def handler(tmp_path: Path) -> ChannelWorkflowHandler:
         generate_seed_handler=generate,
         start_execute_seed_handler=execute,
         job_status_handler=job_status,
+        job_wait_handler=job_wait,
         job_result_handler=job_result,
     )
     tool._fake_interview = interview  # type: ignore[attr-defined]
     tool._fake_generate = generate  # type: ignore[attr-defined]
     tool._fake_execute = execute  # type: ignore[attr-defined]
     tool._fake_job_status = job_status  # type: ignore[attr-defined]
+    tool._fake_job_wait = job_wait  # type: ignore[attr-defined]
     tool._fake_job_result = job_result  # type: ignore[attr-defined]
     return tool
 
@@ -275,6 +300,37 @@ async def test_poll_completes_execution_and_reports_draft_pr(
     result = await handler.handle({"action": "poll", "guild_id": "g1", "channel_id": "c2"})
 
     assert result.is_ok
+    assert "https://example.com/pr/123" in result.value.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_wait_completes_execution_and_reports_draft_pr(
+    handler: ChannelWorkflowHandler,
+) -> None:
+    await handler.handle(
+        {"action": "set_repo", "guild_id": "g1", "channel_id": "cw", "repo": "/repo/demo"}
+    )
+    await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "cw",
+            "user_id": "u1",
+            "message": "goal: Demo\nacceptance_criteria:\n- one\nconstraints:\n- two\n",
+        }
+    )
+
+    result = await handler.handle(
+        {
+            "action": "wait",
+            "guild_id": "g1",
+            "channel_id": "cw",
+            "timeout_seconds": 5,
+        }
+    )
+
+    assert result.is_ok
+    assert result.value.meta["action"] == "wait"
     assert "https://example.com/pr/123" in result.value.content[0].text
 
 
@@ -447,6 +503,38 @@ async def test_poll_running_job_returns_status_without_completion(
     assert result.is_ok
     assert result.value.meta["job_status"] == "running"
     assert "Job status: running" in result.value.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_wait_running_job_returns_status_without_completion(
+    handler: ChannelWorkflowHandler,
+) -> None:
+    handler._fake_job_wait.status = "running"  # type: ignore[attr-defined]
+    handler._fake_job_wait.text = "Job wait: running"  # type: ignore[attr-defined]
+    handler._fake_job_wait.cursor = 3  # type: ignore[attr-defined]
+    handler._fake_job_wait.changed = False  # type: ignore[attr-defined]
+    await handler.handle(
+        {"action": "set_repo", "guild_id": "g1", "channel_id": "c7w", "repo": "/repo/demo"}
+    )
+    await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "c7w",
+            "user_id": "u1",
+            "message": "goal: Demo\nacceptance_criteria:\n- one\nconstraints:\n- two\n",
+        }
+    )
+
+    result = await handler.handle(
+        {"action": "wait", "guild_id": "g1", "channel_id": "c7w", "timeout_seconds": 5}
+    )
+
+    assert result.is_ok
+    assert result.value.meta["job_status"] == "running"
+    assert result.value.meta["cursor"] == 3
+    assert result.value.meta["changed"] is False
+    assert "Job wait: running" in result.value.content[0].text
 
 
 @pytest.mark.asyncio

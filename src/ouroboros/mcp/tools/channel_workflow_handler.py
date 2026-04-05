@@ -9,7 +9,7 @@ from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
-from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler
+from ouroboros.mcp.tools.job_handlers import JobResultHandler, JobStatusHandler, JobWaitHandler
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -50,6 +50,7 @@ class ChannelWorkflowHandler:
     generate_seed_handler: GenerateSeedHandler | None = field(default=None, repr=False)
     start_execute_seed_handler: StartExecuteSeedHandler | None = field(default=None, repr=False)
     job_status_handler: JobStatusHandler | None = field(default=None, repr=False)
+    job_wait_handler: JobWaitHandler | None = field(default=None, repr=False)
     job_result_handler: JobResultHandler | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -61,6 +62,7 @@ class ChannelWorkflowHandler:
             self.start_execute_seed_handler or StartExecuteSeedHandler()
         )
         self._job_status_handler = self.job_status_handler or JobStatusHandler()
+        self._job_wait_handler = self.job_wait_handler or JobWaitHandler()
         self._job_result_handler = self.job_result_handler or JobResultHandler()
 
     @property
@@ -119,7 +121,7 @@ class ChannelWorkflowHandler:
                 MCPToolParameter(
                     name="action",
                     type=ToolInputType.STRING,
-                    description="One of: message, set_repo, status, poll",
+                    description="One of: message, set_repo, status, poll, wait",
                     required=False,
                     default="message",
                 ),
@@ -129,6 +131,13 @@ class ChannelWorkflowHandler:
                     description="For action=message: auto, new, or answer",
                     required=False,
                     default="auto",
+                ),
+                MCPToolParameter(
+                    name="timeout_seconds",
+                    type=ToolInputType.INTEGER,
+                    description="For action=wait: maximum seconds to wait for a workflow update",
+                    required=False,
+                    default=30,
                 ),
             ),
         )
@@ -179,6 +188,12 @@ class ChannelWorkflowHandler:
         if action == "poll":
             return await self._poll_channel(channel)
 
+        if action == "wait":
+            return await self._wait_channel(
+                channel,
+                timeout_seconds=int(arguments.get("timeout_seconds", 30)),
+            )
+
         return await self._handle_message(channel, arguments, user_id)
 
     async def _poll_channel(
@@ -208,6 +223,8 @@ class ChannelWorkflowHandler:
             return Result.err(status_result.error)
         status_meta = status_result.value.meta
         status = status_meta["status"]
+        cursor = int(status_meta.get("cursor", active.last_job_cursor))
+        self._workflow_manager.set_job_cursor(active.workflow_id, cursor)
         if status in {"running", "queued", "cancel_requested"}:
             return self._ok(
                 status_result.value.content[0].text,
@@ -217,76 +234,80 @@ class ChannelWorkflowHandler:
                     "workflow_id": active.workflow_id,
                     "stage": active.stage,
                     "job_status": status,
+                    "cursor": cursor,
                 },
             )
 
-        result_text = status_result.value.content[0].text
-        if status == "completed":
-            result_result = await self._job_result_handler.handle({"job_id": active.job_id})
-            if result_result.is_ok:
-                result_text = result_result.value.content[0].text
-            pr_url = extract_first_url(result_text)
-            completed = self._workflow_manager.mark_completed(
-                active.workflow_id,
-                pr_url=pr_url,
-                final_result=result_text,
-            )
-            next_result = await self._maybe_launch_next_workflow(channel, completed.workflow_id)
-            if next_result is not None and next_result.is_ok:
-                return self._ok(
-                    (
-                        f"{render_result_message(completed)}\n\n"
-                        "Started next queued workflow:\n\n"
-                        f"{next_result.value.content[0].text}"
-                    ),
-                    {
-                        "channel_key": channel.key,
-                        "action": "poll",
-                        "workflow_id": completed.workflow_id,
-                        "stage": completed.stage,
-                        "pr_url": pr_url,
-                        "next_workflow_started": True,
-                    },
-                )
-            return self._ok(
-                render_result_message(completed),
-                {
-                    "channel_key": channel.key,
-                    "action": "poll",
-                    "workflow_id": completed.workflow_id,
-                    "stage": completed.stage,
-                    "pr_url": pr_url,
-                },
-            )
-
-        failed = self._workflow_manager.mark_failed(
-            active.workflow_id,
-            error=result_text,
+        return await self._finalize_terminal_status(
+            channel=channel,
+            active=active,
+            status=status,
+            fallback_text=status_result.value.content[0].text,
+            action="poll",
+            cursor=cursor,
         )
-        next_result = await self._maybe_launch_next_workflow(channel, failed.workflow_id)
-        if next_result is not None and next_result.is_ok:
+
+    async def _wait_channel(
+        self,
+        channel: ChannelRef,
+        *,
+        timeout_seconds: int,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        active = self._workflow_manager.active_for_channel(channel)
+        if active is None:
             return self._ok(
-                (
-                    f"{render_result_message(failed)}\n\n"
-                    "Started next queued workflow:\n\n"
-                    f"{next_result.value.content[0].text}"
-                ),
+                render_channel_summary(channel, self._workflow_manager, self._repo_registry),
+                {"channel_key": channel.key, "action": "wait", "active": False},
+            )
+
+        if active.stage != WorkflowStage.EXECUTING or not active.job_id:
+            return self._ok(
+                render_stage_message(active),
                 {
                     "channel_key": channel.key,
-                    "action": "poll",
-                    "workflow_id": failed.workflow_id,
-                    "stage": failed.stage,
-                    "next_workflow_started": True,
+                    "action": "wait",
+                    "workflow_id": active.workflow_id,
+                    "stage": active.stage,
                 },
             )
-        return self._ok(
-            render_result_message(failed),
+
+        wait_result = await self._job_wait_handler.handle(
             {
-                "channel_key": channel.key,
-                "action": "poll",
-                "workflow_id": failed.workflow_id,
-                "stage": failed.stage,
-            },
+                "job_id": active.job_id,
+                "cursor": active.last_job_cursor,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if wait_result.is_err:
+            return Result.err(wait_result.error)
+
+        wait_meta = wait_result.value.meta
+        status = wait_meta["status"]
+        cursor = int(wait_meta.get("cursor", active.last_job_cursor))
+        changed = bool(wait_meta.get("changed", False))
+        self._workflow_manager.set_job_cursor(active.workflow_id, cursor)
+
+        if status in {"running", "queued", "cancel_requested"}:
+            return self._ok(
+                wait_result.value.content[0].text,
+                {
+                    "channel_key": channel.key,
+                    "action": "wait",
+                    "workflow_id": active.workflow_id,
+                    "stage": active.stage,
+                    "job_status": status,
+                    "cursor": cursor,
+                    "changed": changed,
+                },
+            )
+
+        return await self._finalize_terminal_status(
+            channel=channel,
+            active=active,
+            status=status,
+            fallback_text=wait_result.value.content[0].text,
+            action="wait",
+            cursor=cursor,
         )
 
     async def _handle_message(
@@ -440,6 +461,86 @@ class ChannelWorkflowHandler:
             return None
 
         return await self._launch_workflow(next_record)
+
+    async def _finalize_terminal_status(
+        self,
+        *,
+        channel: ChannelRef,
+        active,
+        status: str,
+        fallback_text: str,
+        action: str,
+        cursor: int,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        result_text = fallback_text
+        if status == "completed":
+            result_result = await self._job_result_handler.handle({"job_id": active.job_id})
+            if result_result.is_ok:
+                result_text = result_result.value.content[0].text
+            pr_url = extract_first_url(result_text)
+            completed = self._workflow_manager.mark_completed(
+                active.workflow_id,
+                pr_url=pr_url,
+                final_result=result_text,
+            )
+            next_result = await self._maybe_launch_next_workflow(channel, completed.workflow_id)
+            if next_result is not None and next_result.is_ok:
+                return self._ok(
+                    (
+                        f"{render_result_message(completed)}\n\n"
+                        "Started next queued workflow:\n\n"
+                        f"{next_result.value.content[0].text}"
+                    ),
+                    {
+                        "channel_key": channel.key,
+                        "action": action,
+                        "workflow_id": completed.workflow_id,
+                        "stage": completed.stage,
+                        "pr_url": pr_url,
+                        "next_workflow_started": True,
+                        "cursor": cursor,
+                    },
+                )
+            return self._ok(
+                render_result_message(completed),
+                {
+                    "channel_key": channel.key,
+                    "action": action,
+                    "workflow_id": completed.workflow_id,
+                    "stage": completed.stage,
+                    "pr_url": pr_url,
+                    "cursor": cursor,
+                },
+            )
+
+        failed = self._workflow_manager.mark_failed(active.workflow_id, error=result_text)
+        next_result = await self._maybe_launch_next_workflow(channel, failed.workflow_id)
+        if next_result is not None and next_result.is_ok:
+            return self._ok(
+                (
+                    f"{render_result_message(failed)}\n\n"
+                    "Started next queued workflow:\n\n"
+                    f"{next_result.value.content[0].text}"
+                ),
+                {
+                    "channel_key": channel.key,
+                    "action": action,
+                    "workflow_id": failed.workflow_id,
+                    "stage": failed.stage,
+                    "next_workflow_started": True,
+                    "cursor": cursor,
+                },
+            )
+        return self._ok(
+            render_result_message(failed),
+            {
+                "channel_key": channel.key,
+                "action": action,
+                "workflow_id": failed.workflow_id,
+                "stage": failed.stage,
+                "cursor": cursor,
+            },
+        )
 
     async def _resume_interview(
         self,
