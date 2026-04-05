@@ -417,8 +417,10 @@ class PMDocumentGenerator:
         parts.append("## Extracted Requirements (PMSeed)")
         parts.append("")
         parts.append(f"**Product Name:** {seed.product_name or 'Unnamed'}")
-        parts.append(f"**PM ID:** {seed.pm_id}")
-        parts.append(f"**Interview ID:** {seed.interview_id}")
+        if seed.pm_id:
+            parts.append(f"**PM ID:** {seed.pm_id}")
+        if seed.interview_id:
+            parts.append(f"**Interview ID:** {seed.interview_id}")
         parts.append(f"**Goal:** {seed.goal or 'Not specified'}")
         parts.append("")
 
@@ -458,10 +460,11 @@ class PMDocumentGenerator:
         if seed.brownfield_repos:
             parts.append("**Brownfield Repositories:**")
             for repo in seed.brownfield_repos:
-                name = repo.get("name", "Unknown")
-                path = repo.get("path", "")
+                name = repo.get("name") or repo.get("path") or "Unknown"
+                path = repo.get("path") or ""
                 desc = repo.get("desc", "")
-                parts.append(f"- {name} ({path}){f' — {desc}' if desc else ''}")
+                label = f"{name} ({path})" if path else name
+                parts.append(f"- {label}{f' — {desc}' if desc else ''}")
             parts.append("")
 
         # Q&A transcript

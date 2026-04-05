@@ -215,6 +215,21 @@ class TestGeneratePrdMarkdown:
         assert "**MyApp**" in md
         assert "(``)" not in md
 
+    def test_omits_empty_pm_id(self):
+        """PM ID is omitted when empty."""
+        seed = PMSeed(pm_id="", product_name="Test", goal="A goal", interview_id="int_1")
+        md = generate_pm_markdown(seed)
+        assert "PM ID" not in md
+        assert "*Interview ID: int_1*" in md
+
+    def test_omits_footer_when_both_ids_empty(self):
+        """Footer separator is omitted when both PM ID and Interview ID are empty."""
+        seed = PMSeed(pm_id="", product_name="Test", goal="A goal", interview_id="")
+        md = generate_pm_markdown(seed)
+        assert "---" not in md
+        assert "PM ID" not in md
+        assert "Interview ID" not in md
+
 
 # ──────────────────────────────────────────────────────────────────
 # save_pm_document tests
