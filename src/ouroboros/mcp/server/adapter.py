@@ -1125,9 +1125,9 @@ def create_ouroboros_server(
         validator=_evolution_validator,
     )
     job_manager = JobManager(event_store)
-    openclaw_state_dir = state_dir.parent / "openclaw"
-    workflow_manager = ChannelWorkflowManager(openclaw_state_dir / "channel_workflows.json")
-    repo_registry = ChannelRepoRegistry(openclaw_state_dir / "channel_repos.json")
+    openclaw_db_path = Path.cwd() / ".ouroboros" / "openclaw.db"
+    workflow_manager = ChannelWorkflowManager(openclaw_db_path)
+    repo_registry = ChannelRepoRegistry(openclaw_db_path)
 
     # Create tool registry for dependency injection
     registry = ToolRegistry()

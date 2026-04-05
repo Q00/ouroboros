@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 import hashlib
-import json
 from pathlib import Path
 import re
 from typing import Any
@@ -14,7 +12,7 @@ from uuid import uuid4
 
 import structlog
 
-from ouroboros.core.file_lock import file_lock
+from ouroboros.openclaw.store import OpenClawStateStore
 
 log = structlog.get_logger(__name__)
 
@@ -120,14 +118,6 @@ class ChannelWorkflowRecord:
         return cls(**data)
 
 
-def _default_state_path() -> Path:
-    return Path.home() / ".ouroboros" / "openclaw" / "channel_workflows.json"
-
-
-def _default_repo_config_path() -> Path:
-    return Path.home() / ".ouroboros" / "openclaw" / "channel_repos.json"
-
-
 _SEED_HINTS = (
     "acceptance_criteria:",
     "task_type:",
@@ -209,109 +199,33 @@ def detect_entry_point(
 class ChannelRepoRegistry:
     """Persistent default repo mapping per channel."""
 
-    def __init__(self, path: Path | None = None) -> None:
-        self._path = path or _default_repo_config_path()
-        self._mapping: dict[str, str] = {}
-        self._load()
-
-    def _load(self) -> None:
-        if not self._path.exists():
-            self._mapping = {}
-            return
-        try:
-            with file_lock(self._path, exclusive=False):
-                payload = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            log.warning("openclaw.repo_registry.load_failed", path=str(self._path))
-            self._mapping = {}
-            return
-        self._mapping = {
-            str(key): str(value)
-            for key, value in payload.items()
-            if isinstance(key, str) and isinstance(value, str) and value
-        }
-
-    def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        with file_lock(self._path):
-            temp_path.write_text(
-                json.dumps(self._mapping, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            temp_path.replace(self._path)
+    def __init__(self, path: Path | None = None, store: OpenClawStateStore | None = None) -> None:
+        self._store = store or OpenClawStateStore(path)
 
     def get(self, channel: ChannelRef) -> str | None:
-        return self._mapping.get(channel.key)
+        return self._store.get_repo(channel.key)
 
     def set(self, channel: ChannelRef, repo: str) -> None:
-        self._mapping[channel.key] = repo
-        self._save()
+        self._store.set_repo(
+            channel_key=channel.key,
+            channel_id=channel.channel_id,
+            guild_id=channel.guild_id,
+            repo=repo,
+        )
 
     def remove(self, channel: ChannelRef) -> None:
-        self._mapping.pop(channel.key, None)
-        self._save()
+        self._store.remove_repo(channel.key)
 
 
 class ChannelWorkflowManager:
     """Manage per-channel active workflows and queued requests."""
 
-    def __init__(self, state_path: Path | None = None) -> None:
-        self._state_path = state_path or _default_state_path()
-        self._records: dict[str, ChannelWorkflowRecord] = {}
-        self._active_by_channel: dict[str, str] = {}
-        self._queues: dict[str, list[str]] = defaultdict(list)
-        self._load()
-
-    def _load(self) -> None:
-        if not self._state_path.exists():
-            return
-        try:
-            with file_lock(self._state_path, exclusive=False):
-                payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            log.warning("openclaw.workflow_state.load_failed", path=str(self._state_path))
-            return
-        self._records = {
-            workflow_id: ChannelWorkflowRecord.from_json(record)
-            for workflow_id, record in payload.get("records", {}).items()
-            if isinstance(record, dict)
-        }
-        self._active_by_channel = {
-            str(k): str(v)
-            for k, v in payload.get("active_by_channel", {}).items()
-            if isinstance(k, str) and isinstance(v, str)
-        }
-        self._queues = defaultdict(
-            list,
-            {
-                str(k): [str(item) for item in values if isinstance(item, str)]
-                for k, values in payload.get("queues", {}).items()
-                if isinstance(k, str) and isinstance(values, list)
-            },
-        )
-
-    def _save(self) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "records": {
-                workflow_id: record.to_json() for workflow_id, record in self._records.items()
-            },
-            "active_by_channel": self._active_by_channel,
-            "queues": dict(self._queues),
-        }
-        temp_path = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
-        with file_lock(self._state_path):
-            temp_path.write_text(
-                json.dumps(payload, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            temp_path.replace(self._state_path)
+    def __init__(self, state_path: Path | None = None, store: OpenClawStateStore | None = None) -> None:
+        self._store = store or OpenClawStateStore(state_path)
 
     def enqueue(self, request: ChannelWorkflowRequest) -> ChannelWorkflowRecord:
         now = datetime.now(UTC)
-        channel_key = request.channel.key
-        is_active = channel_key in self._active_by_channel
+        is_active = self.active_for_channel(request.channel) is not None
         fingerprint = request_fingerprint(
             user_id=request.user_id,
             message=request.message,
@@ -320,7 +234,7 @@ class ChannelWorkflowManager:
         )
         record = ChannelWorkflowRecord(
             workflow_id=f"wf_{uuid4().hex[:12]}",
-            channel_key=channel_key,
+            channel_key=request.channel.key,
             channel_id=request.channel.channel_id,
             guild_id=request.channel.guild_id,
             user_id=request.user_id,
@@ -342,69 +256,34 @@ class ChannelWorkflowManager:
             seed_content=request.seed_content,
             seed_path=request.seed_path,
         )
-        self._records[record.workflow_id] = record
-        if is_active:
-            self._queues[channel_key].append(record.workflow_id)
-        else:
-            self._active_by_channel[channel_key] = record.workflow_id
-        self._save()
+        self._store.upsert_workflow(record.to_json())
         return record
 
     def get(self, workflow_id: str) -> ChannelWorkflowRecord | None:
-        return self._records.get(workflow_id)
+        row = self._store.get_workflow(workflow_id)
+        return ChannelWorkflowRecord.from_json(row) if row is not None else None
 
     def latest_for_channel(self, channel: ChannelRef) -> ChannelWorkflowRecord | None:
-        records = [record for record in self._records.values() if record.channel_key == channel.key]
-        if not records:
-            return None
-        return max(records, key=lambda record: record.queued_at)
+        row = self._store.latest_for_channel(channel.key)
+        return ChannelWorkflowRecord.from_json(row) if row is not None else None
 
     def active_for_channel(self, channel: ChannelRef) -> ChannelWorkflowRecord | None:
-        workflow_id = self._active_by_channel.get(channel.key)
-        if workflow_id is None:
-            return None
-        return self._records.get(workflow_id)
-
-    def find_inflight_duplicate(
-        self,
-        channel: ChannelRef,
-        *,
-        user_id: str | None,
-        message: str,
-        repo: str,
-        entry_point: WorkflowEntryPoint,
-    ) -> ChannelWorkflowRecord | None:
-        """Return an active/queued matching workflow if this looks like a redelivery."""
-        fingerprint = request_fingerprint(
-            user_id=user_id,
-            message=message,
-            repo=repo,
-            entry_point=entry_point,
-        )
-        candidates: list[ChannelWorkflowRecord] = []
-        active = self.active_for_channel(channel)
-        if active is not None and not active.is_terminal:
-            candidates.append(active)
-        candidates.extend(
-            record for record in self.queued_for_channel(channel) if not record.is_terminal
-        )
-        return next(
-            (record for record in candidates if record.request_fingerprint == fingerprint),
-            None,
-        )
+        row = self._store.active_for_channel(channel.key)
+        return ChannelWorkflowRecord.from_json(row) if row is not None else None
 
     def queued_for_channel(self, channel: ChannelRef) -> list[ChannelWorkflowRecord]:
         return [
-            self._records[workflow_id]
-            for workflow_id in self._queues.get(channel.key, [])
-            if workflow_id in self._records
+            ChannelWorkflowRecord.from_json(row)
+            for row in self._store.queued_for_channel(channel.key)
         ]
 
     def update(self, workflow_id: str, **changes: Any) -> ChannelWorkflowRecord:
-        record = self._records[workflow_id]
+        record = self.get(workflow_id)
+        if record is None:
+            msg = f"Unknown workflow_id: {workflow_id}"
+            raise KeyError(msg)
         updated = replace(record, **changes)
-        self._records[workflow_id] = updated
-        self._save()
+        self._store.upsert_workflow(updated.to_json())
         return updated
 
     def set_interview_session(self, workflow_id: str, session_id: str) -> ChannelWorkflowRecord:
@@ -428,7 +307,10 @@ class ChannelWorkflowManager:
         session_id: str | None,
         execution_id: str | None,
     ) -> ChannelWorkflowRecord:
-        record = self._records[workflow_id]
+        record = self.get(workflow_id)
+        if record is None:
+            msg = f"Unknown workflow_id: {workflow_id}"
+            raise KeyError(msg)
         started_at = record.started_at or datetime.now(UTC)
         return self.update(
             workflow_id,
@@ -471,34 +353,44 @@ class ChannelWorkflowManager:
         return record
 
     def _advance_channel(self, channel_key: str, completed_workflow_id: str) -> None:
-        active_workflow_id = self._active_by_channel.get(channel_key)
-        if active_workflow_id == completed_workflow_id:
-            self._active_by_channel.pop(channel_key, None)
-        queue = self._queues.get(channel_key, [])
+        queue = self._store.queued_for_channel(channel_key)
         if not queue:
-            self._save()
             return
-        next_workflow_id = queue.pop(0)
-        if queue:
-            self._queues[channel_key] = queue
-        else:
-            self._queues.pop(channel_key, None)
-        next_record = self._records[next_workflow_id]
+        next_record = ChannelWorkflowRecord.from_json(queue[0])
         next_stage = (
             WorkflowStage.INTERVIEWING
             if next_record.entry_point == WorkflowEntryPoint.INTERVIEW
             else WorkflowStage.EXECUTING
         )
-        self._records[next_workflow_id] = replace(
-            next_record,
-            stage=next_stage,
-            started_at=datetime.now(UTC),
+        self._store.upsert_workflow(
+            replace(
+                next_record,
+                stage=next_stage,
+                started_at=datetime.now(UTC),
+            ).to_json()
         )
-        self._active_by_channel[channel_key] = next_workflow_id
-        self._save()
+
+    def find_inflight_duplicate(
+        self,
+        channel: ChannelRef,
+        *,
+        user_id: str | None,
+        message: str,
+        repo: str,
+        entry_point: WorkflowEntryPoint,
+    ) -> ChannelWorkflowRecord | None:
+        fingerprint = request_fingerprint(
+            user_id=user_id,
+            message=message,
+            repo=repo,
+            entry_point=entry_point,
+        )
+        row = self._store.inflight_duplicate(channel.key, fingerprint)
+        return ChannelWorkflowRecord.from_json(row) if row is not None else None
 
     def find_by_job_id(self, job_id: str) -> ChannelWorkflowRecord | None:
-        return next((record for record in self._records.values() if record.job_id == job_id), None)
+        row = self._store.find_by_job_id(job_id)
+        return ChannelWorkflowRecord.from_json(row) if row is not None else None
 
 
 def render_stage_message(record: ChannelWorkflowRecord) -> str:
