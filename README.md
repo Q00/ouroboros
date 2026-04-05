@@ -97,9 +97,11 @@ pip install ouroboros-ai[claude]        # + Claude Code deps
 pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider
 pip install ouroboros-ai[mcp]           # + MCP server/client support
 pip install ouroboros-ai[tui]           # + Textual terminal UI
-pip install ouroboros-ai[all]           # everything
+pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui + dashboard)
 ouroboros setup                         # configure runtime
 ```
+
+Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias while extras migrate.
 
 See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
 

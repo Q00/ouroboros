@@ -2059,6 +2059,7 @@ class MCPToolProvider:
 
         try:
             # Retry transient failures with bounded backoff
+            # Use retry_async for retries on transient failures
             result = await self._call_with_retry(
                 tool_info=tool_info,
                 arguments=arguments or {},
@@ -2090,7 +2091,7 @@ class MCPToolProvider:
     ) -> Result[MCPToolResult, MCPToolError]:
         """Call tool with retry logic for transient failures.
 
-        Uses internal exponential backoff retries on:
+        Uses retry_async for exponential backoff retries on:
         - Connection errors
         - Timeout errors (if marked retriable)
         - Other transient MCPClientErrors

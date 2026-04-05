@@ -160,6 +160,18 @@ class LiteLLMAdapter:
             if configured_api_key:
                 return configured_api_key
 
+        # Unknown/custom models may still be routed through OpenRouter via credentials.
+        provider_name = self._extract_provider(model)
+        if provider_name not in {"openrouter", "openai", "anthropic", "google"}:
+            credentials = self._load_credentials_config()
+            configured = (
+                credentials.providers.get("openrouter") if credentials is not None else None
+            )
+            if configured is not None:
+                configured_api_key = self._normalize_api_key(configured.api_key)
+                if configured_api_key:
+                    return configured_api_key
+
         # Default to OpenRouter for unknown models
         return self._normalize_api_key(os.environ.get("OPENROUTER_API_KEY"))
 
