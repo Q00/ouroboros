@@ -108,9 +108,9 @@ class ProviderError(OuroborosError):
         error responses.
         """
         if not isinstance(self.details, dict) or not self.details:
-            return str(self)
+            return self.message
 
-        rendered: list[str] = [str(self)]
+        rendered: list[str] = [self.message]
         for key in (
             "error_type",
             "session_id",
@@ -119,11 +119,11 @@ class ProviderError(OuroborosError):
             "stderr",
         ):
             value = self.details.get(key)
-            if not value:
+            if value is None:
                 continue
-            if key == "stderr":
+            if key == "stderr" and value:
                 rendered.append(f"stderr tail:\n{value}")
-            else:
+            elif key != "stderr":
                 rendered.append(f"{key}: {value}")
         return "\n".join(rendered)
 

@@ -421,7 +421,15 @@ class EvaluateHandler:
             # working_dir is used as the project root for artifact resolution.
             from ouroboros.evaluation.artifact_collector import ArtifactCollector
 
-            artifact_bundle = ArtifactCollector().collect(artifact, str(working_dir))
+            try:
+                artifact_bundle = ArtifactCollector().collect(artifact, str(working_dir))
+            except Exception as exc:
+                log.warning(
+                    "mcp.tool.evaluate.artifact_collection_failed",
+                    error=str(exc),
+                    working_dir=str(working_dir),
+                )
+                artifact_bundle = None
 
             context = EvaluationContext(
                 execution_id=session_id,

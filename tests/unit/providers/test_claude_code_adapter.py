@@ -601,17 +601,27 @@ class TestErrorDiagnostics:
     @pytest.mark.asyncio
     async def test_sdk_exception_includes_stderr_in_details(self) -> None:
         """SDK exception captures stderr lines in error details."""
+        import subprocess
+
         adapter = ClaudeCodeAdapter()
         config = CompletionConfig(model="claude-sonnet-4-6")
 
-        mock_options_cls = MagicMock()
+        captured_stderr: dict = {}
+
+        def capture_options(**kwargs):
+            captured_stderr["fn"] = kwargs.get("stderr")
+            return MagicMock()
+
+        mock_options_cls = MagicMock(side_effect=capture_options)
 
         async def failing_query(*args, **kwargs):
+            # Simulate stderr output before the SDK exception
+            if captured_stderr.get("fn"):
+                captured_stderr["fn"]("error: connection refused")
+                captured_stderr["fn"]("fatal: SDK process died")
             if False:
                 yield
             raise subprocess.CalledProcessError(1, "claude")
-
-        import subprocess
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=failing_query))
 
@@ -626,6 +636,7 @@ class TestErrorDiagnostics:
 
         assert result.is_err
         assert "stderr" in result.error.details
+        assert "connection refused" in result.error.details["stderr"]
 
     @pytest.mark.asyncio
     async def test_cancelled_error_is_not_swallowed(self) -> None:
@@ -727,9 +738,18 @@ class TestErrorDiagnostics:
         adapter = ClaudeCodeAdapter()
         config = CompletionConfig(model="claude-sonnet-4-6")
 
-        mock_options_cls = MagicMock()
+        captured_stderr: dict = {}
+
+        def capture_options(**kwargs):
+            captured_stderr["fn"] = kwargs.get("stderr")
+            return MagicMock()
+
+        mock_options_cls = MagicMock(side_effect=capture_options)
 
         async def error_query(*args, **kwargs):
+            # Simulate stderr before error result
+            if captured_stderr.get("fn"):
+                captured_stderr["fn"]("warning: rate limit hit")
             result_msg = MagicMock()
             type(result_msg).__name__ = "ResultMessage"
             result_msg.structured_output = None
@@ -751,6 +771,7 @@ class TestErrorDiagnostics:
         assert result.is_err
         assert "Rate limit exceeded" in result.error.message
         assert "stderr" in result.error.details
+        assert "rate limit hit" in result.error.details["stderr"]
 
 
 class TestProviderErrorFormatDetails:
@@ -775,23 +796,46 @@ class TestProviderErrorFormatDetails:
         assert "stderr tail:\nerror: auth failed" in rendered
 
     def test_format_details_without_details(self) -> None:
-        """format_details falls back to str(error) when no details."""
+        """format_details falls back to message when no details."""
         error = ProviderError(message="Simple error")
         rendered = error.format_details()
-        assert rendered == str(error)
+        assert rendered == "Simple error"
 
-    def test_format_details_skips_empty_values(self) -> None:
-        """format_details skips fields with falsy values."""
+    def test_format_details_skips_none_values(self) -> None:
+        """format_details skips fields with None values."""
         error = ProviderError(
             message="Partial error",
             details={
                 "error_type": "ValueError",
-                "session_id": "",
+                "session_id": None,
                 "stderr": "",
             },
         )
         rendered = error.format_details()
         assert "error_type: ValueError" in rendered
-        # Empty values should not get their own formatted lines
         assert "session_id:" not in rendered
+        # Empty stderr string should not render stderr tail
         assert "stderr tail:" not in rendered
+
+    def test_format_details_preserves_falsy_values(self) -> None:
+        """format_details renders False and 0 instead of dropping them."""
+        error = ProviderError(
+            message="Diagnostic error",
+            details={
+                "claudecode_present": False,
+                "error_type": "RuntimeError",
+            },
+        )
+        rendered = error.format_details()
+        assert "claudecode_present: False" in rendered
+        assert "error_type: RuntimeError" in rendered
+
+    def test_format_details_does_not_duplicate_details_dict(self) -> None:
+        """format_details uses message, not str(self) which appends raw details."""
+        error = ProviderError(
+            message="SDK failed",
+            details={"error_type": "RuntimeError", "session_id": "sess_1"},
+        )
+        rendered = error.format_details()
+        # Should not contain the raw dict representation
+        assert "(details:" not in rendered

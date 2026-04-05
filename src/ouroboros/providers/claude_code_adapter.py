@@ -690,7 +690,7 @@ class ClaudeCodeAdapter:
                     # Check for errors - don't break, just record
                     is_error = getattr(sdk_message, "is_error", False)
                     if is_error:
-                        error_msg = content or "Unknown error from Claude Agent SDK"
+                        error_msg = getattr(sdk_message, "result", "") or "Unknown error from Claude Agent SDK"
                         log.warning(
                             "claude_code_adapter.sdk_error",
                             error=error_msg,
