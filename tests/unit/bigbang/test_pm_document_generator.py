@@ -309,14 +309,50 @@ class TestPMDocumentGeneratorPrompt:
         assert "Not specified" in prompt  # goal fallback
         assert "Unnamed" in prompt  # product_name fallback
 
-    def test_prompt_truncates_long_codebase_context(self):
-        """Codebase context is truncated to prevent token overflow."""
-        long_context = "x" * 5000
-        seed = _make_seed(codebase_context=long_context)
+    def test_prompt_omits_empty_pm_id_and_interview_id(self):
+        """Prompt omits PM ID and Interview ID lines when values are empty."""
+        seed = PMSeed(pm_id="", interview_id="")
         prompt = PMDocumentGenerator._build_generation_prompt(seed)
 
-        # Should be truncated to 3000 chars
-        assert len(prompt) < len(long_context) + 2000
+        assert "**PM ID:**" not in prompt
+        assert "**Interview ID:**" not in prompt
+
+    def test_prompt_includes_pm_id_when_present(self):
+        """Prompt includes PM ID when it has a value."""
+        seed = _make_seed()
+        prompt = PMDocumentGenerator._build_generation_prompt(seed)
+
+        assert "**PM ID:** pm_seed_test123" in prompt
+        assert "**Interview ID:** int_abc" in prompt
+
+    def test_prompt_brownfield_repo_empty_name_uses_path(self):
+        """Prompt builder falls back to path when brownfield repo name is empty."""
+        seed = _make_seed(
+            brownfield_repos=({"name": "", "path": "/repo/path", "desc": "desc"},),
+        )
+        prompt = PMDocumentGenerator._build_generation_prompt(seed)
+
+        assert "/repo/path (/repo/path)" in prompt
+        assert "desc" in prompt
+
+    def test_prompt_brownfield_repo_none_name_uses_path(self):
+        """Prompt builder falls back to path when brownfield repo name is None."""
+        seed = _make_seed(
+            brownfield_repos=({"name": None, "path": "/repo/path"},),
+        )
+        prompt = PMDocumentGenerator._build_generation_prompt(seed)
+
+        assert "/repo/path" in prompt
+
+    def test_prompt_brownfield_repo_missing_path(self):
+        """Prompt builder handles brownfield repo with missing path."""
+        seed = _make_seed(
+            brownfield_repos=({"name": "MyApp"},),
+        )
+        prompt = PMDocumentGenerator._build_generation_prompt(seed)
+
+        assert "MyApp ()" not in prompt
+        assert "MyApp" in prompt
 
     def test_prompt_generation_instruction_at_end(self):
         """Prompt ends with the generation instruction."""

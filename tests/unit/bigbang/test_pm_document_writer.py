@@ -112,6 +112,12 @@ class TestGeneratePrdMarkdown:
         md = generate_pm_markdown(seed)
         assert "*PM ID: pm_seed_test123*" in md
 
+    def test_includes_created_at(self):
+        """Generated markdown includes the seed created_at timestamp."""
+        seed = _make_seed(created_at="2026-03-30T11:33:57+00:00")
+        md = generate_pm_markdown(seed)
+        assert "*Created At: 2026-03-30T11:33:57+00:00*" in md
+
     def test_omits_empty_sections(self):
         """Sections with no data are omitted from the output."""
         seed = PMSeed(
@@ -169,6 +175,60 @@ class TestGeneratePrdMarkdown:
         md = generate_pm_markdown(seed)
         assert "1. **As a** admin" in md
         assert "2. **As a** dev" in md
+
+    def test_omits_empty_created_at(self):
+        """Created At is omitted when empty or None."""
+        seed = PMSeed(pm_id="pm_1", product_name="Test", goal="A goal", created_at="")
+        md = generate_pm_markdown(seed)
+        assert "Created At" not in md
+
+    def test_omits_empty_interview_id(self):
+        """Interview ID is omitted when empty or None."""
+        seed = PMSeed(pm_id="pm_1", product_name="Test", goal="A goal", interview_id="")
+        md = generate_pm_markdown(seed)
+        assert "Interview ID" not in md
+
+    def test_footer_contains_both_pm_id_and_interview_id(self):
+        """Footer contains both PM ID and Interview ID when present."""
+        seed = _make_seed()
+        md = generate_pm_markdown(seed)
+        footer_start = md.index("---")
+        footer = md[footer_start:]
+        assert "*PM ID: pm_seed_test123*" in footer
+        assert "*Interview ID: int_abc*" in footer
+
+    def test_brownfield_repo_empty_name_falls_back_to_path(self):
+        """Brownfield repo with empty name falls back to path."""
+        seed = _make_seed(
+            brownfield_repos=({"name": "", "path": "/repo/path", "desc": "desc"},),
+        )
+        md = generate_pm_markdown(seed)
+        assert "**/repo/path**" in md
+        assert "(`/repo/path`)" in md
+
+    def test_brownfield_repo_missing_path_renders_cleanly(self):
+        """Brownfield repo with missing path renders without empty backticks."""
+        seed = _make_seed(
+            brownfield_repos=({"name": "MyApp"},),
+        )
+        md = generate_pm_markdown(seed)
+        assert "**MyApp**" in md
+        assert "(``)" not in md
+
+    def test_omits_empty_pm_id(self):
+        """PM ID is omitted when empty."""
+        seed = PMSeed(pm_id="", product_name="Test", goal="A goal", interview_id="int_1")
+        md = generate_pm_markdown(seed)
+        assert "PM ID" not in md
+        assert "*Interview ID: int_1*" in md
+
+    def test_omits_footer_when_both_ids_empty(self):
+        """Footer separator is omitted when both PM ID and Interview ID are empty."""
+        seed = PMSeed(pm_id="", product_name="Test", goal="A goal", interview_id="")
+        md = generate_pm_markdown(seed)
+        assert "---" not in md
+        assert "PM ID" not in md
+        assert "Interview ID" not in md
 
 
 # ──────────────────────────────────────────────────────────────────
