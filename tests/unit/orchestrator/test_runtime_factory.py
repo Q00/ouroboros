@@ -8,6 +8,7 @@ import pytest
 
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 
 # TODO: uncomment when OpenCode runtime is shipped
 # from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
@@ -23,6 +24,14 @@ class TestResolveAgentRuntimeBackend:
     def test_resolve_explicit_codex_alias(self) -> None:
         """Normalizes the codex_cli alias to codex."""
         assert resolve_agent_runtime_backend("codex_cli") == "codex"
+
+    def test_resolve_gemini_alias(self) -> None:
+        """Normalizes the gemini alias to gemini."""
+        assert resolve_agent_runtime_backend("gemini") == "gemini"
+
+    def test_resolve_gemini_cli_alias(self) -> None:
+        """Normalizes the gemini_cli alias to gemini."""
+        assert resolve_agent_runtime_backend("gemini_cli") == "gemini"
 
     def test_resolve_uses_config_helper(self) -> None:
         """Falls back to config/env helper when no explicit backend is provided."""
@@ -95,6 +104,101 @@ class TestCreateAgentRuntime:
         assert isinstance(runtime, ClaudeAgentAdapter)
         assert runtime._cwd == "/tmp/project"
         assert runtime._cli_path == "/tmp/claude"
+
+    def test_create_gemini_runtime(self) -> None:
+        """Creates GeminiCLIRuntime for the gemini backend."""
+        mock_dispatcher = object()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_gemini_cli_path",
+                return_value="/tmp/gemini",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=mock_dispatcher,
+            ),
+        ):
+            runtime = create_agent_runtime(
+                backend="gemini",
+                permission_mode="acceptEdits",
+                cwd="/tmp/project",
+            )
+
+        assert isinstance(runtime, GeminiCLIRuntime)
+        assert runtime._cli_path == "/tmp/gemini"
+        assert runtime._cwd == "/tmp/project"
+
+    def test_create_gemini_runtime_via_cli_alias(self) -> None:
+        """gemini_cli alias also creates GeminiCLIRuntime."""
+        mock_dispatcher = object()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_gemini_cli_path",
+                return_value="/tmp/gemini",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=mock_dispatcher,
+            ),
+        ):
+            runtime = create_agent_runtime(
+                backend="gemini_cli",
+                cwd="/tmp/project",
+            )
+
+        assert isinstance(runtime, GeminiCLIRuntime)
+
+    def test_create_gemini_runtime_uses_configured_cli_path(self) -> None:
+        """Gemini runtime factory consumes the shared CLI path helper when no explicit path is passed."""
+        mock_dispatcher = object()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_gemini_cli_path",
+                return_value="/configured/gemini",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=mock_dispatcher,
+            ) as mock_create_dispatcher,
+        ):
+            runtime = create_agent_runtime(
+                backend="gemini",
+                permission_mode="acceptEdits",
+                cwd="/tmp/project",
+            )
+
+        assert isinstance(runtime, GeminiCLIRuntime)
+        assert runtime._cli_path == "/configured/gemini"
+        assert runtime._cwd == "/tmp/project"
+        assert runtime._skill_dispatcher is mock_dispatcher
+        assert mock_create_dispatcher.call_args.kwargs["cwd"] == "/tmp/project"
+        assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "gemini"
+
+    def test_create_gemini_runtime_with_explicit_cli_path(self) -> None:
+        """Explicit cli_path overrides config-resolved path for gemini backend."""
+        mock_dispatcher = object()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_gemini_cli_path",
+                return_value="/configured/gemini",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=mock_dispatcher,
+            ),
+        ):
+            runtime = create_agent_runtime(
+                backend="gemini",
+                cli_path="/explicit/gemini",
+                cwd="/tmp/project",
+            )
+
+        assert isinstance(runtime, GeminiCLIRuntime)
+        assert runtime._cli_path == "/explicit/gemini"
 
     @pytest.mark.skip(reason="OpenCode runtime not yet shipped")
     def test_create_opencode_runtime_uses_configured_cli_path(self) -> None:
