@@ -23,8 +23,8 @@ class TestTriggerType:
         assert TriggerType.LATERAL_THINKING_ADOPTION == "lateral_thinking_adoption"
 
     def test_trigger_count(self) -> None:
-        """Exactly 6 trigger types per FR16."""
-        assert len(TriggerType) == 6
+        """6 trigger types per FR16 + 1 manual request type."""
+        assert len(TriggerType) == 7
 
 
 class TestTriggerContext:

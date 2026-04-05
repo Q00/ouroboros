@@ -96,6 +96,30 @@ def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.S
     return inspect.Signature(parameters=sig_params)
 
 
+_PROJECT_ROOT_MARKERS = (
+    # VCS (most universal — nearly every project has one)
+    ".git",
+    # Python
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    # Node.js
+    "package.json",
+    # Rust
+    "Cargo.toml",
+    # Go
+    "go.mod",
+    # Java / Kotlin
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    # Ruby
+    "Gemfile",
+    # PHP
+    "composer.json",
+)
+
+
 def _looks_like_project_root(path: object) -> bool:
     """Return True when the given path looks like a project root."""
     from pathlib import Path
@@ -103,11 +127,7 @@ def _looks_like_project_root(path: object) -> bool:
     if not isinstance(path, Path):
         return False
 
-    return (
-        (path / "pyproject.toml").exists()
-        or (path / "setup.py").exists()
-        or (path / "package.json").exists()
-    )
+    return any((path / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
 
 
 def _project_dir_from_seed(seed: Any) -> str | None:
@@ -143,11 +163,15 @@ def _project_dir_from_seed(seed: Any) -> str | None:
 
 
 def _project_dir_from_artifact(artifact: str) -> str | None:
-    """Extract a likely project root from Write/Edit tool output."""
+    """Extract a likely project root from Write/Edit/File tool output."""
     from pathlib import Path
     import re
 
-    write_matches = re.findall(r"(?:Write|Edit): (/[^\s]+)", artifact)
+    # Match quoted paths (spaces allowed) or unquoted paths (no spaces).
+    # Examples:  Write: /foo/bar.py  |  File: "/path with spaces/bar.py"
+    write_matches: list[str] = []
+    for m in re.finditer(r'(?:Write|Edit|File): (?:"([^"]+)"|(/[^\s]+))', artifact):
+        write_matches.append(m.group(1) or m.group(2))
     for path_str in write_matches:
         candidate = Path(path_str).parent
         for _ in range(10):

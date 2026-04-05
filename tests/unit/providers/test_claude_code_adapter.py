@@ -577,8 +577,9 @@ class TestErrorDiagnostics:
         mock_options_cls = MagicMock()
 
         async def failing_query(*args, **kwargs):
+            if False:
+                yield
             raise RuntimeError("SDK connection lost")
-            yield  # noqa: unreachable — makes this an async generator
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=failing_query))
 
@@ -606,8 +607,9 @@ class TestErrorDiagnostics:
         mock_options_cls = MagicMock()
 
         async def failing_query(*args, **kwargs):
+            if False:
+                yield
             raise subprocess.CalledProcessError(1, "claude")
-            yield  # noqa: unreachable
 
         import subprocess
 
@@ -634,18 +636,22 @@ class TestErrorDiagnostics:
         mock_options_cls = MagicMock()
 
         async def cancelled_query(*args, **kwargs):
+            if False:
+                yield
             raise asyncio.CancelledError()
-            yield  # noqa: unreachable
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=cancelled_query))
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "claude_agent_sdk": sdk_module,
-                "claude_agent_sdk._errors": sdk_module._errors,
-            },
-        ), pytest.raises(asyncio.CancelledError):
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "claude_agent_sdk": sdk_module,
+                    "claude_agent_sdk._errors": sdk_module._errors,
+                },
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await adapter._execute_single_request("test prompt", config)
 
     @pytest.mark.asyncio
@@ -701,9 +707,7 @@ class TestErrorDiagnostics:
             result_msg.is_error = False
             yield result_msg
 
-        sdk_module = _make_sdk_mock(
-            mock_options_cls, MagicMock(side_effect=empty_no_session_query)
-        )
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=empty_no_session_query))
 
         with patch.dict(
             "sys.modules",

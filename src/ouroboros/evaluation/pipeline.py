@@ -142,15 +142,9 @@ class EvaluationPipeline:
             stage2_result, stage2_events = result.value
             events.extend(stage2_events)
 
-            # Build trigger context if not provided
-            if trigger_context is None:
-                trigger_context = TriggerContext(
-                    execution_id=context.execution_id,
-                    semantic_result=stage2_result,
-                )
-
-            # Check if Stage 2 failed on compliance
-            if not stage2_result.ac_compliance:
+            # Check if Stage 2 failed on compliance — but allow override
+            # via trigger_consensus for a second opinion from Stage 3.
+            if not stage2_result.ac_compliance and not context.trigger_consensus:
                 return self._build_result(
                     context.execution_id,
                     events,
@@ -158,6 +152,29 @@ class EvaluationPipeline:
                     stage2_result=stage2_result,
                     final_approved=False,
                 )
+
+        # Build or enrich trigger context — outside Stage 2 block so that
+        # trigger_consensus=True works even when stage2_enabled=False.
+        if trigger_context is None:
+            trigger_context = TriggerContext(
+                execution_id=context.execution_id,
+                semantic_result=stage2_result,
+                manual_consensus_request=context.trigger_consensus,
+            )
+        elif context.trigger_consensus and not trigger_context.manual_consensus_request:
+            # Caller supplied a TriggerContext (e.g. for drift data) but
+            # trigger_consensus was set separately — merge the override.
+            trigger_context = TriggerContext(
+                execution_id=trigger_context.execution_id,
+                seed_modified=trigger_context.seed_modified,
+                ontology_changed=trigger_context.ontology_changed,
+                goal_reinterpreted=trigger_context.goal_reinterpreted,
+                drift_score=trigger_context.drift_score,
+                uncertainty_score=trigger_context.uncertainty_score,
+                lateral_thinking_adopted=trigger_context.lateral_thinking_adopted,
+                semantic_result=trigger_context.semantic_result or stage2_result,
+                manual_consensus_request=True,
+            )
 
         # Stage 3: Consensus (if triggered)
         if self._config.stage3_enabled and trigger_context:
@@ -235,19 +252,22 @@ class EvaluationPipeline:
         if stage3_result is not None:
             highest_stage = 3
 
-        # Calculate failure reason before creating immutable result
+        # Calculate failure reason before creating immutable result.
+        # Stage 3 is checked before Stage 2 because when Stage 3 ran,
+        # it is the authoritative verdict (Stage 2 may have been bypassed
+        # via trigger_consensus).
         failure_reason: str | None = None
         if not final_approved:
             if stage1_result and not stage1_result.passed:
                 failed = stage1_result.failed_checks
                 failure_reason = f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
-            elif stage2_result and not stage2_result.ac_compliance:
-                failure_reason = (
-                    f"Stage 2 failed: AC non-compliance (score={stage2_result.score:.2f})"
-                )
             elif stage3_result and not stage3_result.approved:
                 failure_reason = (
                     f"Stage 3 failed: Consensus not reached ({stage3_result.majority_ratio:.0%})"
+                )
+            elif stage2_result and not stage2_result.ac_compliance:
+                failure_reason = (
+                    f"Stage 2 failed: AC non-compliance (score={stage2_result.score:.2f})"
                 )
             else:
                 failure_reason = "Unknown failure"

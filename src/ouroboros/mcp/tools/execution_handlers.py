@@ -181,6 +181,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         *,
         execution_id: str | None = None,
         session_id_override: str | None = None,
+        synchronous: bool = False,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle a seed execution request.
 
@@ -189,6 +190,9 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             execution_id: Pre-allocated execution ID (used by StartExecuteSeedHandler).
             session_id_override: Pre-allocated session ID for new executions
                 (used by StartExecuteSeedHandler).
+            synchronous: When True, run execution inline (blocking) instead of
+                fire-and-forget.  Used by StartExecuteSeedHandler so the Job
+                system can track the real execution lifetime.
 
         Returns:
             Result containing execution result or error.
@@ -420,9 +424,8 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         )
                     tracker = prepared.value
 
-                # Fire-and-forget: launch execution in a background task and
-                # return the session/execution IDs immediately so the MCP
-                # client is not blocked by Codex's tool-call timeout.
+                # Background execution coroutine — either awaited directly
+                # (synchronous=True) or wrapped in create_task (fire-and-forget).
                 async def _run_in_background(
                     _runner: OrchestratorRunner,
                     _seed: Seed,
@@ -518,20 +521,56 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             except Exception:
                                 log.exception("mcp.tool.execute_seed.event_store_close_error")
 
-                task = asyncio.create_task(
-                    _run_in_background(runner, seed, tracker, seed_content, is_resume, skip_qa)
-                )
-                launched = True
-                self._background_tasks.add(task)
-                task.add_done_callback(self._background_tasks.discard)
+                if synchronous:
+                    # Run inline — the caller (StartExecuteSeedHandler / Job
+                    # system) already handles backgrounding.  Pass
+                    # _owns_event_store=False so cleanup stays with the caller;
+                    # reconstruct_session below still needs the store open.
+                    launched = True
+                    await _run_in_background(
+                        runner,
+                        seed,
+                        tracker,
+                        seed_content,
+                        is_resume,
+                        skip_qa,
+                        _owns_event_store=False,
+                    )
 
+                    # Derive actual outcome from session state.
+                    try:
+                        post_result = await session_repo.reconstruct_session(tracker.session_id)
+                        session_status = post_result.value.status if post_result.is_ok else None
+                    except Exception:
+                        session_status = None
+
+                    status_label = session_status.value if session_status is not None else "unknown"
+                    success = session_status == SessionStatus.COMPLETED
+                else:
+                    # Fire-and-forget: launch in a background task.
+                    task = asyncio.create_task(
+                        _run_in_background(runner, seed, tracker, seed_content, is_resume, skip_qa)
+                    )
+                    launched = True
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
+                    status_label = "running"
+                    success = None  # unknown yet
+
+                # --- shared message / meta construction ---
+                header = {
+                    True: "Seed Execution COMPLETED",
+                    False: "Seed Execution FINISHED",
+                    None: "Seed Execution LAUNCHED",  # fire-and-forget
+                }[success]
                 message = (
-                    f"Seed Execution LAUNCHED\n"
+                    f"{header}\n"
                     f"{'=' * 60}\n"
                     f"Seed ID: {seed.metadata.seed_id}\n"
                     f"Session ID: {tracker.session_id}\n"
                     f"Execution ID: {tracker.execution_id}\n"
                     f"Goal: {seed.goal}\n\n"
+                    f"Status: {status_label}\n"
                     f"Runtime Backend: {effective_runtime_backend}\n"
                     f"LLM Backend: {resolved_llm_backend}\n"
                 )
@@ -540,22 +579,25 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                         f"Task Worktree: {workspace.worktree_path}\n"
                         f"Task Branch: {workspace.branch}\n"
                     )
-                message += (
-                    "\nExecution is running in the background.\n"
-                    "Use ouroboros_session_status to track progress.\n"
-                    "Use ouroboros_query_events for detailed event history.\n"
-                )
+                if not synchronous:
+                    message += (
+                        "\nExecution is running in the background.\n"
+                        "Use ouroboros_session_status to track progress.\n"
+                        "Use ouroboros_query_events for detailed event history.\n"
+                    )
 
-                meta = {
+                meta: dict[str, Any] = {
                     "seed_id": seed.metadata.seed_id,
                     "session_id": tracker.session_id,
                     "execution_id": tracker.execution_id,
                     "launched": True,
-                    "status": "running",
+                    "status": status_label,
                     "runtime_backend": effective_runtime_backend,
                     "llm_backend": resolved_llm_backend,
                     "resume_requested": is_resume,
                 }
+                if success is not None:
+                    meta["success"] = success
                 if workspace is not None:
                     meta["worktree_path"] = workspace.worktree_path
                     meta["worktree_branch"] = workspace.branch
@@ -563,14 +605,17 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 return Result.ok(
                     MCPToolResult(
                         content=(MCPContentItem(type=ContentType.TEXT, text=message),),
-                        is_error=False,
+                        is_error=success is False,
                         meta=meta,
                     )
                 )
             finally:
-                if workspace is not None and not launched:
+                # In synchronous mode, _run_in_background was told NOT to own
+                # cleanup (_owns_event_store=False), so the caller cleans up
+                # after reconstruct_session has finished using the store.
+                if workspace is not None and (not launched or synchronous):
                     release_lock(workspace.lock_path)
-                if owns_event_store and not launched:
+                if owns_event_store and (not launched or synchronous):
                     try:
                         close_result = event_store.close()
                         if inspect.isawaitable(close_result):
@@ -796,6 +841,7 @@ class StartExecuteSeedHandler:
                 arguments,
                 execution_id=execution_id,
                 session_id_override=new_session_id,
+                synchronous=True,
             )
             if result.is_err:
                 raise RuntimeError(str(result.error))

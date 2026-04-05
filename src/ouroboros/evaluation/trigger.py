@@ -34,6 +34,7 @@ class TriggerType(StrEnum):
     SEED_DRIFT_ALERT = "seed_drift_alert"
     STAGE2_UNCERTAINTY = "stage2_uncertainty"
     LATERAL_THINKING_ADOPTION = "lateral_thinking_adoption"
+    MANUAL_REQUEST = "manual_request"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,7 @@ class TriggerContext:
     uncertainty_score: float = 0.0
     lateral_thinking_adopted: bool = False
     semantic_result: SemanticResult | None = None
+    manual_consensus_request: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +129,23 @@ class ConsensusTrigger:
             Result containing TriggerResult and events
         """
         events: list[BaseEvent] = []
+
+        # Manual consensus request takes highest priority
+        if context.manual_consensus_request:
+            result = TriggerResult(
+                should_trigger=True,
+                trigger_type=TriggerType.MANUAL_REQUEST,
+                reason="Manual consensus request via trigger_consensus=true",
+                details={"manual_request": True},
+            )
+            events.append(
+                create_consensus_triggered_event(
+                    execution_id=context.execution_id,
+                    trigger_type=result.trigger_type.value,
+                    trigger_details=result.details,
+                )
+            )
+            return Result.ok((result, events))
 
         # Check each trigger condition in priority order
         checks = [

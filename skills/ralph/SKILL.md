@@ -55,12 +55,19 @@ When the user invokes this skill:
        cursor = job.meta["cursor"]
 
        # Poll for progress (non-blocking, shows intermediate state)
-       # Use timeout_seconds=60 to reduce context consumption
+       # Use timeout_seconds=120 (2-min long-poll) to reduce context consumption
+       # Only report when AC completed count changes (level-based polling)
+       prev_completed = 0
        while not terminal:
-           wait_result = await job_wait(job_id, cursor, timeout_seconds=60)
+           wait_result = await job_wait(job_id, cursor, timeout_seconds=120)
            cursor = wait_result.meta["cursor"]
            status = wait_result.meta["status"]
-           # Report progress concisely (one line per poll)
+           # Parse AC Progress from response, report only on level completion
+           current_completed = <parse AC completed from response>
+           if current_completed > prev_completed:
+               # Report progress concisely (one line per poll)
+               print: [Level complete] AC: {current_completed}/{total} | Phase: {phase}
+               prev_completed = current_completed
            terminal = status in ("completed", "failed", "cancelled")
 
        # Fetch final result

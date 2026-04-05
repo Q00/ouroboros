@@ -213,12 +213,25 @@ class CancelExecutionHandler:
             )
 
 
-_render_cache: dict[tuple[str, int], str] = {}
+_EMPTY_PROGRESS: dict[str, Any] = {
+    "ac_completed": None,
+    "ac_total": None,
+    "current_phase": None,
+    "activity": None,
+}
+
+_render_cache: dict[tuple[str, int], tuple[str, dict[str, Any]]] = {}
 _RENDER_CACHE_MAX = 64
 
 
-async def _render_job_snapshot(snapshot: JobSnapshot, event_store: EventStore) -> str:
+async def _render_job_snapshot(
+    snapshot: JobSnapshot, event_store: EventStore
+) -> tuple[str, dict[str, Any]]:
     """Format a user-facing job summary with linked execution context.
+
+    Returns (text, progress_dict).  The progress dict contains structured
+    AC progress (ac_completed, ac_total, current_phase, activity) extracted
+    from the same query used for rendering — no duplicate event-store hit.
 
     Results are cached by (job_id, cursor) to avoid redundant EventStore queries
     when the same snapshot is rendered repeatedly (e.g. poll loops).
@@ -228,21 +241,23 @@ async def _render_job_snapshot(snapshot: JobSnapshot, event_store: EventStore) -
     if not snapshot.is_terminal and cache_key in _render_cache:
         return _render_cache[cache_key]
 
-    text = await _render_job_snapshot_inner(snapshot, event_store)
+    text, progress = await _render_job_snapshot_inner(snapshot, event_store)
 
     if not snapshot.is_terminal:
         if len(_render_cache) >= _RENDER_CACHE_MAX:
-            # Evict oldest entries
             to_remove = list(_render_cache.keys())[: _RENDER_CACHE_MAX // 2]
             for key in to_remove:
                 _render_cache.pop(key, None)
-        _render_cache[cache_key] = text
+        _render_cache[cache_key] = (text, progress)
 
-    return text
+    return text, progress
 
 
-async def _render_job_snapshot_inner(snapshot: JobSnapshot, event_store: EventStore) -> str:
-    """Inner render without caching."""
+async def _render_job_snapshot_inner(
+    snapshot: JobSnapshot, event_store: EventStore
+) -> tuple[str, dict[str, Any]]:
+    """Inner render without caching.  Returns (text, progress_dict)."""
+    progress = dict(_EMPTY_PROGRESS)
     lines = [
         f"## Job: {snapshot.job_id}",
         "",
@@ -262,14 +277,20 @@ async def _render_job_snapshot_inner(snapshot: JobSnapshot, event_store: EventSt
         workflow_event = next((e for e in events if e.type == "workflow.progress.updated"), None)
         if workflow_event is not None:
             data = workflow_event.data
+            progress = {
+                "ac_completed": data.get("completed_count"),
+                "ac_total": data.get("total_count"),
+                "current_phase": data.get("current_phase") or "Working",
+                "activity": data.get("activity_detail") or data.get("activity") or "running",
+            }
             lines.extend(
                 [
                     "",
                     "### Execution",
                     f"**Execution ID**: {snapshot.links.execution_id}",
-                    f"**Phase**: {data.get('current_phase') or 'Working'}",
-                    f"**Activity**: {data.get('activity_detail') or data.get('activity') or 'running'}",
-                    f"**AC Progress**: {data.get('completed_count', 0)}/{data.get('total_count', '?')}",
+                    f"**Phase**: {progress['current_phase']}",
+                    f"**Activity**: {progress['activity']}",
+                    f"**AC Progress**: {progress['ac_completed']}/{progress['ac_total'] or '?'}",
                 ]
             )
 
@@ -348,7 +369,7 @@ async def _render_job_snapshot_inner(snapshot: JobSnapshot, event_store: EventSt
     if snapshot.error:
         lines.extend(["", f"**Error**: {snapshot.error}"])
 
-    return "\n".join(lines)
+    return "\n".join(lines), progress
 
 
 @dataclass
@@ -395,7 +416,7 @@ class JobStatusHandler:
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_status"))
 
-        text = await _render_job_snapshot(snapshot, self._event_store)
+        text, progress = await _render_job_snapshot(snapshot, self._event_store)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
@@ -407,6 +428,7 @@ class JobStatusHandler:
                     "session_id": snapshot.links.session_id,
                     "execution_id": snapshot.links.execution_id,
                     "lineage_id": snapshot.links.lineage_id,
+                    **progress,
                 },
             )
         )
@@ -480,7 +502,7 @@ class JobWaitHandler:
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_wait"))
 
-        text = await _render_job_snapshot(snapshot, self._event_store)
+        text, progress = await _render_job_snapshot(snapshot, self._event_store)
         if not changed:
             text += "\n\nNo new job-level events during this wait window."
         return Result.ok(
@@ -492,6 +514,7 @@ class JobWaitHandler:
                     "status": snapshot.status.value,
                     "cursor": snapshot.cursor,
                     "changed": changed,
+                    **progress,
                 },
             )
         )
@@ -610,7 +633,7 @@ class CancelJobHandler:
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_cancel_job"))
 
-        text = await _render_job_snapshot(snapshot, self._event_store)
+        text, _progress = await _render_job_snapshot(snapshot, self._event_store)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),

@@ -127,22 +127,62 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    Then **stop** — do NOT proceed to polling steps.
 
 6. **Poll for progress** using `ouroboros_job_wait` (only if user chose to poll):
+
+   The polling behavior differs based on the user's interval choice:
+
+   **Option A: "Per level (Recommended)"**
+   ```
+   prev_completed = 0
+
+   loop:
+     Tool: ouroboros_job_wait
+     Arguments:
+       job_id: <job_id from step 3>
+       cursor: <cursor from previous response, starts at 0>
+       timeout_seconds: 120   # 2-min long-poll
+
+     # Parse "AC Progress: X/Y" from the response text
+     current_completed = <X from AC Progress>
+     total = <Y from AC Progress>
+     phase = <current phase from response>
+
+     if current_completed > prev_completed:
+       # A level completed — report to user
+       print: [Level complete] AC: {current_completed}/{total} | Phase: {phase}
+       prev_completed = current_completed
+     # else: continue silently (no output)
+
+     # Continue until status is "completed", "failed", or "cancelled"
+   ```
+
+   **Option B: "Every 10 minutes"**
    ```
    loop:
      Tool: ouroboros_job_wait
      Arguments:
        job_id: <job_id from step 3>
        cursor: <cursor from previous response, starts at 0>
-       timeout_seconds: 60
-   
-     # Returns immediately when state changes; waits up to 60s otherwise.
-     # This reduces tool call round-trips and context consumption.
+       timeout_seconds: 600   # 10-min long-poll
+
+     # Report on every return regardless of change
+     print: [10m check] AC: {completed}/{total} | Phase: {phase}
+
      # Continue until status is "completed", "failed", or "cancelled"
    ```
 
-   Between polls, report progress concisely (one line):
+   **Option C: "Every 20 minutes"**
    ```
-   [Executing] Phase: <current_phase> | AC: <completed>/<total>
+   loop:
+     Tool: ouroboros_job_wait
+     Arguments:
+       job_id: <job_id from step 3>
+       cursor: <cursor from previous response, starts at 0>
+       timeout_seconds: 1200  # 20-min long-poll
+
+     # Report on every return regardless of change
+     print: [20m check] AC: {completed}/{total} | Phase: {phase}
+
+     # Continue until status is "completed", "failed", or "cancelled"
    ```
 
 7. **Fetch final result** with `ouroboros_job_result`:

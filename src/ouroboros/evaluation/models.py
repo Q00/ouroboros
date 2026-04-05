@@ -314,6 +314,7 @@ class EvaluationContext:
     goal: str = ""
     constraints: tuple[str, ...] = ()
     artifact_bundle: ArtifactBundle | None = None
+    trigger_consensus: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,16 +353,21 @@ class EvaluationResult:
 
     @property
     def failure_reason(self) -> str | None:
-        """Return the reason for failure, if any."""
+        """Return the reason for failure, if any.
+
+        Stage 3 is checked before Stage 2 because when Stage 3 ran,
+        it is the authoritative verdict (Stage 2 may have been bypassed
+        via trigger_consensus).
+        """
         if self.final_approved:
             return None
         if self.stage1_result and not self.stage1_result.passed:
             failed = self.stage1_result.failed_checks
             return f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
-        if self.stage2_result and not self.stage2_result.ac_compliance:
-            return f"Stage 2 failed: AC non-compliance (score={self.stage2_result.score:.2f})"
         if self.stage3_result and not self.stage3_result.approved:
             return (
                 f"Stage 3 failed: Consensus not reached ({self.stage3_result.majority_ratio:.0%})"
             )
+        if self.stage2_result and not self.stage2_result.ac_compliance:
+            return f"Stage 2 failed: AC non-compliance (score={self.stage2_result.score:.2f})"
         return "Unknown failure"
