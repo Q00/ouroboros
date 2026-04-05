@@ -19,6 +19,8 @@ class OpenClawChannelEvent:
     guild_id: str | None
     user_id: str | None
     message: str
+    message_id: str | None = None
+    event_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +37,8 @@ class OpenClawWorkflowCommand:
     seed_path: str | None = None
     mode: str | None = None
     timeout_seconds: int | None = None
+    message_id: str | None = None
+    event_id: str | None = None
 
     @classmethod
     def from_event(
@@ -57,6 +61,8 @@ class OpenClawWorkflowCommand:
             seed_content=seed_content,
             seed_path=seed_path,
             mode=mode,
+            message_id=event.message_id,
+            event_id=event.event_id,
         )
 
     @classmethod
@@ -132,5 +138,7 @@ class OpenClawWorkflowCommand:
             "seed_path": self.seed_path,
             "mode": self.mode,
             "timeout_seconds": self.timeout_seconds,
+            "message_id": self.message_id,
+            "event_id": self.event_id,
         }
         return {key: value for key, value in data.items() if value is not None}

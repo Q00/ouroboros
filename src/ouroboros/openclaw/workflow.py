@@ -66,6 +66,8 @@ class ChannelWorkflowRequest:
     seed_content: str | None = None
     seed_path: str | None = None
     entry_point: WorkflowEntryPoint = WorkflowEntryPoint.INTERVIEW
+    message_id: str | None = None
+    event_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,8 +136,14 @@ def request_fingerprint(
     message: str,
     repo: str,
     entry_point: WorkflowEntryPoint,
+    message_id: str | None = None,
+    event_id: str | None = None,
 ) -> str:
     """Build a stable fingerprint for duplicate-delivery protection."""
+    if event_id:
+        return f"event:{event_id}"
+    if message_id:
+        return f"message:{message_id}"
     payload = "|".join(
         [
             user_id or "",
@@ -231,6 +239,8 @@ class ChannelWorkflowManager:
             message=request.message,
             repo=request.repo,
             entry_point=request.entry_point,
+            message_id=request.message_id,
+            event_id=request.event_id,
         )
         record = ChannelWorkflowRecord(
             workflow_id=f"wf_{uuid4().hex[:12]}",
@@ -384,6 +394,8 @@ class ChannelWorkflowManager:
             message=message,
             repo=repo,
             entry_point=entry_point,
+            message_id=None,
+            event_id=None,
         )
         row = self._store.inflight_duplicate(channel.key, fingerprint)
         return ChannelWorkflowRecord.from_json(row) if row is not None else None

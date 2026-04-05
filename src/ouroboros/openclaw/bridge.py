@@ -47,12 +47,16 @@ def event_from_payload(payload: dict[str, Any]) -> OpenClawChannelEvent:
 
     guild_id = payload.get("guild_id")
     user_id = payload.get("user_id")
+    message_id = payload.get("message_id")
+    event_id = payload.get("event_id")
 
     return OpenClawChannelEvent(
         channel_id=channel_id.strip(),
         guild_id=guild_id.strip() if isinstance(guild_id, str) and guild_id.strip() else None,
         user_id=user_id.strip() if isinstance(user_id, str) and user_id.strip() else None,
         message=message.strip(),
+        message_id=message_id.strip() if isinstance(message_id, str) and message_id.strip() else None,
+        event_id=event_id.strip() if isinstance(event_id, str) and event_id.strip() else None,
     )
 
 

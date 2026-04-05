@@ -18,26 +18,18 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.openclaw.responses import build_channel_workflow_meta
+from ouroboros.openclaw.runtime import ChannelWorkflowRuntime
 from ouroboros.openclaw.workflow import (
     ChannelRef,
     ChannelRepoRegistry,
     ChannelWorkflowManager,
     ChannelWorkflowRequest,
-    WorkflowEntryPoint,
     WorkflowStage,
     detect_entry_point,
-    extract_first_url,
     render_channel_summary,
-    render_result_message,
     render_stage_message,
 )
-
-
-def _extract_seed_yaml(text: str) -> str:
-    marker = "--- Seed YAML ---"
-    if marker not in text:
-        raise ValueError("generate_seed response did not include inline seed YAML")
-    return text.split(marker, 1)[1].strip()
 
 
 @dataclass
@@ -64,35 +56,17 @@ class ChannelWorkflowHandler:
         self._job_status_handler = self.job_status_handler or JobStatusHandler()
         self._job_wait_handler = self.job_wait_handler or JobWaitHandler()
         self._job_result_handler = self.job_result_handler or JobResultHandler()
+        self._runtime = ChannelWorkflowRuntime(
+            workflow_manager=self._workflow_manager,
+            interview_handler=self._interview_handler,
+            generate_seed_handler=self._generate_seed_handler,
+            start_execute_seed_handler=self._start_execute_seed_handler,
+            job_result_handler=self._job_result_handler,
+        )
 
     @staticmethod
     def _meta(**kwargs: Any) -> dict[str, Any]:
-        """Build a stable metadata shape for channel workflow responses."""
-        meta = {
-            "action": None,
-            "channel_key": None,
-            "workflow_id": None,
-            "stage": None,
-            "entry_point": None,
-            "reason": None,
-            "repo": None,
-            "session_id": None,
-            "execution_id": None,
-            "job_id": None,
-            "seed_id": None,
-            "pr_url": None,
-            "job_status": None,
-            "cursor": None,
-            "changed": None,
-            "ambiguity_score": None,
-            "seed_ready": None,
-            "next_workflow_started": False,
-            "duplicate_delivery": False,
-            "duplicate_of": None,
-            "active": None,
-        }
-        meta.update(kwargs)
-        return meta
+        return build_channel_workflow_meta(**kwargs)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -168,6 +142,18 @@ class ChannelWorkflowHandler:
                     required=False,
                     default=30,
                 ),
+                MCPToolParameter(
+                    name="message_id",
+                    type=ToolInputType.STRING,
+                    description="Optional transport message identifier for dedupe",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="event_id",
+                    type=ToolInputType.STRING,
+                    description="Optional transport event identifier for dedupe",
+                    required=False,
+                ),
             ),
         )
 
@@ -191,39 +177,42 @@ class ChannelWorkflowHandler:
         user_id = str(arguments["user_id"]) if arguments.get("user_id") is not None else None
 
         if action == "set_repo":
-            repo = arguments.get("repo")
-            if not isinstance(repo, str) or not repo.strip():
-                return Result.err(
-                    MCPToolError(
-                        "repo is required for action=set_repo", tool_name=self.definition.name
-                    )
-                )
-            self._repo_registry.set(channel, repo.strip())
-            return self._ok(
-                f"Default repo for channel {channel.key} set to `{repo.strip()}`.",
-                self._meta(
-                    action=action,
-                    channel_key=channel.key,
-                    repo=repo.strip(),
-                ),
-            )
-
+            return self._handle_set_repo(channel, arguments)
         if action == "status":
             return self._ok(
                 render_channel_summary(channel, self._workflow_manager, self._repo_registry),
                 self._meta(action=action, channel_key=channel.key),
             )
-
         if action == "poll":
             return await self._poll_channel(channel)
-
         if action == "wait":
             return await self._wait_channel(
                 channel,
                 timeout_seconds=int(arguments.get("timeout_seconds", 30)),
             )
-
         return await self._handle_message(channel, arguments, user_id)
+
+    def _handle_set_repo(
+        self,
+        channel: ChannelRef,
+        arguments: dict[str, Any],
+    ) -> Result[MCPToolResult, MCPServerError]:
+        repo = arguments.get("repo")
+        if not isinstance(repo, str) or not repo.strip():
+            return Result.err(
+                MCPToolError(
+                    "repo is required for action=set_repo", tool_name=self.definition.name
+                )
+            )
+        self._repo_registry.set(channel, repo.strip())
+        return self._ok(
+            f"Default repo for channel {channel.key} set to `{repo.strip()}`.",
+            self._meta(
+                action="set_repo",
+                channel_key=channel.key,
+                repo=repo.strip(),
+            ),
+        )
 
     async def _poll_channel(
         self,
@@ -250,6 +239,7 @@ class ChannelWorkflowHandler:
         status_result = await self._job_status_handler.handle({"job_id": active.job_id})
         if status_result.is_err:
             return Result.err(status_result.error)
+
         status_meta = status_result.value.meta
         status = status_meta["status"]
         cursor = int(status_meta.get("cursor", active.last_job_cursor))
@@ -267,7 +257,7 @@ class ChannelWorkflowHandler:
                 ),
             )
 
-        return await self._finalize_terminal_status(
+        return await self._runtime.finalize_terminal_status(
             channel=channel,
             active=active,
             status=status,
@@ -330,7 +320,7 @@ class ChannelWorkflowHandler:
                 ),
             )
 
-        return await self._finalize_terminal_status(
+        return await self._runtime.finalize_terminal_status(
             channel=channel,
             active=active,
             status=status,
@@ -353,6 +343,7 @@ class ChannelWorkflowHandler:
                 )
             )
 
+        normalized_message = message.strip()
         mode = str(arguments.get("mode", "auto"))
         active = self._workflow_manager.active_for_channel(channel)
         if (
@@ -361,79 +352,28 @@ class ChannelWorkflowHandler:
             and active.interview_session_id
             and mode == "answer"
         ):
-            return await self._resume_interview(active, message.strip())
+            return await self._runtime.resume_interview(active, normalized_message)
 
-        if active is not None:
-            repo = arguments.get("repo") or self._repo_registry.get(channel) or active.repo
-            detection = detect_entry_point(
-                message.strip(),
-                seed_content=arguments.get("seed_content"),
-                seed_path=arguments.get("seed_path"),
-            )
-            duplicate = self._workflow_manager.find_inflight_duplicate(
-                channel,
-                user_id=user_id,
-                message=message.strip(),
-                repo=str(repo),
-                entry_point=detection.entry_point,
-            )
-            if duplicate is not None:
-                return self._ok(
-                    render_stage_message(duplicate),
-                    self._meta(
-                        action="message",
-                        channel_key=channel.key,
-                        workflow_id=duplicate.workflow_id,
-                        stage=duplicate.stage,
-                        entry_point=duplicate.entry_point,
-                        repo=duplicate.repo,
-                        duplicate_delivery=True,
-                        duplicate_of=duplicate.workflow_id,
-                    ),
-                )
-            queued = self._workflow_manager.enqueue(
-                ChannelWorkflowRequest(
-                    channel=channel,
-                    user_id=user_id,
-                    message=message.strip(),
-                    repo=str(repo),
-                    seed_content=arguments.get("seed_content"),
-                    seed_path=arguments.get("seed_path"),
-                    entry_point=detection.entry_point,
-                )
-            )
-            return self._ok(
-                render_stage_message(queued),
-                self._meta(
-                    action="message",
-                    channel_key=channel.key,
-                    workflow_id=queued.workflow_id,
-                    stage=queued.stage,
-                    entry_point=queued.entry_point,
-                    reason=detection.reason,
-                    repo=queued.repo,
-                ),
-            )
-
-        repo_value = arguments.get("repo") or self._repo_registry.get(channel)
-        if not isinstance(repo_value, str) or not repo_value.strip():
+        repo = arguments.get("repo") or self._repo_registry.get(channel) or (active.repo if active else None)
+        if not isinstance(repo, str) or not repo.strip():
             return Result.err(
                 MCPToolError(
                     "No repo provided and no default repo configured for this channel",
                     tool_name=self.definition.name,
                 )
             )
+        repo = repo.strip()
 
         detection = detect_entry_point(
-            message.strip(),
+            normalized_message,
             seed_content=arguments.get("seed_content"),
             seed_path=arguments.get("seed_path"),
         )
         duplicate = self._workflow_manager.find_inflight_duplicate(
             channel,
             user_id=user_id,
-            message=message.strip(),
-            repo=repo_value.strip(),
+            message=normalized_message,
+            repo=repo,
             entry_point=detection.entry_point,
         )
         if duplicate is not None:
@@ -450,254 +390,34 @@ class ChannelWorkflowHandler:
                     duplicate_of=duplicate.workflow_id,
                 ),
             )
+
         record = self._workflow_manager.enqueue(
             ChannelWorkflowRequest(
                 channel=channel,
                 user_id=user_id,
-                message=message.strip(),
-                repo=repo_value.strip(),
+                message=normalized_message,
+                repo=repo,
                 seed_content=arguments.get("seed_content"),
                 seed_path=arguments.get("seed_path"),
                 entry_point=detection.entry_point,
+                message_id=(str(arguments["message_id"]) if arguments.get("message_id") is not None else None),
+                event_id=(str(arguments["event_id"]) if arguments.get("event_id") is not None else None),
             )
         )
-        return await self._launch_workflow(record)
-
-    async def _launch_workflow(
-        self,
-        record,
-    ) -> Result[MCPToolResult, MCPServerError]:
-        if record.entry_point == WorkflowEntryPoint.INTERVIEW:
-            result = await self._interview_handler.handle(
-                {"initial_context": record.request_message, "cwd": record.repo}
-            )
-            if result.is_err:
-                self._workflow_manager.mark_failed(record.workflow_id, error=str(result.error))
-                return Result.err(result.error)
-            session_id = result.value.meta.get("session_id")
-            if isinstance(session_id, str) and session_id:
-                record = self._workflow_manager.set_interview_session(
-                    record.workflow_id, session_id
-                )
+        if active is not None:
             return self._ok(
-                result.value.content[0].text,
+                render_stage_message(record),
                 self._meta(
                     action="message",
+                    channel_key=channel.key,
                     workflow_id=record.workflow_id,
                     stage=record.stage,
                     entry_point=record.entry_point,
-                    session_id=session_id,
+                    reason=detection.reason,
                     repo=record.repo,
                 ),
             )
-
-        seed_content = record.seed_content or record.request_message
-        execute_result = await self._start_execute_seed_handler.handle(
-            {
-                "seed_content": seed_content,
-                "seed_path": record.seed_path,
-                "cwd": record.repo,
-            }
-        )
-        if execute_result.is_err:
-            self._workflow_manager.mark_failed(record.workflow_id, error=str(execute_result.error))
-            return Result.err(execute_result.error)
-        meta = execute_result.value.meta
-        record = self._workflow_manager.set_executing(
-            record.workflow_id,
-            job_id=meta.get("job_id"),
-            session_id=meta.get("session_id"),
-            execution_id=meta.get("execution_id"),
-        )
-        return self._ok(
-            execute_result.value.content[0].text,
-            self._meta(
-                action="message",
-                workflow_id=record.workflow_id,
-                stage=record.stage,
-                entry_point=record.entry_point,
-                repo=record.repo,
-                job_id=meta.get("job_id"),
-                session_id=meta.get("session_id"),
-                execution_id=meta.get("execution_id"),
-            ),
-        )
-
-    async def _maybe_launch_next_workflow(
-        self,
-        channel: ChannelRef,
-        previous_workflow_id: str,
-    ) -> Result[MCPToolResult, MCPServerError] | None:
-        next_record = self._workflow_manager.active_for_channel(channel)
-        if next_record is None or next_record.workflow_id == previous_workflow_id:
-            return None
-
-        if next_record.entry_point == WorkflowEntryPoint.INTERVIEW and next_record.interview_session_id:
-            return None
-        if next_record.entry_point == WorkflowEntryPoint.EXECUTION and next_record.job_id:
-            return None
-
-        return await self._launch_workflow(next_record)
-
-    async def _finalize_terminal_status(
-        self,
-        *,
-        channel: ChannelRef,
-        active,
-        status: str,
-        fallback_text: str,
-        action: str,
-        cursor: int,
-    ) -> Result[MCPToolResult, MCPServerError]:
-        result_text = fallback_text
-        if status == "completed":
-            result_result = await self._job_result_handler.handle({"job_id": active.job_id})
-            if result_result.is_ok:
-                result_text = result_result.value.content[0].text
-            pr_url = extract_first_url(result_text)
-            completed = self._workflow_manager.mark_completed(
-                active.workflow_id,
-                pr_url=pr_url,
-                final_result=result_text,
-            )
-            next_result = await self._maybe_launch_next_workflow(channel, completed.workflow_id)
-            if next_result is not None and next_result.is_ok:
-                return self._ok(
-                    (
-                        f"{render_result_message(completed)}\n\n"
-                        "Started next queued workflow:\n\n"
-                        f"{next_result.value.content[0].text}"
-                    ),
-                    self._meta(
-                        action=action,
-                        channel_key=channel.key,
-                        workflow_id=completed.workflow_id,
-                        stage=completed.stage,
-                        pr_url=pr_url,
-                        next_workflow_started=True,
-                        cursor=cursor,
-                    ),
-                )
-            return self._ok(
-                render_result_message(completed),
-                self._meta(
-                    action=action,
-                    channel_key=channel.key,
-                    workflow_id=completed.workflow_id,
-                    stage=completed.stage,
-                    pr_url=pr_url,
-                    cursor=cursor,
-                ),
-            )
-
-        failed = self._workflow_manager.mark_failed(active.workflow_id, error=result_text)
-        next_result = await self._maybe_launch_next_workflow(channel, failed.workflow_id)
-        if next_result is not None and next_result.is_ok:
-            return self._ok(
-                (
-                    f"{render_result_message(failed)}\n\n"
-                    "Started next queued workflow:\n\n"
-                    f"{next_result.value.content[0].text}"
-                ),
-                self._meta(
-                    action=action,
-                    channel_key=channel.key,
-                    workflow_id=failed.workflow_id,
-                    stage=failed.stage,
-                    next_workflow_started=True,
-                    cursor=cursor,
-                ),
-            )
-        return self._ok(
-            render_result_message(failed),
-            self._meta(
-                action=action,
-                channel_key=channel.key,
-                workflow_id=failed.workflow_id,
-                stage=failed.stage,
-                cursor=cursor,
-            ),
-        )
-
-    async def _resume_interview(
-        self,
-        record,
-        answer: str,
-    ) -> Result[MCPToolResult, MCPServerError]:
-        result = await self._interview_handler.handle(
-            {"session_id": record.interview_session_id, "answer": answer}
-        )
-        if result.is_err:
-            self._workflow_manager.mark_failed(record.workflow_id, error=str(result.error))
-            return Result.err(result.error)
-
-        meta = result.value.meta
-        if meta.get("completed"):
-            seed_result = await self._generate_seed_handler.handle(
-                {
-                    "session_id": record.interview_session_id,
-                    "ambiguity_score": meta.get("ambiguity_score"),
-                }
-            )
-            if seed_result.is_err:
-                self._workflow_manager.mark_failed(record.workflow_id, error=str(seed_result.error))
-                return Result.err(seed_result.error)
-
-            seed_text = seed_result.value.content[0].text
-            seed_yaml = _extract_seed_yaml(seed_text)
-            self._workflow_manager.set_seed(
-                record.workflow_id,
-                seed_id=seed_result.value.meta.get("seed_id"),
-                seed_content=seed_yaml,
-            )
-            execute_result = await self._start_execute_seed_handler.handle(
-                {
-                    "seed_content": seed_yaml,
-                    "cwd": record.repo,
-                }
-            )
-            if execute_result.is_err:
-                self._workflow_manager.mark_failed(
-                    record.workflow_id, error=str(execute_result.error)
-                )
-                return Result.err(execute_result.error)
-            execute_meta = execute_result.value.meta
-            executing = self._workflow_manager.set_executing(
-                record.workflow_id,
-                job_id=execute_meta.get("job_id"),
-                session_id=execute_meta.get("session_id"),
-                execution_id=execute_meta.get("execution_id"),
-            )
-            combined_text = (
-                f"{seed_text}\n\n"
-                f"{render_stage_message(executing)}\n\n"
-                f"{execute_result.value.content[0].text}"
-            )
-            return self._ok(
-                combined_text,
-                self._meta(
-                    action="message",
-                    workflow_id=executing.workflow_id,
-                    stage=executing.stage,
-                    seed_id=seed_result.value.meta.get("seed_id"),
-                    job_id=execute_meta.get("job_id"),
-                    session_id=execute_meta.get("session_id"),
-                    execution_id=execute_meta.get("execution_id"),
-                    repo=record.repo,
-                ),
-            )
-
-        return self._ok(
-            result.value.content[0].text,
-            self._meta(
-                action="message",
-                workflow_id=record.workflow_id,
-                stage=record.stage,
-                session_id=record.interview_session_id,
-                ambiguity_score=meta.get("ambiguity_score"),
-                seed_ready=meta.get("seed_ready"),
-            )
-        )
+        return await self._runtime.launch_workflow(record)
 
     @staticmethod
     def _ok(text: str, meta: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:

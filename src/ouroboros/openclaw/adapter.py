@@ -80,6 +80,8 @@ class OpenClawWorkflowAdapter:
                 user_id=event.user_id,
                 message=parsed.message or event.message,
                 mode=parsed.mode or "auto",
+                message_id=event.message_id,
+                event_id=event.event_id,
             )
 
         return await self.dispatch(command)
