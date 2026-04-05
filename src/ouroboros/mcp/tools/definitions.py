@@ -23,6 +23,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
     GenerateSeedHandler,
     InterviewHandler,
 )
+from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler
 from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
     LateralThinkHandler,
@@ -110,6 +111,11 @@ def job_result_handler() -> JobResultHandler:
     return JobResultHandler()
 
 
+def ac_tree_hud_handler() -> ACTreeHUDHandler:
+    """Create an ACTreeHUDHandler instance."""
+    return ACTreeHUDHandler()
+
+
 def cancel_job_handler() -> CancelJobHandler:
     """Create a CancelJobHandler instance."""
     return CancelJobHandler()
@@ -178,6 +184,7 @@ OuroborosToolHandlers = tuple[
     | JobStatusHandler
     | JobWaitHandler
     | JobResultHandler
+    | ACTreeHUDHandler
     | CancelJobHandler
     | QueryEventsHandler
     | GenerateSeedHandler
@@ -218,6 +225,7 @@ def get_ouroboros_tools(
         JobStatusHandler(),
         JobWaitHandler(),
         JobResultHandler(),
+        ACTreeHUDHandler(),
         CancelJobHandler(),
         QueryEventsHandler(),
         GenerateSeedHandler(llm_backend=llm_backend),

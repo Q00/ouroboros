@@ -737,8 +737,8 @@ class StartExecuteSeedHandler:
             name="ouroboros_start_execute_seed",
             description=(
                 "Start a seed execution in the background and return a job ID immediately. "
-                "Use ouroboros_job_status, ouroboros_job_wait, and ouroboros_job_result "
-                "to monitor progress. "
+                "Use ouroboros_ac_tree_hud for live progress snapshots and "
+                "ouroboros_job_result for terminal output. "
                 "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),
@@ -878,7 +878,8 @@ class StartExecuteSeedHandler:
             f"Execution ID: {snapshot.links.execution_id or 'pending'}\n\n"
             f"Runtime Backend: {runtime_backend}\n"
             f"LLM Backend: {llm_backend}\n\n"
-            "Use ouroboros_job_status, ouroboros_job_wait, or ouroboros_job_result to monitor it."
+            "Use ouroboros_ac_tree_hud(session_id, cursor) for live progress and "
+            "ouroboros_job_result(job_id) for the final output."
         )
         return Result.ok(
             MCPToolResult(

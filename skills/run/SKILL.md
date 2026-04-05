@@ -126,63 +126,69 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    ```
    Then **stop** — do NOT proceed to polling steps.
 
-6. **Poll for progress** using `ouroboros_job_wait` (only if user chose to poll):
+6. **Poll for progress** using `ouroboros_ac_tree_hud` (only if user chose to poll):
 
-   The polling behavior differs based on the user's interval choice:
+   The polling behavior differs based on the user's interval choice. In all cases,
+   the tool returns a compact markdown snapshot when state changed, or a one-line
+   delta ("No AC tree change since cursor <cursor>.") when nothing changed.
+   Keep the latest cursor from the tool's meta payload for the next call.
 
    **Option A: "Per level (Recommended)"**
    ```
    prev_completed = 0
 
    loop:
-     Tool: ouroboros_job_wait
+     Tool: ouroboros_ac_tree_hud
      Arguments:
-       job_id: <job_id from step 3>
+       session_id: <session_id from step 3>
        cursor: <cursor from previous response, starts at 0>
-       timeout_seconds: 120   # 2-min long-poll
+       max_nodes: 50
 
-     # Parse "AC Progress: X/Y" from the response text
-     current_completed = <X from AC Progress>
-     total = <Y from AC Progress>
-     phase = <current phase from response>
+     # Parse completed/total from the snapshot or meta
+     current_completed = <completed count>
+     total = <total count>
 
      if current_completed > prev_completed:
-       # A level completed — report to user
-       print: [Level complete] AC: {current_completed}/{total} | Phase: {phase}
+       # A level completed — show the returned markdown snapshot as-is
+       print snapshot
        prev_completed = current_completed
      # else: continue silently (no output)
 
-     # Continue until status is "completed", "failed", or "cancelled"
+     # Continue until meta.status is "completed", "failed", or "cancelled"
    ```
 
    **Option B: "Every 10 minutes"**
    ```
    loop:
-     Tool: ouroboros_job_wait
+     Tool: ouroboros_ac_tree_hud
      Arguments:
-       job_id: <job_id from step 3>
+       session_id: <session_id from step 3>
        cursor: <cursor from previous response, starts at 0>
-       timeout_seconds: 600   # 10-min long-poll
+       max_nodes: 50
 
      # Report on every return regardless of change
-     print: [10m check] AC: {completed}/{total} | Phase: {phase}
+     - If unchanged: echo the one-line delta only
+     - If changed: show the returned markdown snapshot as-is
+     sleep 600  # 10 min between polls
 
-     # Continue until status is "completed", "failed", or "cancelled"
+     # Continue until meta.status is "completed", "failed", or "cancelled"
    ```
 
    **Option C: "Every 20 minutes"**
    ```
    loop:
-     Tool: ouroboros_job_wait
+     Tool: ouroboros_ac_tree_hud
      Arguments:
-       job_id: <job_id from step 3>
+       session_id: <session_id from step 3>
        cursor: <cursor from previous response, starts at 0>
-       timeout_seconds: 1200  # 20-min long-poll
+       max_nodes: 50
 
      # Report on every return regardless of change
-     print: [20m check] AC: {completed}/{total} | Phase: {phase}
+     - If unchanged: echo the one-line delta only
+     - If changed: show the returned markdown snapshot as-is
+     sleep 1200  # 20 min between polls
 
-     # Continue until status is "completed", "failed", or "cancelled"
+     # Continue until meta.status is "completed", "failed", or "cancelled"
    ```
 
 7. **Fetch final result** with `ouroboros_job_result`:
@@ -234,9 +240,12 @@ Session ID: orch_x1y2z3
 Execution ID: exec_m1n2o3
 
 [Polling for progress...]
-Phase: Executing | AC Progress: 1/3
-Phase: Executing | AC Progress: 2/3
-Phase: Executing | AC Progress: 3/3
+🌳 AC Tree
+✅ Parse seed
+⏳ Implement workflow routing [Edit src/ouroboros/mcp/tools/ac_tree_hud_handler.py]
+⬜ Verify output
+
+elapsed 45s | messages 12 | tools 4
 
 [Fetching final result...]
 
