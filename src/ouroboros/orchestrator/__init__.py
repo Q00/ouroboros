@@ -98,6 +98,11 @@ from ouroboros.orchestrator.execution_strategy import (
     get_strategy,
     register_strategy,
 )
+
+try:
+    from ouroboros.orchestrator.kiro_adapter import KiroAgentAdapter
+except (ImportError, ModuleNotFoundError):  # pragma: no cover
+    KiroAgentAdapter = None  # type: ignore[assignment,misc]
 from ouroboros.orchestrator.level_context import (
     ACContextSummary,
     LevelContext,
@@ -157,6 +162,7 @@ __all__ = [
     "CodexCliRuntime",
     # "OpenCodeRuntime",  # TODO: uncomment when shipped
     # "OpenCodeRuntimeAdapter",  # TODO: uncomment when shipped
+    "KiroAgentAdapter",
     "DEFAULT_TOOLS",
     "RuntimeHandle",
     "TaskResult",

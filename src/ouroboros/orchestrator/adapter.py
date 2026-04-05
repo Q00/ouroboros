@@ -218,6 +218,8 @@ _RUNTIME_HANDLE_BACKEND_ALIASES = {
     "codex_cli": "codex_cli",
     "opencode": "opencode",
     "opencode_cli": "opencode",
+    "kiro": "kiro",
+    "kiro_cli": "kiro",
 }
 
 
