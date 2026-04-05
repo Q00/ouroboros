@@ -165,9 +165,7 @@ class LiteLLMAdapter:
         if provider_name not in {"openrouter", "openai", "anthropic", "google"}:
             credentials = self._load_credentials_config()
             configured = (
-                credentials.providers.get("openrouter")
-                if credentials is not None
-                else None
+                credentials.providers.get("openrouter") if credentials is not None else None
             )
             if configured is not None:
                 configured_api_key = self._normalize_api_key(configured.api_key)

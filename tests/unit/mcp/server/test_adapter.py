@@ -11,8 +11,8 @@ from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
 from ouroboros.mcp.server.adapter import (
     VALID_TRANSPORTS,
     MCPServerAdapter,
-    _extract_feedback_metadata_from_artifact,
     _build_tool_signature_with_aliases,
+    _extract_feedback_metadata_from_artifact,
     _project_dir_from_artifact,
     _project_dir_from_seed,
     validate_transport,
@@ -127,7 +127,7 @@ class TestMCPServerAdapter:
         nested_dir.mkdir(parents=True)
         (project_dir / "pyproject.toml").write_text("[build-system]")
 
-        artifact = f'Edit: {nested_dir / "app.tsx"}'
+        artifact = f"Edit: {nested_dir / 'app.tsx'}"
 
         assert _project_dir_from_artifact(artifact) == str(project_dir)
 

@@ -6,9 +6,9 @@ handling, and server lifecycle.
 """
 
 import asyncio
-import keyword
 from collections.abc import Sequence
 import inspect
+import keyword
 import os
 from pathlib import Path
 import re

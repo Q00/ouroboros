@@ -6,8 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import ouroboros.core.file_lock as file_lock_module
-from ouroboros.core.file_lock import file_lock
-from ouroboros.core.file_lock import _acquire_lock, _release_lock
+from ouroboros.core.file_lock import _acquire_lock, _release_lock, file_lock
 
 
 def test_file_lock_creates_lockfile(tmp_path: Path) -> None:
