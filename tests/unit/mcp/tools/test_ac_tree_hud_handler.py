@@ -70,8 +70,7 @@ class TestRenderACTreeHUDMarkdown:
         assert "◇ Acceptance Criteria" in markdown
         assert "├─ ● AC 1: First criterion" in markdown
         assert (
-            "├─ ◐ AC 2: Second criterion  [Read "
-            "src/ouroboros/mcp/tools/ac_tree_hud_handler.py]"
+            "├─ ◐ AC 2: Second criterion  [Read src/ouroboros/mcp/tools/ac_tree_hud_handler.py]"
         ) in markdown
         assert "└─ ○ AC 3: Third criterion" in markdown
 
@@ -411,9 +410,7 @@ class TestRenderACTreeHUDMarkdown:
             },
         )
 
-        assert (
-            "├─ ◐ AC 1: Executing criterion without activity payload  [working]"
-        ) in markdown
+        assert ("├─ ◐ AC 1: Executing criterion without activity payload  [working]") in markdown
         assert (
             "└─ ◐ AC 2: Executing criterion with unavailable activity payload  [working]"
         ) in markdown

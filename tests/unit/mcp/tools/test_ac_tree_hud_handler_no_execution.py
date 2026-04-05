@@ -46,9 +46,7 @@ async def test_handle_returns_graceful_warning_when_session_has_no_execution_lin
     tool_result = result.value
     assert tool_result.is_error is False
     assert tool_result.text_content == (
-        "Session: sess_no_exec\n"
-        "Status: running\n"
-        "Warning: no execution linked to this session yet."
+        "Session: sess_no_exec\nStatus: running\nWarning: no execution linked to this session yet."
     )
     assert tool_result.meta == {
         "session_id": "sess_no_exec",

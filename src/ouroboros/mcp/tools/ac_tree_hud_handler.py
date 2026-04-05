@@ -150,7 +150,9 @@ def _normalize_current_tool_activity(
                 if not isinstance(tool_input, Mapping):
                     tool_input = raw_mapping.get("input")
                 if not isinstance(tool_input, Mapping):
-                    tool_input = fallback_tool_input if isinstance(fallback_tool_input, Mapping) else {}
+                    tool_input = (
+                        fallback_tool_input if isinstance(fallback_tool_input, Mapping) else {}
+                    )
                 path_hint = _extract_tool_input_path_hint(tool_input)
             if not summary:
                 if tool_detail:
@@ -207,7 +209,9 @@ def _normalize_current_tool_activity(
         or runtime_status.lower() in {"completed", "failed", "cancelled", "paused"}
     )
     raw_activity_missing = raw_activity is None
-    raw_activity_unavailable = raw_activity is not None and raw_mapping is None and raw_detail is None
+    raw_activity_unavailable = (
+        raw_activity is not None and raw_mapping is None and raw_detail is None
+    )
     payload_present_but_empty = bool(raw_mapping) is False and isinstance(raw_activity, Mapping)
 
     if is_stale:
@@ -277,10 +281,11 @@ def _resolve_node_tool_activity(raw_node: Mapping[str, Any]) -> object:
     if not fallback_state and not fallback_summary:
         return raw_activity
 
+    merged_activity: dict[str, Any]
     if isinstance(raw_activity, Mapping):
         merged_activity = dict(raw_activity)
     else:
-        merged_activity: dict[str, Any] = {}
+        merged_activity = {}
         raw_detail = _coerce_non_empty_string(raw_activity)
         if raw_detail:
             merged_activity["detail"] = raw_detail
@@ -302,7 +307,9 @@ def _find_latest_progress_event(events: list[Any]) -> Any | None:
     return latest
 
 
-def _find_latest_prior_progress_event(events: list[Any], excluded_event_ids: set[str]) -> Any | None:
+def _find_latest_prior_progress_event(
+    events: list[Any], excluded_event_ids: set[str]
+) -> Any | None:
     """Return the newest workflow.progress.updated event excluding newer cursor events."""
     latest = None
     for event in events:
@@ -640,7 +647,9 @@ def _render_tree_lines(
         if remaining_budget <= 0:
             return
 
-        raw_child_ids = child_ids_override or _coerce_children_ids(nodes[parent_id].get("children_ids"))
+        raw_child_ids = child_ids_override or _coerce_children_ids(
+            nodes[parent_id].get("children_ids")
+        )
         child_ids = [child_id for child_id in raw_child_ids if child_id in nodes]
         if not child_ids:
             return
@@ -652,12 +661,16 @@ def _render_tree_lines(
             focused_child_ids = sorted(child_ids, key=lambda cid: _node_sort_key(nodes[cid]))
             focused_set = set(focused_child_ids)
 
-        focused_positions = [idx for idx, child_id in enumerate(child_ids) if child_id in focused_set]
+        focused_positions = [
+            idx for idx, child_id in enumerate(child_ids) if child_id in focused_set
+        ]
         for position_index, child_position in enumerate(focused_positions):
             if remaining_budget <= 0:
                 break
 
-            previous_position = focused_positions[position_index - 1] if position_index > 0 else None
+            previous_position = (
+                focused_positions[position_index - 1] if position_index > 0 else None
+            )
             if previous_position is not None and child_position - previous_position > 1:
                 skipped = child_position - previous_position - 1
                 branch = "├─" if position_index < len(focused_positions) else "└─"
@@ -683,9 +696,12 @@ def _render_tree_lines(
 
                 child_index = child.get("index")
                 child_activity_state = _tool_activity_state(child)
-                if isinstance(child_index, int) and child_index == current_ac_index and (
-                    inline_activity is None
-                    or child_activity_state in _FALLBACK_ACTIVITY_LABELS
+                if (
+                    isinstance(child_index, int)
+                    and child_index == current_ac_index
+                    and (
+                        inline_activity is None or child_activity_state in _FALLBACK_ACTIVITY_LABELS
+                    )
                 ):
                     current_activity = _format_tool_activity(
                         last_tool_activity.get("tool_name"),
@@ -954,7 +970,9 @@ class ACTreeHUDHandler:
                     event_type="workflow.progress.updated",
                     limit=1,
                 )
-                latest_progress_event = latest_historical_events[0] if latest_historical_events else None
+                latest_progress_event = (
+                    latest_historical_events[0] if latest_historical_events else None
+                )
                 if latest_progress_event is None:
                     return Result.ok(
                         _warning_result(

@@ -9,9 +9,9 @@ Public API:
 
 from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
 from ouroboros.mcp.tools.definitions import (
-    ACTreeHUDHandler,
     OUROBOROS_TOOLS,
     ACDashboardHandler,
+    ACTreeHUDHandler,
     CancelExecutionHandler,
     CancelJobHandler,
     EvaluateHandler,

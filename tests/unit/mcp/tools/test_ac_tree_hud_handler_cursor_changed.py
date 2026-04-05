@@ -109,6 +109,5 @@ async def test_handle_returns_full_render_when_progress_event_arrives_after_curs
     assert "Activity: executing | Update second criterion" in tool_result.text_content
     assert "├─ ● AC 1: First criterion" in tool_result.text_content
     assert (
-        "└─ ◐ AC 2: Second criterion  "
-        "[Edit src/ouroboros/mcp/tools/ac_tree_hud_handler.py]"
+        "└─ ◐ AC 2: Second criterion  [Edit src/ouroboros/mcp/tools/ac_tree_hud_handler.py]"
     ) in tool_result.text_content

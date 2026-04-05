@@ -19,11 +19,11 @@ Handler modules:
 
 from __future__ import annotations
 
+from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler
 from ouroboros.mcp.tools.authoring_handlers import (
     GenerateSeedHandler,
     InterviewHandler,
 )
-from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler
 from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
     LateralThinkHandler,
