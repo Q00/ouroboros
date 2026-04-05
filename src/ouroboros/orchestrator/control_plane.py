@@ -53,7 +53,9 @@ def build_control_plane_state(
     hints: list[CapabilityExecutionHint] = []
 
     for descriptor in graph.capabilities:
-        decision = decisions_by_id[descriptor.stable_id]
+        decision = decisions_by_id.get(descriptor.stable_id)
+        if decision is None:
+            continue
         if descriptor.semantics.parallel_safety is CapabilityParallelSafety.SAFE:
             mode = ControlPlaneExecutionMode.PARALLEL
         elif (

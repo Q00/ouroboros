@@ -341,11 +341,11 @@ def render_parallel_verification_report(
         lines.append(f"Skipped: {parallel_result.skipped_count}")
 
     warning_paths: list[str] = []
-    for result in parallel_result.results:
+    for user_facing_idx, result in enumerate(parallel_result.results, start=1):
         warning_paths.extend(
             _collect_decomposition_depth_warning_paths(
                 result,
-                index_path=(result.ac_index + 1,),
+                index_path=(user_facing_idx,),
             )
         )
 
@@ -2112,6 +2112,12 @@ class ParallelACExecutor:
 
                 for idx, sub_ac in enumerate(sub_acs):
                     try:
+                        # Only depth-0 → depth-1 transitions flag children as sub-ACs
+                        # with parent_ac_index/sub_ac_index. Deeper descendants
+                        # (depth>=2) retain their own ac_index and are treated as
+                        # independent nodes for runtime identity tracking; downstream
+                        # tooling that needs full ancestry should traverse via
+                        # decomposition events rather than parent_ac_index metadata.
                         child_is_sub_ac = depth == 0 and not is_sub_ac
                         await self._emit_subtask_event(
                             execution_id=execution_id,

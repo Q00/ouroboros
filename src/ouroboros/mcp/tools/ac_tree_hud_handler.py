@@ -466,7 +466,10 @@ def _build_tree_from_acceptance_criteria(
 
     if current_ac_index is not None:
         current_id = f"ac_{current_ac_index}"
-        if current_id in nodes and nodes[current_id].get("status") == "pending":
+        if current_id in nodes and nodes[current_id].get("status") in (
+            "pending",
+            "in_progress",
+        ):
             nodes[current_id]["status"] = "executing"
 
     return {"root_id": _ROOT_ID, "nodes": nodes}
@@ -673,6 +676,8 @@ def _render_tree_lines(
             )
             if previous_position is not None and child_position - previous_position > 1:
                 skipped = child_position - previous_position - 1
+                # Gap marker uses ├─ unless no more children follow (the last
+                # focused node will render its own └─ branch on the next iteration).
                 branch = "├─" if position_index < len(focused_positions) else "└─"
                 visible_lines.append(f"{prefix}{branch} ... (+{skipped} tasks)")
 
