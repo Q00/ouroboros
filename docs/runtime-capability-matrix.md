@@ -13,7 +13,7 @@ The runtime backend is selected via the `orchestrator.runtime_backend` config ke
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # Supported values: claude | codex
+  runtime_backend: claude   # Supported values: claude | codex | opencode
                             # The runtime abstraction layer also accepts custom
                             # adapters registered in runtime_factory.py
 ```
@@ -26,7 +26,7 @@ ouroboros run workflow --runtime codex seed.yaml
 
 You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` environment variable.
 
-> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code and Codex CLI are the two shipped backends; additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture — How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter).
+> **Extensibility:** Ouroboros uses a pluggable `AgentRuntime` protocol. Claude Code, Codex CLI, and OpenCode are the three shipped backends; additional runtimes can be registered by implementing the protocol and extending `runtime_factory.py`. See [Architecture — How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter).
 
 ## Capability Matrix
 
@@ -34,39 +34,39 @@ You can also override the configured backend with the `OUROBOROS_AGENT_RUNTIME` 
 
 These capabilities are part of the Ouroboros core engine and work the same way regardless of runtime backend.
 
-| Capability | Claude Code | Codex CLI | Notes |
-|------------|:-----------:|:---------:|-------|
-| Seed file parsing | Yes | Yes | Same YAML schema, same validation |
-| Acceptance criteria tree | Yes | Yes | Structured AC decomposition |
-| Evaluation principles | Yes | Yes | Weighted scoring against principles |
-| Exit conditions | Yes | Yes | Deterministic termination logic |
-| Event sourcing (SQLite) | Yes | Yes | Full event log, replay support |
-| Checkpoint / resume | Yes | Yes | `--resume <session_id>` |
-| TUI dashboard | Yes | Yes | Textual-based progress view |
-| Interview (Socratic seed creation) | Yes | Yes | `ouroboros init start ...` with the appropriate LLM backend |
-| Dry-run validation | Yes | Yes | `--dry-run` validates without executing |
+| Capability | Claude Code | Codex CLI | OpenCode | Notes |
+|------------|:-----------:|:---------:|:--------:|-------|
+| Seed file parsing | Yes | Yes | Yes | Same YAML schema, same validation |
+| Acceptance criteria tree | Yes | Yes | Yes | Structured AC decomposition |
+| Evaluation principles | Yes | Yes | Yes | Weighted scoring against principles |
+| Exit conditions | Yes | Yes | Yes | Deterministic termination logic |
+| Event sourcing (SQLite) | Yes | Yes | Yes | Full event log, replay support |
+| Checkpoint / resume | Yes | Yes | Yes | `--resume <session_id>` |
+| TUI dashboard | Yes | Yes | Yes | Textual-based progress view |
+| Interview (Socratic seed creation) | Yes | Yes | Yes | `ouroboros init start ...` with the appropriate LLM backend |
+| Dry-run validation | Yes | Yes | Yes | `--dry-run` validates without executing |
 
 ### Runtime Layer (differs by backend)
 
 These capabilities depend on the runtime backend's native features and execution model.
 
-| Capability | Claude Code | Codex CLI | Notes |
-|------------|:-----------:|:---------:|-------|
-| **Authentication** | Max Plan subscription | OpenAI API key | No API key needed for Claude Code |
-| **Underlying model** | Claude (Anthropic) | GPT-5.4+ (OpenAI) | Model choice follows the runtime |
-| **Tool surface** | Read, Write, Edit, Bash, Glob, Grep | Codex-native tool set | Different tool implementations; same task outcomes |
-| **Sandbox / permissions** | Claude Code permission system | Codex sandbox model | Each runtime manages its own safety boundaries |
-| **Cost model** | Included in Max Plan | Per-token API charges | See [OpenAI pricing](https://openai.com/pricing) for Codex costs |
+| Capability | Claude Code | Codex CLI | OpenCode | Notes |
+|------------|:-----------:|:---------:|:--------:|-------|
+| **Authentication** | Max Plan subscription | OpenAI API key | Provider API keys (configured in OpenCode) | No API key needed for Claude Code |
+| **Underlying model** | Claude (Anthropic) | GPT-5.4+ (OpenAI) | Provider-dependent (OpenCode supports multiple providers) | Model choice follows the runtime |
+| **Tool surface** | Read, Write, Edit, Bash, Glob, Grep | Codex-native tool set | Read, Write, Edit, Bash, Glob, Grep | Different tool implementations; same task outcomes |
+| **Sandbox / permissions** | Claude Code permission system | Codex sandbox model | OpenCode permission system | Each runtime manages its own safety boundaries |
+| **Cost model** | Included in Max Plan | Per-token API charges | Depends on configured provider | See [OpenAI pricing](https://openai.com/pricing) for Codex costs |
 
 ### Integration Surface (UX differences)
 
-| Aspect | Claude Code | Codex CLI |
-|--------|-------------|-----------|
-| **Primary UX** | In-session skills and MCP server | Session-oriented Ouroboros runtime over Codex CLI transport |
-| **Skill shortcuts (`ooo`)** | Yes -- skills loaded into Claude Code session | Yes -- after `ouroboros setup --runtime codex` installs managed skills into `~/.codex/skills/`, rules into `~/.codex/rules/`, and the MCP/env hookup into `~/.codex/config.toml`. Keep role-specific Ouroboros model overrides in `~/.ouroboros/config.yaml` |
-| **MCP integration** | Native MCP server support | Deterministic skill/MCP dispatch through the Ouroboros Codex adapter |
-| **Session context** | Shares Claude Code session context | Preserved via runtime handles, native session IDs, and resume support |
-| **Install extras** | `ouroboros-ai[claude]` | `ouroboros-ai` (base package) + `codex` on PATH |
+| Aspect | Claude Code | Codex CLI | OpenCode |
+|--------|-------------|-----------|----------|
+| **Primary UX** | In-session skills and MCP server | Session-oriented Ouroboros runtime over Codex CLI transport | MCP server integration |
+| **Skill shortcuts (`ooo`)** | Yes -- skills loaded into Claude Code session | Yes -- after `ouroboros setup --runtime codex` installs managed skills into `~/.codex/skills/`, rules into `~/.codex/rules/`, and the MCP/env hookup into `~/.codex/config.toml`. Keep role-specific Ouroboros model overrides in `~/.ouroboros/config.yaml` | Yes -- after `ouroboros setup --runtime opencode` |
+| **MCP integration** | Native MCP server support | Deterministic skill/MCP dispatch through the Ouroboros Codex adapter | Native MCP server support |
+| **Session context** | Shares Claude Code session context | Preserved via runtime handles, native session IDs, and resume support | Session IDs + resume via `--session` |
+| **Install extras** | `ouroboros-ai[claude]` | `ouroboros-ai` (base package) + `codex` on PATH | `ouroboros-ai` (base package) + `opencode` on PATH |
 
 ## What Stays the Same
 
@@ -97,15 +97,18 @@ The table below covers the two currently shipped backends. Because Ouroboros use
 |-----------|----------|
 | Have a Claude Code Max Plan and want zero API key setup | Claude Code (`runtime_backend: claude`) |
 | Want a Codex-backed Ouroboros session instead of a Claude Code session | Codex CLI (`runtime_backend: codex`) |
+| Want to use OpenCode with multiple model providers | OpenCode (`runtime_backend: opencode`) |
 | Want to use Anthropic's Claude models | Claude Code |
 | Want to use OpenAI's GPT models | Codex CLI |
-| Need MCP server integration | Claude Code |
-| Want minimal Python dependencies | Codex CLI (base package only) |
+| Want to use multiple providers via a single runtime | OpenCode |
+| Need MCP server integration | Claude Code or OpenCode |
+| Want minimal Python dependencies | Codex CLI or OpenCode (base package only) |
 | Want to integrate a custom or third-party AI coding agent | Implement the `AgentRuntime` protocol and register it in `runtime_factory.py` |
 
 ## Further Reading
 
 - [Claude Code runtime guide](runtime-guides/claude-code.md)
 - [Codex CLI runtime guide](runtime-guides/codex.md)
+- [OpenCode runtime guide](runtime-guides/opencode.md)
 - [Platform support matrix](platform-support.md) (OS and Python version compatibility)
 - [Architecture overview](architecture.md) — including [How to add a new runtime adapter](architecture.md#how-to-add-a-new-runtime-adapter)

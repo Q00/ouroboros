@@ -370,6 +370,205 @@ def _setup_claude(claude_path: str) -> None:
     print_info(f"Config saved to: {config_path}")
 
 
+def _strip_jsonc(text: str) -> str:
+    """Strip JSONC features (comments, trailing commas) to produce valid JSON.
+
+    .. deprecated::
+        Forwards to :func:`ouroboros.cli.jsonc.strip_jsonc` which handles
+        quoted strings correctly.
+    """
+    from ouroboros.cli.jsonc import strip_jsonc
+
+    return strip_jsonc(text)
+
+
+def _ensure_opencode_mcp_entry() -> None:
+    """Ensure the global OpenCode config has a correct ouroboros MCP entry.
+
+    OpenCode reads config from ``~/.config/opencode/opencode.json`` (JSONC).
+    The ``mcp`` key is a record of named MCP server configs.
+
+    MCP entry format (local):
+        ``{ "type": "local", "command": [...], "environment": {...}, "timeout": 300000 }``
+    """
+    config_dir = Path.home() / ".config" / "opencode"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "opencode.json"
+
+    data: dict = {}
+    if config_path.exists():
+        try:
+            data = json.loads(_strip_jsonc(config_path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            print_warning(
+                f"Could not parse {config_path} — skipping MCP registration to avoid "
+                "overwriting existing settings.  Fix the JSON syntax and re-run setup."
+            )
+            return
+
+    if not isinstance(data, dict):
+        print_warning(f"{config_path} top-level is not an object — resetting to {{}}.")
+        data = {}
+
+    mcp = data.get("mcp")
+    if mcp is None:
+        mcp = {}
+        data["mcp"] = mcp
+    elif not isinstance(mcp, dict):
+        print_warning(f"{config_path} 'mcp' key is not an object — replacing with {{}}.")
+        mcp = {}
+        data["mcp"] = mcp
+
+    # Detect the best command to run ouroboros mcp serve
+    detected = _detect_opencode_mcp_command()
+    if detected is None:
+        print_warning(
+            "Cannot register MCP server: no working ouroboros installation found.\n"
+            "Install with: pip install ouroboros-ai[all]"
+        )
+        return
+
+    entry = {
+        "type": "local",
+        "command": detected["command"],
+        "environment": {
+            "OUROBOROS_AGENT_RUNTIME": "opencode",
+            "OUROBOROS_LLM_BACKEND": "opencode",
+        },
+        "timeout": 300000,
+    }
+
+    existing = mcp.get("ouroboros")
+    if not isinstance(existing, dict):
+        mcp["ouroboros"] = entry
+        print_success(f"Registered MCP server in {config_path}")
+    else:
+        # Update command only for known standard launchers. Custom entries
+        # (docker, nix wrappers, etc.) are left untouched so we don't break
+        # user-managed configurations — mirrors the Claude setup path.
+        _KNOWN_COMMANDS = {"ouroboros", "python3", "python", "uvx", "uv"}
+        existing_cmd = existing.get("command")
+        # OpenCode expects command: string[]. If it's a bare string (hand-edited
+        # or legacy), replace it unconditionally since it can't launch.
+        if isinstance(existing_cmd, str):
+            existing["command"] = entry["command"]
+            print_info("Replaced invalid command string with proper array format.")
+        else:
+            # First element is the binary
+            existing_binary = (
+                existing_cmd[0] if isinstance(existing_cmd, list) and existing_cmd else None
+            )
+            # Repair malformed arrays: empty list, non-string first element
+            if not isinstance(existing_binary, str):
+                existing["command"] = entry["command"]
+                print_info("Replaced malformed command array with proper launcher.")
+            elif existing_binary in _KNOWN_COMMANDS:
+                if existing_cmd != entry["command"]:
+                    existing["command"] = entry["command"]
+                    print_info("Updated MCP server command to match current install.")
+        # Normalise stale transport type (e.g. "remote" → "local")
+        if existing.get("type") != "local":
+            existing["type"] = "local"
+        # Ensure runtime env vars are set — repair non-dict environment
+        env = existing.get("environment")
+        if not isinstance(env, dict):
+            env = {}
+            existing["environment"] = env
+        env["OUROBOROS_AGENT_RUNTIME"] = "opencode"
+        env["OUROBOROS_LLM_BACKEND"] = "opencode"
+        if "timeout" not in existing:
+            existing["timeout"] = 300000
+        print_info("MCP server already registered — verified config.")
+
+    # Write back as plain JSON.  This intentionally discards JSONC
+    # comments — the same approach Claude and Codex setup use for their
+    # respective config files.  A comment-preserving JSONC writer is out
+    # of scope for this module.
+    try:
+        with config_path.open("w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+    except OSError:
+        print_warning(f"Could not write {config_path} — skipping.")
+
+
+def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
+    """Detect the best command to run ouroboros MCP server for OpenCode.
+
+    OpenCode MCP uses ``command: string[]`` format (array, not separate command+args).
+
+    Detection order mirrors the Claude setup path: prefer ``uvx`` (pinned
+    extras) over a bare ``ouroboros`` binary so that machines with both a
+    stale global binary and a newer uvx install use the newer one.
+    """
+    if shutil.which("uvx"):
+        return {"command": ["uvx", "--from", "ouroboros-ai[all]", "ouroboros", "mcp", "serve"]}
+    if shutil.which("ouroboros"):
+        return {"command": ["ouroboros", "mcp", "serve"]}
+    # Check if ouroboros is importable via python
+    import subprocess
+
+    python_path = shutil.which("python3") or shutil.which("python")
+    if python_path:
+        try:
+            subprocess.run(
+                [python_path, "-c", "import ouroboros"],
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
+            return {"command": [python_path, "-m", "ouroboros", "mcp", "serve"]}
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    return None
+
+
+def _setup_opencode(opencode_path: str) -> None:
+    """Configure Ouroboros for the OpenCode runtime."""
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text()) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text()) or {}
+
+    # Repair non-dict top-level / section shapes
+    if not isinstance(config_dict, dict):
+        print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
+        config_dict = {}
+
+    # Set runtime and LLM backend to opencode
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "opencode"
+    orch["opencode_cli_path"] = opencode_path
+
+    llm = config_dict.get("llm")
+    if not isinstance(llm, dict):
+        llm = {}
+        config_dict["llm"] = llm
+    llm["backend"] = "opencode"
+
+    with config_path.open("w") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured OpenCode runtime (CLI: {opencode_path})")
+    print_info(f"Config saved to: {config_path}")
+
+    # Register MCP server in OpenCode config
+    _ensure_opencode_mcp_entry()
+
+    # Also register for Claude Code if present
+    if (Path.home() / ".claude").is_dir():
+        _ensure_claude_mcp_entry()
+
+
 # ── Brownfield repo helpers ──────────────────────────────────────
 
 
@@ -535,7 +734,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex).",
+            help="Runtime backend to configure (claude, codex, opencode).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -548,13 +747,14 @@ def setup(
 ) -> None:
     """Set up Ouroboros for your environment.
 
-    Detects available runtimes (Claude Code, Codex) and configures
+    Detects available runtimes (Claude Code, Codex, OpenCode) and configures
     Ouroboros to use the selected backend.
 
     [dim]Examples:[/dim]
-    [dim]    ouroboros setup                    # auto-detect[/dim]
-    [dim]    ouroboros setup --runtime codex    # use Codex[/dim]
-    [dim]    ouroboros setup --runtime claude   # use Claude Code[/dim]
+    [dim]    ouroboros setup                      # auto-detect[/dim]
+    [dim]    ouroboros setup --runtime codex      # use Codex[/dim]
+    [dim]    ouroboros setup --runtime claude     # use Claude Code[/dim]
+    [dim]    ouroboros setup --runtime opencode   # use OpenCode[/dim]
     [dim]    ouroboros setup scan               # scan brownfield repos[/dim]
     [dim]    ouroboros setup list               # list brownfield repos[/dim]
     [dim]    ouroboros setup default            # toggle default repos[/dim]
@@ -618,7 +818,8 @@ def setup(
                 "No runtimes found.\n\n"
                 "Install one of:\n"
                 "  • Claude Code: https://claude.ai/download\n"
-                "  • Codex CLI:   npm install -g @openai/codex"
+                "  • Codex CLI:   npm install -g @openai/codex\n"
+                "  • OpenCode:    npm install -g opencode-ai"
             )
             raise typer.Exit(1)
 
@@ -635,6 +836,12 @@ def setup(
             print_error("Codex CLI not found in PATH.")
             raise typer.Exit(1)
         _setup_codex(codex_path)
+    elif selected in ("opencode", "opencode_cli"):
+        opencode_path = available.get("opencode")
+        if not opencode_path:
+            print_error("OpenCode CLI not found in PATH.")
+            raise typer.Exit(1)
+        _setup_opencode(opencode_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

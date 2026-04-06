@@ -1,6 +1,6 @@
 <!--
 doc_metadata:
-  runtime_scope: [local, claude, codex]
+  runtime_scope: [local, claude, codex, opencode]
 -->
 
 # CLI Reference
@@ -56,7 +56,7 @@ ouroboros [OPTIONS] COMMAND [ARGS]...
 Detect available runtime backends and configure Ouroboros for your environment.
 
 Ouroboros supports multiple runtime backends via a pluggable `AgentRuntime` protocol. The `setup` command auto-detects
-which runtimes are available in your PATH (currently: Claude Code, Codex CLI) and
+which runtimes are available in your PATH (currently: Claude Code, Codex CLI, OpenCode) and
 configures `orchestrator.runtime_backend` accordingly. Additional runtimes can be registered
 by implementing the protocol — see [Architecture](architecture.md#how-to-add-a-new-runtime-adapter).
 
@@ -68,7 +68,7 @@ ouroboros setup [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`. Auto-detected if omitted |
+| `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`. Auto-detected if omitted |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 
 **Examples:**
@@ -97,10 +97,9 @@ ouroboros setup --non-interactive
 - For Codex CLI: installs managed Ouroboros rules into `~/.codex/rules/`
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
 - For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml`
+- For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
 
 > **Codex config split:** put persistent Ouroboros per-role model overrides in `~/.ouroboros/config.yaml` (`clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, `consensus.models`, `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model`). `~/.codex/config.toml` is only the Codex MCP/env hookup file used by setup.
-
-> **`opencode` caveat:** `setup` detects the `opencode` binary in PATH but cannot configure it — if `opencode` is your only installed runtime, `setup` exits with `Error: Unsupported runtime: opencode`. The `opencode` runtime backend is **not yet implemented** (`runtime_factory.py` raises `NotImplementedError`). It is planned for a future release.
 
 ---
 
@@ -132,8 +131,8 @@ ouroboros init [start] [OPTIONS] [CONTEXT]
 | `-r, --resume TEXT` | Resume an existing interview by ID |
 | `--state-dir DIRECTORY` | Custom directory for interview state files |
 | `-o, --orchestrator` | Use Claude Code for the interview/seed flow; combine with `--runtime` to choose the workflow handoff backend |
-| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`. `opencode` appears in the CLI enum but is out of scope. Custom adapters registered in `runtime_factory.py` are also accepted. |
-| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`). `opencode` appears in the CLI enum but is out of scope |
+| `--runtime TEXT` | Agent runtime backend for the workflow execution step after seed generation. Shipped values: `claude`, `codex`, `opencode`. Custom adapters registered in `runtime_factory.py` are also accepted. |
+| `--llm-backend TEXT` | LLM backend for interview, ambiguity scoring, and seed generation (`claude_code`, `litellm`, `codex`, `opencode`) |
 | `-d, --debug` | Show verbose logs including debug messages |
 
 **Examples:**
@@ -209,7 +208,7 @@ ouroboros run [workflow] [OPTIONS] SEED_FILE
 | Option | Description |
 |--------|-------------|
 | `-o/-O, --orchestrator/--no-orchestrator` | Use the agent-runtime orchestrator for execution (default: enabled) |
-| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`). Uses configured default if omitted. (`opencode` is in the CLI enum but out of scope) |
+| `--runtime TEXT` | Agent runtime backend override (`claude`, `codex`, `opencode`). Uses configured default if omitted |
 | `-r, --resume TEXT` | Resume a previous orchestrator session by ID |
 | `--mcp-config PATH` | Path to MCP client configuration YAML file |
 | `--mcp-tool-prefix TEXT` | Prefix to add to all MCP tool names (e.g., `mcp_`) |
@@ -352,7 +351,7 @@ ouroboros config backend [BACKEND]
 
 | Argument | Description |
 |----------|-------------|
-| `BACKEND` | Backend to switch to: `claude` or `codex`. Omit to show current |
+| `BACKEND` | Backend to switch to: `claude` or `codex`. Omit to show current. For `opencode`, use `ouroboros setup` instead |
 
 **Examples:**
 
@@ -631,8 +630,8 @@ ouroboros mcp serve [OPTIONS]
 | `-p, --port INTEGER` | Port to bind to (default: 8080) |
 | `-t, --transport TEXT` | Transport type: `stdio` or `sse` (default: stdio) |
 | `--db TEXT` | Path to the EventStore database file |
-| `--runtime TEXT` | Runtime backend for orchestrator-driven tools (`claude`, `codex`). (`opencode` is in the CLI enum but out of scope) |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`). (`opencode` is in the CLI enum but out of scope) |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`). Affects which tool variants are instantiated |
 
 **Examples:**
 
@@ -689,7 +688,7 @@ If Ouroboros is installed directly (not via `uvx`), use:
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # or "codex"
+  runtime_backend: claude   # or "codex" or "opencode"
 ```
 
 Override per-session with the `OUROBOROS_AGENT_RUNTIME` environment variable if needed.
@@ -706,8 +705,8 @@ ouroboros mcp info [OPTIONS]
 
 | Option | Description |
 |--------|-------------|
-| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`). Affects which tool variants are instantiated |
-| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`). Affects which tool variants are instantiated |
+| `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`). Affects which tool variants are instantiated |
+| `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`). Affects which tool variants are instantiated |
 
 **Available Tools:**
 
@@ -722,7 +721,7 @@ ouroboros mcp info [OPTIONS]
 ## Typical Workflows
 
 > For first-time setup and the complete onboarding flow, see **[Getting Started](getting-started.md)**.
-> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md) and [Codex CLI](runtime-guides/codex.md) runtime guides.
+> For runtime-specific configuration, see the [Claude Code](runtime-guides/claude-code.md), [Codex CLI](runtime-guides/codex.md), and [OpenCode](runtime-guides/opencode.md) runtime guides.
 
 ### Cancelling Stuck Executions
 
@@ -745,11 +744,12 @@ The table below covers the most commonly used variables. For the full list — i
 | `ANTHROPIC_API_KEY` | — | Anthropic API key for Claude models |
 | `OPENAI_API_KEY` | — | OpenAI API key for LiteLLM / Codex CLI |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consensus and LiteLLM |
-| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`) |
-| `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for non-OpenCode runtimes |
+| `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`) |
+| `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for Claude Code / Codex runtimes (no-op for OpenCode) |
 | `OUROBOROS_LLM_BACKEND` | `llm.backend` | Override the LLM-only flow backend |
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary |
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary |
+| `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary |
 
 ---
 

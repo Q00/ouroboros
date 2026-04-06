@@ -8,9 +8,7 @@ import pytest
 
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
-
-# TODO: uncomment when OpenCode runtime is shipped
-# from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
+from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.runtime_factory import (
     create_agent_runtime,
     resolve_agent_runtime_backend,
@@ -32,15 +30,10 @@ class TestResolveAgentRuntimeBackend:
         ):
             assert resolve_agent_runtime_backend() == "codex"
 
-    def test_resolve_rejects_opencode_at_boundary(self) -> None:
-        """OpenCode is rejected at resolve time since it is not yet shipped."""
-        with pytest.raises(ValueError, match="not yet available"):
-            resolve_agent_runtime_backend("opencode")
-
-    def test_resolve_rejects_opencode_cli_alias_at_boundary(self) -> None:
-        """OpenCode CLI alias is also rejected at resolve time."""
-        with pytest.raises(ValueError, match="not yet available"):
-            resolve_agent_runtime_backend("opencode_cli")
+    def test_resolve_opencode_aliases(self) -> None:
+        """OpenCode aliases normalize to opencode."""
+        assert resolve_agent_runtime_backend("opencode") == "opencode"
+        assert resolve_agent_runtime_backend("opencode_cli") == "opencode"
 
     def test_resolve_rejects_unknown_backend(self) -> None:
         """Raises for unsupported backends."""
@@ -96,39 +89,21 @@ class TestCreateAgentRuntime:
         assert runtime._cwd == "/tmp/project"
         assert runtime._cli_path == "/tmp/claude"
 
-    @pytest.mark.skip(reason="OpenCode runtime not yet shipped")
     def test_create_opencode_runtime_uses_configured_cli_path(self) -> None:
-        """Creates OpenCode runtime with the configured CLI path."""
-        mock_dispatcher = object()
+        """Creates OpenCode runtime with the explicit CLI path."""
+        runtime = create_agent_runtime(
+            backend="opencode",
+            permission_mode="acceptEdits",
+            cwd="/tmp/project",
+            cli_path="/tmp/opencode",
+        )
 
-        with (
-            patch(
-                "ouroboros.orchestrator.runtime_factory.get_opencode_cli_path",
-                return_value="/tmp/opencode",
-            ),
-            patch(
-                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
-                return_value=mock_dispatcher,
-            ) as mock_create_dispatcher,
-        ):
-            runtime = create_agent_runtime(
-                backend="opencode",
-                permission_mode="acceptEdits",
-                cwd="/tmp/project",
-            )
-
-        assert isinstance(runtime, OpenCodeRuntime)  # type: ignore[name-defined]  # noqa: F821
+        assert isinstance(runtime, OpenCodeRuntime)
         assert runtime._cli_path == "/tmp/opencode"
         assert runtime._cwd == "/tmp/project"
-        assert runtime._skill_dispatcher is mock_dispatcher
-        assert mock_create_dispatcher.call_args.kwargs["cwd"] == "/tmp/project"
-        assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "opencode"
 
-    @pytest.mark.skip(reason="OpenCode runtime not yet shipped")
     def test_create_runtime_uses_configured_opencode_alias_when_backend_omitted(self) -> None:
         """Configured OpenCode aliases should resolve through the shared runtime factory."""
-        mock_dispatcher = object()
-
         with (
             patch(
                 "ouroboros.orchestrator.runtime_factory.get_agent_runtime_backend",
@@ -142,24 +117,13 @@ class TestCreateAgentRuntime:
                 "ouroboros.orchestrator.runtime_factory.get_llm_backend",
                 return_value="opencode",
             ),
-            patch(
-                "ouroboros.orchestrator.runtime_factory.get_opencode_cli_path",
-                return_value="/tmp/opencode",
-            ),
-            patch(
-                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
-                return_value=mock_dispatcher,
-            ) as mock_create_dispatcher,
         ):
             runtime = create_agent_runtime(cwd="/tmp/project")
 
-        assert isinstance(runtime, OpenCodeRuntime)  # type: ignore[name-defined]  # noqa: F821
-        assert runtime._cli_path == "/tmp/opencode"
+        assert isinstance(runtime, OpenCodeRuntime)
         assert runtime._cwd == "/tmp/project"
         assert runtime._permission_mode == "acceptEdits"
-        assert runtime._skill_dispatcher is mock_dispatcher
         assert mock_get_permission_mode.call_args.kwargs["backend"] == "opencode"
-        assert mock_create_dispatcher.call_args.kwargs["runtime_backend"] == "opencode"
 
     def test_create_runtime_uses_configured_permission_mode(self) -> None:
         """Runtime factory uses config/env permission defaults when omitted."""
@@ -172,7 +136,6 @@ class TestCreateAgentRuntime:
         assert isinstance(runtime, CodexCliRuntime)
         assert runtime._permission_mode == "bypassPermissions"
 
-    @pytest.mark.skip(reason="OpenCode runtime not yet shipped")
     def test_create_opencode_runtime_uses_backend_specific_permission_default(self) -> None:
         """OpenCode runtime asks the shared config helper for the OpenCode-specific mode."""
         with (
@@ -187,7 +150,7 @@ class TestCreateAgentRuntime:
         ):
             runtime = create_agent_runtime(backend="opencode")
 
-        assert isinstance(runtime, OpenCodeRuntime)  # type: ignore[name-defined]  # noqa: F821
+        assert isinstance(runtime, OpenCodeRuntime)
         assert runtime._permission_mode == "bypassPermissions"
         assert mock_get_permission_mode.call_args.kwargs["backend"] == "opencode"
 

@@ -29,6 +29,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -37,6 +38,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 def _write_pid_file() -> bool:
@@ -262,7 +264,7 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
             case_sensitive=False,
         ),
     ] = None,
@@ -271,7 +273,7 @@ def serve(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or opencode)."
             ),
             case_sensitive=False,
         ),
@@ -296,8 +298,8 @@ def serve(
         # Start with SSE transport on custom port
         ouroboros mcp serve --transport sse --port 9000
 
-        # Start with Codex runtime for orchestrator-driven tools
-        ouroboros mcp serve --runtime codex
+        # Start with OpenCode runtime
+        ouroboros mcp serve --runtime opencode
 
         # Use Codex CLI for LLM-only tools as well
         ouroboros mcp serve --runtime codex --llm-backend codex
@@ -349,7 +351,7 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
             case_sensitive=False,
         ),
     ] = None,
@@ -358,7 +360,7 @@ def info(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or opencode)."
             ),
             case_sensitive=False,
         ),
