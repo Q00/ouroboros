@@ -72,7 +72,10 @@ class OpenClawTransportBridge(OpenClawReplySink):
         payload: dict[str, Any],
     ) -> Result[OpenClawChannelEvent, MCPClientError]:
         """Handle a raw inbound payload from a Discord/OpenClaw transport."""
-        event = event_from_payload(payload)
+        try:
+            event = event_from_payload(payload)
+        except ValueError as exc:
+            return Result.err(MCPClientError.from_exception(exc))
         result = await self.orchestrator.handle_event(event, self)
         if result.is_err:
             return Result.err(result.error)

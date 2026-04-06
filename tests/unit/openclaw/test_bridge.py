@@ -83,3 +83,15 @@ async def test_transport_bridge_handles_payload_and_posts_reply() -> None:
 
     assert result.is_ok
     assert transport.messages == [("c1", "g1", "reply", {"stage": "interviewing"})]
+
+
+@pytest.mark.asyncio
+async def test_transport_bridge_returns_result_err_for_invalid_payload() -> None:
+    adapter = OpenClawWorkflowAdapter(client=FakeClient())
+    orchestrator = OpenClawWorkflowOrchestrator(adapter=adapter)
+    transport = FakeTransport()
+    bridge = OpenClawTransportBridge(orchestrator=orchestrator, transport=transport)
+
+    result = await bridge.handle_payload({"channel_id": "c1"})
+
+    assert result.is_err

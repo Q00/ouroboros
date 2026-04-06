@@ -55,6 +55,8 @@ class OpenClawWorkflowOrchestrator:
             wait_result = await self._wait_until_stable(event, sink, initial)
             if wait_result.is_err:
                 return Result.err(wait_result.error)
+            if wait_result.value is not None:
+                return Result.ok(wait_result.value)
 
         return Result.ok(initial)
 

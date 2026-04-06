@@ -107,6 +107,8 @@ async def test_orchestrator_waits_until_completed() -> None:
     )
 
     assert result.is_ok
+    assert result.value.reply_text == "Done with draft PR"
+    assert result.value.meta["stage"] == "completed"
     assert len(sink.messages) == 3
     assert adapter.dispatch_calls[0]["action"] == "wait"
 
@@ -148,3 +150,48 @@ async def test_orchestrator_deduplicates_identical_wait_messages() -> None:
 
     assert result.is_ok
     assert [text for text, _ in sink.messages] == ["Execution started", "Done"]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_keeps_waiting_after_auto_started_execution() -> None:
+    adapter = FakeAdapter(
+        [
+            OpenClawAdapterResponse(
+                reply_text="Execution started",
+                meta={"stage": "executing"},
+            ),
+            OpenClawAdapterResponse(
+                reply_text="First workflow done\n\nStarted next queued workflow:\n\nExecution started for next",
+                meta={
+                    "stage": "executing",
+                    "workflow_id": "next-workflow",
+                    "job_status": "running",
+                    "next_workflow_started": True,
+                },
+            ),
+            OpenClawAdapterResponse(
+                reply_text="Next workflow complete",
+                meta={"stage": "completed"},
+            ),
+        ]
+    )
+    sink = FakeSink()
+    orchestrator = OpenClawWorkflowOrchestrator(
+        adapter=adapter,
+        wait_timeout_seconds=0,
+        max_waits=5,
+    )
+
+    result = await orchestrator.handle_event(
+        OpenClawChannelEvent(
+            channel_id="c1",
+            guild_id="g1",
+            user_id="u1",
+            message="goal: demo",
+        ),
+        sink,
+    )
+
+    assert result.is_ok
+    assert result.value.reply_text == "Next workflow complete"
+    assert len(adapter.dispatch_calls) == 2

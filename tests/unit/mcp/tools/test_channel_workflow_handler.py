@@ -327,6 +327,30 @@ async def test_seed_like_input_skips_interview(handler: ChannelWorkflowHandler) 
 
 
 @pytest.mark.asyncio
+async def test_seed_path_drives_execution_without_inline_seed_content(
+    handler: ChannelWorkflowHandler,
+) -> None:
+    await handler.handle(
+        {"action": "set_repo", "guild_id": "g1", "channel_id": "seedpath", "repo": "/repo/demo"}
+    )
+    result = await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "seedpath",
+            "user_id": "u1",
+            "message": "please run this file",
+            "seed_path": "seed.yaml",
+        }
+    )
+
+    assert result.is_ok
+    execute_call = handler._fake_execute.calls[-1]  # type: ignore[attr-defined]
+    assert execute_call["seed_path"] == "seed.yaml"
+    assert "seed_content" not in execute_call
+
+
+@pytest.mark.asyncio
 async def test_poll_completes_execution_and_reports_draft_pr(
     handler: ChannelWorkflowHandler,
 ) -> None:

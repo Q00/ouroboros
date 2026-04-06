@@ -104,6 +104,26 @@ async def test_handle_event_routes_wait_mode() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_event_returns_usage_for_invalid_control_command() -> None:
+    client = FakeClient()
+    adapter = OpenClawWorkflowAdapter(client=client)
+
+    result = await adapter.handle_event(
+        OpenClawChannelEvent(
+            channel_id="c1",
+            guild_id="g1",
+            user_id="u1",
+            message="/ouro answer",
+        )
+    )
+
+    assert result.is_ok
+    assert result.value.is_error is True
+    assert "Usage:" in result.value.reply_text
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
 async def test_handle_event_validates_repo_set_usage() -> None:
     client = FakeClient()
     adapter = OpenClawWorkflowAdapter(client=client)

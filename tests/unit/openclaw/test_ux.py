@@ -29,3 +29,12 @@ def test_parse_new_and_answer_commands() -> None:
 
 def test_parse_non_command_returns_none() -> None:
     assert parse_channel_command("work on feature x") is None
+
+
+def test_parse_malformed_commands_return_invalid_usage() -> None:
+    new = parse_channel_command("/ouro new")
+    answer = parse_channel_command("/ouro answer")
+    status = parse_channel_command("/ouro status extra")
+    assert new is not None and new.action == "invalid"
+    assert answer is not None and answer.action == "invalid"
+    assert status is not None and status.action == "invalid"

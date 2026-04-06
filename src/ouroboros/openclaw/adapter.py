@@ -48,6 +48,14 @@ class OpenClawWorkflowAdapter:
         parsed = parse_channel_command(event.message)
         if parsed is None:
             command = OpenClawWorkflowCommand.from_event(event, mode="auto")
+        elif parsed.action == "invalid":
+            return Result.ok(
+                OpenClawAdapterResponse(
+                    reply_text=parsed.usage or "Invalid /ouro command",
+                    meta={"action": "invalid", "valid": False},
+                    is_error=True,
+                )
+            )
         elif parsed.action == "set_repo":
             if not parsed.repo:
                 return Result.ok(

@@ -57,14 +57,15 @@ class ChannelWorkflowRuntime:
                 )
             )
 
-        seed_content = record.seed_content or record.request_message
-        execute_result = await self.start_execute_seed_handler.handle(
-            {
-                "seed_content": seed_content,
-                "seed_path": record.seed_path,
-                "cwd": record.repo,
-            }
-        )
+        execute_arguments: dict[str, str] = {"cwd": record.repo}
+        if record.seed_content:
+            execute_arguments["seed_content"] = record.seed_content
+        elif record.seed_path:
+            execute_arguments["seed_path"] = record.seed_path
+        else:
+            execute_arguments["seed_content"] = record.request_message
+
+        execute_result = await self.start_execute_seed_handler.handle(execute_arguments)
         if execute_result.is_err:
             self.workflow_manager.mark_failed(record.workflow_id, error=str(execute_result.error))
             return Result.err(execute_result.error)
@@ -135,6 +136,17 @@ class ChannelWorkflowRuntime:
             )
             next_result = await self.maybe_launch_next_workflow(channel, completed.workflow_id)
             if next_result is not None and next_result.is_ok:
+                next_meta = dict(next_result.value.meta)
+                next_meta.update(
+                    {
+                        "action": action,
+                        "next_workflow_started": True,
+                        "previous_workflow_id": completed.workflow_id,
+                        "previous_stage": completed.stage,
+                        "pr_url": pr_url,
+                        "cursor": cursor,
+                    }
+                )
                 return Result.ok(
                     MCPToolResult(
                         content=(
@@ -148,15 +160,7 @@ class ChannelWorkflowRuntime:
                             ),
                         ),
                         is_error=False,
-                        meta=build_channel_workflow_meta(
-                            action=action,
-                            channel_key=channel.key,
-                            workflow_id=completed.workflow_id,
-                            stage=completed.stage,
-                            pr_url=pr_url,
-                            next_workflow_started=True,
-                            cursor=cursor,
-                        ),
+                        meta=next_meta,
                     )
                 )
             return Result.ok(
@@ -177,6 +181,16 @@ class ChannelWorkflowRuntime:
         failed = self.workflow_manager.mark_failed(active.workflow_id, error=result_text)
         next_result = await self.maybe_launch_next_workflow(channel, failed.workflow_id)
         if next_result is not None and next_result.is_ok:
+            next_meta = dict(next_result.value.meta)
+            next_meta.update(
+                {
+                    "action": action,
+                    "next_workflow_started": True,
+                    "previous_workflow_id": failed.workflow_id,
+                    "previous_stage": failed.stage,
+                    "cursor": cursor,
+                }
+            )
             return Result.ok(
                 MCPToolResult(
                     content=(
@@ -190,14 +204,7 @@ class ChannelWorkflowRuntime:
                         ),
                     ),
                     is_error=False,
-                    meta=build_channel_workflow_meta(
-                        action=action,
-                        channel_key=channel.key,
-                        workflow_id=failed.workflow_id,
-                        stage=failed.stage,
-                        next_workflow_started=True,
-                        cursor=cursor,
-                    ),
+                    meta=next_meta,
                 )
             )
         return Result.ok(
