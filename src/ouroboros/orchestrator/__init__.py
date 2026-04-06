@@ -47,12 +47,9 @@ from ouroboros.orchestrator.coordinator import (
     FileConflict,
     LevelCoordinator,
 )
-
-# TODO: uncomment when OpenCode runtime is shipped
-# from ouroboros.orchestrator.opencode_runtime import (
-#     OpenCodeRuntime,
-#     OpenCodeRuntimeAdapter,
-# )
+from ouroboros.orchestrator.opencode_runtime import (
+    OpenCodeRuntime,
+)
 
 try:
     from ouroboros.orchestrator.dependency_analyzer import (
@@ -116,13 +113,11 @@ from ouroboros.orchestrator.mcp_tools import (
     MCPToolsLoadedEvent,
     ToolConflict,
 )
-
-# TODO: uncomment when OpenCode runtime is shipped
-# from ouroboros.orchestrator.opencode_event_normalizer import (
-#     OpenCodeEventContext,
-#     OpenCodeEventNormalizer,
-#     normalize_opencode_event,
-# )
+from ouroboros.orchestrator.opencode_event_normalizer import (
+    OpenCodeEventContext,
+    OpenCodeEventNormalizer,
+    normalize_opencode_event,
+)
 from ouroboros.orchestrator.parallel_executor import (
     ACExecutionOutcome,
     ACExecutionResult,
@@ -155,8 +150,7 @@ __all__ = [
     "ClaudeAgentAdapter",
     "ClaudeCodeRuntime",
     "CodexCliRuntime",
-    # "OpenCodeRuntime",  # TODO: uncomment when shipped
-    # "OpenCodeRuntimeAdapter",  # TODO: uncomment when shipped
+    "OpenCodeRuntime",
     "DEFAULT_TOOLS",
     "RuntimeHandle",
     "TaskResult",
@@ -210,9 +204,9 @@ __all__ = [
     "ParallelExecutionStageResult",
     "ParallelExecutionResult",
     "StageExecutionOutcome",
-    # "OpenCodeEventContext",  # TODO: uncomment when shipped
-    # "OpenCodeEventNormalizer",  # TODO: uncomment when shipped
-    # "normalize_opencode_event",  # TODO: uncomment when shipped
+    "OpenCodeEventContext",
+    "OpenCodeEventNormalizer",
+    "normalize_opencode_event",
     # Level Context
     "ACContextSummary",
     "LevelContext",

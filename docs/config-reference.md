@@ -75,7 +75,7 @@ Controls how Ouroboros launches and communicates with the agent runtime backend.
 
 ```yaml
 orchestrator:
-  runtime_backend: claude       # "claude" | "codex" | "opencode" (opencode: not yet implemented)
+  runtime_backend: claude       # "claude" | "codex" | "opencode"
   permission_mode: acceptEdits  # "default" | "acceptEdits" | "bypassPermissions"
   opencode_permission_mode: bypassPermissions
   cli_path: null                # Path to Claude CLI binary; null = use SDK default
@@ -93,8 +93,6 @@ orchestrator:
 | `codex_cli_path` | `string \| null` | `null` | Absolute path to the Codex CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_CODEX_CLI_PATH`. |
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `default_max_turns` | `int >= 1` | `10` | Default maximum number of turns per agent execution task. |
-
-> **OpenCode scope note:** The `opencode` runtime backend is **not yet implemented** — setting `runtime_backend: opencode` will raise `NotImplementedError` at runtime. The `opencode_*` options are listed here for forward-compatibility; support is planned for a future release.
 
 ---
 

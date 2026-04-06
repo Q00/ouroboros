@@ -50,6 +50,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -58,6 +59,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 class _DefaultStartGroup(typer.core.TyperGroup):
@@ -669,7 +671,7 @@ def start(
             "--runtime",
             help=(
                 "Agent runtime backend for the workflow execution step after seed generation "
-                "(claude or codex)."
+                "(claude, codex, or opencode)."
             ),
             case_sensitive=False,
         ),
@@ -680,7 +682,7 @@ def start(
             "--llm-backend",
             help=(
                 "LLM backend for interview, ambiguity scoring, and seed generation "
-                "(claude_code, litellm, or codex)."
+                "(claude_code, litellm, codex, or opencode)."
             ),
             case_sensitive=False,
         ),

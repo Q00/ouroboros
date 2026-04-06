@@ -16,9 +16,7 @@ from ouroboros.providers.base import LLMAdapter
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
-
-# TODO: uncomment when OpenCode adapter is shipped
-# from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
+from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
 _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
@@ -38,11 +36,7 @@ def resolve_llm_backend(backend: str | None = None) -> str:
     if candidate in _GEMINI_BACKENDS:
         return "gemini"
     if candidate in _OPENCODE_BACKENDS:
-        msg = (
-            "OpenCode LLM adapter is not yet available. "
-            "Supported backends: claude_code, codex, gemini, litellm"
-        )
-        raise ValueError(msg)
+        return "opencode"
     if candidate in _LITELLM_BACKENDS:
         return "litellm"
 
@@ -65,7 +59,7 @@ def resolve_llm_permission_mode(
         raise ValueError(msg)
 
     resolved = resolve_llm_backend(backend)
-    if use_case == "interview" and resolved in ("claude_code", "codex", "gemini"):
+    if use_case == "interview" and resolved in ("claude_code", "codex", "gemini", "opencode"):
         # Interview uses LLM to generate questions — no file writes, but
         # CLI sandbox modes block LLM output entirely. Must bypass.
         return "bypassPermissions"
@@ -125,7 +119,18 @@ def create_llm_adapter(
             timeout=timeout,
             max_retries=max_retries,
         )
-    # opencode is rejected at resolve time; this is a defensive fallback
+    if resolved_backend == "opencode":
+        return OpenCodeLLMAdapter(
+            cli_path=cli_path,
+            cwd=cwd,
+            permission_mode=resolved_permission_mode,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            on_message=on_message,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+    # litellm is the fallback
     try:
         from ouroboros.providers.litellm_adapter import LiteLLMAdapter
     except ImportError as exc:
