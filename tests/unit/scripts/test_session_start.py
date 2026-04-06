@@ -65,6 +65,7 @@ class TestSessionStartMain:
 
     def test_check_update_raises_reports_stderr(self, monkeypatch, capsys) -> None:
         """check_update() raising after module loads is also caught."""
+
         def _exploding_check():
             raise ConnectionError("network down")
 
