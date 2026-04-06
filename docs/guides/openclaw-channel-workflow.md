@@ -58,6 +58,12 @@ mcporter call ouroboros.ouroboros_channel_workflow \
 # ooo interview add dark mode to settings
 ```
 
+### Example: Interview in a channel
+
+![OpenClaw ooo interview example](../assets/openclaw-ooo.png)
+
+A user types `ooo interview` followed by their request, and the bot responds with a Socratic interview question — all within the chat channel.
+
 ### Usage
 
 All commands are prefixed with `ooo`:

@@ -37,11 +37,12 @@
 
 ---
 
-> **New: PM 모드** — `ooo pm`으로 소크라테스식 PM 인터뷰를 통해 PRD를 자동 생성할 수 있습니다.
-> 이해관계자 정렬, 유저 스토리 매핑, 구조화된 PRD 생성까지 — 같은 소크라테스 엔진이 제품 관리 워크플로우도 지원합니다.
+> **New: OpenClaw 연동** — Ouroboros가 이제 채팅 플랫폼 안에서 직접 실행됩니다. [OpenClaw 가이드](./docs/guides/openclaw-channel-workflow.md)
+> 스킬을 설치하고 MCP를 연결하면, 팀원 누구나 Slack·Discord 등 OpenClaw 지원 채널에서 `ooo` 명령어를 바로 사용할 수 있습니다.
 >
-> ```
-> > ooo pm "알림 시스템을 만들고 싶어"
+> ```bash
+> clawhub install ouroboros
+> openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
 > ```
 
 ---
