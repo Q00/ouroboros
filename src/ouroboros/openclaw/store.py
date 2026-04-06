@@ -23,8 +23,13 @@ class OpenClawStateStore:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path or default_openclaw_db_path()
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self._initialized = False
+
+    def _ensure_initialized(self) -> None:
+        if not self._initialized:
+            self._initialized = True
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._db_path)
@@ -36,6 +41,7 @@ class OpenClawStateStore:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        self._ensure_initialized()
         conn = self._connect()
         try:
             yield conn

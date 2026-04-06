@@ -30,6 +30,14 @@ class ChannelWorkflowRuntime:
     start_execute_seed_handler: StartExecuteSeedHandler
     job_result_handler: JobResultHandler
 
+    def _channel_ref(self, record) -> ChannelRef:
+        return ChannelRef(channel_id=record.channel_id, guild_id=record.guild_id)
+
+    async def _fail_and_advance(self, record, error) -> None:
+        """Mark a workflow as failed and attempt to launch the next queued one."""
+        self.workflow_manager.mark_failed(record.workflow_id, error=str(error))
+        await self.maybe_launch_next_workflow(self._channel_ref(record), record.workflow_id)
+
     async def launch_workflow(self, record) -> Result[MCPToolResult, MCPServerError]:
         """Launch either the interview path or direct execution path."""
         if record.entry_point == WorkflowEntryPoint.INTERVIEW:
@@ -37,7 +45,7 @@ class ChannelWorkflowRuntime:
                 {"initial_context": record.request_message, "cwd": record.repo}
             )
             if result.is_err:
-                self.workflow_manager.mark_failed(record.workflow_id, error=str(result.error))
+                await self._fail_and_advance(record, result.error)
                 return Result.err(result.error)
             session_id = result.value.meta.get("session_id")
             if isinstance(session_id, str) and session_id:
@@ -70,7 +78,7 @@ class ChannelWorkflowRuntime:
 
         execute_result = await self.start_execute_seed_handler.handle(execute_arguments)
         if execute_result.is_err:
-            self.workflow_manager.mark_failed(record.workflow_id, error=str(execute_result.error))
+            await self._fail_and_advance(record, execute_result.error)
             return Result.err(execute_result.error)
         meta = execute_result.value.meta
         record = self.workflow_manager.set_executing(
@@ -242,7 +250,7 @@ class ChannelWorkflowRuntime:
             {"session_id": record.interview_session_id, "answer": answer}
         )
         if result.is_err:
-            self.workflow_manager.mark_failed(record.workflow_id, error=str(result.error))
+            await self._fail_and_advance(record, result.error)
             return Result.err(result.error)
 
         meta = result.value.meta
@@ -254,14 +262,14 @@ class ChannelWorkflowRuntime:
                 }
             )
             if seed_result.is_err:
-                self.workflow_manager.mark_failed(record.workflow_id, error=str(seed_result.error))
+                await self._fail_and_advance(record, seed_result.error)
                 return Result.err(seed_result.error)
 
             seed_text = seed_result.value.content[0].text
             try:
                 seed_yaml = extract_seed_yaml(seed_text)
             except ValueError as exc:
-                self.workflow_manager.mark_failed(record.workflow_id, error=str(exc))
+                await self._fail_and_advance(record, exc)
                 return Result.err(MCPToolError(str(exc), tool_name="ouroboros_channel_workflow"))
             self.workflow_manager.set_seed(
                 record.workflow_id,
@@ -275,9 +283,7 @@ class ChannelWorkflowRuntime:
                 }
             )
             if execute_result.is_err:
-                self.workflow_manager.mark_failed(
-                    record.workflow_id, error=str(execute_result.error)
-                )
+                await self._fail_and_advance(record, execute_result.error)
                 return Result.err(execute_result.error)
             execute_meta = execute_result.value.meta
             executing = self.workflow_manager.set_executing(
