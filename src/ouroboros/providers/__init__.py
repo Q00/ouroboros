@@ -31,10 +31,10 @@ def __getattr__(name: str) -> object:
         from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 
         return CodexCliLLMAdapter
-    # TODO: uncomment when OpenCode adapter is shipped
-    # if name == "OpenCodeLLMAdapter":
-    #     from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
-    #     return OpenCodeLLMAdapter
+    if name == "OpenCodeLLMAdapter":
+        from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
+
+        return OpenCodeLLMAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -50,7 +50,7 @@ __all__ = [
     # Implementations (AnthropicAdapter is the recommended default)
     "AnthropicAdapter",
     "CodexCliLLMAdapter",
-    # "OpenCodeLLMAdapter",  # TODO: uncomment when shipped
+    "OpenCodeLLMAdapter",
     "LiteLLMAdapter",
     # Factory helpers
     "create_llm_adapter",

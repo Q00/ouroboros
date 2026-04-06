@@ -7,15 +7,13 @@ import pytest
 
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
-
-# TODO: uncomment when OpenCode adapter is shipped
-# from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 from ouroboros.providers.factory import (
     create_llm_adapter,
     resolve_llm_backend,
     resolve_llm_permission_mode,
 )
 from ouroboros.providers.litellm_adapter import LiteLLMAdapter
+from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
 
 class TestResolveLLMBackend:
@@ -37,15 +35,10 @@ class TestResolveLLMBackend:
         assert resolve_llm_backend("codex") == "codex"
         assert resolve_llm_backend("codex_cli") == "codex"
 
-    def test_rejects_opencode_at_boundary(self) -> None:
-        """OpenCode is rejected at resolve time since it is not yet shipped."""
-        with pytest.raises(ValueError, match="not yet available"):
-            resolve_llm_backend("opencode")
-
-    def test_rejects_opencode_cli_alias_at_boundary(self) -> None:
-        """OpenCode CLI alias is also rejected at resolve time."""
-        with pytest.raises(ValueError, match="not yet available"):
-            resolve_llm_backend("opencode_cli")
+    def test_resolves_opencode_aliases(self) -> None:
+        """OpenCode aliases normalize to opencode."""
+        assert resolve_llm_backend("opencode") == "opencode"
+        assert resolve_llm_backend("opencode_cli") == "opencode"
 
     def test_falls_back_to_configured_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Configured backend is used when no explicit backend is provided."""
@@ -120,30 +113,26 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, CodexCliLLMAdapter)
         assert adapter._cli_path == "/tmp/codex"
 
-    @pytest.mark.skip(reason="OpenCode adapter not yet shipped")
     def test_creates_opencode_adapter(self) -> None:
         """OpenCode backend returns OpenCodeLLMAdapter."""
         adapter = create_llm_adapter(backend="opencode", cwd="/tmp/project")
-        assert isinstance(adapter, OpenCodeLLMAdapter)  # type: ignore[name-defined]  # noqa: F821
+        assert isinstance(adapter, OpenCodeLLMAdapter)
         assert adapter._cwd == "/tmp/project"
-        assert adapter._permission_mode == "acceptEdits"
 
-    @pytest.mark.skip(reason="OpenCode adapter not yet shipped")
     def test_creates_opencode_adapter_uses_configured_cli_path(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """OpenCode factory consumes the shared CLI path helper when no explicit path is passed."""
         monkeypatch.setattr(
-            "ouroboros.providers.factory.get_opencode_cli_path",
+            "ouroboros.providers.opencode_adapter.get_opencode_cli_path",
             lambda: "/tmp/opencode",
         )
 
         adapter = create_llm_adapter(backend="opencode", cwd="/tmp/project")
 
-        assert isinstance(adapter, OpenCodeLLMAdapter)  # type: ignore[name-defined]  # noqa: F821
+        assert isinstance(adapter, OpenCodeLLMAdapter)
         assert adapter._cli_path == "/tmp/opencode"
 
-    @pytest.mark.skip(reason="OpenCode adapter not yet shipped")
     def test_uses_configured_opencode_backend_alias_when_backend_omitted(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -156,7 +145,7 @@ class TestCreateLLMAdapter:
 
         adapter = create_llm_adapter(cwd="/tmp/project", allowed_tools=["Read"], max_turns=2)
 
-        assert isinstance(adapter, OpenCodeLLMAdapter)  # type: ignore[name-defined]  # noqa: F821
+        assert isinstance(adapter, OpenCodeLLMAdapter)
         assert adapter._cwd == "/tmp/project"
         assert adapter._permission_mode == "acceptEdits"
         assert adapter._allowed_tools == ["Read"]
@@ -197,7 +186,6 @@ class TestCreateLLMAdapter:
         assert isinstance(adapter, CodexCliLLMAdapter)
         assert adapter._permission_mode == "acceptEdits"
 
-    @pytest.mark.skip(reason="OpenCode adapter not yet shipped")
     def test_opencode_adapter_uses_backend_specific_permission_default(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -209,7 +197,7 @@ class TestCreateLLMAdapter:
 
         adapter = create_llm_adapter(backend="opencode", cwd="/tmp/project")
 
-        assert isinstance(adapter, OpenCodeLLMAdapter)  # type: ignore[name-defined]  # noqa: F821
+        assert isinstance(adapter, OpenCodeLLMAdapter)
         assert adapter._permission_mode == "acceptEdits"
 
 
@@ -230,7 +218,9 @@ class TestResolveLLMPermissionMode:
             == "bypassPermissions"
         )
 
-    def test_interview_mode_rejects_opencode(self) -> None:
-        """OpenCode is rejected at resolve time, even for interview use case."""
-        with pytest.raises(ValueError, match="not yet available"):
+    def test_interview_mode_escalates_to_bypass_for_opencode(self) -> None:
+        """Interview needs bypassPermissions for OpenCode — read-only sandbox blocks LLM output."""
+        assert (
             resolve_llm_permission_mode(backend="opencode", use_case="interview")
+            == "bypassPermissions"
+        )

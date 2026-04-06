@@ -13,10 +13,8 @@ from ouroboros.config import (
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
-
-# TODO: uncomment when OpenCode runtime is shipped
-# from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.command_dispatcher import create_codex_command_dispatcher
+from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 
 _CLAUDE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
@@ -31,8 +29,7 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
     if candidate in _CODEX_BACKENDS:
         return "codex"
     if candidate in _OPENCODE_BACKENDS:
-        msg = "OpenCode runtime is not yet available. Supported backends: claude, codex"
-        raise ValueError(msg)
+        return "opencode"
 
     msg = f"Unsupported orchestrator runtime backend: {candidate}"
     raise ValueError(msg)
@@ -78,7 +75,14 @@ def create_agent_runtime(
             **runtime_kwargs,
         )
 
-    # opencode is rejected at resolve time; this is a defensive fallback
+    if resolved_backend == "opencode":
+        from ouroboros.config import get_opencode_cli_path
+
+        return OpenCodeRuntime(
+            cli_path=cli_path or get_opencode_cli_path(),
+            **runtime_kwargs,
+        )
+
     msg = f"Unsupported orchestrator runtime backend: {resolved_backend}"
     raise ValueError(msg)
 

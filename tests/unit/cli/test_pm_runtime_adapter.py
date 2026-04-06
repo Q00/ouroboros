@@ -163,7 +163,7 @@ def test_pm_command_formats_factory_errors() -> None:
     ctx = SimpleNamespace(invoked_subcommand=None)
 
     with (
-        patch("ouroboros.cli.commands.pm.get_llm_backend", return_value="opencode"),
+        patch("ouroboros.cli.commands.pm.get_llm_backend", return_value="invalid_backend_xyz"),
         patch("ouroboros.cli.commands.pm.get_clarification_model", return_value="default"),
         patch("ouroboros.cli.commands.pm.print_error") as mock_error,
     ):
@@ -180,9 +180,7 @@ def test_pm_command_formats_factory_errors() -> None:
         else:
             raise AssertionError("Expected typer.Exit for backend configuration errors")
 
-    mock_error.assert_called_once_with(
-        "OpenCode LLM adapter is not yet available. Supported backends: claude_code, codex, gemini, litellm"
-    )
+    mock_error.assert_called_once_with("Unsupported LLM backend: invalid_backend_xyz")
 
 
 def test_pm_command_formats_missing_litellm_dependency() -> None:
