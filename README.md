@@ -232,8 +232,9 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 | `ooo qa` | *(via skill)* | General-purpose QA verdict for any artifact |
 | `ooo update` | `ouroboros update` | Check for updates + upgrade to latest |
 | `ooo brownfield` | *(via skill)* | Scan and manage brownfield repo defaults |
+| `ooo publish` | *(skill/runtime surface; uses `gh` CLI)* | Publish a Seed as GitHub Epic/Task issues for team workflows |
 
-> Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`) are available through agent skills or MCP tools only.
+> Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`, `publish`) are available through agent skills, runtime rules, or MCP tools rather than a direct `ouroboros <subcommand>` shell command.
 
 See the [CLI reference](./docs/cli-reference.md) for full details.
 
