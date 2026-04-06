@@ -1010,6 +1010,10 @@ class OpenCodeRuntime:
                 skills_dir=self._skills_dir,
             ) as skill_md_path:
                 frontmatter = self._load_skill_frontmatter(skill_md_path)
+                # Resolve to a concrete Path while the context manager is
+                # alive — importlib.resources may clean up a temp extraction
+                # once the ``with`` block exits.
+                resolved_skill_path = Path(str(skill_md_path))
         except FileNotFoundError:
             return None
         except (OSError, ValueError, yaml.YAMLError) as e:
@@ -1038,7 +1042,7 @@ class OpenCodeRuntime:
             skill_name=skill_name,
             command_prefix=command_prefix,
             prompt=prompt,
-            skill_path=skill_md_path,
+            skill_path=resolved_skill_path,
             mcp_tool=mcp_tool,
             mcp_args=self._resolve_dispatch_templates(
                 mcp_args,
@@ -1321,10 +1325,13 @@ class OpenCodeRuntime:
         # Feed prompt via stdin to avoid OS ARG_MAX / MAX_ARG_STRLEN limits
         # (~128 KB per single argument on Linux).  OpenCode auto-reads stdin
         # when !process.stdin.isTTY, so piping works out of the box.
-        if composed_prompt and process.stdin is not None:
+        # Always close stdin so the subprocess sees EOF even when the prompt
+        # is empty — otherwise ``opencode run`` hangs waiting for input.
+        if process.stdin is not None:
             try:
-                process.stdin.write(composed_prompt.encode("utf-8"))
-                await process.stdin.drain()
+                if composed_prompt:
+                    process.stdin.write(composed_prompt.encode("utf-8"))
+                    await process.stdin.drain()
                 process.stdin.close()
                 await process.stdin.wait_closed()
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:

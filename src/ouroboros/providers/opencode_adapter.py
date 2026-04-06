@@ -528,10 +528,13 @@ class OpenCodeLLMAdapter:
             )
 
         # Feed prompt via stdin to avoid OS ARG_MAX / MAX_ARG_STRLEN limits.
-        if prompt and process.stdin is not None:
+        # Always close stdin so the subprocess sees EOF even when prompt is
+        # empty — otherwise ``opencode run`` hangs waiting for input.
+        if process.stdin is not None:
             try:
-                process.stdin.write(prompt.encode("utf-8"))
-                await process.stdin.drain()
+                if prompt:
+                    process.stdin.write(prompt.encode("utf-8"))
+                    await process.stdin.drain()
                 process.stdin.close()
                 await process.stdin.wait_closed()
             except (BrokenPipeError, ConnectionResetError, OSError) as exc:
