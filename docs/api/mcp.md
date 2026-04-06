@@ -247,6 +247,94 @@ class MCPServerInfo:
 
 ---
 
+## Ouroboros MCP Tools
+
+### Tool: `ouroboros_channel_workflow`
+
+Channel-native workflow orchestration surface intended for OpenClaw/Discord-style
+message transports.
+
+This tool wraps:
+
+- per-channel queueing
+- default repository mapping
+- input-detected entry points
+- interview / seed / execution handoff
+- execution status inspection
+- change-driven execution waiting
+
+#### Supported actions
+
+| Action | Purpose |
+|--------|---------|
+| `message` | Submit a new message or continue an interview |
+| `set_repo` | Configure the default repo for a channel |
+| `status` | Inspect current channel workflow state |
+| `poll` | Read the current active workflow state immediately |
+| `wait` | Wait for execution state to change via job wait |
+
+#### Parameters
+
+| Name | Type | Required | Notes |
+|------|------|----------|------|
+| `channel_id` | `string` | yes | Originating channel identifier |
+| `guild_id` | `string` | no | Optional guild/server identifier |
+| `user_id` | `string` | no | Optional caller/user identifier |
+| `message` | `string` | no | Channel message content or interview answer |
+| `repo` | `string` | no | Explicit repo override |
+| `seed_content` | `string` | no | Inline seed/spec payload |
+| `seed_path` | `string` | no | Seed path |
+| `action` | `string` | no | `message`, `set_repo`, `status`, `poll`, `wait` |
+| `mode` | `string` | no | For `message`: `auto`, `new`, `answer` |
+| `timeout_seconds` | `integer` | no | For `wait`: maximum wait duration |
+
+#### Stable response metadata
+
+The tool emits a stable metadata envelope with these keys:
+
+| Key | Meaning |
+|-----|---------|
+| `action` | Action that produced the response |
+| `channel_key` | Normalized channel key (`guild_id:channel_id` or `channel_id`) |
+| `workflow_id` | Workflow identifier when available |
+| `stage` | Workflow stage when available |
+| `entry_point` | Detected entry point (`interview` / `execution`) |
+| `repo` | Target repository when available |
+| `session_id` | Interview/runtime session identifier |
+| `execution_id` | Execution identifier |
+| `job_id` | Background job identifier |
+| `seed_id` | Generated seed identifier |
+| `pr_url` | Draft PR URL on success |
+| `job_status` | Underlying job status when waiting/running |
+| `cursor` | Last seen job cursor for wait semantics |
+| `changed` | Whether a `wait` call observed a change |
+| `ambiguity_score` | Interview ambiguity score when available |
+| `seed_ready` | Whether interview output is ready for seed generation |
+| `next_workflow_started` | Whether queue advancement started the next workflow |
+| `duplicate_delivery` | True when an inbound message was treated as a redelivery |
+| `duplicate_of` | Existing workflow ID reused for a duplicate delivery |
+| `active` | Used by `status` / `poll` / `wait` summaries when no active workflow exists |
+
+#### Example
+
+```python
+result = await client.call_tool(
+    "ouroboros_channel_workflow",
+    {
+        "action": "message",
+        "channel_id": "123",
+        "guild_id": "guild-1",
+        "user_id": "user-42",
+        "message": "work on issue #320",
+    },
+)
+
+print(result.value.text_content)
+print(result.value.meta["workflow_id"])
+```
+
+---
+
 ## Error Hierarchy
 
 All MCP-specific exceptions inherit from `MCPError`, which inherits from `OuroborosError`.

@@ -103,6 +103,9 @@ ouroboros setup                         # configure runtime
 
 See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
 
+Messaging/runtime integration guide:
+[OpenClaw channel workflow](./docs/guides/openclaw-channel-workflow.md)
+
 </details>
 
 <details>

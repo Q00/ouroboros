@@ -17,6 +17,7 @@ from ouroboros.mcp.tools.definitions import (
     ACTreeHUDHandler,
     CancelExecutionHandler,
     CancelJobHandler,
+    ChannelWorkflowHandler,
     EvaluateHandler,
     EvolveRewindHandler,
     EvolveStepHandler,
@@ -790,6 +791,7 @@ class TestOuroborosTools:
         assert LineageStatusHandler in handler_types
         assert EvolveRewindHandler in handler_types
         assert CancelExecutionHandler in handler_types
+        assert ChannelWorkflowHandler in handler_types
 
     def test_all_tools_have_unique_names(self) -> None:
         """All tools have unique names."""
