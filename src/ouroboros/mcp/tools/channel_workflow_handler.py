@@ -358,6 +358,26 @@ class ChannelWorkflowHandler:
             )
         repo = repo.strip()
 
+        message_id = (
+            str(arguments["message_id"]) if arguments.get("message_id") is not None else None
+        )
+        event_id = str(arguments["event_id"]) if arguments.get("event_id") is not None else None
+        event_key = message_id or event_id
+        if event_key and self._workflow_manager.is_event_processed(event_key):
+            label = active or self._workflow_manager.latest_for_channel(channel)
+            if label is not None:
+                return self._ok(
+                    render_stage_message(label),
+                    self._meta(
+                        action="message",
+                        channel_key=channel.key,
+                        workflow_id=label.workflow_id,
+                        stage=label.stage,
+                        duplicate_delivery=True,
+                        duplicate_of=label.workflow_id,
+                    ),
+                )
+
         detection = detect_entry_point(
             normalized_message,
             seed_content=arguments.get("seed_content"),
@@ -398,26 +418,9 @@ class ChannelWorkflowHandler:
             and mode != "new"
             and (active.user_id is None or user_id == active.user_id)
         ):
-            message_id = (
-                str(arguments["message_id"]) if arguments.get("message_id") is not None else None
-            )
-            event_id = str(arguments["event_id"]) if arguments.get("event_id") is not None else None
-            answer_event_key = message_id or event_id
-            if answer_event_key and self._workflow_manager.is_event_processed(answer_event_key):
-                return self._ok(
-                    render_stage_message(active),
-                    self._meta(
-                        action="message",
-                        channel_key=channel.key,
-                        workflow_id=active.workflow_id,
-                        stage=active.stage,
-                        duplicate_delivery=True,
-                        duplicate_of=active.workflow_id,
-                    ),
-                )
             result = await self._runtime.resume_interview(active, normalized_message)
-            if result.is_ok and answer_event_key:
-                self._workflow_manager.mark_event_processed(answer_event_key, active.workflow_id)
+            if result.is_ok and event_key:
+                self._workflow_manager.mark_event_processed(event_key, active.workflow_id)
             return result
 
         if mode == "answer":
@@ -451,6 +454,8 @@ class ChannelWorkflowHandler:
                 ),
             )
         )
+        if event_key:
+            self._workflow_manager.mark_event_processed(event_key, record.workflow_id)
         if active is not None:
             return self._ok(
                 render_stage_message(record),

@@ -52,7 +52,8 @@ class OpenClawWorkflowOrchestrator:
             meta=initial.meta,
         )
 
-        if self._needs_wait(initial):
+        action = initial.meta.get("action")
+        if action not in ("poll", "wait", "status") and self._needs_wait(initial):
             wait_result = await self._wait_until_stable(event, sink, initial)
             if wait_result.is_err:
                 return Result.err(wait_result.error)
