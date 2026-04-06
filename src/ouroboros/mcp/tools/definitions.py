@@ -24,6 +24,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
     GenerateSeedHandler,
     InterviewHandler,
 )
+from ouroboros.mcp.tools.channel_workflow_handler import ChannelWorkflowHandler
 from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
     LateralThinkHandler,
@@ -141,6 +142,38 @@ def interview_handler(*, llm_backend: str | None = None) -> InterviewHandler:
     return InterviewHandler(llm_backend=llm_backend)
 
 
+def channel_workflow_handler(
+    *,
+    runtime_backend: str | None = None,
+    llm_backend: str | None = None,
+    interview_handler: InterviewHandler | None = None,
+    generate_seed_handler: GenerateSeedHandler | None = None,
+    start_execute_seed_handler: StartExecuteSeedHandler | None = None,
+    job_wait_handler: JobWaitHandler | None = None,
+    job_status_handler: JobStatusHandler | None = None,
+    job_result_handler: JobResultHandler | None = None,
+) -> ChannelWorkflowHandler:
+    """Create a ChannelWorkflowHandler instance.
+
+    When handler instances are provided they are reused, ensuring shared
+    job state with the rest of the tool set.
+    """
+    if start_execute_seed_handler is None:
+        execute_handler = ExecuteSeedHandler(
+            agent_runtime_backend=runtime_backend,
+            llm_backend=llm_backend,
+        )
+        start_execute_seed_handler = StartExecuteSeedHandler(execute_handler=execute_handler)
+    return ChannelWorkflowHandler(
+        interview_handler=interview_handler or InterviewHandler(llm_backend=llm_backend),
+        generate_seed_handler=generate_seed_handler or GenerateSeedHandler(llm_backend=llm_backend),
+        start_execute_seed_handler=start_execute_seed_handler,
+        job_wait_handler=job_wait_handler or JobWaitHandler(),
+        job_status_handler=job_status_handler or JobStatusHandler(),
+        job_result_handler=job_result_handler or JobResultHandler(),
+    )
+
+
 def lateral_think_handler() -> LateralThinkHandler:
     """Create a LateralThinkHandler instance."""
     return LateralThinkHandler()
@@ -199,6 +232,7 @@ OuroborosToolHandlers = tuple[
     | CancelExecutionHandler
     | BrownfieldHandler
     | PMInterviewHandler
+    | ChannelWorkflowHandler
     | QAHandler,
     ...,
 ]
@@ -211,26 +245,37 @@ def get_ouroboros_tools(
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
 ) -> OuroborosToolHandlers:
-    """Create the default set of Ouroboros MCP tool handlers."""
+    """Create the default set of Ouroboros MCP tool handlers.
+
+    Shared handler instances are passed to ``channel_workflow_handler``
+    so the channel workflow surface uses the same job/event stores as
+    the top-level tools.
+    """
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
     )
+    start_execute = StartExecuteSeedHandler(execute_handler=execute_seed)
+    job_status = JobStatusHandler()
+    job_wait = JobWaitHandler()
+    job_result = JobResultHandler()
+    interview = InterviewHandler(llm_backend=llm_backend)
+    generate_seed = GenerateSeedHandler(llm_backend=llm_backend)
     return (
         execute_seed,
-        StartExecuteSeedHandler(execute_handler=execute_seed),
+        start_execute,
         SessionStatusHandler(),
-        JobStatusHandler(),
-        JobWaitHandler(),
-        JobResultHandler(),
+        job_status,
+        job_wait,
+        job_result,
         ACTreeHUDHandler(),
         CancelJobHandler(),
         QueryEventsHandler(),
-        GenerateSeedHandler(llm_backend=llm_backend),
+        generate_seed,
         MeasureDriftHandler(),
-        InterviewHandler(llm_backend=llm_backend),
+        interview,
         EvaluateHandler(llm_backend=llm_backend),
         LateralThinkHandler(),
         EvolveStepHandler(),
@@ -240,6 +285,16 @@ def get_ouroboros_tools(
         CancelExecutionHandler(),
         BrownfieldHandler(),
         PMInterviewHandler(llm_backend=llm_backend),
+        channel_workflow_handler(
+            runtime_backend=runtime_backend,
+            llm_backend=llm_backend,
+            interview_handler=interview,
+            generate_seed_handler=generate_seed,
+            start_execute_seed_handler=start_execute,
+            job_wait_handler=job_wait,
+            job_status_handler=job_status,
+            job_result_handler=job_result,
+        ),
         QAHandler(llm_backend=llm_backend),
     )
 

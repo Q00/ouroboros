@@ -735,6 +735,7 @@ def create_ouroboros_server(
         ACDashboardHandler,
         CancelExecutionHandler,
         CancelJobHandler,
+        ChannelWorkflowHandler,
         EvaluateHandler,
         EvolveRewindHandler,
         EvolveStepHandler,
@@ -755,6 +756,7 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
     from ouroboros.mcp.tools.qa import QAHandler
     from ouroboros.mcp.tools.registry import ToolRegistry
+    from ouroboros.openclaw.workflow import ChannelRepoRegistry, ChannelWorkflowManager
     from ouroboros.orchestrator import create_agent_runtime, resolve_agent_runtime_backend
     from ouroboros.orchestrator.runner import (
         OrchestratorRunner,
@@ -788,8 +790,8 @@ def create_ouroboros_server(
 
     # Create state directory for interviews
     if state_dir is None:
-        state_dir = Path.home() / ".ouroboros" / "data"
-        state_dir.mkdir(parents=True, exist_ok=True)
+        state_dir = Path.cwd() / ".ouroboros" / "data"
+    state_dir.mkdir(parents=True, exist_ok=True)
 
     # Create core service instances
     interview_engine = InterviewEngine(
@@ -1255,6 +1257,9 @@ def create_ouroboros_server(
         validator=_evolution_validator,
     )
     job_manager = JobManager(event_store)
+    openclaw_db_path = state_dir / "openclaw.db"
+    workflow_manager = ChannelWorkflowManager(openclaw_db_path)
+    repo_registry = ChannelRepoRegistry(openclaw_db_path)
 
     # Create tool registry for dependency injection
     registry = ToolRegistry()
@@ -1319,6 +1324,39 @@ def create_ouroboros_server(
             llm_backend=llm_backend,
         ),
         BrownfieldHandler(),
+        ChannelWorkflowHandler(
+            workflow_manager=workflow_manager,
+            repo_registry=repo_registry,
+            interview_handler=InterviewHandler(
+                interview_engine=interview_engine,
+                event_store=event_store,
+                llm_adapter=llm_adapter,
+                llm_backend=llm_backend,
+            ),
+            generate_seed_handler=GenerateSeedHandler(
+                interview_engine=interview_engine,
+                seed_generator=seed_generator,
+                llm_adapter=llm_adapter,
+                llm_backend=llm_backend,
+            ),
+            start_execute_seed_handler=StartExecuteSeedHandler(
+                execute_handler=execute_seed,
+                event_store=event_store,
+                job_manager=job_manager,
+            ),
+            job_status_handler=JobStatusHandler(
+                event_store=event_store,
+                job_manager=job_manager,
+            ),
+            job_wait_handler=JobWaitHandler(
+                event_store=event_store,
+                job_manager=job_manager,
+            ),
+            job_result_handler=JobResultHandler(
+                event_store=event_store,
+                job_manager=job_manager,
+            ),
+        ),
         EvaluateHandler(
             event_store=event_store,
             llm_adapter=llm_adapter,

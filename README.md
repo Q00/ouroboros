@@ -105,6 +105,13 @@ Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibi
 
 See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
 
+Chat platform integration (OpenClaw / Slack / Discord):
+```bash
+clawhub install ouroboros                    # install OpenClaw skill
+openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
+```
+Guide: [Channel workflow integration](./docs/guides/openclaw-channel-workflow.md)
+
 </details>
 
 <details>
