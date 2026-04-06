@@ -115,7 +115,7 @@ uv run ouroboros --version            # verify CLI
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |
-| OpenCode backend | Python >= 3.12, `opencode` on PATH, API key for your configured provider |
+| OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
 
 ---
 
@@ -198,7 +198,7 @@ Inside a Claude Code session:
 ooo interview "I want to build a personal finance tracker"
 ```
 
-> **CLI note:** The standalone CLI does not have an `interview` command. Use `ooo interview` inside Claude Code, or use MCP tools to run interviews.
+> **CLI note:** You can also run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"`. Inside a Claude Code session, use `ooo interview` directly. Inside Codex CLI or OpenCode sessions, first run `ouroboros setup --runtime <codex|opencode>` to register the MCP server.
 
 The Socratic Interviewer asks clarifying questions:
 - "What platforms do you want to track?" (Bank accounts, credit cards, investments)
@@ -289,7 +289,7 @@ ooo interview "Add real-time notifications to the chat app"
 ooo run
 ```
 
-> **Terminal users:** The standalone CLI does not have an `interview` command. Generate seeds via `ooo interview` in Claude Code or via MCP tools, then run with `ouroboros run <seed_file>`.
+> **Terminal users:** Run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"`, then execute with `ouroboros run workflow <seed_file>`. For Codex or OpenCode agent sessions, first run `ouroboros setup --runtime <codex|opencode>` to register the MCP server.
 
 ---
 

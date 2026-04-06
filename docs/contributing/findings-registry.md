@@ -630,7 +630,7 @@ findings:
       - docs/guides/cli-usage.md
     code_deps:
       - src/ouroboros/cli/commands/setup.py
-    resolution_ref: "cli-audit-findings.md#F-12; fixed in this generation"
+    resolution_ref: "cli-audit-findings.md#F-12; fixed in this generation. OpenCode runtime fully implemented in PR #324."
 
   - id: FIND-025
     claim_id: CLM-025
@@ -870,7 +870,8 @@ findings:
     resolution_ref: >-
       runtime-capability-crosscheck.md#Sec2;
       fix: "(opencode is in the CLI enum but out of scope)" note added to all
-      --runtime/--llm-backend option descriptions in cli-reference.md
+      --runtime/--llm-backend option descriptions in cli-reference.md.
+      OpenCode runtime fully implemented in PR #324 — out-of-scope notes no longer apply.
 
   - id: FIND-040
     claim_id: CLM-040

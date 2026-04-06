@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code and Codex CLI. The installer detects your runtime, registers the MCP server, and installs skills automatically.
+> Works with Claude Code, Codex CLI, and OpenCode. The installer detects Claude Code and Codex CLI automatically, registers the MCP server, and installs skills. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
 
 <details>
 <summary><strong>Other install methods</strong></summary>
@@ -103,7 +103,7 @@ ouroboros setup                         # configure runtime
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias while extras migrate.
 
-See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
+See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [OpenCode](./docs/runtime-guides/opencode.md)
 
 Chat platform integration (OpenClaw / Slack / Discord):
 ```bash

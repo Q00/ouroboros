@@ -551,7 +551,7 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `runtime_factory.py` | `docs/runtime-capability-matrix.md`, `docs/runtime-guides/claude-code.md`, `docs/runtime-guides/codex.md` — if a backend is added, removed, or changes its `NotImplementedError` status |
 | `adapter.py` (`ClaudeAgentAdapter`) | `docs/runtime-guides/claude-code.md` — permission modes, session flow |
 | `codex_cli_runtime.py` (`CodexCliRuntime`) | `docs/runtime-guides/codex.md` — permission modes, `--runtime codex` behavior |
-| `opencode_runtime.py` (`OpenCodeRuntime`) | `docs/runtime-capability-matrix.md` — mark `[Not yet available]` until `NotImplementedError` is removed; `docs/runtime-guides/` — create guide only when fully shipped |
+| `opencode_runtime.py` (`OpenCodeRuntime`) | `docs/runtime-capability-matrix.md`, `docs/runtime-guides/opencode.md` — permission modes, `--runtime opencode` behavior |
 | `runner.py` (`OrchestratorRunner`) | `docs/architecture.md` — orchestration lifecycle; `docs/getting-started.md` — session ID output, resume flow |
 | `parallel_executor.py` | `docs/cli-reference.md` — `--sequential` flag behavior; `docs/architecture.md` — parallel execution strategy |
 | `coordinator.py` (`LevelCoordinator`) | `docs/architecture.md` — inter-level conflict resolution and coordinator review gate |
@@ -563,7 +563,7 @@ Changes under `src/ouroboros/orchestrator/` affect runtime behavior documentatio
 | `command_dispatcher.py` | `docs/architecture.md` — command dispatch model |
 | `level_context.py` | `docs/architecture.md` — level context description |
 
-**Runtime availability rule**: If `create_agent_runtime()` raises `NotImplementedError` for a backend, that backend **must not** appear in docs as a working option. Currently `opencode` is unimplemented — it must be marked `[Not yet available]` wherever documented.
+**Runtime availability rule**: If `create_agent_runtime()` raises `NotImplementedError` for a backend, that backend **must not** appear in docs as a working option. All three backends (`claude`, `codex`, `opencode`) are fully implemented and documented.
 
 ---
 
@@ -703,7 +703,7 @@ To catch doc drift during development, reviewers should check:
 
 1. **Flag parity**: Run `ouroboros <cmd> --help` and compare every flag to `docs/cli-reference.md`. Any mismatch is a documentation bug.
 2. **Placeholder honesty**: If a command's implementation body is `# Placeholder implementation`, the corresponding doc entry must say `[Placeholder — not yet implemented]`.
-3. **Runtime parity**: `claude` and `codex` are the only fully-implemented backends. Any doc that lists `opencode` without a `[Not yet available]` marker is incorrect.
+3. **Runtime parity**: `claude`, `codex`, and `opencode` are all fully-implemented backends. Any doc that lists a backend as available must have a corresponding runtime guide in `docs/runtime-guides/`.
 4. **Config key drift**: After any change to `src/ouroboros/config/models.py`, grep for the changed key name across `docs/` to find stale references.
 5. **TUI key bindings**: If `screens/*.py` `BINDINGS` arrays change, verify `docs/guides/tui-usage.md` reflects the new keys.
 6. **Skills registry drift**: If a new `skills/*.yaml` file is added, check that `docs/runtime-guides/codex.md` or the relevant guide mentions it.

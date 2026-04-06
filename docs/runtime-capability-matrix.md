@@ -91,7 +91,7 @@ The runtime backend affects:
 
 ## Choosing a Runtime
 
-The table below covers the two currently shipped backends. Because Ouroboros uses a pluggable `AgentRuntime` protocol, teams can register additional backends without modifying the core engine.
+The table below covers the three currently shipped backends. Because Ouroboros uses a pluggable `AgentRuntime` protocol, teams can register additional backends without modifying the core engine.
 
 | If you... | Consider |
 |-----------|----------|

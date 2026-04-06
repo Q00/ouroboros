@@ -125,7 +125,7 @@ After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are in
 | `ooo interview` | Yes | `ouroboros init start --llm-backend codex "your idea"` |
 | `ooo seed` | Yes | *(bundled in `ouroboros init start`)* |
 | `ooo run` | Yes | `ouroboros run workflow --runtime codex seed.yaml` |
-| `ooo status` | Yes | `ouroboros status execution <session_id>` |
+| `ooo status` | Yes | `ouroboros status execution <execution_id>` |
 | `ooo evaluate` | Yes | *(MCP only)* |
 | `ooo evolve` | Yes | *(MCP only)* |
 | `ooo ralph` | Yes | *(MCP only)* |

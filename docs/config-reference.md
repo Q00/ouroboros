@@ -1,6 +1,6 @@
 <!--
 doc_metadata:
-  runtime_scope: [local, claude, codex]
+  runtime_scope: [local, claude, codex, opencode]
 -->
 
 # Configuration Reference
@@ -536,6 +536,23 @@ consensus:
 ```
 
 This is the recommended Ouroboros-side pattern for Codex users. Keep `~/.codex/config.toml` limited to the MCP/env block created by setup.
+
+### OpenCode Runtime
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: opencode
+  opencode_cli_path: /usr/local/bin/opencode   # omit if opencode is already on PATH
+
+llm:
+  backend: opencode
+
+logging:
+  level: info
+```
+
+OpenCode supports multiple model providers (Anthropic, OpenAI, Google, and others). Model selection is configured in OpenCode itself (`~/.config/opencode/opencode.json`), not in `config.yaml`. The `orchestrator.opencode_permission_mode` defaults to `bypassPermissions` since OpenCode runs non-interactively via `opencode run --format json`. The `llm.opencode_permission_mode` defaults to `acceptEdits`, but the factory forces `bypassPermissions` for interview/seed use cases to avoid CLI sandbox blocking.
 
 ### Full Config Skeleton
 
