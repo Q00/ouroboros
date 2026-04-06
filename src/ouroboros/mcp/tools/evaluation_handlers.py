@@ -134,8 +134,8 @@ class MeasureDriftHandler:
                 )
             )
 
-        constraint_violations_raw = arguments.get("constraint_violations", [])
-        current_concepts_raw = arguments.get("current_concepts", [])
+        constraint_violations_raw = arguments.get("constraint_violations") or []
+        current_concepts_raw = arguments.get("current_concepts") or []
 
         log.info(
             "mcp.tool.measure_drift",

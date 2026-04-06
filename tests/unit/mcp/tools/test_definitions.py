@@ -1202,6 +1202,24 @@ class TestMeasureDriftHandler:
 
         assert result.is_err
 
+    async def test_handle_none_optional_params(self) -> None:
+        """handle succeeds when optional params are explicitly None (#275)."""
+        handler = MeasureDriftHandler()
+        result = await handler.handle(
+            {
+                "session_id": "test-session",
+                "current_output": "Built a test task with Python 3.14",
+                "seed_content": VALID_SEED_YAML,
+                "constraint_violations": None,
+                "current_concepts": None,
+            }
+        )
+
+        assert result.is_ok
+        meta = result.value.meta
+        assert "combined_drift" in meta
+        assert meta["constraint_drift"] == 0.0
+
 
 class TestEvaluateHandler:
     """Test EvaluateHandler class."""
