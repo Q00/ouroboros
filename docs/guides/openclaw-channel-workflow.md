@@ -30,6 +30,8 @@ uv tool install ouroboros-ai
 openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
 ```
 
+> If `openclaw mcp set` is not recognized, run `openclaw update` to get the latest version.
+
 Verify the registration:
 
 ```bash

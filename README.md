@@ -111,6 +111,8 @@ Chat platform integration (OpenClaw / Slack / Discord):
 clawhub install ouroboros                    # install OpenClaw skill
 openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
 ```
+> If `openclaw mcp set` is not recognized, run `openclaw update` to get the latest version.
+
 Guide: [Channel workflow integration](./docs/guides/openclaw-channel-workflow.md)
 
 </details>
