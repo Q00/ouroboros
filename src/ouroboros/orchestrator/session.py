@@ -892,12 +892,19 @@ class SessionRepository:
         orphaned: list[SessionTracker] = []
 
         try:
-            # Get all session start events to enumerate sessions
-            start_events = await self._event_store.get_all_sessions()
+            # Pre-filter at the SQL level: only replay sessions that do NOT
+            # have a terminal event (completed/failed/cancelled).  This avoids
+            # the expensive O(S×E) full-replay for the common case where most
+            # sessions are already finished.
+            # See https://github.com/Q00/ouroboros/issues/310
+            candidate_ids = await self._event_store.get_non_terminal_session_ids()
 
-            for start_event in start_events:
-                session_id = start_event.aggregate_id
+            log.info(
+                "orchestrator.orphan_detection.candidates",
+                candidate_count=len(candidate_ids),
+            )
 
+            for session_id in candidate_ids:
                 # Replay all events for this session
                 try:
                     events = await self._event_store.replay("session", session_id)
@@ -927,9 +934,9 @@ class SessionRepository:
                 last_activity = last_event.timestamp
                 if last_activity is None:
                     # If no timestamp, use start_time from event data as fallback
-                    start_time_str = start_event.data.get("start_time")
-                    if start_time_str:
-                        last_activity = datetime.fromisoformat(start_time_str)
+                    start_ts = events[0].data.get("start_time") if events else None
+                    if start_ts:
+                        last_activity = datetime.fromisoformat(start_ts)
                     else:
                         continue
 
@@ -953,7 +960,7 @@ class SessionRepository:
 
             log.info(
                 "orchestrator.orphan_detection.complete",
-                total_sessions=len(start_events),
+                candidate_sessions=len(candidate_ids),
                 orphaned_count=len(orphaned),
             )
 

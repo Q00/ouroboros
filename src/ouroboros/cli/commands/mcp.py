@@ -138,22 +138,11 @@ async def _run_mcp_server(
     else:
         event_store = EventStore()
 
-    # Auto-cancel orphaned sessions on startup.
-    # Sessions left in RUNNING/PAUSED state for >1 hour are considered orphaned
-    # (e.g., from a previous crash). Cancel them before accepting new requests.
-    # NOTE: find_orphaned_sessions now checks for active runtime processes first,
-    # so sessions with live claude/codex agents won't be cancelled even if stale.
-    try:
-        await event_store.initialize()
-        repo = SessionRepository(event_store)
-        cancelled = await repo.cancel_orphaned_sessions()
-        if cancelled:
-            _stderr_console.print(
-                f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
-            )
-    except Exception as e:
-        # Auto-cleanup is best-effort — don't prevent server from starting
-        _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+    # Initialize EventStore eagerly — required by tool handlers.
+    # Orphan cleanup is deferred to a background task (see below) so that the
+    # MCP JSON-RPC handshake is not blocked by an expensive full-replay scan
+    # of the event history.  See https://github.com/Q00/ouroboros/issues/310
+    await event_store.initialize()
 
     # Auto-discover and connect MCP bridge for server-to-server communication
     from ouroboros.mcp.bridge import create_bridge_from_env
@@ -218,8 +207,23 @@ async def _run_mcp_server(
 
     _write_pid_file()
 
+    # Schedule orphan cleanup as a background task so it does not block
+    # the MCP handshake.  The scan is best-effort — failures are logged
+    # but never prevent the server from operating.
+    async def _deferred_orphan_cleanup() -> None:
+        try:
+            repo = SessionRepository(event_store)
+            cancelled = await repo.cancel_orphaned_sessions()
+            if cancelled:
+                _stderr_console.print(
+                    f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
+                )
+        except Exception as e:
+            _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+
     # Start serving
     try:
+        asyncio.create_task(_deferred_orphan_cleanup())
         await server.serve(transport=transport, host=host, port=port)
     finally:
         _cleanup_pid_file()
