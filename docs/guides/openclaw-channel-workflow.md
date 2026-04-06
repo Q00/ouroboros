@@ -54,8 +54,24 @@ Or manually copy `skills/ouroboros/SKILL.md` into your OpenClaw skills directory
 mcporter call ouroboros.ouroboros_channel_workflow \
   action=status channel_id=test
 
-# Or via OpenClaw agent
-# Just mention Ouroboros in a Discord channel where the bot is active
+# Or via OpenClaw agent — prefix with ooo in any channel:
+# ooo interview add dark mode to settings
+```
+
+### Usage
+
+All commands are prefixed with `ooo`:
+
+```
+ooo interview <request>    Start a requirements interview
+ooo seed                   Generate seed from current interview
+ooo run <description>      Start execution
+ooo eval                   Evaluate current execution
+ooo status                 Check workflow state
+ooo poll                   Poll execution progress
+ooo wait                   Long-poll for changes
+ooo repo <path>            Set default repo for channel
+ooo <answer text>          Answer an interview question
 ```
 
 ## Supported actions

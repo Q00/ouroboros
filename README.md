@@ -103,8 +103,12 @@ ouroboros setup                         # configure runtime
 
 See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
 
-Messaging/runtime integration guide:
-[OpenClaw channel workflow](./docs/guides/openclaw-channel-workflow.md)
+Chat platform integration (OpenClaw / Slack / Discord):
+```bash
+clawhub install ouroboros                    # install OpenClaw skill
+openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
+```
+Guide: [Channel workflow integration](./docs/guides/openclaw-channel-workflow.md)
 
 </details>
 
