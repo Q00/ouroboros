@@ -3,26 +3,11 @@
 These modules provide the stateful orchestration layer needed for
 message-based runtimes such as OpenClaw/Discord to drive the existing
 Ouroboros interview -> seed -> execution pipeline.
+
+OpenClaw natively supports MCP server registration and tool calls,
+so the adapter/bridge/orchestrator/contracts/ux layers have been removed.
 """
 
-from ouroboros.openclaw.adapter import (
-    OpenClawAdapterResponse,
-    OpenClawWorkflowAdapter,
-)
-from ouroboros.openclaw.bridge import (
-    OpenClawTransport,
-    OpenClawTransportBridge,
-    event_from_payload,
-)
-from ouroboros.openclaw.contracts import (
-    OpenClawChannelEvent,
-    OpenClawWorkflowCommand,
-)
-from ouroboros.openclaw.orchestrator import (
-    OpenClawReplySink,
-    OpenClawWorkflowOrchestrator,
-)
-from ouroboros.openclaw.ux import ParsedChannelCommand, parse_channel_command
 from ouroboros.openclaw.workflow import (
     ChannelRef,
     ChannelRepoRegistry,
@@ -45,20 +30,9 @@ __all__ = [
     "ChannelWorkflowRecord",
     "ChannelWorkflowRequest",
     "EntryPointDetection",
-    "OpenClawAdapterResponse",
-    "OpenClawChannelEvent",
-    "OpenClawTransport",
-    "OpenClawTransportBridge",
-    "OpenClawReplySink",
-    "OpenClawWorkflowAdapter",
-    "OpenClawWorkflowCommand",
-    "OpenClawWorkflowOrchestrator",
-    "ParsedChannelCommand",
     "WorkflowEntryPoint",
     "WorkflowStage",
     "detect_entry_point",
-    "event_from_payload",
-    "parse_channel_command",
     "render_channel_summary",
     "render_result_message",
     "render_stage_message",

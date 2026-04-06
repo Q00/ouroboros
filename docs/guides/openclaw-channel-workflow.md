@@ -1,7 +1,8 @@
-# OpenClaw Channel Workflow Integration
+# Channel Workflow Integration
 
-This guide explains how an OpenClaw/Discord adapter can drive the
-`ouroboros_channel_workflow` MCP tool for channel-native workflow orchestration.
+This guide explains how to connect a chat platform (OpenClaw, Slack, Discord,
+or any MCP-capable client) to the Ouroboros `ouroboros_channel_workflow` MCP
+tool for channel-native workflow orchestration.
 
 ## What this tool does
 
@@ -9,250 +10,127 @@ This guide explains how an OpenClaw/Discord adapter can drive the
 
 - per-channel queueing
 - default repository mapping per channel
-- input-detected entry points
+- input-detected entry points (interview vs. direct execution)
 - in-channel interview bridging
 - change-driven execution waiting and result reporting
 
-It is designed to sit **between** an OpenClaw message adapter and the existing
-Ouroboros interview / seed / execution pipeline.
+## Setup
 
-## Boundary models
+### 1. Install Ouroboros
 
-Use the OpenClaw contracts in:
-
-- `src/ouroboros/openclaw/contracts.py`
-
-Key models:
-
-- `OpenClawChannelEvent`
-- `OpenClawWorkflowCommand`
-- `OpenClawWorkflowAdapter`
-
-These models help normalize inbound channel events before translating them into
-flat MCP tool arguments.
-
-## Typical adapter flow
-
-### 1. Configure a default repo for a channel
-
-```python
-from ouroboros.openclaw.contracts import OpenClawWorkflowCommand
-
-command = OpenClawWorkflowCommand.set_repo(
-    channel_id="1234567890",
-    guild_id="guild-1",
-    repo="/workspace/my-project",
-)
-
-tool_args = command.to_tool_arguments()
-# -> {"action": "set_repo", "channel_id": "...", "guild_id": "...", "repo": "..."}
+```bash
+pip install ouroboros-ai
+# or
+uv tool install ouroboros-ai
 ```
 
-### 2. Convert an incoming channel message into a workflow command
+### 2. Register Ouroboros MCP server in OpenClaw
 
-```python
-from ouroboros.openclaw.contracts import (
-    OpenClawChannelEvent,
-    OpenClawWorkflowCommand,
-)
-
-event = OpenClawChannelEvent(
-    channel_id="1234567890",
-    guild_id="guild-1",
-    user_id="user-42",
-    message="work on issue #320",
-)
-
-command = OpenClawWorkflowCommand.from_event(event)
-tool_args = command.to_tool_arguments()
+```bash
+openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
 ```
 
-### 3. Call the MCP tool
+Verify the registration:
 
-```python
-result = await mcp_client.call_tool("ouroboros_channel_workflow", tool_args)
-channel_reply = result.text_content
+```bash
+openclaw mcp list
+openclaw mcp show ouroboros
 ```
 
-### 4. Wait for execution changes
+### 3. Install the OpenClaw skill
 
-Long-running execution should use the wait-style action rather than tight polling:
+From ClawHub:
 
-```python
-wait_args = OpenClawWorkflowCommand.wait(
-    channel_id="1234567890",
-    guild_id="guild-1",
-    timeout_seconds=30,
-).to_tool_arguments()
-
-result = await mcp_client.call_tool("ouroboros_channel_workflow", wait_args)
+```bash
+clawhub install ouroboros
 ```
 
-## Thin adapter example
+Or manually copy `skills/ouroboros/SKILL.md` into your OpenClaw skills directory.
 
-If you want the transport layer to stay minimal, use the adapter scaffold in:
+### 4. Test the connection
 
-- `src/ouroboros/openclaw/adapter.py`
-- `src/ouroboros/openclaw/ux.py`
+```bash
+# Using mcporter (ad-hoc MCP tool call)
+mcporter call ouroboros.ouroboros_channel_workflow \
+  action=status channel_id=test
 
-Example:
-
-```python
-from ouroboros.openclaw import (
-    OpenClawChannelEvent,
-    OpenClawWorkflowAdapter,
-)
-
-adapter = OpenClawWorkflowAdapter(client=mcp_client)
-
-event = OpenClawChannelEvent(
-    channel_id="1234567890",
-    guild_id="guild-1",
-    user_id="user-42",
-    message="/ouro new work on issue #320",
-)
-
-result = await adapter.handle_event(event)
-reply_text = result.value.reply_text
+# Or via OpenClaw agent
+# Just mention Ouroboros in a Discord channel where the bot is active
 ```
-
-That adapter will:
-
-1. parse explicit `/ouro ...` commands when present
-2. fall back to plain-message workflow submission otherwise
-3. call `ouroboros_channel_workflow`
-4. return normalized reply text + metadata for the channel transport
-
-Supported explicit commands:
-
-- `/ouro repo set <repo>`
-- `/ouro status`
-- `/ouro queue`
-- `/ouro poll`
-- `/ouro wait`
-- `/ouro new <message>`
-- `/ouro answer <message>`
 
 ## Supported actions
 
 ### `action="set_repo"`
+
 Configure the default repo for a channel.
 
-Required:
-- `channel_id`
-- `repo`
-
-Optional:
-- `guild_id`
-
-### `action="status"`
-Inspect the current channel workflow state.
-
-Required:
-- `channel_id`
-
-Optional:
-- `guild_id`
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `channel_id` | yes | Channel identifier |
+| `guild_id` | no | Guild/server identifier |
+| `repo` | yes | Repository path |
 
 ### `action="message"`
-Handle a user message in the channel.
 
-Required:
-- `channel_id`
-- `message`
+Handle a user message — starts interview or execution based on input detection.
 
-Optional:
-- `guild_id`
-- `user_id`
-- `repo`
-- `seed_content`
-- `seed_path`
-- `mode`
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `channel_id` | yes | Channel identifier |
+| `message` | yes | User message content |
+| `guild_id` | no | Guild/server identifier |
+| `user_id` | no | Caller identifier |
+| `repo` | no | Explicit repo override |
+| `seed_content` | no | Inline seed/spec YAML |
+| `seed_path` | no | Path to seed file |
+| `mode` | no | `auto`, `new`, or `answer` |
+| `message_id` | no | Transport message ID for dedup |
+| `event_id` | no | Transport event ID for dedup |
+
+### `action="status"`
+
+Inspect current channel workflow state.
 
 ### `action="poll"`
-Return the current active workflow state immediately.
 
-Required:
-- `channel_id`
-
-Optional:
-- `guild_id`
+Read the current active workflow state immediately.
 
 ### `action="wait"`
-Wait for execution state to change using the underlying job wait mechanism.
 
-Required:
-- `channel_id`
+Wait for execution state to change (long-poll).
 
-Optional:
-- `guild_id`
-- `timeout_seconds`
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `timeout_seconds` | no | Max wait duration (default: 30) |
 
-## Entry point behavior
+## Entry point detection
 
-The tool uses input detection:
+The tool automatically detects the appropriate starting stage:
 
-- vague natural-language request -> interview
-- issue / feature discussion -> interview
-- seed/spec-like YAML payload -> execution
-
-This means the adapter usually does **not** need to decide the starting stage itself.
+- **Vague natural-language request** → starts an interview
+- **Issue / feature discussion** → starts an interview
+- **Seed/spec-like YAML payload** → skips to execution
 
 ## Queue behavior
 
-- one active workflow per channel
-- additional requests in the same channel are queued
-- workflows in other channels remain independent
+- One active workflow per channel
+- Additional requests are queued
+- Workflows in other channels remain independent
+- Queue advances automatically when a workflow completes or fails
 
-## Current expectations for adapters
+## Response metadata
 
-An adapter should:
+Every response includes a stable metadata envelope:
 
-1. normalize inbound message events
-2. call `ouroboros_channel_workflow`
-3. post the returned text back into the originating channel
-4. wait for execution changes while a job is active
-
-An adapter does **not** need to:
-
-- implement its own queue
-- generate its own stage machine
-- manually decide interview vs execution for most inputs
-
-## Recommended runtime shape
-
-Use a hybrid structure:
-
-- **inbound messages** -> event-driven
-- **execution updates** -> change-driven waiting
-
-In practice:
-
-1. inbound Discord/OpenClaw message arrives
-2. adapter calls `ouroboros_channel_workflow(action="message", ...)`
-3. if execution starts, adapter repeatedly calls `action="wait"`
-4. adapter posts updates only when the returned text/meta actually change
-
-This gives users an event-driven experience without forcing the transport layer
-to implement its own workflow state machine.
-
-## Recommended channel / thread policy
-
-For the best Discord UX, prefer:
-
-- parent channel: brief intake / completion notifications
-- per-request thread: interview, execution progress, and terminal output
-
-Recommended approach:
-
-1. user posts a request in the parent channel
-2. transport creates or chooses a workflow thread
-3. all `ouroboros_channel_workflow` replies for that request go into the thread
-4. parent channel only receives short lifecycle summaries when needed
-
-This keeps interview noise and execution updates from overwhelming the main channel.
-
-## Current limitation
-
-This layer currently provides the Ouroboros-side orchestration contract and state model.
-It does not yet include a concrete OpenClaw transport adapter in this repository.
+| Key | Description |
+|-----|-------------|
+| `action` | Action that produced the response |
+| `channel_key` | Normalized channel key |
+| `workflow_id` | Workflow identifier |
+| `stage` | Current workflow stage |
+| `entry_point` | Detected entry point (`interview` / `execution`) |
+| `repo` | Target repository |
+| `session_id` | Interview/runtime session ID |
+| `job_id` | Background job ID |
+| `job_status` | Underlying job status |
+| `duplicate_delivery` | True if message was a redelivery |
