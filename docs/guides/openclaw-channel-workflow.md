@@ -30,6 +30,8 @@ uv tool install ouroboros-ai
 openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
 ```
 
+> If `openclaw mcp set` is not recognized, run `openclaw update` to get the latest version.
+
 Verify the registration:
 
 ```bash
@@ -57,6 +59,12 @@ mcporter call ouroboros.ouroboros_channel_workflow \
 # Or via OpenClaw agent — prefix with ooo in any channel:
 # ooo interview add dark mode to settings
 ```
+
+### Example: Interview in a channel
+
+![OpenClaw ooo interview example](../assets/openclaw-ooo.png)
+
+A user types `ooo interview` followed by their request, and the bot responds with a Socratic interview question — all within the chat channel.
 
 ### Usage
 

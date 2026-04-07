@@ -38,11 +38,12 @@
 
 ---
 
-> **New: PM Mode** — `ooo pm` generates a PRD through a guided PM-focused interview.
-> Ouroboros now supports product management workflows: stakeholder alignment, user story mapping, and structured PRD generation — all driven by the same Socratic engine.
+> **New: OpenClaw Integration** — Ouroboros now runs inside chat platforms via [OpenClaw](./docs/guides/openclaw-channel-workflow.md).
+> Install the skill, connect MCP, and your team can run `ooo` commands directly from Slack, Discord, or any OpenClaw-supported channel.
 >
-> ```
-> > ooo pm "I want to build a notification system"
+> ```bash
+> clawhub install ouroboros
+> openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
 > ```
 
 ---
@@ -110,6 +111,8 @@ Chat platform integration (OpenClaw / Slack / Discord):
 clawhub install ouroboros                    # install OpenClaw skill
 openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
 ```
+> If `openclaw mcp set` is not recognized, run `openclaw update` to get the latest version.
+
 Guide: [Channel workflow integration](./docs/guides/openclaw-channel-workflow.md)
 
 </details>
