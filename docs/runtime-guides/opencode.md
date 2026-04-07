@@ -23,10 +23,14 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
 ## Installing OpenCode
 
-OpenCode is distributed as a standalone binary. Install via the official script:
+OpenCode is distributed as a standalone binary. Install via the official installer script or npm:
 
 ```bash
+# Recommended: official installer
 curl -fsSL https://opencode.ai/install | bash
+
+# Alternative: npm
+npm i -g opencode-ai@latest
 ```
 
 Verify the installation:

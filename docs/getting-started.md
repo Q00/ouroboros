@@ -198,7 +198,7 @@ Inside a Claude Code session:
 ooo interview "I want to build a personal finance tracker"
 ```
 
-> **CLI note:** You can also run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"`. Inside a Claude Code session, use `ooo interview` directly. Inside Codex CLI or OpenCode sessions, first run `ouroboros setup --runtime <codex|opencode>` to register the MCP server.
+> **CLI note:** You can also run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"`. For in-agent `ooo interview` usage: Claude Code works out-of-the-box; Codex CLI and OpenCode require `ouroboros setup --runtime <codex|opencode>` first to register the MCP server.
 
 The Socratic Interviewer asks clarifying questions:
 - "What platforms do you want to track?" (Bank accounts, credit cards, investments)
@@ -289,7 +289,7 @@ ooo interview "Add real-time notifications to the chat app"
 ooo run
 ```
 
-> **Terminal users:** Run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"`, then execute with `ouroboros run workflow <seed_file>`. For Codex or OpenCode agent sessions, first run `ouroboros setup --runtime <codex|opencode>` to register the MCP server.
+> **Terminal users:** Run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"`, then execute with `ouroboros run workflow <seed_file>`. (Separate from in-agent `ooo` usage; terminal flows don't require MCP registration.)
 
 ---
 

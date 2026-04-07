@@ -80,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code, Codex CLI, and OpenCode. The installer detects Claude Code and Codex CLI automatically, registers the MCP server, and installs skills. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
+> Works with Claude Code, Codex CLI, and OpenCode. The installer detects Claude Code and Codex CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
 
 <details>
 <summary><strong>Other install methods</strong></summary>
