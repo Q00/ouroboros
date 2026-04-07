@@ -543,12 +543,20 @@ class MCPServerAdapter:
         """
         transport = validate_transport(transport)
 
-        # FastMCP transport cannot provide credentials, so auth will fail
+        # FastMCP transport cannot provide credentials or client identity
         if self._security.auth_config.method != AuthMethod.NONE:
             msg = (
                 f"FastMCP transport does not support authentication. "
                 f"Configured auth method: {self._security.auth_config.method.value}. "
                 f"All tool calls will be rejected. Use AuthMethod.NONE for FastMCP transports."
+            )
+            raise ValueError(msg)
+
+        if self._security.rate_limit_config.enabled:
+            msg = (
+                "FastMCP transport does not support rate limiting "
+                "(requires client identity). Configured rate_limit_config.enabled=True "
+                "will have no effect. Disable rate limiting for FastMCP transports."
             )
             raise ValueError(msg)
 

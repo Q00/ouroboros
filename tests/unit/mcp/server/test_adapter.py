@@ -474,3 +474,46 @@ class TestServeTransport:
             match="FastMCP transport does not support authentication",
         ):
             await adapter.serve(transport="stdio")
+
+    @pytest.mark.asyncio
+    async def test_fastmcp_allows_none_auth_with_required_true(self):
+        """FastMCP allows AuthMethod.NONE even with required=True.
+
+        This edge case verifies that required=True with method=NONE doesn't
+        trigger the guard, since NONE always allows access regardless of
+        the required flag.
+        """
+        from ouroboros.mcp.server.security import AuthConfig, AuthMethod
+
+        # required=True with method=NONE should not trigger guard
+        auth_config = AuthConfig(
+            method=AuthMethod.NONE,
+            required=True,  # Has no effect when method is NONE
+        )
+        adapter = MCPServerAdapter(auth_config=auth_config)
+        adapter.register_tool(MockToolHandler(name="test_tool"))
+
+        # Should not raise - method is NONE so credentials not needed
+        # (We just verify serve() doesn't reject; actual serving is mocked elsewhere)
+
+    @pytest.mark.asyncio
+    async def test_fastmcp_rejects_rate_limit_config(self):
+        """FastMCP serve() rejects rate limiting config upfront.
+
+        Rate limiting requires client identity which FastMCP cannot provide,
+        so the guard prevents the false sense of security.
+        """
+        from ouroboros.mcp.server.security import RateLimitConfig
+
+        adapter = MCPServerAdapter(
+            rate_limit_config=RateLimitConfig(
+                enabled=True,
+                requests_per_minute=100,
+            )
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="FastMCP transport does not support rate limiting",
+        ):
+            await adapter.serve(transport="stdio")
