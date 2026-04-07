@@ -246,7 +246,7 @@ class TestClaudeSetup:
                     "mcpServers": {
                         "ouroboros": {
                             "command": "uvx",
-                            "args": ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"],
+                            "args": ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"],
                             "timeout": 600,
                         }
                     }
@@ -268,7 +268,7 @@ class TestClaudeSetup:
         # Stale args (ouroboros-ai without [claude]) should be updated
         assert claude_mcp["mcpServers"]["ouroboros"]["args"] == [
             "--from",
-            "ouroboros-ai[claude]",
+            "ouroboros-ai[mcp,claude]",
             "ouroboros",
             "mcp",
             "serve",
@@ -283,7 +283,7 @@ class TestClaudeSetup:
             (
                 lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
                 "uvx",
-                ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"],
+                ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"],
             ),
             # no uvx, ouroboros binary available → binary entry
             (
@@ -404,7 +404,7 @@ class TestClaudeSetup:
         claude_mcp = json.loads(claude_config.read_text(encoding="utf-8"))
         # Should be updated from python3 to uvx
         assert claude_mcp["mcpServers"]["ouroboros"]["command"] == "uvx"
-        assert "ouroboros-ai[claude]" in str(claude_mcp["mcpServers"]["ouroboros"]["args"])
+        assert "ouroboros-ai[mcp,claude]" in str(claude_mcp["mcpServers"]["ouroboros"]["args"])
 
     def test_setup_claude_skips_write_when_args_already_current(self, tmp_path: Path) -> None:
         """No file write when args are already up to date."""
@@ -413,7 +413,7 @@ class TestClaudeSetup:
         config_path = config_dir / "config.yaml"
         config_path.write_text("{}", encoding="utf-8")
 
-        current_args = ["--from", "ouroboros-ai[claude]", "ouroboros", "mcp", "serve"]
+        current_args = ["--from", "ouroboros-ai[mcp,claude]", "ouroboros", "mcp", "serve"]
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         claude_config = claude_dir / "mcp.json"

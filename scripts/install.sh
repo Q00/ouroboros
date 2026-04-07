@@ -80,7 +80,7 @@ if [ "$HAS_CODEX" = true ] && [ "$HAS_CLAUDE" = true ]; then
   if [ -t 0 ]; then
     echo
     echo "Both Codex and Claude detected. Which runtime do you want to use?"
-    echo "  [1] Claude  (pip install ${PACKAGE_NAME}[claude])  ← recommended"
+    echo "  [1] Claude  (pip install ${PACKAGE_NAME}[mcp,claude])  ← recommended"
     echo "  [2] Codex   (pip install ${PACKAGE_NAME})"
     echo "  [3] All     (pip install ${PACKAGE_NAME}[all])"
     read -rp "Select [1]: " choice
@@ -117,9 +117,9 @@ else
   fi
   case "${choice:-1}" in
     0) EXTRAS=""; RUNTIME="" ;;
-    2) EXTRAS=""; RUNTIME="codex" ;;
+    2) EXTRAS="[mcp]"; RUNTIME="codex" ;;
     3) EXTRAS="[all]"; RUNTIME="" ;;
-    *) EXTRAS="[claude]"; RUNTIME="claude" ;;
+    *) EXTRAS="[mcp,claude]"; RUNTIME="claude" ;;
   esac
 fi
 
@@ -193,14 +193,14 @@ if command -v claude &>/dev/null; then
   # MCP command matches the installer that actually ran in step 3
   if [ "$INSTALL_METHOD" = "uv" ]; then
     case "$EXTRAS" in
-      "[claude]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","--with","claude-agent-sdk>=0.1.0","--with","anthropic>=0.52.0","ouroboros","mcp","serve"]}'
+      "[mcp,claude]")
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[mcp,claude]","ouroboros","mcp","serve"]}'
         ;;
       "[all]")
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","--with","claude-agent-sdk>=0.1.0","--with","anthropic>=0.52.0","--with","litellm>=1.80.0,<=1.82.6","ouroboros","mcp","serve"]}'
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[all]","ouroboros","mcp","serve"]}'
         ;;
       *)
-        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai","ouroboros","mcp","serve"]}'
+        OUROBOROS_ENTRY='{"command":"uvx","args":["--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
         ;;
     esac
   elif [ "$INSTALL_METHOD" = "pipx" ]; then

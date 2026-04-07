@@ -35,7 +35,7 @@ from ouroboros.persistence.brownfield import BrownfieldStore
 # Canonical MCP args for Claude Code uvx installs — single source of truth.
 _CLAUDE_UVX_ARGS: list[str] = [
     "--from",
-    "ouroboros-ai[claude]",
+    "ouroboros-ai[mcp,claude]",
     "ouroboros",
     "mcp",
     "serve",
@@ -166,7 +166,7 @@ _CODEX_MCP_SECTION = """# Ouroboros MCP hookup for Codex CLI.
 
 [mcp_servers.ouroboros]
 command = "uvx"
-args = ["--from", "ouroboros-ai", "ouroboros", "mcp", "serve"]
+args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]
 
 [mcp_servers.ouroboros.env]
 OUROBOROS_AGENT_RUNTIME = "codex"
