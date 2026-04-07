@@ -129,7 +129,7 @@ After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are in
 | `ooo evaluate` | Yes | *(MCP only)* |
 | `ooo evolve` | Yes | *(MCP only)* |
 | `ooo ralph` | Yes | *(MCP only)* |
-| `ooo cancel` | Yes | `ouroboros cancel execution <session_id>` |
+| `ooo cancel` | Yes | `ouroboros cancel execution <execution_id>` |
 | `ooo unstuck` | Yes | *(MCP only)* |
 | `ooo tutorial` | Yes | *(MCP only)* |
 | `ooo welcome` | Yes | *(MCP only)* |
