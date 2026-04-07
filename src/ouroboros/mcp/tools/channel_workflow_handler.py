@@ -44,6 +44,7 @@ class ChannelWorkflowHandler:
     job_status_handler: JobStatusHandler | None = field(default=None, repr=False)
     job_wait_handler: JobWaitHandler | None = field(default=None, repr=False)
     job_result_handler: JobResultHandler | None = field(default=None, repr=False)
+    default_repo: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._workflow_manager = self.workflow_manager or ChannelWorkflowManager()
@@ -348,6 +349,7 @@ class ChannelWorkflowHandler:
             arguments.get("repo")
             or self._repo_registry.get(channel)
             or (active.repo if active else None)
+            or self.default_repo
         )
         if not isinstance(repo, str) or not repo.strip():
             return Result.err(

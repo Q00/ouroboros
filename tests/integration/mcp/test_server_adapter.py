@@ -590,7 +590,7 @@ class TestCreateOuroborosServer:
         assert status_result.is_ok
         assert "Channel Workflow Summary" in status_result.value.text_content
         assert str(tmp_path / "repo") in status_result.value.text_content
-        assert (tmp_path / "data" / "openclaw.db").exists()
+        assert (Path.home() / ".ouroboros" / "ouroboros.db").exists()
 
 
 class TestMCPServerAdapterConcurrency:

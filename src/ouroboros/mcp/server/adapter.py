@@ -1257,7 +1257,8 @@ def create_ouroboros_server(
         validator=_evolution_validator,
     )
     job_manager = JobManager(event_store)
-    openclaw_db_path = state_dir / "openclaw.db"
+    cwd = Path.cwd()
+    openclaw_db_path = Path.home() / ".ouroboros" / "ouroboros.db"
     workflow_manager = ChannelWorkflowManager(openclaw_db_path)
     repo_registry = ChannelRepoRegistry(openclaw_db_path)
 
@@ -1327,6 +1328,7 @@ def create_ouroboros_server(
         ChannelWorkflowHandler(
             workflow_manager=workflow_manager,
             repo_registry=repo_registry,
+            default_repo=str(cwd) if str(cwd) != "/" else None,
             interview_handler=InterviewHandler(
                 interview_engine=interview_engine,
                 event_store=event_store,

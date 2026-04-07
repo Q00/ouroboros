@@ -152,6 +152,7 @@ def channel_workflow_handler(
     job_wait_handler: JobWaitHandler | None = None,
     job_status_handler: JobStatusHandler | None = None,
     job_result_handler: JobResultHandler | None = None,
+    default_repo: str | None = None,
 ) -> ChannelWorkflowHandler:
     """Create a ChannelWorkflowHandler instance.
 
@@ -171,6 +172,7 @@ def channel_workflow_handler(
         job_wait_handler=job_wait_handler or JobWaitHandler(),
         job_status_handler=job_status_handler or JobStatusHandler(),
         job_result_handler=job_result_handler or JobResultHandler(),
+        default_repo=default_repo,
     )
 
 

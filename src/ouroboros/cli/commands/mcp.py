@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Annotated
 
 from rich.console import Console
@@ -98,6 +101,60 @@ def _check_stale_instance() -> bool:
         return True
 
 
+def _ensure_shell_env(*, timeout: float = 10.0) -> None:
+    """Load login-shell environment when launched outside a login shell.
+
+    When a gateway process (e.g., OpenClaw) spawns ``ouroboros mcp serve``,
+    the child inherits only a minimal environment. This sources the user's
+    shell profile to recover PATH, ANTHROPIC_API_KEY, etc.
+
+    Uses JSON serialization to avoid multiline env value parsing issues.
+    Avoids the ``-i`` (interactive) flag which hangs on oh-my-zsh/p10k.
+    """
+    # Fast path: if key indicators are already present, skip
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return
+
+    shell = os.environ.get("SHELL", "/bin/zsh" if sys.platform == "darwin" else "/bin/bash")
+    shell_name = Path(shell).name
+
+    # Dump env as JSON — unambiguous, handles multiline values
+    dump_cmd = 'python3 -c "import os,json,sys; json.dump(dict(os.environ), sys.stdout)"'
+
+    if shell_name == "zsh":
+        cmd = [shell, "-l", "-c", f"[[ -f ~/.zshrc ]] && source ~/.zshrc 2>/dev/null; {dump_cmd}"]
+    elif shell_name == "bash":
+        cmd = [shell, "-l", "-c", f"[[ -f ~/.bashrc ]] && source ~/.bashrc 2>/dev/null; {dump_cmd}"]
+    else:
+        cmd = [shell, "-l", "-c", dump_cmd]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        _stderr_console.print(f"[yellow]Warning: shell env load failed: {e}[/yellow]")
+        return
+
+    if result.returncode != 0:
+        return
+
+    try:
+        env = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        _stderr_console.print("[yellow]Warning: could not parse shell env output[/yellow]")
+        return
+
+    current_path_dirs = set(os.environ.get("PATH", "").split(os.pathsep))
+    for key, val in env.items():
+        if key == "PATH":
+            new_dirs = [d for d in val.split(os.pathsep) if d and d not in current_path_dirs]
+            if new_dirs:
+                os.environ["PATH"] = (
+                    os.pathsep.join(new_dirs) + os.pathsep + os.environ.get("PATH", "")
+                )
+        elif key not in os.environ:
+            os.environ[key] = val
+
+
 app = typer.Typer(
     name="mcp",
     help="MCP (Model Context Protocol) server commands.",
@@ -123,6 +180,9 @@ async def _run_mcp_server(
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
     """
+    # Ensure login-shell environment is available (critical for gateway-spawned processes)
+    _ensure_shell_env()
+
     from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore

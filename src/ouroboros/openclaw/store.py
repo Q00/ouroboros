@@ -11,7 +11,7 @@ from typing import Any
 
 def default_openclaw_db_path() -> Path:
     """Return the default SQLite database path for OpenClaw workflow state."""
-    return Path.cwd() / ".ouroboros" / "openclaw.db"
+    return Path.home() / ".ouroboros" / "ouroboros.db"
 
 
 class OpenClawStateStore:
