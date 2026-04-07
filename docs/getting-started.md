@@ -198,7 +198,7 @@ Inside a Claude Code session:
 ooo interview "I want to build a personal finance tracker"
 ```
 
-> **CLI note:** You can also run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"`. For in-agent `ooo interview` usage: Claude Code works out-of-the-box; Codex CLI and OpenCode require `ouroboros setup --runtime <codex|opencode>` first to register the MCP server.
+> **CLI note:** You can also run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"` (where `<backend>` is `claude_code`, `codex`, `opencode`, or `litellm`). For in-agent `ooo interview` usage: Claude Code works out-of-the-box; Codex CLI and OpenCode require `ouroboros setup --runtime <codex|opencode>` first to register the MCP server.
 
 The Socratic Interviewer asks clarifying questions:
 - "What platforms do you want to track?" (Bank accounts, credit cards, investments)

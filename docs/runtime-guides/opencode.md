@@ -106,7 +106,7 @@ This:
 
 - Detects the `opencode` binary on your `PATH` and records it as `orchestrator.opencode_cli_path`
 - Writes `orchestrator.runtime_backend: opencode` and `llm.backend: opencode` to `~/.ouroboros/config.yaml`
-- Registers the Ouroboros MCP server in OpenCode's JSONC configuration (`~/.config/opencode/opencode.json`). Note: The setup process rewrites the file as plain JSON and removes comments for compatibility.
+- Registers the Ouroboros MCP server in OpenCode's configuration file (`~/.config/opencode/opencode.json`). Note: The setup process rewrites the file as plain JSON and removes comments (the file supports JSONC format initially, but setup normalizes to JSON for compatibility).
 
 ### `ooo` Skill Availability on OpenCode
 
