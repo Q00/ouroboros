@@ -23,7 +23,7 @@ from ouroboros.mcp.errors import (
     MCPToolError,
 )
 from ouroboros.mcp.server.protocol import PromptHandler, ResourceHandler, ToolHandler
-from ouroboros.mcp.server.security import AuthConfig, RateLimitConfig, SecurityLayer
+from ouroboros.mcp.server.security import AuthConfig, AuthMethod, RateLimitConfig, SecurityLayer
 from ouroboros.mcp.types import (
     MCPCapabilities,
     MCPPromptDefinition,
@@ -537,8 +537,28 @@ class MCPServerAdapter:
             transport: Transport type - "stdio" or "sse" (case-insensitive).
             host: Host to bind to (SSE only). Defaults to "localhost".
             port: Port to bind to (SSE only). Defaults to 8080.
+
+        Raises:
+            ValueError: If transport is invalid or incompatible with security config.
         """
         transport = validate_transport(transport)
+
+        # FastMCP transport cannot provide credentials or client identity
+        if self._security.auth_config.method != AuthMethod.NONE:
+            msg = (
+                f"FastMCP transport does not support authentication. "
+                f"Configured auth method: {self._security.auth_config.method.value}. "
+                f"All tool calls will be rejected. Use AuthMethod.NONE for FastMCP transports."
+            )
+            raise ValueError(msg)
+
+        if self._security.rate_limit_config.enabled:
+            msg = (
+                "FastMCP transport does not support rate limiting "
+                "(requires client identity). Configured rate_limit_config.enabled=True "
+                "will have no effect. Disable rate limiting for FastMCP transports."
+            )
+            raise ValueError(msg)
 
         try:
             from mcp.server.fastmcp import FastMCP
@@ -582,7 +602,12 @@ class MCPServerAdapter:
                     for key, value in kwargs.items():
                         normalized_kwargs.setdefault(key, value)
 
-                    result = await h.handle(normalized_kwargs)
+                    # Route through call_tool() to enforce security checks.
+                    # FastMCP does not provide credentials, so:
+                    # - Input validation is enforced
+                    # - Auth/authorization will reject if any auth method configured
+                    # - Rate limiting cannot apply (requires client_id)
+                    result = await self.call_tool(h.definition.name, normalized_kwargs)
                     if result.is_ok:
                         # Convert MCPToolResult to FastMCP format
                         tool_result = result.value

@@ -402,3 +402,138 @@ class TestServeTransport:
             await adapter.serve(transport="sse", host="localhost", port=0)
 
         assert mock_fastmcp_cls.call_args.kwargs["port"] == 0
+
+    @pytest.mark.asyncio
+    async def test_fastmcp_path_enforces_security(self):
+        """FastMCP tool wrapper routes through call_tool to enforce security checks."""
+        from unittest.mock import MagicMock, patch
+
+        # Create adapter with no auth but input validation enabled (default)
+        adapter = MCPServerAdapter()
+        adapter.register_tool(MockToolHandler(name="secure_tool"))
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        captured_wrapper = None
+
+        def capture_tool_decorator(name, description):
+            """Capture the tool wrapper function."""
+
+            def decorator(func):
+                nonlocal captured_wrapper
+                captured_wrapper = func
+                return func
+
+            return decorator
+
+        mock_instance.tool = capture_tool_decorator
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_stdio_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            await adapter.serve(transport="stdio")
+
+        # Verify wrapper was captured
+        assert captured_wrapper is not None
+
+        # Test: Path traversal should be rejected by input validation
+        with pytest.raises(RuntimeError, match="Path traversal detected"):
+            await captured_wrapper(input="../../../etc/passwd")
+
+    @pytest.mark.asyncio
+    async def test_fastmcp_rejects_auth_config_at_startup(self):
+        """FastMCP serve() rejects auth config upfront with clear error.
+
+        This guard prevents the confusing failure mode where the server
+        starts successfully but then rejects every tool call at runtime.
+        """
+        from ouroboros.mcp.server.security import AuthConfig, AuthMethod
+
+        # Create adapter with auth required
+        auth_config = AuthConfig(
+            method=AuthMethod.API_KEY,
+            api_keys=frozenset(["valid-key"]),
+            required=True,
+        )
+        adapter = MCPServerAdapter(auth_config=auth_config)
+
+        # serve() should reject the incompatible configuration immediately
+        with pytest.raises(
+            ValueError,
+            match="FastMCP transport does not support authentication",
+        ):
+            await adapter.serve(transport="stdio")
+
+    @pytest.mark.asyncio
+    async def test_fastmcp_allows_none_auth_with_required_true(self):
+        """FastMCP allows AuthMethod.NONE even with required=True.
+
+        This edge case verifies that required=True with method=NONE doesn't
+        trigger the guard, since NONE always allows access regardless of
+        the required flag.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from ouroboros.mcp.server.security import AuthConfig, AuthMethod
+
+        # required=True with method=NONE should not trigger guard
+        auth_config = AuthConfig(
+            method=AuthMethod.NONE,
+            required=True,  # Has no effect when method is NONE
+        )
+        adapter = MCPServerAdapter(auth_config=auth_config)
+        adapter.register_tool(MockToolHandler(name="test_tool"))
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.tool = MagicMock(return_value=lambda f: f)
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_stdio_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            # Should not raise - method is NONE so guard passes
+            await adapter.serve(transport="stdio")
+
+    @pytest.mark.asyncio
+    async def test_fastmcp_rejects_rate_limit_config(self):
+        """FastMCP serve() rejects rate limiting config upfront.
+
+        Rate limiting requires client identity which FastMCP cannot provide,
+        so the guard prevents the false sense of security.
+        """
+        from ouroboros.mcp.server.security import RateLimitConfig
+
+        adapter = MCPServerAdapter(
+            rate_limit_config=RateLimitConfig(
+                enabled=True,
+                requests_per_minute=100,
+            )
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="FastMCP transport does not support rate limiting",
+        ):
+            await adapter.serve(transport="stdio")

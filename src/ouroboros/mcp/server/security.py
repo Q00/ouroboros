@@ -205,9 +205,11 @@ class Authenticator:
             Result containing auth context or auth error.
         """
         if self._config.method == AuthMethod.NONE:
+            # NONE method always authenticates; `required` flag is irrelevant
+            # when no credentials are needed.
             return Result.ok(
                 AuthContext(
-                    authenticated=not self._config.required,
+                    authenticated=True,
                     permissions=frozenset(Permission),
                 )
             )
