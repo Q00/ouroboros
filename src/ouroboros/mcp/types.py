@@ -17,6 +17,7 @@ class TransportType(StrEnum):
     STDIO = "stdio"
     SSE = "sse"
     STREAMABLE_HTTP = "streamable-http"
+    HTTP = "http"
 
 
 class ToolInputType(StrEnum):
@@ -59,7 +60,15 @@ class MCPServerConfig:
         if self.transport == TransportType.STDIO and not self.command:
             msg = "command is required for stdio transport"
             raise ValueError(msg)
-        if self.transport in (TransportType.SSE, TransportType.STREAMABLE_HTTP) and not self.url:
+        if (
+            self.transport
+            in (
+                TransportType.SSE,
+                TransportType.STREAMABLE_HTTP,
+                TransportType.HTTP,
+            )
+            and not self.url
+        ):
             msg = f"url is required for {self.transport} transport"
             raise ValueError(msg)
 

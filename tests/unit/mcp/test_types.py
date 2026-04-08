@@ -29,6 +29,7 @@ class TestTransportType:
         assert TransportType.STDIO == "stdio"
         assert TransportType.SSE == "sse"
         assert TransportType.STREAMABLE_HTTP == "streamable-http"
+        assert TransportType.HTTP == "http"
 
 
 class TestMCPServerConfig:
@@ -61,6 +62,23 @@ class TestMCPServerConfig:
                 name="test",
                 transport=TransportType.SSE,
             )
+
+    def test_http_config_requires_url(self) -> None:
+        """HTTP transport requires URL."""
+        with pytest.raises(ValueError, match="url is required"):
+            MCPServerConfig(
+                name="test",
+                transport=TransportType.HTTP,
+            )
+
+    def test_valid_http_config(self) -> None:
+        """Valid HTTP config is created successfully."""
+        config = MCPServerConfig(
+            name="test",
+            transport=TransportType.HTTP,
+            url="http://localhost:3000",
+        )
+        assert config.url == "http://localhost:3000"
 
     def test_valid_sse_config(self) -> None:
         """Valid SSE config is created successfully."""

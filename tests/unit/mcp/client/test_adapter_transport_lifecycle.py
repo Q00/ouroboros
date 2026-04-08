@@ -223,3 +223,224 @@ class TestHappyPath:
         transport_cm.__aexit__.assert_called_once()
         assert adapter._session is None
         assert adapter._transport_cm is None
+
+
+def _make_sse_config(name: str = "test") -> MCPServerConfig:
+    return MCPServerConfig(
+        name=name,
+        transport=TransportType.SSE,
+        url="http://localhost:8080/sse",
+    )
+
+
+def _make_http_config(
+    name: str = "test", transport: TransportType = TransportType.HTTP
+) -> MCPServerConfig:
+    return MCPServerConfig(
+        name=name,
+        transport=transport,
+        url="http://localhost:3000",
+    )
+
+
+def _mock_http_transport_cm(read=None, write=None, get_session_id=None):
+    """Create a mock streamable_http_client context manager (3-tuple)."""
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(
+        return_value=(read or MagicMock(), write or MagicMock(), get_session_id or MagicMock())
+    )
+    cm.__aexit__ = AsyncMock(return_value=None)
+    return cm
+
+
+class TestSSETransportConnect:
+    """Tests for SSE transport connect lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_sse_connect_stores_session(self):
+        """SSE connect succeeds, session stored."""
+        adapter = MCPClientAdapter()
+        transport_cm = _mock_transport_cm()
+        session = _mock_session()
+
+        with (
+            patch("mcp.client.sse.sse_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+        ):
+            result = await adapter.connect(_make_sse_config())
+
+        assert result.is_ok
+        assert adapter._session is not None
+        assert adapter._transport_cm is transport_cm
+
+    @pytest.mark.asyncio
+    async def test_sse_connect_requires_url(self):
+        """SSE config without url raises ValueError."""
+        with pytest.raises(ValueError, match="url is required"):
+            MCPServerConfig(name="test", transport=TransportType.SSE)
+
+    @pytest.mark.asyncio
+    async def test_sse_connect_rollback_on_init_fail(self):
+        """If initialize() fails on SSE, transport cleaned up."""
+        adapter = MCPClientAdapter(max_retries=1)
+        transport_cm = _mock_transport_cm()
+        session = _mock_session(init_fail=True)
+
+        with (
+            patch("mcp.client.sse.sse_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+        ):
+            result = await adapter.connect(_make_sse_config())
+
+        assert result.is_err
+        transport_cm.__aexit__.assert_called_with(None, None, None)
+        assert adapter._transport_cm is None
+        assert adapter._session is None
+
+
+class TestHTTPTransportConnect:
+    """Tests for HTTP / streamable-http transport connect lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_http_connect_stores_session(self):
+        """HTTP connect succeeds, session stored."""
+        adapter = MCPClientAdapter()
+        transport_cm = _mock_http_transport_cm()
+        session = _mock_session()
+
+        with (
+            patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+            patch("mcp.shared._httpx_utils.create_mcp_http_client"),
+        ):
+            result = await adapter.connect(_make_http_config())
+
+        assert result.is_ok
+        assert adapter._session is not None
+        assert adapter._transport_cm is transport_cm
+
+    @pytest.mark.asyncio
+    async def test_streamable_http_connect_stores_session(self):
+        """STREAMABLE_HTTP connect succeeds, session stored."""
+        adapter = MCPClientAdapter()
+        transport_cm = _mock_http_transport_cm()
+        session = _mock_session()
+
+        with (
+            patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+            patch("mcp.shared._httpx_utils.create_mcp_http_client"),
+        ):
+            result = await adapter.connect(
+                _make_http_config(transport=TransportType.STREAMABLE_HTTP)
+            )
+
+        assert result.is_ok
+        assert adapter._session is not None
+        assert adapter._transport_cm is transport_cm
+
+    @pytest.mark.asyncio
+    async def test_http_connect_requires_url(self):
+        """HTTP config without url raises ValueError."""
+        with pytest.raises(ValueError, match="url is required"):
+            MCPServerConfig(name="test", transport=TransportType.HTTP)
+
+    @pytest.mark.asyncio
+    async def test_http_connect_rollback_on_init_fail(self):
+        """If initialize() fails on HTTP, transport cleaned up."""
+        adapter = MCPClientAdapter(max_retries=1)
+        transport_cm = _mock_http_transport_cm()
+        session = _mock_session(init_fail=True)
+
+        with (
+            patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+            patch("mcp.shared._httpx_utils.create_mcp_http_client"),
+        ):
+            result = await adapter.connect(_make_http_config())
+
+        assert result.is_err
+        transport_cm.__aexit__.assert_called_with(None, None, None)
+        assert adapter._transport_cm is None
+        assert adapter._session is None
+
+    @pytest.mark.asyncio
+    async def test_http_connect_passes_headers(self):
+        """When config has headers, create_mcp_http_client called with them."""
+        adapter = MCPClientAdapter()
+        transport_cm = _mock_http_transport_cm()
+        session = _mock_session()
+
+        config = MCPServerConfig(
+            name="test",
+            transport=TransportType.HTTP,
+            url="http://localhost:3000",
+            headers={"Authorization": "Bearer token123"},
+        )
+
+        with (
+            patch(
+                "mcp.client.streamable_http.streamable_http_client", return_value=transport_cm
+            ) as mock_http,
+            patch("mcp.ClientSession", return_value=session),
+            patch("mcp.shared._httpx_utils.create_mcp_http_client") as mock_factory,
+        ):
+            result = await adapter.connect(config)
+
+        assert result.is_ok
+        mock_factory.assert_called_once()
+        call_kwargs = mock_factory.call_args
+        assert call_kwargs.kwargs["headers"] == {"Authorization": "Bearer token123"}
+        mock_http.assert_called_once_with(
+            "http://localhost:3000",
+            http_client=mock_factory.return_value,
+        )
+
+    @pytest.mark.asyncio
+    async def test_http_connect_uses_mcp_timeout_defaults(self):
+        """HTTP transport uses MCP-appropriate timeouts with extended read for streaming."""
+        adapter = MCPClientAdapter()
+        transport_cm = _mock_http_transport_cm()
+        session = _mock_session()
+
+        config = MCPServerConfig(
+            name="test",
+            transport=TransportType.HTTP,
+            url="http://localhost:3000",
+            timeout=15.0,
+        )
+
+        with (
+            patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+            patch("mcp.shared._httpx_utils.create_mcp_http_client") as mock_factory,
+            patch("httpx.Timeout") as mock_timeout,
+        ):
+            result = await adapter.connect(config)
+
+        assert result.is_ok
+        # read timeout should be max(config.timeout, 300.0) for SSE streaming
+        mock_timeout.assert_called_once_with(15.0, read=300.0)
+        mock_factory.assert_called_once_with(
+            headers=None,
+            timeout=mock_timeout.return_value,
+        )
+
+    @pytest.mark.asyncio
+    async def test_http_disconnect_cleans_transport_on_error(self):
+        """HTTP transport cleaned up when session init fails."""
+        adapter = MCPClientAdapter(max_retries=1)
+        transport_cm = _mock_http_transport_cm()
+        session = _mock_session(init_fail=True)
+
+        with (
+            patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
+            patch("mcp.ClientSession", return_value=session),
+            patch("mcp.shared._httpx_utils.create_mcp_http_client"),
+        ):
+            result = await adapter.connect(_make_http_config())
+
+        assert result.is_err
+        transport_cm.__aexit__.assert_called_with(None, None, None)
+        assert adapter._transport_cm is None
+        assert adapter._session is None

@@ -74,6 +74,7 @@ class TransportType(StrEnum):
     STDIO = "stdio"
     SSE = "sse"
     STREAMABLE_HTTP = "streamable-http"
+    HTTP = "http"
 ```
 
 ### Enum: `ContentType`
@@ -122,6 +123,13 @@ config = MCPServerConfig(
     transport=TransportType.SSE,
     url="https://api.example.com/mcp",
     headers={"Authorization": "Bearer xxx"},
+)
+
+# HTTP transport (alias for streamable-http, used by Claude Code)
+http_config = MCPServerConfig(
+    name="github-mcp",
+    transport=TransportType.HTTP,
+    url="http://localhost:3000/mcp",
 )
 ```
 

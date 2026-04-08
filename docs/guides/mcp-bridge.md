@@ -37,6 +37,10 @@ mcp_servers:
     command: npx
     args: ["-y", "openchrome-mcp@latest", "serve", "--auto-launch"]
 
+  - name: github
+    transport: http
+    url: "http://localhost:3000/mcp"
+
 connection:
   timeout_seconds: 30
   retry_attempts: 3

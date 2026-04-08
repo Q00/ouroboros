@@ -624,7 +624,7 @@ ouroboros mcp serve [OPTIONS]
 |--------|-------------|
 | `-h, --host TEXT` | Host to bind to (default: localhost) |
 | `-p, --port INTEGER` | Port to bind to (default: 8080) |
-| `-t, --transport TEXT` | Transport type: `stdio` or `sse` (default: stdio) |
+| `-t, --transport TEXT` | Transport type: `stdio` or `sse` (default: stdio). Note: `http` and `streamable-http` are supported as *client* transports for bridging upstream MCP servers via `mcp_servers.yaml`, not as serve transports. |
 | `--db TEXT` | Path to the EventStore database file |
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`). Affects which tool variants are instantiated |
 | `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`). Affects which tool variants are instantiated |

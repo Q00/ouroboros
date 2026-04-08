@@ -93,6 +93,7 @@ class MCPClientAdapter:
         self._transport_cm: Any = None
         self._read_stream: Any = None
         self._write_stream: Any = None
+        self._http_client: Any = None
         self._server_info: MCPServerInfo | None = None
         self._config: MCPServerConfig | None = None
 
@@ -227,10 +228,63 @@ class MCPClientAdapter:
                 await self._reset_connection_state()
                 raise
 
-        elif config.transport in (TransportType.SSE, TransportType.STREAMABLE_HTTP):
-            # SSE/HTTP transport would be implemented here
-            msg = f"Transport {config.transport} not yet implemented"
-            raise NotImplementedError(msg)
+        elif config.transport == TransportType.SSE:
+            if not config.url:
+                msg = "url is required for sse transport"
+                raise ValueError(msg)
+
+            from mcp.client.sse import sse_client
+
+            self._transport_cm = sse_client(
+                config.url,
+                headers=config.headers if config.headers else None,
+                timeout=config.timeout,
+            )
+            try:
+                self._read_stream, self._write_stream = await self._transport_cm.__aenter__()
+                self._session = ClientSession(self._read_stream, self._write_stream)
+                await self._session.__aenter__()
+
+                result = await self._session.initialize()
+                self._server_info = self._parse_server_info(result, config.name)
+            except Exception:
+                await self._reset_connection_state()
+                raise
+
+        elif config.transport in (TransportType.STREAMABLE_HTTP, TransportType.HTTP):
+            if not config.url:
+                msg = f"url is required for {config.transport} transport"
+                raise ValueError(msg)
+
+            import httpx
+            from mcp.client.streamable_http import streamable_http_client
+            from mcp.shared._httpx_utils import create_mcp_http_client
+
+            timeout = httpx.Timeout(config.timeout, read=max(config.timeout, 300.0))
+            http_client = create_mcp_http_client(
+                headers=config.headers if config.headers else None,
+                timeout=timeout,
+            )
+            self._http_client = http_client
+
+            try:
+                self._transport_cm = streamable_http_client(
+                    config.url,
+                    http_client=http_client,
+                )
+                # streamable_http_client yields 3-tuple: (read, write, get_session_id)
+                streams = await self._transport_cm.__aenter__()
+                self._read_stream = streams[0]
+                self._write_stream = streams[1]
+                self._session = ClientSession(self._read_stream, self._write_stream)
+                await self._session.__aenter__()
+
+                result = await self._session.initialize()
+                self._server_info = self._parse_server_info(result, config.name)
+            except Exception:
+                await self._reset_connection_state()
+                raise
+
         else:
             msg = f"Unknown transport: {config.transport}"
             raise ValueError(msg)
@@ -239,11 +293,13 @@ class MCPClientAdapter:
         """Best-effort cleanup for partially initialized connection state."""
         session = self._session
         transport_cm = self._transport_cm
+        http_client = self._http_client
 
         self._session = None
         self._transport_cm = None
         self._read_stream = None
         self._write_stream = None
+        self._http_client = None
         self._server_info = None
 
         errors: list[BaseException] = []
@@ -257,6 +313,12 @@ class MCPClientAdapter:
         if transport_cm is not None:
             try:
                 await transport_cm.__aexit__(None, None, None)
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                errors.append(exc)
+
+        if http_client is not None:
+            try:
+                await http_client.aclose()
             except Exception as exc:  # pragma: no cover - defensive cleanup
                 errors.append(exc)
 
@@ -296,7 +358,7 @@ class MCPClientAdapter:
         Returns:
             Result containing None on success or MCPClientError on failure.
         """
-        if self._session is None and self._transport_cm is None:
+        if self._session is None and self._transport_cm is None and self._http_client is None:
             return Result.ok(None)
 
         server_name = self._config.name if self._config else "unknown"
