@@ -9,7 +9,6 @@ See: https://github.com/Q00/ouroboros/issues/286
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -101,12 +100,8 @@ class TestParallelScoringAndQuestionGeneration:
         state = _make_state(answered_rounds=MIN_ROUNDS_BEFORE_EARLY_EXIT)
 
         mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
-        mock_engine.record_response = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
+        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
+        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_err=False, value="Parallel question?")
         )
@@ -131,9 +126,7 @@ class TestParallelScoringAndQuestionGeneration:
                 return_value=mock_engine,
             ),
         ):
-            result = await handler.handle(
-                {"session_id": "test-parallel", "answer": "My answer"}
-            )
+            result = await handler.handle({"session_id": "test-parallel", "answer": "My answer"})
 
             # Both must be called
             mock_score.assert_called_once()
@@ -149,12 +142,8 @@ class TestParallelScoringAndQuestionGeneration:
         state = _make_state(answered_rounds=MIN_ROUNDS_BEFORE_EARLY_EXIT)
 
         mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
-        mock_engine.record_response = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
+        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
+        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_err=False, value="Discarded question")
         )
@@ -185,9 +174,7 @@ class TestParallelScoringAndQuestionGeneration:
                 return_value=mock_engine,
             ),
         ):
-            await handler.handle(
-                {"session_id": "test-parallel", "answer": "Final clarification"}
-            )
+            await handler.handle({"session_id": "test-parallel", "answer": "Final clarification"})
 
             # Early completion should trigger
             mock_complete.assert_called_once()
@@ -199,12 +186,8 @@ class TestParallelScoringAndQuestionGeneration:
         state = _make_state(answered_rounds=MIN_ROUNDS_BEFORE_EARLY_EXIT)
 
         mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
-        mock_engine.record_response = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
+        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
+        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_err=False, value="Question after score failure")
         )
@@ -227,9 +210,7 @@ class TestParallelScoringAndQuestionGeneration:
                 return_value=mock_engine,
             ),
         ):
-            result = await handler.handle(
-                {"session_id": "test-parallel", "answer": "Some answer"}
-            )
+            result = await handler.handle({"session_id": "test-parallel", "answer": "Some answer"})
 
             # Question gen should still succeed
             assert result.is_ok
@@ -250,12 +231,8 @@ class TestParallelScoringAndQuestionGeneration:
             return MagicMock(is_err=False, value="Retry question")
 
         mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
-        mock_engine.record_response = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
+        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
+        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(side_effect=_question_side_effect)
         mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
 
@@ -276,9 +253,7 @@ class TestParallelScoringAndQuestionGeneration:
                 return_value=mock_engine,
             ),
         ):
-            result = await handler.handle(
-                {"session_id": "test-parallel", "answer": "Some answer"}
-            )
+            result = await handler.handle({"session_id": "test-parallel", "answer": "Some answer"})
 
             # Should have been called twice: once parallel (failed), once sequential (retry)
             assert mock_engine.ask_next_question.call_count == 2
@@ -295,21 +270,15 @@ class TestNoParallelizationBelowThreshold:
         state = _make_state(answered_rounds=1)
 
         mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
-        mock_engine.record_response = AsyncMock(
-            return_value=MagicMock(is_err=False, value=state)
-        )
+        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
+        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
             return_value=MagicMock(is_err=False, value="Early question")
         )
         mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
 
         with (
-            patch.object(
-                handler, "_score_interview_state", new_callable=AsyncMock
-            ) as mock_score,
+            patch.object(handler, "_score_interview_state", new_callable=AsyncMock) as mock_score,
             patch.object(handler, "_emit_event", new_callable=AsyncMock),
             patch(
                 "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
@@ -320,9 +289,7 @@ class TestNoParallelizationBelowThreshold:
                 return_value=mock_engine,
             ),
         ):
-            result = await handler.handle(
-                {"session_id": "test-parallel", "answer": "Early answer"}
-            )
+            result = await handler.handle({"session_id": "test-parallel", "answer": "Early answer"})
 
             mock_score.assert_not_called()
             mock_engine.ask_next_question.assert_called_once()
