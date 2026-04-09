@@ -758,6 +758,7 @@ def create_ouroboros_server(
     from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
     from ouroboros.mcp.tools.definitions import (
         ACDashboardHandler,
+        ACTreeHUDHandler,
         CancelExecutionHandler,
         CancelJobHandler,
         ChannelWorkflowHandler,
@@ -1403,6 +1404,9 @@ def create_ouroboros_server(
             evolutionary_loop=evolutionary_loop,
         ),
         ACDashboardHandler(
+            event_store=event_store,
+        ),
+        ACTreeHUDHandler(
             event_store=event_store,
         ),
         QAHandler(
