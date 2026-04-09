@@ -196,7 +196,7 @@ class AmbiguityScorer:
     llm_adapter: LLMAdapter
     model: str = field(default_factory=get_clarification_model)
     temperature: float = SCORING_TEMPERATURE
-    initial_max_tokens: int = 2048
+    initial_max_tokens: int = 512
     max_retries: int | None = 10  # Default to 10 retries (None = unlimited)
     max_format_error_retries: int = 5  # Stop after N format errors (non-truncation)
 
@@ -259,6 +259,7 @@ class AmbiguityScorer:
         last_error: Exception | ProviderError | None = None
         last_response: str = ""
         attempt = 0
+        format_error_count = 0
 
         while True:
             # Check retry limit if set
@@ -337,11 +338,22 @@ class AmbiguityScorer:
                     current_max_tokens = next_tokens
                 else:
                     # Format error without truncation - retry with same tokens
+                    format_error_count += 1
+                    if format_error_count >= self.max_format_error_retries:
+                        log.warning(
+                            "ambiguity.scoring.format_errors_exhausted",
+                            interview_id=state.interview_id,
+                            error=str(e),
+                            format_error_count=format_error_count,
+                            max_format_error_retries=self.max_format_error_retries,
+                        )
+                        break
                     log.warning(
                         "ambiguity.scoring.format_error_retrying",
                         interview_id=state.interview_id,
                         error=str(e),
                         attempt=attempt,
+                        format_error_count=format_error_count,
                         finish_reason=result.value.finish_reason,
                     )
 

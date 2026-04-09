@@ -234,7 +234,7 @@ class InterviewEngine:
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
     model: str = field(default_factory=get_clarification_model)
     temperature: float = 0.7
-    max_tokens: int = 2048
+    max_tokens: int = 512
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""

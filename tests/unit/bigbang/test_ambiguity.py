@@ -308,7 +308,7 @@ class TestAmbiguityScorerInit:
         assert scorer.llm_adapter == mock_adapter
         assert scorer.model == get_clarification_model()
         assert scorer.temperature == SCORING_TEMPERATURE
-        assert scorer.initial_max_tokens == 2048
+        assert scorer.initial_max_tokens == 512
         assert scorer.max_retries == 10  # Default to 10 retries
 
     def test_scorer_custom_values(self) -> None:
