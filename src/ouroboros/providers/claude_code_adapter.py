@@ -52,7 +52,9 @@ log = structlog.get_logger(__name__)
 # Retry configuration for transient API errors
 _MAX_RETRIES = 5
 _MAX_JSON_RETRIES = 3  # Extra retries when response_format requires JSON but LLM returns prose
-_INITIAL_BACKOFF_SECONDS = 0.5  # Keep low for interactive loops; exponential backoff handles sustained failures
+_INITIAL_BACKOFF_SECONDS = (
+    0.5  # Keep low for interactive loops; exponential backoff handles sustained failures
+)
 _RETRYABLE_ERROR_PATTERNS = (
     "concurrency",
     "rate",
