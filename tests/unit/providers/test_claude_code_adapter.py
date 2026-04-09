@@ -248,6 +248,51 @@ class TestExecuteSingleRequestSystemPrompt:
         options_call_kwargs = mock_options_cls.call_args.kwargs
         assert "system_prompt" not in options_call_kwargs
 
+
+class TestAdapterOverheadReductions:
+    """Test per-call overhead optimizations in ClaudeCodeAdapter."""
+
+    @pytest.mark.asyncio
+    async def test_version_check_skip_env_is_set(self) -> None:
+        """CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK=1 is passed to ClaudeAgentOptions."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        env = options_call_kwargs.get("env", {})
+        assert env.get("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK") == "1"
+
+    def test_initial_backoff_is_half_second(self) -> None:
+        """_INITIAL_BACKOFF_SECONDS should be 0.5 for interactive responsiveness."""
+        from ouroboros.providers.claude_code_adapter import _INITIAL_BACKOFF_SECONDS
+
+        assert _INITIAL_BACKOFF_SECONDS == 0.5
+
+
+class TestJsonSchemaHandling:
+    """Test JSON schema handling in ClaudeCodeAdapter."""
+
     @pytest.mark.asyncio
     async def test_json_schema_is_enforced_via_prompt_not_output_format(self) -> None:
         """json_schema requests should augment the prompt, not SDK output_format."""
