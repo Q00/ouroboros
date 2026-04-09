@@ -52,7 +52,7 @@ log = structlog.get_logger(__name__)
 # Retry configuration for transient API errors
 _MAX_RETRIES = 5
 _MAX_JSON_RETRIES = 3  # Extra retries when response_format requires JSON but LLM returns prose
-_INITIAL_BACKOFF_SECONDS = 2.0  # Increased for custom CLI startup
+_INITIAL_BACKOFF_SECONDS = 0.5  # Keep low for interactive loops; exponential backoff handles sustained failures
 _RETRYABLE_ERROR_PATTERNS = (
     "concurrency",
     "rate",
@@ -559,7 +559,13 @@ class ClaudeCodeAdapter:
         # to signal it's an SDK call, but the older check on CLAUDECODE fires
         # first, causing silent empty responses.  Strip it via env override.
         claudecode_present = bool(os.environ.get("CLAUDECODE"))
-        env_overrides: dict[str, str] = {}
+        env_overrides: dict[str, str] = {
+            # Skip the per-call `claude -v` subprocess that the Agent SDK runs
+            # to verify version compatibility.  This is advisory-only — version
+            # mismatches surface naturally as API errors — and saves ~0.3-0.8 s
+            # latency on every LLM call.
+            "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": "1",
+        }
         if claudecode_present:
             env_overrides["CLAUDECODE"] = ""
 
