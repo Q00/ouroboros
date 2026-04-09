@@ -1554,12 +1554,16 @@ class TestOrchestratorRunner:
             )
 
         mock_adapter.execute_task = mock_execute
+        # Inherit a known builtin (WebFetch) and a bridge tool
+        # (mcp__chrome-devtools__click).  The bridge tool should be
+        # deferred to MCPToolProvider discovery — not injected as a
+        # phantom builtin catalog entry.
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
             inherited_runtime_handle=inherited_handle,
-            inherited_tools=["mcp__chrome-devtools__click"],
+            inherited_tools=["WebFetch", "mcp__chrome-devtools__click"],
         )
 
         from ouroboros.core.types import Result
@@ -1582,7 +1586,10 @@ class TestOrchestratorRunner:
         assert resume_handle.backend == inherited_handle.backend
         assert resume_handle.native_session_id == inherited_handle.native_session_id
         assert resume_handle.metadata.get("fork_session") is True
-        assert "mcp__chrome-devtools__click" in captured_kwargs["tools"]
+        # Known builtin should be inherited
+        assert "WebFetch" in captured_kwargs["tools"]
+        # Bridge tool should NOT appear — it would be a phantom entry
+        assert "mcp__chrome-devtools__click" not in captured_kwargs["tools"]
 
     @pytest.mark.asyncio
     async def test_execute_parallel_passes_inherited_runtime_handle_to_executor(
@@ -2023,18 +2030,22 @@ class TestOrchestratorRunnerWithMCP:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> None:
-        """Delegated runners should merge inherited tools without duplicating built-ins."""
+        """Inherited builtin tools are merged; non-builtin tools are deferred to bridge."""
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
-            inherited_tools=["Read", "mcp__chrome-devtools__click"],
+            inherited_tools=["Read", "WebFetch", "mcp__chrome-devtools__click"],
         )
 
         merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
 
-        assert "mcp__chrome-devtools__click" in merged_tools
+        # Known builtins are inherited and deduplicated
+        assert "WebFetch" in merged_tools
         assert merged_tools.count("Read") == 1
+        # Bridge/MCP tools are NOT injected — they would create phantom entries.
+        # They will be discovered via MCPToolProvider when mcp_manager is set.
+        assert "mcp__chrome-devtools__click" not in merged_tools
         assert provider is None
         assert tool_catalog is not None
 
