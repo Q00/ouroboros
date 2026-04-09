@@ -5,6 +5,7 @@ Contains handlers for interview and seed generation tools:
 - InterviewHandler: Manages interactive requirement-clarification interviews.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -532,6 +533,7 @@ class InterviewHandler:
         self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._initialized = False
+        self._bg_tasks: set[asyncio.Task] = set()
 
     async def _ensure_initialized(self) -> None:
         """Ensure the event store is initialized."""
@@ -552,6 +554,12 @@ class InterviewHandler:
             await self._event_store.append(event)
         except Exception as e:
             log.warning("mcp.tool.interview.event_emission_failed", error=str(e))
+
+    def _emit_event_bg(self, event: Any) -> None:
+        """Fire-and-forget event emission — non-blocking on the hot path."""
+        task = asyncio.create_task(self._emit_event(event))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def _score_interview_state(
         self,
@@ -644,7 +652,7 @@ class InterviewHandler:
 
         from ouroboros.events.interview import interview_completed
 
-        await self._emit_event(
+        self._emit_event_bg(
             interview_completed(
                 interview_id=session_id,
                 total_rounds=len(state.rounds),
@@ -785,7 +793,7 @@ class InterviewHandler:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_failed(
                             state.interview_id,
                             error_msg,
@@ -852,7 +860,7 @@ class InterviewHandler:
                 # Emit interview started event
                 from ouroboros.events.interview import interview_started
 
-                await self._emit_event(
+                self._emit_event_bg(
                     interview_started(
                         state.interview_id,
                         resolved_context.value,
@@ -991,7 +999,7 @@ class InterviewHandler:
                     # Emit response recorded event
                     from ouroboros.events.interview import interview_response_recorded
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_response_recorded(
                             interview_id=session_id,
                             round_number=len(state.rounds),
@@ -1044,7 +1052,7 @@ class InterviewHandler:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_failed(
                             session_id,
                             error_msg,
@@ -1144,7 +1152,7 @@ class InterviewHandler:
             if _interview_id:
                 from ouroboros.events.interview import interview_failed
 
-                await self._emit_event(
+                self._emit_event_bg(
                     interview_failed(
                         _interview_id,
                         str(e),
