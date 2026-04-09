@@ -1636,7 +1636,26 @@ class TestInterviewHandlerCwd:
         state = InterviewState(
             interview_id="sess-123",
             ambiguity_score=0.14,
-            ambiguity_breakdown={"goal_clarity": {"name": "goal_clarity"}},
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "Goal Clarity",
+                    "clarity_score": 0.90,
+                    "weight": 0.4,
+                    "justification": "Goal is clear.",
+                },
+                "constraint_clarity": {
+                    "name": "Constraint Clarity",
+                    "clarity_score": 0.86,
+                    "weight": 0.3,
+                    "justification": "Constraints are clear.",
+                },
+                "success_criteria_clarity": {
+                    "name": "Success Criteria Clarity",
+                    "clarity_score": 0.88,
+                    "weight": 0.3,
+                    "justification": "Success criteria are clear.",
+                },
+            },
             rounds=[
                 InterviewRound(
                     round_number=1,
@@ -1713,10 +1732,36 @@ class TestInterviewHandlerCwd:
         mock_engine.complete_interview = AsyncMock()
         mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
         mock_engine.ask_next_question = AsyncMock()
+        rescored = AmbiguityScore(
+            overall_score=0.18,
+            breakdown=ScoreBreakdown(
+                goal_clarity=ComponentScore(
+                    name="Goal Clarity",
+                    clarity_score=0.86,
+                    weight=0.4,
+                    justification="Goal is clear.",
+                ),
+                constraint_clarity=ComponentScore(
+                    name="Constraint Clarity",
+                    clarity_score=0.40,
+                    weight=0.3,
+                    justification="Constraints remain vague.",
+                ),
+                success_criteria_clarity=ComponentScore(
+                    name="Success Criteria Clarity",
+                    clarity_score=0.82,
+                    weight=0.3,
+                    justification="Criteria are mostly measurable.",
+                ),
+            ),
+        )
 
-        with patch(
-            "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
-            return_value=mock_engine,
+        with (
+            patch.object(handler, "_score_interview_state", AsyncMock(return_value=rescored)),
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+                return_value=mock_engine,
+            ),
         ):
             result = await handler.handle({"session_id": "sess-123", "answer": "done"})
 
@@ -1725,6 +1770,82 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["seed_ready"] is False
         assert "completion floors are unmet" in result.value.content[0].text
         mock_engine.complete_interview.assert_not_called()
+        mock_engine.ask_next_question.assert_not_called()
+
+    async def test_interview_handle_done_rescores_degraded_brownfield_snapshot(self) -> None:
+        """Brownfield done flow should re-score when persisted breakdown is degraded."""
+        handler = InterviewHandler(llm_adapter=MagicMock())
+        handler._emit_event = AsyncMock()
+        state = InterviewState(
+            interview_id="sess-123",
+            is_brownfield=True,
+            ambiguity_score=0.18,
+            ambiguity_breakdown={"goal_clarity": {"name": "Goal Clarity"}},
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What should it do?",
+                    user_response=None,
+                )
+            ],
+        )
+
+        async def complete_state(
+            current_state: InterviewState,
+        ) -> Result[InterviewState, Exception]:
+            current_state.status = InterviewStatus.COMPLETED
+            return Result.ok(current_state)
+
+        rescored = AmbiguityScore(
+            overall_score=0.18,
+            breakdown=ScoreBreakdown(
+                goal_clarity=ComponentScore(
+                    name="Goal Clarity",
+                    clarity_score=0.85,
+                    weight=0.35,
+                    justification="Goal is clear.",
+                ),
+                constraint_clarity=ComponentScore(
+                    name="Constraint Clarity",
+                    clarity_score=0.72,
+                    weight=0.25,
+                    justification="Constraints are clear enough.",
+                ),
+                success_criteria_clarity=ComponentScore(
+                    name="Success Criteria Clarity",
+                    clarity_score=0.80,
+                    weight=0.25,
+                    justification="Success criteria are measurable.",
+                ),
+                context_clarity=ComponentScore(
+                    name="Context Clarity",
+                    clarity_score=0.70,
+                    weight=0.15,
+                    justification="Codebase context is understood.",
+                ),
+            ),
+        )
+
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.complete_interview = AsyncMock(side_effect=complete_state)
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_engine.ask_next_question = AsyncMock()
+
+        with (
+            patch.object(handler, "_score_interview_state", AsyncMock(return_value=rescored)) as mock_score,
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+                return_value=mock_engine,
+            ),
+        ):
+            result = await handler.handle({"session_id": "sess-123", "answer": "done"})
+
+        assert result.is_ok
+        assert state.status == InterviewStatus.COMPLETED
+        assert result.value.meta["completed"] is True
+        mock_score.assert_called_once()
+        mock_engine.complete_interview.assert_called_once()
         mock_engine.ask_next_question.assert_not_called()
 
     async def test_interview_handle_asks_closure_question_on_first_strong_score(self) -> None:

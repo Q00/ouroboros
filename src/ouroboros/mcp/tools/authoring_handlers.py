@@ -247,6 +247,21 @@ def _load_state_ambiguity_score(state: InterviewState) -> AmbiguityScore | None:
     )
 
 
+def _stored_ambiguity_snapshot_is_degraded(state: InterviewState) -> bool:
+    """Return True when stored ambiguity data lacks a parseable breakdown."""
+    if state.ambiguity_score is None:
+        return True
+    if not isinstance(state.ambiguity_breakdown, dict):
+        return True
+
+    try:
+        ScoreBreakdown.model_validate(state.ambiguity_breakdown)
+    except PydanticValidationError:
+        return True
+
+    return False
+
+
 @dataclass
 class GenerateSeedHandler:
     """Handler for the ouroboros_generate_seed tool.
@@ -920,7 +935,14 @@ class InterviewHandler:
                         # Gate: check ambiguity before completing.
                         # Stored score first; live scoring as fallback.
                         exit_score = _load_state_ambiguity_score(state)
-                        if exit_score is None or not exit_score.is_ready_for_seed:
+                        if (
+                            exit_score is None
+                            or _stored_ambiguity_snapshot_is_degraded(state)
+                            or not qualifies_for_seed_completion(
+                                exit_score,
+                                is_brownfield=state.is_brownfield,
+                            )
+                        ):
                             exit_score = await self._score_interview_state(llm_adapter, state)
                         if exit_score is not None and qualifies_for_seed_completion(
                             exit_score,
