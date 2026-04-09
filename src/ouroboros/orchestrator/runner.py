@@ -1030,9 +1030,7 @@ class OrchestratorRunner:
             # When ``self._mcp_manager`` is set the bridge tools will be
             # discovered by ``MCPToolProvider.get_tools()`` below, which
             # returns real definitions tied to a live server connection.
-            known_builtins = {
-                d.name for d in enumerate_runtime_builtin_tool_definitions()
-            }
+            known_builtins = {d.name for d in enumerate_runtime_builtin_tool_definitions()}
             for tool_name in self._inherited_tools:
                 if tool_name in known_builtins and tool_name not in base_tools:
                     base_tools.append(tool_name)
