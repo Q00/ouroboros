@@ -237,7 +237,7 @@ Just include these naturally in your request:
 
 REAL-TIME MONITORING (TUI):
 When running ooo run or ooo evolve, open a separate terminal:
-  uvx --from ouroboros-ai ouroboros tui monitor
+  uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor
 Press 1-4 to switch screens (Dashboard, Execution, Logs, Debug).
 
 READY TO BUILD:

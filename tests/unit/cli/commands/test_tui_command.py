@@ -26,4 +26,6 @@ def test_monitor_command_reports_optional_tui_dependency() -> None:
             monitor_command()
 
     print_error.assert_called_once()
-    assert "ouroboros-ai[tui]" in print_error.call_args.args[0]
+    error_message = print_error.call_args.args[0]
+    assert "ouroboros-ai[tui]" in error_message
+    assert "uvx --from 'ouroboros-ai[tui]' ouroboros tui monitor" in error_message
