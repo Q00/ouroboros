@@ -402,7 +402,23 @@ class EvaluateHandler:
             # Use injected or create services.
             # Evaluation reads multiple spec files (one Read call per AC), so
             # max_turns must be well above 1.
-            llm_adapter = self.llm_adapter or create_llm_adapter(
+            #
+            # IMPORTANT: The shared ``self.llm_adapter`` that may have been
+            # injected by ``build_mcp_server`` (see ``mcp/server/adapter.py``)
+            # is constructed with ``max_turns=1`` for interview / seed-generation
+            # use cases. That value is fatal for evaluation because the Stage 2
+            # semantic evaluator issues at least one ``Read`` tool call per AC to
+            # inspect spec files. With ``max_turns=1`` the Agent SDK returns
+            # ``error_max_turns`` on the very first tool call, surfacing as
+            # ``Command failed with exit code 1`` at the MCP tool boundary.
+            #
+            # To ensure the evaluator always has enough turns, construct a
+            # fresh adapter here rather than relying on the injected instance.
+            # The old ``self.llm_adapter or create_llm_adapter(...)`` pattern
+            # short-circuited on the injected adapter and silently preserved
+            # the ``max_turns=1`` ceiling — see issue #305 for the user-facing
+            # failure it produced.
+            llm_adapter = create_llm_adapter(
                 backend=self.llm_backend,
                 max_turns=20,
             )
