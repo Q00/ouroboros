@@ -99,9 +99,8 @@ class MechanicalResult:
 class SemanticResult:
     """Result of Stage 2 semantic evaluation.
 
-    Uses LLM to evaluate AC compliance, goal alignment, drift, and
-    reward-hacking risk.  Uncertainty score determines if Stage 3
-    consensus is needed.
+    Uses LLM to evaluate AC compliance, goal alignment, and drift.
+    Uncertainty score determines if Stage 3 consensus is needed.
 
     Attributes:
         score: Overall evaluation score (0.0-1.0)
@@ -110,9 +109,8 @@ class SemanticResult:
         drift_score: Deviation from seed intent (0.0-1.0, lower is better)
         uncertainty: Model uncertainty about evaluation (0.0-1.0)
         reasoning: Explanation of the evaluation
-        reward_hacking_risk: Suspicion that the artifact games the
-            evaluator rather than solving the real task (0.0-1.0).
-            Distinct from drift_score.
+        questions_used: Socratic / ontology-gap questions used during evaluation
+        evidence: Concrete evidence the evaluator relied on
     """
 
     score: float
@@ -121,17 +119,12 @@ class SemanticResult:
     drift_score: float
     uncertainty: float
     reasoning: str
-    reward_hacking_risk: float = 0.0
+    questions_used: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate score ranges."""
-        for attr in (
-            "score",
-            "goal_alignment",
-            "drift_score",
-            "uncertainty",
-            "reward_hacking_risk",
-        ):
+        for attr in ("score", "goal_alignment", "drift_score", "uncertainty"):
             value = getattr(self, attr)
             if not 0.0 <= value <= 1.0:
                 msg = f"{attr} must be between 0.0 and 1.0, got {value}"
@@ -180,7 +173,6 @@ class ConsensusResult:
     votes: tuple[Vote, ...]
     majority_ratio: float
     disagreements: tuple[str, ...] = ()
-    is_single_model: bool = False
 
     @property
     def approving_votes(self) -> int:
@@ -314,7 +306,6 @@ class EvaluationContext:
     goal: str = ""
     constraints: tuple[str, ...] = ()
     artifact_bundle: ArtifactBundle | None = None
-    trigger_consensus: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,21 +344,16 @@ class EvaluationResult:
 
     @property
     def failure_reason(self) -> str | None:
-        """Return the reason for failure, if any.
-
-        Stage 3 is checked before Stage 2 because when Stage 3 ran,
-        it is the authoritative verdict (Stage 2 may have been bypassed
-        via trigger_consensus).
-        """
+        """Return the reason for failure, if any."""
         if self.final_approved:
             return None
         if self.stage1_result and not self.stage1_result.passed:
             failed = self.stage1_result.failed_checks
             return f"Stage 1 failed: {', '.join(c.check_type for c in failed)}"
+        if self.stage2_result and not self.stage2_result.ac_compliance:
+            return f"Stage 2 failed: AC non-compliance (score={self.stage2_result.score:.2f})"
         if self.stage3_result and not self.stage3_result.approved:
             return (
                 f"Stage 3 failed: Consensus not reached ({self.stage3_result.majority_ratio:.0%})"
             )
-        if self.stage2_result and not self.stage2_result.ac_compliance:
-            return f"Stage 2 failed: AC non-compliance (score={self.stage2_result.score:.2f})"
         return "Unknown failure"

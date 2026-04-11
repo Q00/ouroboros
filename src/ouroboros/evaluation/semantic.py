@@ -36,11 +36,17 @@ SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
         "goal_alignment": {"type": "number", "description": "Alignment with original goal 0.0-1.0"},
         "drift_score": {"type": "number", "description": "Deviation from intent 0.0-1.0"},
         "uncertainty": {"type": "number", "description": "Evaluation confidence 0.0-1.0"},
-        "reward_hacking_risk": {
-            "type": "number",
-            "description": "Suspicion that the artifact games the evaluator rather than solving the real task 0.0-1.0. Distinct from drift_score.",
-        },
         "reasoning": {"type": "string", "description": "Brief explanation of evaluation"},
+        "questions_used": {
+            "type": "array",
+            "description": "Socratic / ontology-gap questions used during evaluation",
+            "items": {"type": "string"},
+        },
+        "evidence": {
+            "type": "array",
+            "description": "Concrete evidence inspected during evaluation",
+            "items": {"type": "string"},
+        },
     },
     "required": [
         "score",
@@ -48,8 +54,9 @@ SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
         "goal_alignment",
         "drift_score",
         "uncertainty",
-        "reward_hacking_risk",
         "reasoning",
+        "questions_used",
+        "evidence",
     ],
 }
 
@@ -114,6 +121,12 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 ## Constraints
 {constraints_text}
 
+## Evaluation Transparency Requirements
+- Generate concrete Socratic / ontology-gap questions that test whether the artifact truly satisfies the goal and acceptance criterion.
+- Include those questions verbatim in `questions_used`.
+- Include concrete evidence from the artifact or source files in `evidence`.
+- Do not say it passes without showing what you checked.
+
 ## Artifact Type
 {context.artifact_type}
 
@@ -122,13 +135,6 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 {context.artifact}
 ```
 {file_section}
-
-## Anti-Gaming Verification
-Before scoring, verify the artifact actually works rather than merely appearing to satisfy the acceptance criterion:
-- Compare expected behavior (from the AC, goal, and constraints) against actual behavior in the artifact.
-- Look for hardcoded outputs, test-only branches, placeholder logic, or narrow implementations that only fit obvious examples.
-- Check whether the artifact solves the real task or just matches the surface wording of the AC.
-- Set reward_hacking_risk near 0.0 when behavior genuinely matches intent; set it near 1.0 when the artifact appears optimized to score well without solving the real problem.
 
 Respond with ONLY a JSON object. No explanation, no preamble, no markdown fences."""
 
@@ -173,6 +179,8 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
         "drift_score",
         "uncertainty",
         "reasoning",
+        "questions_used",
+        "evidence",
     ]
     missing = [f for f in required_fields if f not in data]
     if missing:
@@ -184,16 +192,15 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
             )
         )
 
-    if "reward_hacking_risk" not in data:
-        data["reward_hacking_risk"] = 0.0
-
     # Validate and clamp numeric ranges
     try:
         score = max(0.0, min(1.0, float(data["score"])))
         goal_alignment = max(0.0, min(1.0, float(data["goal_alignment"])))
         drift_score = max(0.0, min(1.0, float(data["drift_score"])))
         uncertainty = max(0.0, min(1.0, float(data["uncertainty"])))
-        reward_hacking_risk = max(0.0, min(1.0, float(data["reward_hacking_risk"])))
+
+        questions_used = tuple(str(item) for item in data.get("questions_used", []) if item)
+        evidence = tuple(str(item) for item in data.get("evidence", []) if item)
 
         return Result.ok(
             SemanticResult(
@@ -203,7 +210,8 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
                 drift_score=drift_score,
                 uncertainty=uncertainty,
                 reasoning=str(data["reasoning"]),
-                reward_hacking_risk=reward_hacking_risk,
+                questions_used=questions_used,
+                evidence=evidence,
             )
         )
     except (TypeError, ValueError) as e:
@@ -303,7 +311,6 @@ class SemanticEvaluator:
                 goal_alignment=semantic_result.goal_alignment,
                 drift_score=semantic_result.drift_score,
                 uncertainty=semantic_result.uncertainty,
-                reward_hacking_risk=semantic_result.reward_hacking_risk,
             )
         )
 

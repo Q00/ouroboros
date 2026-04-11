@@ -51,6 +51,8 @@ class TestBuildEvaluationPrompt:
         assert "Build authentication system" in prompt
         assert "Must be secure" in prompt
         assert "No plaintext passwords" in prompt
+        assert "questions_used" in prompt
+        assert "evidence" in prompt
 
 
 class TestParseSemanticResponse:
@@ -65,7 +67,8 @@ class TestParseSemanticResponse:
             "drift_score": 0.1,
             "uncertainty": 0.2,
             "reasoning": "Good implementation",
-            "reward_hacking_risk": 0.05
+            "questions_used": ["What evidence shows the AC is actually met?"],
+            "evidence": ["login() exists"]
         }"""
         result = parse_semantic_response(response)
 
@@ -77,12 +80,13 @@ class TestParseSemanticResponse:
         assert semantic.drift_score == 0.1
         assert semantic.uncertainty == 0.2
         assert semantic.reasoning == "Good implementation"
-        assert semantic.reward_hacking_risk == 0.05
+        assert semantic.questions_used == ("What evidence shows the AC is actually met?",)
+        assert semantic.evidence == ("login() exists",)
 
     def test_json_with_surrounding_text(self) -> None:
         """Parse JSON embedded in text."""
         response = """Here is my evaluation:
-        {"score": 0.8, "ac_compliance": true, "goal_alignment": 0.85, "drift_score": 0.15, "uncertainty": 0.1, "reasoning": "Works well", "reward_hacking_risk": 0.0}
+        {"score": 0.8, "ac_compliance": true, "goal_alignment": 0.85, "drift_score": 0.15, "uncertainty": 0.1, "reasoning": "Works well", "questions_used": ["What proves this works well?"], "evidence": ["Observed success path"]}
         Thank you for asking."""
         result = parse_semantic_response(response)
 
@@ -98,7 +102,8 @@ class TestParseSemanticResponse:
             "drift_score": 2.0,
             "uncertainty": 0.2,
             "reasoning": "Test",
-            "reward_hacking_risk": 1.5
+            "questions_used": ["What is missing?"],
+            "evidence": ["Checked artifact"]
         }"""
         result = parse_semantic_response(response)
 
@@ -106,7 +111,6 @@ class TestParseSemanticResponse:
         assert result.value.score == 1.0  # clamped from 1.5
         assert result.value.goal_alignment == 0.0  # clamped from -0.1
         assert result.value.drift_score == 1.0  # clamped from 2.0
-        assert result.value.reward_hacking_risk == 1.0  # clamped from 1.5
 
     def test_missing_required_field(self) -> None:
         """Error when required field is missing."""
@@ -118,21 +122,6 @@ class TestParseSemanticResponse:
 
         assert result.is_err
         assert "Missing required fields" in result.error.message
-
-    def test_missing_reward_hacking_risk_defaults_to_zero(self) -> None:
-        """Omitting reward_hacking_risk should degrade gracefully to 0.0."""
-        response = """{
-            "score": 0.8,
-            "ac_compliance": true,
-            "goal_alignment": 0.85,
-            "drift_score": 0.15,
-            "uncertainty": 0.1,
-            "reasoning": "Looks good"
-        }"""
-        result = parse_semantic_response(response)
-
-        assert result.is_ok
-        assert result.value.reward_hacking_risk == 0.0
 
     def test_no_json_in_response(self) -> None:
         """Error when no JSON found."""
@@ -208,7 +197,8 @@ class TestSemanticEvaluator:
                     "drift_score": 0.1,
                     "uncertainty": 0.15,
                     "reasoning": "Good implementation",
-                    "reward_hacking_risk": 0.05
+                    "questions_used": ["What evidence shows the function really works?"],
+                    "evidence": ["Function signature matches AC"]
                 }""",
                 model="test-model",
                 usage=UsageInfo(100, 50, 150),
@@ -240,7 +230,8 @@ class TestSemanticEvaluator:
                     "drift_score": 0.2,
                     "uncertainty": 0.1,
                     "reasoning": "OK",
-                    "reward_hacking_risk": 0.0
+                    "questions_used": ["What evidence supports OK?"],
+                    "evidence": ["Artifact inspected"]
                 }""",
                 model="test",
                 usage=UsageInfo(0, 0, 0),
@@ -272,7 +263,8 @@ class TestSemanticEvaluator:
                     "drift_score": 0.1,
                     "uncertainty": 0.15,
                     "reasoning": "Good",
-                    "reward_hacking_risk": 0.0
+                    "questions_used": ["What concrete evidence makes this good?"],
+                    "evidence": ["Artifact content reviewed"]
                 }""",
                 model="test",
                 usage=UsageInfo(0, 0, 0),
@@ -345,7 +337,8 @@ class TestRunSemanticEvaluation:
                     "drift_score": 0.05,
                     "uncertainty": 0.1,
                     "reasoning": "Excellent",
-                    "reward_hacking_risk": 0.0
+                    "questions_used": ["What evidence shows the AC is satisfied?"],
+                    "evidence": ["test code was evaluated"]
                 }""",
                 model="test",
                 usage=UsageInfo(0, 0, 0),
