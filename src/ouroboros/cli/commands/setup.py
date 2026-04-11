@@ -382,18 +382,38 @@ def _strip_jsonc(text: str) -> str:
     return strip_jsonc(text)
 
 
+def _find_opencode_config() -> Path:
+    """Locate the existing OpenCode config file, or return a default path.
+
+    OpenCode checks (in order): ``opencode.jsonc``, ``opencode.json``,
+    ``config.json`` — all inside ``~/.config/opencode/``.  On Windows
+    ``Path.home()`` resolves to ``%USERPROFILE%`` which matches the
+    ``xdg-basedir`` fallback that OpenCode uses.
+
+    Returns the first file that exists, or ``opencode.json`` as the
+    default for new installations (plain JSON is the safer default
+    since we write with ``json.dump``).
+    """
+    config_dir = Path.home() / ".config" / "opencode"
+    for name in ("opencode.jsonc", "opencode.json"):
+        candidate = config_dir / name
+        if candidate.exists():
+            return candidate
+    return config_dir / "opencode.json"
+
+
 def _ensure_opencode_mcp_entry() -> None:
     """Ensure the global OpenCode config has a correct ouroboros MCP entry.
 
-    OpenCode reads config from ``~/.config/opencode/opencode.json`` (JSONC).
+    OpenCode reads config from ``~/.config/opencode/`` — either
+    ``opencode.jsonc`` or ``opencode.json`` (both support JSONC).
     The ``mcp`` key is a record of named MCP server configs.
 
     MCP entry format (local):
         ``{ "type": "local", "command": [...], "environment": {...}, "timeout": 300000 }``
     """
-    config_dir = Path.home() / ".config" / "opencode"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / "opencode.json"
+    config_path = _find_opencode_config()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
 
     data: dict = {}
     if config_path.exists():

@@ -179,10 +179,24 @@ def _strip_jsonc(text: str) -> str:
     return strip_jsonc(text)
 
 
+def _find_opencode_config() -> Path | None:
+    """Locate existing OpenCode config (``opencode.jsonc`` or ``opencode.json``).
+
+    Returns the first file that exists, or ``None`` if neither is present.
+    Mirrors the lookup order that OpenCode itself uses.
+    """
+    config_dir = Path.home() / ".config" / "opencode"
+    for name in ("opencode.jsonc", "opencode.json"):
+        candidate = config_dir / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _remove_opencode_mcp(dry_run: bool) -> bool:
-    """Remove ouroboros entry from OpenCode config (~/.config/opencode/opencode.json)."""
-    config_path = Path.home() / ".config" / "opencode" / "opencode.json"
-    if not config_path.exists():
+    """Remove ouroboros entry from OpenCode config (opencode.jsonc or opencode.json)."""
+    config_path = _find_opencode_config()
+    if config_path is None:
         return False
 
     try:
@@ -339,9 +353,9 @@ def uninstall(
     except OSError:
         targets.append("Codex MCP config (~/.codex/config.toml — may be unreadable)")
 
-    opencode_config = Path.home() / ".config" / "opencode" / "opencode.json"
+    opencode_config = _find_opencode_config()
     try:
-        if opencode_config.exists():
+        if opencode_config is not None:
             oc_data = json.loads(_strip_jsonc(opencode_config.read_text()))
             if isinstance(oc_data.get("mcp"), dict) and "ouroboros" in oc_data["mcp"]:
                 targets.append(f"OpenCode MCP config ({opencode_config})")

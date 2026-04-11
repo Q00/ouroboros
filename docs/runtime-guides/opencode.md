@@ -19,7 +19,7 @@ No additional Python SDK is required beyond the base `ouroboros-ai` package.
 - A **provider configured in OpenCode** (run `opencode` and complete the first-run setup, or use `opencode providers auth <provider>`)
 - **Python >= 3.12**
 
-> **Note:** OpenCode manages its own provider authentication. You do not need to set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` environment variables for Ouroboros — OpenCode handles provider credentials internally via its own configuration at `~/.config/opencode/opencode.json`.
+> **Note:** OpenCode manages its own provider authentication. You do not need to set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` environment variables for Ouroboros — OpenCode handles provider credentials internally via its own configuration at `~/.config/opencode/opencode.jsonc` (or `opencode.json`).
 
 ## Installing OpenCode
 
@@ -80,7 +80,7 @@ uv run ouroboros run workflow --runtime opencode ~/.ouroboros/seeds/seed_abcd123
 
 Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings (backend selection, permission mode, CLI path).
 
-Use `~/.config/opencode/opencode.json` (OpenCode's own config) for provider/model selection, MCP servers, and tool permissions. `ouroboros setup --runtime opencode` writes the Ouroboros MCP server entry into this file automatically.
+Use `~/.config/opencode/opencode.jsonc` or `opencode.json` (OpenCode's own config) for provider/model selection, MCP servers, and tool permissions. `ouroboros setup --runtime opencode` writes the Ouroboros MCP server entry into this file automatically.
 
 ```yaml
 # ~/.ouroboros/config.yaml
@@ -106,7 +106,7 @@ This:
 
 - Detects the `opencode` binary on your `PATH` and records it as `orchestrator.opencode_cli_path`
 - Writes `orchestrator.runtime_backend: opencode` and `llm.backend: opencode` to `~/.ouroboros/config.yaml`
-- Registers the Ouroboros MCP server in OpenCode's configuration file (`~/.config/opencode/opencode.json`). Note: The setup process rewrites the file as plain JSON and removes comments (the file supports JSONC format initially, but setup normalizes to JSON for compatibility).
+- Registers the Ouroboros MCP server in OpenCode's configuration file (`~/.config/opencode/opencode.jsonc` or `opencode.json`). If an existing `.jsonc` config is found, setup updates it in place instead of creating a separate `.json` file. Note: The setup process rewrites the file as plain JSON and removes comments (the file supports JSONC format initially, but setup normalizes to JSON for compatibility).
 
 ### `ooo` Skill Availability on OpenCode
 
