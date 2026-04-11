@@ -1530,6 +1530,80 @@ class TestOrchestratorRunner:
         assert kwargs["session_id"] == tracker.session_id
 
     @pytest.mark.asyncio
+    async def test_execute_parallel_builds_dependency_analyzer_with_llm_adapter(
+        self,
+        runner: OrchestratorRunner,
+        sample_seed: Seed,
+    ) -> None:
+        """Parallel execution should restore LLM-assisted dependency analysis."""
+        from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+
+        tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
+        dependency_graph = DependencyGraph(
+            nodes=tuple(
+                ACNode(index=i, content=ac) for i, ac in enumerate(sample_seed.acceptance_criteria)
+            ),
+            execution_levels=((0, 1, 2),),
+        )
+        parallel_result = ParallelExecutionResult(
+            results=tuple(
+                ACExecutionResult(
+                    ac_index=i,
+                    ac_content=ac,
+                    success=True,
+                    final_message="done",
+                )
+                for i, ac in enumerate(sample_seed.acceptance_criteria)
+            ),
+            success_count=len(sample_seed.acceptance_criteria),
+            failure_count=0,
+            total_messages=len(sample_seed.acceptance_criteria),
+        )
+        llm_adapter = object()
+        analyzer_instance = MagicMock()
+        analyzer_instance.analyze = AsyncMock(return_value=Result.ok(dependency_graph))
+        dependency_analyzer_cls = MagicMock(return_value=analyzer_instance)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                return_value=llm_adapter,
+            ) as mock_create_llm_adapter,
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer",
+                dependency_analyzer_cls,
+            ),
+            patch.object(runner, "_check_cancellation", AsyncMock(return_value=False)),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ),
+            patch(
+                "ouroboros.orchestrator.parallel_executor.ParallelACExecutor.execute_parallel",
+                AsyncMock(return_value=parallel_result),
+            ),
+        ):
+            result = await runner._execute_parallel(
+                seed=sample_seed,
+                exec_id="exec_parallel",
+                tracker=tracker,
+                merged_tools=["Read"],
+                tool_catalog=assemble_session_tool_catalog(["Read"]),
+                system_prompt="system",
+                start_time=tracker.start_time,
+            )
+
+        assert result.is_ok
+        mock_create_llm_adapter.assert_called_once_with(
+            backend="opencode",
+            permission_mode="acceptEdits",
+            cwd="/tmp/project",
+            max_turns=1,
+        )
+        dependency_analyzer_cls.assert_called_once_with(llm_adapter=llm_adapter)
+
+    @pytest.mark.asyncio
     async def test_execute_seed_uses_inherited_runtime_handle(
         self,
         mock_event_store: AsyncMock,

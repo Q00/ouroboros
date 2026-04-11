@@ -82,10 +82,12 @@ from ouroboros.orchestrator.runtime_message_projection import (
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
+from ouroboros.providers import create_llm_adapter
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
     from ouroboros.mcp.client.manager import MCPClientManager
+    from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
     from ouroboros.persistence.event_store import EventStore
 
 log = get_logger(__name__)
@@ -563,6 +565,31 @@ class OrchestratorRunner:
             return runtime_handle.cwd
         cwd = self._adapter.working_directory
         return cwd if isinstance(cwd, str) and cwd else None
+
+    def _build_dependency_analyzer(self) -> DependencyAnalyzer:
+        """Create a dependency analyzer wired to the active LLM backend when available."""
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
+        llm_backend = getattr(self._adapter, "_llm_backend", None)
+        backend = llm_backend if isinstance(llm_backend, str) and llm_backend else (
+            self._adapter.runtime_backend
+        )
+        try:
+            llm_adapter = create_llm_adapter(
+                backend=backend,
+                permission_mode=self._adapter.permission_mode,
+                cwd=self._effective_cwd(),
+                max_turns=1,
+            )
+        except Exception as exc:
+            log.warning(
+                "orchestrator.runner.dependency_analysis_llm_unavailable",
+                backend=backend,
+                error=str(exc),
+            )
+            return DependencyAnalyzer()
+
+        return DependencyAnalyzer(llm_adapter=llm_adapter)
 
     def _normalized_message_type(self, message: AgentMessage) -> str:
         """Collapse runtime-specific message details into shared progress categories."""
@@ -1711,7 +1738,7 @@ class OrchestratorRunner:
         Returns:
             Result containing OrchestratorResult on success.
         """
-        from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyAnalyzer
+        from ouroboros.orchestrator.dependency_analyzer import ACNode
         from ouroboros.orchestrator.parallel_executor import (
             ParallelACExecutor,
             render_parallel_completion_message,
@@ -1728,7 +1755,7 @@ class OrchestratorRunner:
         # Analyze dependencies
         self._console.print("\n[cyan]Analyzing AC dependencies...[/cyan]")
 
-        analyzer = DependencyAnalyzer()
+        analyzer = self._build_dependency_analyzer()
         dep_result = await analyzer.analyze(seed.acceptance_criteria)
 
         if dep_result.is_err:
