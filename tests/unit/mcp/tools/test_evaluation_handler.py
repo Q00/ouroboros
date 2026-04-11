@@ -177,9 +177,7 @@ class TestEvaluateHandlerAdapterCreation:
             "fresh adapter for evaluation instead of reusing the shared "
             "interview-tuned adapter."
         )
-        assert captured["max_turns"] >= 10, (
-            f"max_turns={captured['max_turns']} is too low."
-        )
+        assert captured["max_turns"] >= 10, f"max_turns={captured['max_turns']} is too low."
 
     async def test_injected_max_turns_1_adapter_does_not_leak(self):
         """Regression for issue #305: injecting a max_turns=1 adapter must not
