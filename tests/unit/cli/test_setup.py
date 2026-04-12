@@ -13,6 +13,7 @@ import ouroboros.cli.commands.setup as setup_cmd
 from ouroboros.cli.commands.setup import (
     _display_repos_table,
     _ensure_opencode_mcp_entry,
+    _find_opencode_config,
     _list_repos,
     _prompt_repo_selection,
     _scan_and_register_repos,
@@ -1465,3 +1466,103 @@ class TestOpenCodeSetupConfigYaml:
         assert result["orchestrator"]["runtime_backend"] == "opencode"
         assert isinstance(result["llm"], dict)
         assert result["llm"]["backend"] == "opencode"
+
+
+# ── JSONC config file detection tests ────────────────────────────
+
+
+class TestFindOpencodeConfig:
+    """Tests for _find_opencode_config — .jsonc/.json detection logic."""
+
+    def test_prefers_jsonc_over_json(self, tmp_path: Path) -> None:
+        """When both opencode.jsonc and opencode.json exist, .jsonc wins."""
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        (config_dir / "opencode.jsonc").write_text("{}", encoding="utf-8")
+        (config_dir / "opencode.json").write_text("{}", encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _find_opencode_config()
+
+        assert result.name == "opencode.jsonc"
+
+    def test_falls_back_to_json(self, tmp_path: Path) -> None:
+        """When only opencode.json exists, it is returned."""
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        (config_dir / "opencode.json").write_text("{}", encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _find_opencode_config()
+
+        assert result.name == "opencode.json"
+
+    def test_returns_json_default_when_neither_exists(self, tmp_path: Path) -> None:
+        """When no config exists, returns opencode.json as default for creation."""
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _find_opencode_config()
+
+        assert result.name == "opencode.json"
+        assert not result.exists()
+
+    def test_only_jsonc_exists(self, tmp_path: Path) -> None:
+        """When only opencode.jsonc exists, it is returned."""
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        (config_dir / "opencode.jsonc").write_text("{}", encoding="utf-8")
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            result = _find_opencode_config()
+
+        assert result.name == "opencode.jsonc"
+
+
+class TestSetupJsoncDetection:
+    """Tests for _ensure_opencode_mcp_entry picking up .jsonc files."""
+
+    def test_setup_reads_existing_jsonc(self, tmp_path: Path) -> None:
+        """Setup should read and update an existing opencode.jsonc file."""
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        jsonc_path = config_dir / "opencode.jsonc"
+        jsonc_path.write_text(
+            '{\n  // user comment\n  "theme": "dark",\n  "mcp": {}\n}\n',
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
+                return_value={"command": ["ouroboros", "mcp", "serve"]},
+            ),
+        ):
+            _ensure_opencode_mcp_entry()
+
+        # Must write back to .jsonc, not create a separate .json
+        data = json.loads(jsonc_path.read_text(encoding="utf-8"))
+        assert "ouroboros" in data["mcp"]
+        assert data["theme"] == "dark"
+        assert not (config_dir / "opencode.json").exists()
+
+    def test_setup_does_not_create_json_when_jsonc_exists(self, tmp_path: Path) -> None:
+        """No stray opencode.json should be created when .jsonc is present."""
+        config_dir = tmp_path / ".config" / "opencode"
+        config_dir.mkdir(parents=True)
+        jsonc_path = config_dir / "opencode.jsonc"
+        jsonc_path.write_text('{"mcp": {}}', encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
+                return_value={"command": ["ouroboros", "mcp", "serve"]},
+            ),
+        ):
+            _ensure_opencode_mcp_entry()
+
+        assert jsonc_path.exists()
+        assert not (config_dir / "opencode.json").exists()

@@ -552,7 +552,7 @@ logging:
   level: info
 ```
 
-OpenCode supports multiple model providers (Anthropic, OpenAI, Google, and others). Model selection is configured in OpenCode itself (`~/.config/opencode/opencode.json`), not in `config.yaml`. The `orchestrator.opencode_permission_mode` defaults to `bypassPermissions` since OpenCode runs non-interactively via `opencode run --format json`. The `llm.opencode_permission_mode` defaults to `acceptEdits`, but the factory forces `bypassPermissions` for interview/seed use cases to avoid CLI sandbox blocking.
+OpenCode supports multiple model providers (Anthropic, OpenAI, Google, and others). Model selection is configured in OpenCode itself (`~/.config/opencode/opencode.jsonc` or `opencode.json`), not in `config.yaml`. The `orchestrator.opencode_permission_mode` defaults to `bypassPermissions` since OpenCode runs non-interactively via `opencode run --format json`. The `llm.opencode_permission_mode` defaults to `acceptEdits`, but the factory forces `bypassPermissions` for interview/seed use cases to avoid CLI sandbox blocking.
 
 ### Full Config Skeleton
 
