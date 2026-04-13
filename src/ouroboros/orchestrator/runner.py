@@ -347,6 +347,7 @@ class OrchestratorRunner:
         task_workspace: TaskWorkspace | None = None,
         checkpoint_store: CheckpointStore | None = None,
         max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
+        max_parallel_workers: int = 3,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -370,6 +371,7 @@ class OrchestratorRunner:
             checkpoint_store: Optional checkpoint store for execution state persistence
                         and recovery. When provided, enables per-level state snapshots.
             max_decomposition_depth: Maximum recursive AC decomposition depth.
+            max_parallel_workers: Maximum concurrent AC workers for parallel execution.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -385,6 +387,7 @@ class OrchestratorRunner:
         self._task_cwd = task_cwd
         self._task_workspace = task_workspace
         self._max_decomposition_depth = max(0, max_decomposition_depth)
+        self._max_parallel_workers = max(1, max_parallel_workers)
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
 
@@ -1288,12 +1291,15 @@ class OrchestratorRunner:
         if session_result.is_err:
             return Result.err(session_result.error)
 
-        return await self.execute_precreated_session(
-            seed=seed,
-            tracker=session_result.value,
-            parallel=parallel,
-            externally_satisfied_acs=externally_satisfied_acs,
-        )
+        execute_kwargs: dict[str, Any] = {
+            "seed": seed,
+            "tracker": session_result.value,
+            "parallel": parallel,
+        }
+        if externally_satisfied_acs:
+            execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+
+        return await self.execute_precreated_session(**execute_kwargs)
 
     async def prepare_session(
         self,
@@ -1398,16 +1404,19 @@ class OrchestratorRunner:
 
             # Check for parallel execution mode
             if parallel and len(seed.acceptance_criteria) > 1:
-                return await self._execute_parallel(
-                    seed=seed,
-                    exec_id=exec_id,
-                    tracker=tracker,
-                    merged_tools=merged_tools,
-                    tool_catalog=tool_catalog,
-                    system_prompt=system_prompt,
-                    start_time=start_time,
-                    externally_satisfied_acs=externally_satisfied_acs,
-                )
+                parallel_kwargs: dict[str, Any] = {
+                    "seed": seed,
+                    "exec_id": exec_id,
+                    "tracker": tracker,
+                    "merged_tools": merged_tools,
+                    "tool_catalog": tool_catalog,
+                    "system_prompt": system_prompt,
+                    "start_time": start_time,
+                }
+                if externally_satisfied_acs:
+                    parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+
+                return await self._execute_parallel(**parallel_kwargs)
         except Exception as e:
             self._cleanup_pre_execution_state(
                 exec_id,
@@ -1819,6 +1828,7 @@ class OrchestratorRunner:
             event_store=self._event_store,
             console=self._console,
             enable_decomposition=self._enable_decomposition,
+            max_concurrent=self._max_parallel_workers,
             max_decomposition_depth=self._max_decomposition_depth,
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
@@ -1884,6 +1894,7 @@ class OrchestratorRunner:
             "skipped_count": parallel_result.skipped_count,
             "total_levels": execution_plan.total_stages,
             "max_decomposition_depth": self._max_decomposition_depth,
+            "max_parallel_workers": self._max_parallel_workers,
             "verification_report": verification_report,
             **self._task_summary(),
         }
