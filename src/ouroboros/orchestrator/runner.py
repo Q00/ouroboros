@@ -83,6 +83,7 @@ from ouroboros.orchestrator.session import SessionRepository, SessionStatus, Ses
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.providers import create_llm_adapter
+from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -345,6 +346,7 @@ class OrchestratorRunner:
         task_cwd: str | None = None,
         task_workspace: TaskWorkspace | None = None,
         checkpoint_store: CheckpointStore | None = None,
+        max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -367,6 +369,7 @@ class OrchestratorRunner:
             task_workspace: Managed task workspace metadata for persistence and cleanup.
             checkpoint_store: Optional checkpoint store for execution state persistence
                         and recovery. When provided, enables per-level state snapshots.
+            max_decomposition_depth: Maximum recursive AC decomposition depth.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -381,6 +384,7 @@ class OrchestratorRunner:
         self._inherited_tools = list(inherited_tools) if inherited_tools else None
         self._task_cwd = task_cwd
         self._task_workspace = task_workspace
+        self._max_decomposition_depth = max(0, max_decomposition_depth)
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
 
@@ -1806,6 +1810,7 @@ class OrchestratorRunner:
             event_store=self._event_store,
             console=self._console,
             enable_decomposition=self._enable_decomposition,
+            max_decomposition_depth=self._max_decomposition_depth,
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
             checkpoint_store=self._checkpoint_store,
@@ -1852,6 +1857,7 @@ class OrchestratorRunner:
         verification_report = render_parallel_verification_report(
             parallel_result,
             len(seed.acceptance_criteria),
+            max_decomposition_depth=self._max_decomposition_depth,
         )
         execution_summary = {
             "goal": seed.goal,
@@ -1863,6 +1869,7 @@ class OrchestratorRunner:
             "invalid_count": parallel_result.invalid_count,
             "skipped_count": parallel_result.skipped_count,
             "total_levels": execution_plan.total_stages,
+            "max_decomposition_depth": self._max_decomposition_depth,
             "verification_report": verification_report,
             **self._task_summary(),
         }

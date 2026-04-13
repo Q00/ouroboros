@@ -103,8 +103,9 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 # Decomposition constants
-# Depth >= MAX_DECOMPOSITION_DEPTH forces atomic execution as a soft safety net.
-MAX_DECOMPOSITION_DEPTH = 3
+# Depth >= max_decomposition_depth forces atomic execution as a soft safety net.
+DEFAULT_MAX_DECOMPOSITION_DEPTH = 2
+MAX_DECOMPOSITION_DEPTH = DEFAULT_MAX_DECOMPOSITION_DEPTH
 MIN_SUB_ACS = 2
 MAX_SUB_ACS = 5
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
@@ -329,6 +330,8 @@ def _collect_decomposition_depth_warning_paths(
 def render_parallel_verification_report(
     parallel_result: ParallelExecutionResult,
     total_acceptance_criteria: int,
+    *,
+    max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
 ) -> str:
     """Build the canonical QA artifact for parallel execution results."""
     lines = [
@@ -361,7 +364,7 @@ def render_parallel_verification_report(
                     ),
                     "source": "parallel_executor",
                     "details": {
-                        "max_depth": MAX_DECOMPOSITION_DEPTH,
+                        "max_depth": max_decomposition_depth,
                         "affected_count": len(warning_paths),
                         "affected_ac_paths": warning_paths,
                     },
@@ -424,6 +427,7 @@ class ParallelACExecutor:
         console: Console | None = None,
         enable_decomposition: bool = True,
         max_concurrent: int = 3,
+        max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         checkpoint_store: Any | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
         task_cwd: str | None = None,
@@ -436,6 +440,7 @@ class ParallelACExecutor:
             console: Rich console for output.
             enable_decomposition: Enable Claude to decompose complex ACs.
             max_concurrent: Maximum number of concurrent AC executions.
+            max_decomposition_depth: Maximum recursive decomposition depth.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions.
@@ -445,6 +450,7 @@ class ParallelACExecutor:
         self._event_store = event_store
         self._console = console or Console()
         self._enable_decomposition = enable_decomposition
+        self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._inherited_runtime_handle = inherited_runtime_handle
         self._task_cwd = task_cwd
         self._coordinator = LevelCoordinator(
@@ -2073,7 +2079,7 @@ class ParallelACExecutor:
         )
 
         # Try decomposition if enabled and not too deep
-        if self._enable_decomposition and depth < MAX_DECOMPOSITION_DEPTH:
+        if self._enable_decomposition and depth < self._max_decomposition_depth:
             self._console.print(f"  [dim]AC {ac_index + 1}: Analyzing complexity...[/dim]")
             self._flush_console()
             sub_acs = await self._try_decompose_ac(
@@ -2220,7 +2226,7 @@ class ParallelACExecutor:
         # Depth-limit canary: execution is forced atomic once the soft recursion
         # safety net is reached, so downstream stages can detect decomposition pressure.
         decomposition_depth_warning = (
-            self._enable_decomposition and depth >= MAX_DECOMPOSITION_DEPTH
+            self._enable_decomposition and depth >= self._max_decomposition_depth
         )
 
         # Stall recovery belongs to atomic leaves only. Once this method decides

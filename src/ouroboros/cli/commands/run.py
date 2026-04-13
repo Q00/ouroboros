@@ -6,6 +6,7 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 
 import asyncio
 from enum import Enum
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 from uuid import uuid4
@@ -29,6 +30,7 @@ from ouroboros.core.worktree import (
     maybe_restore_task_workspace,
 )
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
+from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 
 
 class _DefaultWorkflowGroup(typer.core.TyperGroup):
@@ -110,6 +112,46 @@ def _resolve_cli_project_dir(seed: "Seed", seed_file: Path) -> Path:
     return resolve_seed_project_path(seed, stable_base=stable_base) or stable_base
 
 
+def _coerce_non_negative_int(value: object, *, source: str) -> int:
+    """Parse a non-negative integer from CLI, env, or seed config."""
+    if isinstance(value, bool):
+        print_error(f"{source} must be a non-negative integer")
+        raise typer.Exit(1)
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        print_error(f"{source} must be a non-negative integer")
+        raise typer.Exit(1) from exc
+
+    if parsed < 0:
+        print_error(f"{source} must be a non-negative integer")
+        raise typer.Exit(1)
+    return parsed
+
+
+def _resolve_max_decomposition_depth(seed_data: dict[str, Any], cli_value: int | None) -> int:
+    """Resolve decomposition depth from CLI, env, seed config, then default."""
+    if cli_value is not None:
+        return _coerce_non_negative_int(cli_value, source="--max-decomposition-depth")
+
+    env_value = os.environ.get("OUROBOROS_MAX_DECOMPOSITION_DEPTH", "").strip()
+    if env_value:
+        return _coerce_non_negative_int(
+            env_value,
+            source="OUROBOROS_MAX_DECOMPOSITION_DEPTH",
+        )
+
+    orchestrator_config = seed_data.get("orchestrator")
+    if isinstance(orchestrator_config, dict) and "max_decomposition_depth" in orchestrator_config:
+        return _coerce_non_negative_int(
+            orchestrator_config.get("max_decomposition_depth"),
+            source="seed.orchestrator.max_decomposition_depth",
+        )
+
+    return DEFAULT_MAX_DECOMPOSITION_DEPTH
+
+
 async def _initialize_mcp_manager(
     config_path: Path,
     tool_prefix: str,  # noqa: ARG001
@@ -181,6 +223,7 @@ async def _run_orchestrator(
     parallel: bool = True,
     no_qa: bool = False,
     runtime_backend: str | None = None,
+    max_decomposition_depth: int | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -193,6 +236,7 @@ async def _run_orchestrator(
         parallel: Execute independent ACs in parallel. Default: True.
         no_qa: Skip post-execution QA. Default: False.
         runtime_backend: Optional orchestrator runtime backend override.
+        max_decomposition_depth: Optional recursive decomposition depth cap override.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
@@ -208,9 +252,15 @@ async def _run_orchestrator(
         print_error(f"Invalid seed format: {e}")
         raise typer.Exit(1) from e
 
+    resolved_max_decomposition_depth = _resolve_max_decomposition_depth(
+        seed_data,
+        max_decomposition_depth,
+    )
+
     if debug:
         print_info(f"Loaded seed: {seed.goal[:80]}...")
         print_info(f"Acceptance criteria: {len(seed.acceptance_criteria)}")
+        print_info(f"Max decomposition depth: {resolved_max_decomposition_depth}")
 
     # Initialize MCP manager if config provided
     mcp_manager = None
@@ -220,8 +270,6 @@ async def _run_orchestrator(
         mcp_manager = await _initialize_mcp_manager(mcp_config, mcp_tool_prefix)
 
     # Initialize components
-    import os
-
     db_path = os.path.expanduser("~/.ouroboros/ouroboros.db")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
@@ -273,6 +321,7 @@ async def _run_orchestrator(
         mcp_tool_prefix=mcp_tool_prefix,
         debug=debug,
         task_workspace=workspace,
+        max_decomposition_depth=resolved_max_decomposition_depth,
     )
 
     # Execute
@@ -430,6 +479,17 @@ def workflow(
             help="Skip post-execution QA evaluation.",
         ),
     ] = False,
+    max_decomposition_depth: Annotated[
+        int | None,
+        typer.Option(
+            "--max-decomposition-depth",
+            min=0,
+            help=(
+                "Maximum recursive AC decomposition depth. "
+                "0 disables decomposition; 1 allows one split; default 2."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -465,6 +525,9 @@ def workflow(
 
         # Skip post-execution QA
         ouroboros run seed.yaml --no-qa
+
+        # Limit recursive decomposition depth
+        ouroboros run seed.yaml --max-decomposition-depth 1
     """
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
@@ -489,6 +552,7 @@ def workflow(
                     parallel=not sequential,
                     no_qa=no_qa,
                     runtime_backend=runtime.value if runtime else None,
+                    max_decomposition_depth=max_decomposition_depth,
                 )
             )
         except (ValueError, NotImplementedError) as e:
