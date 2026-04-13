@@ -166,7 +166,9 @@ async def test_run_orchestrator_passes_resolved_depth_cap_to_runner(tmp_path: Pa
     with (
         patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=seed_data),
         patch("ouroboros.orchestrator.create_agent_runtime"),
-        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner) as mock_runner_cls,
+        patch(
+            "ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner
+        ) as mock_runner_cls,
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
             "ouroboros.cli.commands.run.build_verification_artifacts",

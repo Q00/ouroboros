@@ -66,6 +66,7 @@ from ouroboros.orchestrator.mcp_tools import (
     assemble_session_tool_catalog,
     serialize_tool_catalog,
 )
+from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyExecutionPhase,
@@ -83,7 +84,6 @@ from ouroboros.orchestrator.session import SessionRepository, SessionStatus, Ses
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.providers import create_llm_adapter
-from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed

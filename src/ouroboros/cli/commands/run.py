@@ -119,7 +119,12 @@ def _coerce_non_negative_int(value: object, *, source: str) -> int:
         raise typer.Exit(1)
 
     try:
-        parsed = int(value)
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
+            parsed = int(value)
+        else:
+            raise TypeError
     except (TypeError, ValueError) as exc:
         print_error(f"{source} must be a non-negative integer")
         raise typer.Exit(1) from exc
