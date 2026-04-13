@@ -11,6 +11,7 @@ import pytest
 from ouroboros.cli.commands.run import (
     _load_skip_completed_markers,
     _resolve_max_decomposition_depth,
+    _resolve_max_parallel_workers,
     _run_orchestrator,
 )
 from ouroboros.core.types import Result
@@ -114,6 +115,13 @@ def test_load_skip_completed_markers_parses_yaml_metadata(tmp_path: Path) -> Non
         0: {"reason": "Done manually", "commit": "abc1234"},
         1: {},
     }
+
+
+def test_resolve_max_parallel_workers_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parallel worker caps should be configurable via environment variable."""
+    monkeypatch.setenv("OUROBOROS_MAX_PARALLEL_WORKERS", "5")
+
+    assert _resolve_max_parallel_workers() == 5
 
 
 @pytest.mark.asyncio
