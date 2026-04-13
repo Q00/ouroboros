@@ -81,6 +81,11 @@ def _get_evaluation_system_prompt() -> str:
 def build_evaluation_prompt(context: EvaluationContext) -> str:
     """Build the user prompt for evaluation.
 
+    When file artifacts are available (from ArtifactCollector), omits the
+    inline artifact text section — the artifact summary is saved as a file
+    in working_dir and collected alongside source code. This keeps prompts
+    manageable even for large artifacts (50KB+).
+
     Args:
         context: Evaluation context with artifact and criteria
 
@@ -93,15 +98,23 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
         else "None specified"
     )
 
-    # Build file artifacts section if available
-    file_section = ""
-    if context.artifact_bundle and context.artifact_bundle.files:
-        file_lines = ["\n## Source Files (actual code)"]
+    has_files = context.artifact_bundle and context.artifact_bundle.files
+
+    if has_files:
+        # File-based evaluation: actual source code (including the artifact
+        # summary saved as a file) is already in the files section.
+        # No need to inline the artifact text — it's among the files.
+        file_lines = []
         for fa in context.artifact_bundle.files:
             truncated_note = " [TRUNCATED]" if fa.truncated else ""
             file_lines.append(f"\n### {fa.file_path}{truncated_note}")
             file_lines.append(f"```\n{fa.content}\n```")
-        file_section = "\n".join(file_lines)
+        artifact_section = ""
+        code_section = f"\n## Source Files\n{chr(10).join(file_lines)}"
+    else:
+        # No files — fall back to full artifact text.
+        artifact_section = f"## Artifact Content\n```\n{context.artifact}\n```"
+        code_section = ""
 
     return f"""Evaluate the following artifact:
 
@@ -117,11 +130,8 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 ## Artifact Type
 {context.artifact_type}
 
-## Artifact Content
-```
-{context.artifact}
-```
-{file_section}
+{artifact_section}
+{code_section}
 
 ## Anti-Gaming Verification
 Before scoring, verify the artifact actually works rather than merely appearing to satisfy the acceptance criterion:

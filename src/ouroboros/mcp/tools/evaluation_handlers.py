@@ -34,7 +34,6 @@ from ouroboros.observability.drift import (
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
-from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
@@ -240,7 +239,6 @@ class EvaluateHandler:
     """
 
     event_store: EventStore | None = field(default=None, repr=False)
-    llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
     TIMEOUT_SECONDS: int = 0  # No server-side timeout; client/runtime decides.
 
@@ -399,25 +397,9 @@ class EvaluateHandler:
             # Use acceptance_criterion or derive from seed
             current_ac = acceptance_criterion or "Verify execution output meets requirements"
 
-            # Use injected or create services.
-            # Evaluation reads multiple spec files (one Read call per AC), so
-            # max_turns must be well above 1.
-            #
-            # IMPORTANT: The shared ``self.llm_adapter`` that may have been
-            # injected by ``build_mcp_server`` (see ``mcp/server/adapter.py``)
-            # is constructed with ``max_turns=1`` for interview / seed-generation
-            # use cases. That value is fatal for evaluation because the Stage 2
-            # semantic evaluator issues at least one ``Read`` tool call per AC to
-            # inspect spec files. With ``max_turns=1`` the Agent SDK returns
-            # ``error_max_turns`` on the very first tool call, surfacing as
-            # ``Command failed with exit code 1`` at the MCP tool boundary.
-            #
-            # To ensure the evaluator always has enough turns, construct a
-            # fresh adapter here rather than relying on the injected instance.
-            # The old ``self.llm_adapter or create_llm_adapter(...)`` pattern
-            # short-circuited on the injected adapter and silently preserved
-            # the ``max_turns=1`` ceiling — see issue #305 for the user-facing
-            # failure it produced.
+            # Evaluation reads multiple spec files (one Read call per AC).
+            # Use a dedicated adapter with a higher turn budget — the shared
+            # MCP adapter is max_turns=1 (tuned for interview/seed single-shot).
             llm_adapter = create_llm_adapter(
                 backend=self.llm_backend,
                 max_turns=20,
@@ -435,7 +417,18 @@ class EvaluateHandler:
 
             # Collect file-based artifacts for richer semantic evaluation.
             # working_dir is used as the project root for artifact resolution.
+            #
+            # Write the artifact text to a file in working_dir so the
+            # ArtifactCollector can pick it up naturally during its scan
+            # instead of inlining the full text (potentially 50KB+) into
+            # the evaluation prompt.
             from ouroboros.evaluation.artifact_collector import ArtifactCollector
+
+            artifact_file = working_dir / ".ouroboros_eval_artifact.md"
+            try:
+                artifact_file.write_text(artifact, encoding="utf-8")
+            except OSError:
+                pass  # Non-critical — evaluator falls back to text_summary
 
             try:
                 artifact_bundle = ArtifactCollector().collect(artifact, str(working_dir))

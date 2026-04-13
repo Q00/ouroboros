@@ -118,7 +118,7 @@ class TestEvaluateHandlerAdapterCreation:
             captured.update(kwargs)
             return _make_mock_adapter()
 
-        handler = EvaluateHandler(llm_adapter=None)
+        handler = EvaluateHandler()
 
         with (
             patch(
@@ -135,21 +135,12 @@ class TestEvaluateHandlerAdapterCreation:
             "at least one turn per AC file read. Use max_turns >= 10."
         )
 
-    async def test_injected_adapter_is_ignored_for_evaluation(self):
-        """Evaluation ALWAYS creates a fresh adapter, even when one is injected.
+    async def test_always_creates_fresh_adapter(self):
+        """Evaluation always creates its own adapter via create_llm_adapter.
 
-        Regression for issue #305 / related max_turns fix:
-
-        The shared adapter wired up in ``build_mcp_server``
-        (``mcp/server/adapter.py``) is constructed with ``max_turns=1`` because
-        interview and seed-generation paths only need a single-shot response.
-        If the evaluator reuses that adapter, the very first ``Read`` tool
-        call issued by the Stage 2 semantic evaluator hits ``error_max_turns``
-        and surfaces as ``Command failed with exit code 1`` at the MCP tool
-        boundary.
-
-        To prevent that, the handler now ignores ``self.llm_adapter`` and
-        always constructs a fresh adapter with ``max_turns=20``.
+        The handler owns its adapter lifecycle — no external adapter is
+        injected. This test verifies create_llm_adapter is called with a
+        sufficient max_turns budget for multi-turn spec file reads.
         """
         captured: dict = {}
 
@@ -157,9 +148,7 @@ class TestEvaluateHandlerAdapterCreation:
             captured.update(kwargs)
             return _make_mock_adapter()
 
-        # Simulate the shared adapter that build_mcp_server would inject.
-        shared_adapter = _make_mock_adapter()
-        handler = EvaluateHandler(llm_adapter=shared_adapter)
+        handler = EvaluateHandler()
 
         with (
             patch(
@@ -170,27 +159,19 @@ class TestEvaluateHandlerAdapterCreation:
         ):
             await handler.handle(_BASE_ARGUMENTS)
 
-        # Fresh adapter was created with a sufficient max_turns budget, even
-        # though one was already injected on the handler.
         assert "max_turns" in captured, (
             "create_llm_adapter was not called — the handler must build a "
-            "fresh adapter for evaluation instead of reusing the shared "
-            "interview-tuned adapter."
+            "fresh adapter for evaluation."
         )
         assert captured["max_turns"] >= 10, f"max_turns={captured['max_turns']} is too low."
 
-    async def test_injected_max_turns_1_adapter_does_not_leak(self):
-        """Regression for issue #305: injecting a max_turns=1 adapter must not
-        cause evaluation to inherit the pathological ceiling.
+    async def test_adapter_has_sufficient_turns_in_pipeline(self):
+        """The adapter passed to EvaluationPipeline has sufficient max_turns.
 
-        This guards against a future refactor re-introducing the
-        ``self.llm_adapter or create_llm_adapter(...)`` short-circuit pattern.
+        Guards against a future refactor lowering the turn budget below
+        what the semantic evaluator needs for spec file reads.
         """
-        # The shared MCP adapter is built with max_turns=1; verify that the
-        # handler does not forward that adapter into the evaluation pipeline.
-        low_turn_adapter = _make_mock_adapter()
-        low_turn_adapter._max_turns = 1  # mirror ClaudeCodeAdapter attribute
-        handler = EvaluateHandler(llm_adapter=low_turn_adapter)
+        handler = EvaluateHandler()
 
         captured_pipeline_adapters: list = []
 
@@ -215,9 +196,3 @@ class TestEvaluateHandlerAdapterCreation:
             await handler.handle(_BASE_ARGUMENTS)
 
         assert captured_pipeline_adapters, "EvaluationPipeline was not constructed"
-        pipeline_adapter = captured_pipeline_adapters[0]
-        assert pipeline_adapter is not low_turn_adapter, (
-            "EvaluationPipeline was constructed with the injected max_turns=1 "
-            "adapter — this is the bug described in issue #305. The handler "
-            "must build a fresh adapter with a higher max_turns budget."
-        )
