@@ -746,6 +746,50 @@ class TestParallelACExecutor:
             3,
         ]
 
+    @pytest.mark.asyncio
+    async def test_execute_parallel_skips_externally_satisfied_acs(self) -> None:
+        """Top-level ACs flagged by --skip-completed should not be re-executed."""
+        seed = _make_seed("AC 1", "AC 2")
+        dependency_graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="AC 1", depends_on=()),
+                ACNode(index=1, content="AC 2", depends_on=()),
+            ),
+            execution_levels=((0, 1),),
+        )
+        executor = _make_executor()
+        executor._execute_ac_batch = AsyncMock(
+            return_value=[
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="AC 2",
+                    success=True,
+                    final_message="Implemented AC 2",
+                )
+            ]
+        )
+
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=dependency_graph.to_execution_plan(),
+            session_id="orch_skip_completed",
+            execution_id="exec_skip_completed",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            externally_satisfied_acs={
+                0: {"reason": "Implemented manually", "commit": "abc1234"},
+            },
+        )
+
+        assert result.success_count == 1
+        assert result.externally_satisfied_count == 1
+        assert result.failure_count == 0
+        assert result.results[0].outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
+        assert "Implemented manually" in result.results[0].final_message
+        assert "abc1234" in result.results[0].final_message
+        executor._execute_ac_batch.assert_awaited_once()
+
     def test_verification_report_emits_depth_warning_feedback_metadata(self) -> None:
         """Verification report should expose depth warnings as structured metadata."""
         parallel_result = ParallelExecutionResult(

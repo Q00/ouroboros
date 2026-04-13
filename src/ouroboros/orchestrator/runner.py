@@ -1264,6 +1264,7 @@ class OrchestratorRunner:
         execution_id: str | None = None,
         session_id: str | None = None,
         parallel: bool = True,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed via Claude Agent.
 
@@ -1277,6 +1278,8 @@ class OrchestratorRunner:
             session_id: Optional session ID to preallocate for external tracking.
             parallel: Enable parallel AC execution. When True, independent ACs
                      run concurrently. Default: True (parallel execution).
+            externally_satisfied_acs: Top-level ACs already satisfied by the
+                current working tree and therefore skipped for re-execution.
 
         Returns:
             Result containing OrchestratorResult on success.
@@ -1289,6 +1292,7 @@ class OrchestratorRunner:
             seed=seed,
             tracker=session_result.value,
             parallel=parallel,
+            externally_satisfied_acs=externally_satisfied_acs,
         )
 
     async def prepare_session(
@@ -1340,6 +1344,7 @@ class OrchestratorRunner:
         seed: Seed,
         tracker: SessionTracker,
         parallel: bool = True,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute a seed using an already-persisted orchestrator session."""
         exec_id = tracker.execution_id
@@ -1401,6 +1406,7 @@ class OrchestratorRunner:
                     tool_catalog=tool_catalog,
                     system_prompt=system_prompt,
                     start_time=start_time,
+                    externally_satisfied_acs=externally_satisfied_acs,
                 )
         except Exception as e:
             self._cleanup_pre_execution_state(
@@ -1727,6 +1733,7 @@ class OrchestratorRunner:
         tool_catalog: SessionToolCatalog,
         system_prompt: str,
         start_time: datetime,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed with parallel AC execution.
 
@@ -1740,6 +1747,8 @@ class OrchestratorRunner:
             merged_tools: Available tools.
             system_prompt: System prompt for agents.
             start_time: Execution start time.
+            externally_satisfied_acs: Top-level ACs already satisfied by the
+                current working tree and therefore skipped for re-execution.
 
         Returns:
             Result containing OrchestratorResult on success.
@@ -1833,6 +1842,7 @@ class OrchestratorRunner:
             tools=merged_tools,
             tool_catalog=tool_catalog.tools,
             system_prompt=system_prompt,
+            externally_satisfied_acs=externally_satisfied_acs,
         )
 
         # Check for cancellation after parallel execution
@@ -1864,6 +1874,10 @@ class OrchestratorRunner:
             "acceptance_criteria_count": len(seed.acceptance_criteria),
             "parallel_execution": True,
             "success_count": parallel_result.success_count,
+            "externally_satisfied_count": parallel_result.externally_satisfied_count,
+            "satisfied_count": (
+                parallel_result.success_count + parallel_result.externally_satisfied_count
+            ),
             "failure_count": parallel_result.failure_count,
             "blocked_count": parallel_result.blocked_count,
             "invalid_count": parallel_result.invalid_count,

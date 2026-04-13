@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ouroboros.cli.commands.run import _resolve_max_decomposition_depth, _run_orchestrator
+from ouroboros.cli.commands.run import (
+    _load_skip_completed_markers,
+    _resolve_max_decomposition_depth,
+    _run_orchestrator,
+)
 from ouroboros.core.types import Result
 from ouroboros.evaluation.verification_artifacts import VerificationArtifacts
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -90,6 +94,26 @@ def test_resolve_max_decomposition_depth_prefers_cli_then_env_then_seed(
 
     assert _resolve_max_decomposition_depth(seed_data, None) == 4
     assert _resolve_max_decomposition_depth(seed_data, 1) == 1
+
+
+def test_load_skip_completed_markers_parses_yaml_metadata(tmp_path: Path) -> None:
+    """The skip-completed marker file should resolve 1-based AC numbers."""
+    marker_file = tmp_path / "completed.yaml"
+    marker_file.write_text(
+        "completed_acs:\n"
+        "  - ac: 1\n"
+        "    reason: Done manually\n"
+        "    commit: abc1234\n"
+        "  - 2\n",
+        encoding="utf-8",
+    )
+
+    markers = _load_skip_completed_markers(str(marker_file), total_acs=3)
+
+    assert markers == {
+        0: {"reason": "Done manually", "commit": "abc1234"},
+        1: {},
+    }
 
 
 @pytest.mark.asyncio
@@ -183,6 +207,58 @@ async def test_run_orchestrator_passes_resolved_depth_cap_to_runner(tmp_path: Pa
         await _run_orchestrator(seed_file)
 
     assert mock_runner_cls.call_args.kwargs["max_decomposition_depth"] == 3
+
+
+@pytest.mark.asyncio
+async def test_run_orchestrator_passes_skip_completed_markers_to_runner(tmp_path: Path) -> None:
+    """CLI orchestration should pass parsed skip-completed markers into the runner."""
+    seed_file = tmp_path / "seed.yaml"
+    seed_file.write_text("goal: ignored\n", encoding="utf-8")
+    marker_file = tmp_path / "completed.yaml"
+    marker_file.write_text(
+        "completed_acs:\n"
+        "  - ac: 1\n"
+        "    reason: Hybrid flow\n"
+        "    commit: deadbee\n",
+        encoding="utf-8",
+    )
+
+    fake_exec = SimpleNamespace(
+        success=True,
+        session_id="sess-test",
+        messages_processed=5,
+        duration_seconds=1.0,
+        execution_id="exec-test",
+        summary={"verification_report": "Parallel Execution Verification Report"},
+        final_message="fallback final message",
+    )
+    mock_runner = MagicMock()
+    mock_runner.execute_seed = AsyncMock(return_value=Result.ok(fake_exec))
+    mock_runner.resume_session = AsyncMock()
+
+    with (
+        patch("ouroboros.cli.commands.run._load_seed_from_yaml", return_value=VALID_SEED_DATA),
+        patch("ouroboros.orchestrator.create_agent_runtime"),
+        patch("ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner),
+        patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
+        patch(
+            "ouroboros.cli.commands.run.build_verification_artifacts",
+            new_callable=AsyncMock,
+            return_value=FAKE_VERIFICATION_ARTIFACTS,
+        ),
+        patch(
+            "ouroboros.mcp.tools.qa.QAHandler.handle",
+            new_callable=AsyncMock,
+            return_value=FAKE_QA_RESULT,
+        ),
+    ):
+        mock_event_store_cls.return_value.initialize = AsyncMock()
+        await _run_orchestrator(seed_file, skip_completed=str(marker_file))
+
+    execute_kwargs = mock_runner.execute_seed.await_args.kwargs
+    assert execute_kwargs["externally_satisfied_acs"] == {
+        0: {"reason": "Hybrid flow", "commit": "deadbee"},
+    }
 
 
 @pytest.mark.asyncio

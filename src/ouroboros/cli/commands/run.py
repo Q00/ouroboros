@@ -152,6 +152,64 @@ def _resolve_max_decomposition_depth(seed_data: dict[str, Any], cli_value: int |
     return DEFAULT_MAX_DECOMPOSITION_DEPTH
 
 
+def _load_skip_completed_markers(
+    marker_path: str | None,
+    *,
+    total_acs: int,
+) -> dict[int, dict[str, Any]]:
+    """Load a YAML marker file describing already-satisfied top-level ACs."""
+    if not marker_path:
+        return {}
+
+    path = Path(marker_path).expanduser()
+    if not path.exists() or not path.is_file():
+        print_error(f"--skip-completed file not found: {path}")
+        raise typer.Exit(1)
+
+    try:
+        raw_data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print_error(f"Failed to read --skip-completed file: {exc}")
+        raise typer.Exit(1) from exc
+
+    if raw_data is None:
+        return {}
+
+    if isinstance(raw_data, dict):
+        raw_entries = raw_data.get("completed_acs", [])
+    elif isinstance(raw_data, list):
+        raw_entries = raw_data
+    else:
+        print_error("--skip-completed must be a YAML list or a mapping with completed_acs")
+        raise typer.Exit(1)
+
+    if not isinstance(raw_entries, list):
+        print_error("--skip-completed completed_acs must be a YAML list")
+        raise typer.Exit(1)
+
+    resolved: dict[int, dict[str, Any]] = {}
+    for index, entry in enumerate(raw_entries, start=1):
+        source = f"{path}: completed_acs[{index}]"
+        if isinstance(entry, dict):
+            ac_number = _coerce_non_negative_int(entry.get("ac"), source=f"{source}.ac")
+            metadata = {
+                "reason": entry.get("reason"),
+                "commit": entry.get("commit"),
+            }
+        else:
+            ac_number = _coerce_non_negative_int(entry, source=source)
+            metadata = {}
+
+        if ac_number < 1 or ac_number > total_acs:
+            print_error(
+                f"{source} references AC {ac_number}, but the seed only has {total_acs} ACs"
+            )
+            raise typer.Exit(1)
+        resolved[ac_number - 1] = metadata
+
+    return resolved
+
+
 async def _initialize_mcp_manager(
     config_path: Path,
     tool_prefix: str,  # noqa: ARG001
@@ -224,6 +282,7 @@ async def _run_orchestrator(
     no_qa: bool = False,
     runtime_backend: str | None = None,
     max_decomposition_depth: int | None = None,
+    skip_completed: str | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -237,6 +296,7 @@ async def _run_orchestrator(
         no_qa: Skip post-execution QA. Default: False.
         runtime_backend: Optional orchestrator runtime backend override.
         max_decomposition_depth: Optional recursive decomposition depth cap override.
+        skip_completed: Optional path to a marker file for already-satisfied ACs.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
@@ -256,11 +316,22 @@ async def _run_orchestrator(
         seed_data,
         max_decomposition_depth,
     )
+    externally_satisfied_acs = {}
+    if skip_completed:
+        if resume_session:
+            print_warning("--skip-completed is ignored when resuming an existing session.")
+        else:
+            externally_satisfied_acs = _load_skip_completed_markers(
+                skip_completed,
+                total_acs=len(seed.acceptance_criteria),
+            )
 
     if debug:
         print_info(f"Loaded seed: {seed.goal[:80]}...")
         print_info(f"Acceptance criteria: {len(seed.acceptance_criteria)}")
         print_info(f"Max decomposition depth: {resolved_max_decomposition_depth}")
+        if externally_satisfied_acs:
+            print_info(f"Externally satisfied ACs: {len(externally_satisfied_acs)}")
 
     # Initialize MCP manager if config provided
     mcp_manager = None
@@ -342,6 +413,7 @@ async def _run_orchestrator(
                 execution_id=execution_id,
                 session_id=session_id_for_run,
                 parallel=parallel,
+                externally_satisfied_acs=externally_satisfied_acs,
             )
 
         # Handle result
@@ -490,6 +562,16 @@ def workflow(
             ),
         ),
     ] = None,
+    skip_completed: Annotated[
+        str | None,
+        typer.Option(
+            "--skip-completed",
+            help=(
+                "Path to a YAML marker file listing already-satisfied top-level ACs. "
+                "Entries use 1-based AC numbers under completed_acs."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -528,6 +610,9 @@ def workflow(
 
         # Limit recursive decomposition depth
         ouroboros run seed.yaml --max-decomposition-depth 1
+
+        # Skip ACs already satisfied by the working tree
+        ouroboros run seed.yaml --skip-completed docs/completed.yaml
     """
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
@@ -553,6 +638,7 @@ def workflow(
                     no_qa=no_qa,
                     runtime_backend=runtime.value if runtime else None,
                     max_decomposition_depth=max_decomposition_depth,
+                    skip_completed=skip_completed,
                 )
             )
         except (ValueError, NotImplementedError) as e:

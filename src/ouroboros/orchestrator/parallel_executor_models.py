@@ -25,6 +25,7 @@ class ACExecutionOutcome(str, Enum):  # noqa: UP042
     """Normalized outcome for a single AC execution."""
 
     SUCCEEDED = "succeeded"
+    SATISFIED_EXTERNALLY = "satisfied_externally"
     FAILED = "failed"
     BLOCKED = "blocked"
     INVALID = "invalid"
@@ -91,6 +92,11 @@ class ACExecutionResult:
         return self.outcome == ACExecutionOutcome.BLOCKED
 
     @property
+    def is_satisfied_externally(self) -> bool:
+        """True when the AC was skipped because the working tree already satisfied it."""
+        return self.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
+
+    @property
     def is_failure(self) -> bool:
         """True when the AC executed and failed."""
         return self.outcome == ACExecutionOutcome.FAILED
@@ -133,7 +139,24 @@ class ParallelExecutionStageResult:
     @property
     def success_count(self) -> int:
         """Number of successful ACs in this stage."""
-        return sum(1 for result in self.results if result.outcome == ACExecutionOutcome.SUCCEEDED)
+        return sum(
+            1
+            for result in self.results
+            if result.outcome
+            in {
+                ACExecutionOutcome.SUCCEEDED,
+                ACExecutionOutcome.SATISFIED_EXTERNALLY,
+            }
+        )
+
+    @property
+    def externally_satisfied_count(self) -> int:
+        """Number of ACs skipped because the working tree already satisfies them."""
+        return sum(
+            1
+            for result in self.results
+            if result.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
+        )
 
     @property
     def failure_count(self) -> int:
@@ -185,6 +208,7 @@ class ParallelExecutionResult:
     Attributes:
         results: Individual results for each AC.
         success_count: Number of successful ACs.
+        externally_satisfied_count: Number of ACs satisfied without re-execution.
         failure_count: Number of failed ACs.
         skipped_count: Number of skipped ACs (due to failed dependencies).
         blocked_count: Number of ACs blocked by dependency failures.
@@ -202,6 +226,7 @@ class ParallelExecutionResult:
     results: tuple[ACExecutionResult, ...]
     success_count: int
     failure_count: int
+    externally_satisfied_count: int = 0
     skipped_count: int = 0
     blocked_count: int = 0
     invalid_count: int = 0
@@ -218,7 +243,7 @@ class ParallelExecutionResult:
     @property
     def any_succeeded(self) -> bool:
         """Return True if at least one AC succeeded."""
-        return self.success_count > 0
+        return self.success_count > 0 or self.externally_satisfied_count > 0
 
 
 __all__ = [
