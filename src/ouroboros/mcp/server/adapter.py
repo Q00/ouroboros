@@ -802,6 +802,15 @@ def create_ouroboros_server(
     )
 
     # Create shared LLM adapter for interview/seed/evaluation paths.
+    #
+    # NOTE: ``max_turns=1`` is appropriate for interview question generation
+    # and seed synthesis, where the adapter returns a single-shot response.
+    # Evaluation (Stage 2 semantic) DOES NOT use this adapter — see
+    # ``EvaluateHandler.handle`` in ``mcp/tools/evaluation_handlers.py`` which
+    # constructs a fresh adapter with ``max_turns=20`` so the semantic
+    # evaluator can issue tool calls when reading spec files. Do not bump
+    # this value without first auditing every caller of ``self.llm_adapter``
+    # — it affects interview latency and token usage.
     llm_adapter = create_llm_adapter(
         backend=llm_backend,
         max_turns=1,
