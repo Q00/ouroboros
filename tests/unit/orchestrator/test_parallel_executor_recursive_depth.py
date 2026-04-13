@@ -18,6 +18,7 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
         event_store=AsyncMock(),
         console=MagicMock(),
         enable_decomposition=True,
+        max_decomposition_depth=3,
     )
     executor._emit_subtask_event = AsyncMock()
     executor._try_decompose_ac = AsyncMock(

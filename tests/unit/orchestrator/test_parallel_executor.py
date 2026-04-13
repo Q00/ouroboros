@@ -696,6 +696,7 @@ class TestParallelACExecutor:
             event_store=AsyncMock(),
             console=MagicMock(),
             enable_decomposition=True,
+            max_decomposition_depth=3,
         )
         executor._emit_subtask_event = AsyncMock()
         executor._try_decompose_ac = AsyncMock(
@@ -770,7 +771,11 @@ class TestParallelACExecutor:
             failure_count=0,
         )
 
-        report = render_parallel_verification_report(parallel_result, 1)
+        report = render_parallel_verification_report(
+            parallel_result,
+            1,
+            max_decomposition_depth=3,
+        )
 
         assert "## Feedback Metadata" in report
         assert '"code": "decomposition_depth_warning"' in report
