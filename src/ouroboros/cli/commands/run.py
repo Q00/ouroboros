@@ -130,6 +130,15 @@ def _coerce_non_negative_int(value: object, *, source: str) -> int:
     return parsed
 
 
+def _coerce_positive_int(value: object, *, source: str) -> int:
+    """Parse a positive integer from CLI or env config."""
+    parsed = _coerce_non_negative_int(value, source=source)
+    if parsed <= 0:
+        print_error(f"{source} must be greater than 0")
+        raise typer.Exit(1)
+    return parsed
+
+
 def _resolve_max_decomposition_depth(seed_data: dict[str, Any], cli_value: int | None) -> int:
     """Resolve decomposition depth from CLI, env, seed config, then default."""
     if cli_value is not None:
@@ -208,6 +217,17 @@ def _load_skip_completed_markers(
         resolved[ac_number - 1] = metadata
 
     return resolved
+
+
+def _resolve_max_parallel_workers() -> int:
+    """Resolve the parallel worker cap from the environment."""
+    env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
+    if env_value:
+        return _coerce_positive_int(
+            env_value,
+            source="OUROBOROS_MAX_PARALLEL_WORKERS",
+        )
+    return 3
 
 
 async def _initialize_mcp_manager(
@@ -316,7 +336,8 @@ async def _run_orchestrator(
         seed_data,
         max_decomposition_depth,
     )
-    externally_satisfied_acs = {}
+    resolved_max_parallel_workers = _resolve_max_parallel_workers()
+    externally_satisfied_acs: dict[int, dict[str, Any]] | None = None
     if skip_completed:
         if resume_session:
             print_warning("--skip-completed is ignored when resuming an existing session.")
@@ -330,6 +351,7 @@ async def _run_orchestrator(
         print_info(f"Loaded seed: {seed.goal[:80]}...")
         print_info(f"Acceptance criteria: {len(seed.acceptance_criteria)}")
         print_info(f"Max decomposition depth: {resolved_max_decomposition_depth}")
+        print_info(f"Max parallel workers: {resolved_max_parallel_workers}")
         if externally_satisfied_acs:
             print_info(f"Externally satisfied ACs: {len(externally_satisfied_acs)}")
 
@@ -393,6 +415,7 @@ async def _run_orchestrator(
         debug=debug,
         task_workspace=workspace,
         max_decomposition_depth=resolved_max_decomposition_depth,
+        max_parallel_workers=resolved_max_parallel_workers,
     )
 
     # Execute
@@ -408,13 +431,15 @@ async def _run_orchestrator(
                 print_info("Parallel mode: independent ACs will run concurrently")
             else:
                 print_info("Sequential mode: ACs will run one at a time")
-            result = await runner.execute_seed(
-                seed,
-                execution_id=execution_id,
-                session_id=session_id_for_run,
-                parallel=parallel,
-                externally_satisfied_acs=externally_satisfied_acs,
-            )
+            execute_kwargs: dict[str, Any] = {
+                "seed": seed,
+                "execution_id": execution_id,
+                "session_id": session_id_for_run,
+                "parallel": parallel,
+            }
+            if externally_satisfied_acs:
+                execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+            result = await runner.execute_seed(**execute_kwargs)
 
         # Handle result
         if result.is_ok:
