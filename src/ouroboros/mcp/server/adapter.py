@@ -733,7 +733,8 @@ def create_ouroboros_server(
         rate_limit_config: Optional rate limiting configuration.
         event_store: Optional EventStore instance. If not provided, creates default.
         state_dir: Optional pathlib.Path for interview state directory.
-                   If not provided, uses ~/.ouroboros/data.
+                   If not provided, uses ``get_config_dir() / "data"``
+                   (typically ``~/.ouroboros/data``).
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
 

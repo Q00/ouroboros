@@ -6,7 +6,7 @@ import pytest
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
-from ouroboros.evaluation.models import EvaluationContext
+from ouroboros.evaluation.models import ArtifactBundle, EvaluationContext, FileArtifact
 from ouroboros.evaluation.semantic import (
     SemanticConfig,
     SemanticEvaluator,
@@ -51,6 +51,38 @@ class TestBuildEvaluationPrompt:
         assert "Build authentication system" in prompt
         assert "Must be secure" in prompt
         assert "No plaintext passwords" in prompt
+
+    def test_file_artifacts_omit_inline_artifact_text(self) -> None:
+        """When collected files are present, the prompt should prefer file sections."""
+        context = EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="User can login securely",
+            artifact="inline artifact text that should not be duplicated",
+            artifact_bundle=ArtifactBundle(
+                files=(
+                    FileArtifact(
+                        file_path="/tmp/.ouroboros_eval_artifact.md",
+                        content="artifact summary from file",
+                    ),
+                    FileArtifact(
+                        file_path="/tmp/src/auth.py",
+                        content="def login(username, password): ...",
+                    ),
+                ),
+                text_summary="artifact summary from file",
+                total_chars=64,
+            ),
+        )
+
+        prompt = build_evaluation_prompt(context)
+
+        assert "## Source Files" in prompt
+        assert "### /tmp/.ouroboros_eval_artifact.md" in prompt
+        assert "### /tmp/src/auth.py" in prompt
+        assert "artifact summary from file" in prompt
+        assert "## Artifact Content" not in prompt
+        assert "inline artifact text that should not be duplicated" not in prompt
 
 
 class TestParseSemanticResponse:
