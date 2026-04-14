@@ -26,6 +26,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
 )
 from ouroboros.mcp.tools.channel_workflow_handler import ChannelWorkflowHandler
 from ouroboros.mcp.tools.evaluation_handlers import (
+    ChecklistVerifyHandler,
     EvaluateHandler,
     LateralThinkHandler,
     MeasureDriftHandler,
@@ -186,6 +187,18 @@ def evaluate_handler(*, llm_backend: str | None = None) -> EvaluateHandler:
     return EvaluateHandler(llm_backend=llm_backend)
 
 
+def checklist_verify_handler(
+    *,
+    evaluate_handler: EvaluateHandler | None = None,
+    llm_backend: str | None = None,
+) -> ChecklistVerifyHandler:
+    """Create a ChecklistVerifyHandler instance."""
+    return ChecklistVerifyHandler(
+        evaluate_handler=evaluate_handler,
+        llm_backend=llm_backend,
+    )
+
+
 def evolve_step_handler() -> EvolveStepHandler:
     """Create an EvolveStepHandler instance."""
     return EvolveStepHandler()
@@ -226,6 +239,7 @@ OuroborosToolHandlers = tuple[
     | MeasureDriftHandler
     | InterviewHandler
     | EvaluateHandler
+    | ChecklistVerifyHandler
     | LateralThinkHandler
     | EvolveStepHandler
     | StartEvolveStepHandler
@@ -265,6 +279,7 @@ def get_ouroboros_tools(
     job_result = JobResultHandler()
     interview = InterviewHandler(llm_backend=llm_backend)
     generate_seed = GenerateSeedHandler(llm_backend=llm_backend)
+    evaluate = EvaluateHandler(llm_backend=llm_backend)
     return (
         execute_seed,
         start_execute,
@@ -278,7 +293,8 @@ def get_ouroboros_tools(
         generate_seed,
         MeasureDriftHandler(),
         interview,
-        EvaluateHandler(llm_backend=llm_backend),
+        evaluate,
+        ChecklistVerifyHandler(evaluate_handler=evaluate, llm_backend=llm_backend),
         LateralThinkHandler(),
         EvolveStepHandler(),
         StartEvolveStepHandler(),

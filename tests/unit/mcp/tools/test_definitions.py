@@ -768,7 +768,9 @@ class TestOuroborosTools:
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
         """OUROBOROS_TOOLS contains all standard handlers."""
-        assert len(OUROBOROS_TOOLS) == 23
+        from ouroboros.mcp.tools.evaluation_handlers import ChecklistVerifyHandler
+
+        assert len(OUROBOROS_TOOLS) == 24
 
         handler_types = {type(h) for h in OUROBOROS_TOOLS}
         assert ACTreeHUDHandler in handler_types
@@ -784,6 +786,7 @@ class TestOuroborosTools:
         assert MeasureDriftHandler in handler_types
         assert InterviewHandler in handler_types
         assert EvaluateHandler in handler_types
+        assert ChecklistVerifyHandler in handler_types
         assert LateralThinkHandler in handler_types
         assert EvolveStepHandler in handler_types
         assert StartEvolveStepHandler in handler_types
@@ -806,7 +809,7 @@ class TestOuroborosTools:
     def test_get_ouroboros_tools_can_inject_runtime_backend(self) -> None:
         """Tool factory can build execute_seed with a specific runtime backend."""
         tools = get_ouroboros_tools(runtime_backend="codex")
-        assert len(tools) == 23
+        assert len(tools) == 24
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
         assert execute_handler.agent_runtime_backend == "codex"
 
