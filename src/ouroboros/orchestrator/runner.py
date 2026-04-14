@@ -1022,25 +1022,38 @@ class OrchestratorRunner:
         """
         # Start with strategy tools (or DEFAULT_TOOLS as fallback)
         base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
+        inherited_mcp: set[str] = set()
         if self._inherited_tools:
-            # Only inherit tools that are known runtime builtins (Read, Edit,
-            # Bash, etc.).  Bridge / MCP tools should NOT be injected here
-            # because they would create phantom catalog entries — definitions
-            # that have a name but no backing handler or server connection.
-            # When ``self._mcp_manager`` is set the bridge tools will be
-            # discovered by ``MCPToolProvider.get_tools()`` below, which
-            # returns real definitions tied to a live server connection.
+            # Separate inherited tools into two buckets:
+            #
+            # 1. **Builtins** (Read, Edit, Bash, …) → added to ``base_tools``
+            #    so they receive real catalog entries with handlers.
+            #
+            # 2. **Bridge / MCP tools** → stored as ``inherited_capabilities``
+            #    on the session catalog.  They are *not* added to
+            #    ``base_tools`` because that would synthesize phantom catalog
+            #    entries (definitions with no backing handler).  When
+            #    ``self._mcp_manager`` is set, ``MCPToolProvider.get_tools()``
+            #    below discovers them with real server connections.  When the
+            #    manager is absent the names are still preserved so the
+            #    delegated-session capability contract is not silently lost.
             known_builtins = {d.name for d in enumerate_runtime_builtin_tool_definitions()}
             for tool_name in self._inherited_tools:
                 if tool_name in known_builtins and tool_name not in base_tools:
                     base_tools.append(tool_name)
                 elif tool_name not in known_builtins:
+                    inherited_mcp.add(tool_name)
                     log.info(
-                        "orchestrator.runner.inherited_tool_deferred_to_bridge",
+                        "orchestrator.runner.inherited_mcp_capability_preserved",
                         tool=tool_name,
                         has_mcp_manager=self._mcp_manager is not None,
                     )
         session_catalog = assemble_session_tool_catalog(base_tools)
+        if inherited_mcp:
+            session_catalog = replace(
+                session_catalog,
+                inherited_capabilities=frozenset(inherited_mcp),
+            )
         capability_graph = build_capability_graph(session_catalog)
         merged_tools = allowed_capability_names(
             capability_graph,

@@ -202,13 +202,20 @@ class SessionToolCatalogEntry:
 
 @dataclass(frozen=True, slots=True)
 class SessionToolCatalog:
-    """Deterministic merged tool catalog for a single runtime session."""
+    """Deterministic merged tool catalog for a single runtime session.
+
+    ``inherited_capabilities`` tracks MCP/bridge tool names that a parent
+    session authorized for the child **without** synthesizing catalog entries.
+    These names are preserved for observability and downstream authorization
+    but do **not** appear in ``tools`` / ``entries`` (no phantom definitions).
+    """
 
     tools: tuple[MCPToolDefinition, ...] = field(default_factory=tuple)
     attached_tools: tuple[MCPToolDefinition, ...] = field(default_factory=tuple)
     entries: tuple[SessionToolCatalogEntry, ...] = field(default_factory=tuple)
     attached_entries: tuple[SessionToolCatalogEntry, ...] = field(default_factory=tuple)
     conflicts: tuple[ToolConflict, ...] = field(default_factory=tuple)
+    inherited_capabilities: frozenset[str] = field(default_factory=frozenset)
 
 
 def _infer_tool_input_type(value: Any) -> ToolInputType:
@@ -1179,17 +1186,35 @@ def _restore_tool_definition_for_catalog_source(
 
 
 def normalize_serialized_tool_catalog(
-    tool_catalog: Sequence[Mapping[str, Any]] | None,
+    tool_catalog: Sequence[Mapping[str, Any]] | Mapping[str, Any] | None,
     *,
     tool_prefix: str = "",
 ) -> SessionToolCatalog | None:
-    """Rehydrate a serialized startup/session catalog into `SessionToolCatalog`."""
+    """Rehydrate a serialized startup/session catalog into `SessionToolCatalog`.
+
+    Accepts both the legacy list format and the dict format produced by
+    :func:`serialize_tool_catalog` when ``inherited_capabilities`` are present.
+    """
     if not tool_catalog:
         return None
 
+    # Handle the dict format with inherited_capabilities
+    inherited_capabilities: frozenset[str] = frozenset()
+    entries: Sequence[Mapping[str, Any]]
+    if isinstance(tool_catalog, Mapping):
+        raw_entries = tool_catalog.get("entries", ())
+        entries = raw_entries if isinstance(raw_entries, Sequence) else ()
+        raw_inherited = tool_catalog.get("inherited_capabilities", ())
+        if isinstance(raw_inherited, Sequence) and not isinstance(raw_inherited, str):
+            inherited_capabilities = frozenset(str(n) for n in raw_inherited)
+    else:
+        entries = tool_catalog
+
     builtin_tools: list[MCPToolDefinition] = []
     attached_tools: list[MCPToolDefinition] = []
-    for entry in tool_catalog:
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
         definition = _normalize_session_catalog_tool_definition(entry)
         if definition is None:
             continue
@@ -1204,14 +1229,17 @@ def normalize_serialized_tool_catalog(
         else:
             builtin_tools.append(restored_definition)
 
-    if not builtin_tools and not attached_tools:
+    if not builtin_tools and not attached_tools and not inherited_capabilities:
         return None
 
-    return assemble_session_tool_catalog(
+    catalog = assemble_session_tool_catalog(
         builtin_tools=builtin_tools,
         attached_tools=attached_tools,
         tool_prefix=tool_prefix,
     )
+    if inherited_capabilities:
+        catalog = replace(catalog, inherited_capabilities=inherited_capabilities)
+    return catalog
 
 
 def _builtin_tools_from_catalog(catalog: SessionToolCatalog) -> tuple[MCPToolDefinition, ...]:
@@ -1838,10 +1866,18 @@ def serialize_tool_result(tool_result: MCPToolResult) -> dict[str, Any]:
 
 def serialize_tool_catalog(
     tool_catalog: SessionToolCatalog | Sequence[MCPToolDefinition],
-) -> list[dict[str, Any]]:
-    """Serialize a startup tool catalog into JSON-safe metadata."""
+) -> dict[str, Any] | list[dict[str, Any]]:
+    """Serialize a startup tool catalog into JSON-safe metadata.
+
+    When *tool_catalog* is a :class:`SessionToolCatalog` **with** inherited
+    capabilities, the return value is a ``dict`` with ``"entries"`` and
+    ``"inherited_capabilities"`` keys so that the capability contract is
+    preserved in session metadata.  For catalogs without inherited
+    capabilities (and for plain definition sequences), the legacy list
+    format is returned for backward compatibility.
+    """
     if isinstance(tool_catalog, SessionToolCatalog):
-        return [
+        entries = [
             serialize_tool_definition(
                 entry.tool,
                 stable_id=entry.stable_id,
@@ -1849,6 +1885,12 @@ def serialize_tool_catalog(
             )
             for entry in tool_catalog.entries
         ]
+        if tool_catalog.inherited_capabilities:
+            return {
+                "entries": entries,
+                "inherited_capabilities": sorted(tool_catalog.inherited_capabilities),
+            }
+        return entries
     return [serialize_tool_definition(tool_definition) for tool_definition in tool_catalog]
 
 

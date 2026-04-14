@@ -2030,7 +2030,7 @@ class TestOrchestratorRunnerWithMCP:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> None:
-        """Inherited builtin tools are merged; non-builtin tools are deferred to bridge."""
+        """Inherited builtin tools are merged; non-builtin tools are preserved as capabilities."""
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
@@ -2043,11 +2043,13 @@ class TestOrchestratorRunnerWithMCP:
         # Known builtins are inherited and deduplicated
         assert "WebFetch" in merged_tools
         assert merged_tools.count("Read") == 1
-        # Bridge/MCP tools are NOT injected — they would create phantom entries.
-        # They will be discovered via MCPToolProvider when mcp_manager is set.
+        # Bridge/MCP tools are NOT in merged_tools — they would create
+        # phantom entries.  Instead they are preserved as inherited
+        # capabilities on the catalog for authorization / observability.
         assert "mcp__chrome-devtools__click" not in merged_tools
-        assert provider is None
         assert tool_catalog is not None
+        assert "mcp__chrome-devtools__click" in tool_catalog.inherited_capabilities
+        assert provider is None
 
     @pytest.mark.asyncio
     async def test_get_merged_tools_mcp_failure(
