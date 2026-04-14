@@ -541,8 +541,22 @@ class InterviewHandler:
             await self._event_store.initialize()
             self._initialized = True
 
+    async def _drain_bg_tasks(self, timeout: float = 5.0) -> None:
+        """Await all pending background event tasks before shutdown."""
+        if not self._bg_tasks:
+            return
+        tasks = list(self._bg_tasks)
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for t in pending:
+            t.cancel()
+        # Await cancelled tasks so CancelledError propagates cleanly
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._bg_tasks.clear()
+
     async def close(self) -> None:
-        """Close the event store if this handler owns it."""
+        """Drain pending event tasks, then close the event store if owned."""
+        await self._drain_bg_tasks()
         if self._owns_event_store:
             await self._event_store.close()
             self._initialized = False
