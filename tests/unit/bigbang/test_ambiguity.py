@@ -9,13 +9,17 @@ from ouroboros.bigbang.ambiguity import (
     CONSTRAINT_CLARITY_WEIGHT,
     GOAL_CLARITY_WEIGHT,
     MAX_TOKEN_LIMIT,
+    MILESTONE_DEFINITIONS,
     SCORING_TEMPERATURE,
     SUCCESS_CRITERIA_CLARITY_WEIGHT,
+    AmbiguityMilestone,
     AmbiguityScore,
     AmbiguityScorer,
     ComponentScore,
     ScoreBreakdown,
     format_score_display,
+    get_milestone,
+    get_next_milestone,
     is_ready_for_seed,
 )
 from ouroboros.bigbang.interview import InterviewRound, InterviewState
@@ -981,7 +985,7 @@ class TestFormatScoreDisplay:
     """Test format_score_display helper function."""
 
     def test_format_score_display_ready(self) -> None:
-        """format_score_display shows 'Yes' when ready for seed."""
+        """format_score_display shows 'Yes' and READY milestone when ready for seed."""
         breakdown = ScoreBreakdown(
             goal_clarity=ComponentScore(
                 name="Goal Clarity",
@@ -1007,13 +1011,14 @@ class TestFormatScoreDisplay:
         output = format_score_display(score)
 
         assert "0.15" in output
+        assert "[READY]" in output
         assert "Ready for Seed: Yes" in output
         assert "Goal Clarity" in output
         assert "90% clear" in output
         assert "Well-defined goal." in output
 
     def test_format_score_display_not_ready(self) -> None:
-        """format_score_display shows 'No' when not ready for seed."""
+        """format_score_display shows 'No' and INITIAL milestone when not ready."""
         breakdown = ScoreBreakdown(
             goal_clarity=ComponentScore(
                 name="Goal Clarity",
@@ -1039,7 +1044,9 @@ class TestFormatScoreDisplay:
         output = format_score_display(score)
 
         assert "0.50" in output
+        assert "[INITIAL]" in output
         assert "Ready for Seed: No" in output
+        assert "Next: progress" in output
 
     def test_format_score_display_includes_all_components(self) -> None:
         """format_score_display includes all component information."""
@@ -1349,3 +1356,150 @@ class TestAmbiguityScorerAdditionalContext:
 
         assert "Which deployment strategy?" in user_message
         assert "Context Clarity" in system_message
+
+
+class TestAmbiguityMilestone:
+    """Test AmbiguityMilestone enum and milestone helpers."""
+
+    def test_milestone_enum_values(self) -> None:
+        """AmbiguityMilestone has exactly four stages."""
+        assert AmbiguityMilestone.INITIAL == "initial"
+        assert AmbiguityMilestone.PROGRESS == "progress"
+        assert AmbiguityMilestone.REFINED == "refined"
+        assert AmbiguityMilestone.READY == "ready"
+        assert len(AmbiguityMilestone) == 4
+
+    def test_milestone_definitions_ordered_descending(self) -> None:
+        """MILESTONE_DEFINITIONS thresholds are in descending order."""
+        thresholds = [t for t, _, _ in MILESTONE_DEFINITIONS]
+        assert thresholds == sorted(thresholds, reverse=True)
+
+    def test_milestone_definitions_last_is_ambiguity_threshold(self) -> None:
+        """The lowest milestone threshold equals AMBIGUITY_THRESHOLD."""
+        assert MILESTONE_DEFINITIONS[-1][0] == AMBIGUITY_THRESHOLD
+
+
+class TestGetMilestone:
+    """Test get_milestone() for various score ranges."""
+
+    def test_high_ambiguity_returns_initial(self) -> None:
+        """Scores above 0.4 map to INITIAL."""
+        milestone, desc = get_milestone(0.7)
+        assert milestone == AmbiguityMilestone.INITIAL
+        assert "Core requirements" in desc
+
+    def test_score_0_5_returns_initial(self) -> None:
+        """Score exactly 0.5 maps to INITIAL (within the 0.4-1.0 band)."""
+        milestone, _ = get_milestone(0.5)
+        assert milestone == AmbiguityMilestone.INITIAL
+
+    def test_score_0_4_returns_progress(self) -> None:
+        """Score exactly 0.4 maps to PROGRESS."""
+        milestone, desc = get_milestone(0.4)
+        assert milestone == AmbiguityMilestone.PROGRESS
+        assert "Most requirements" in desc
+
+    def test_score_0_35_returns_progress(self) -> None:
+        """Score 0.35 (between 0.3 and 0.4) maps to PROGRESS."""
+        milestone, _ = get_milestone(0.35)
+        assert milestone == AmbiguityMilestone.PROGRESS
+
+    def test_score_0_3_returns_refined(self) -> None:
+        """Score exactly 0.3 maps to REFINED."""
+        milestone, desc = get_milestone(0.3)
+        assert milestone == AmbiguityMilestone.REFINED
+        assert "Success criteria" in desc
+
+    def test_score_0_25_returns_refined(self) -> None:
+        """Score 0.25 (between 0.2 and 0.3) maps to REFINED."""
+        milestone, _ = get_milestone(0.25)
+        assert milestone == AmbiguityMilestone.REFINED
+
+    def test_score_0_2_returns_ready(self) -> None:
+        """Score exactly at AMBIGUITY_THRESHOLD maps to READY."""
+        milestone, desc = get_milestone(0.2)
+        assert milestone == AmbiguityMilestone.READY
+        assert "Ready for Seed" in desc
+
+    def test_score_below_threshold_returns_ready(self) -> None:
+        """Score below threshold still maps to READY."""
+        milestone, _ = get_milestone(0.1)
+        assert milestone == AmbiguityMilestone.READY
+
+    def test_score_zero_returns_ready(self) -> None:
+        """Perfect clarity (0.0) maps to READY."""
+        milestone, _ = get_milestone(0.0)
+        assert milestone == AmbiguityMilestone.READY
+
+    def test_score_1_0_returns_initial(self) -> None:
+        """Maximum ambiguity (1.0) maps to INITIAL."""
+        milestone, _ = get_milestone(1.0)
+        assert milestone == AmbiguityMilestone.INITIAL
+
+
+class TestGetNextMilestone:
+    """Test get_next_milestone() for progression targets."""
+
+    def test_high_score_next_is_progress(self) -> None:
+        """From INITIAL (0.5), next milestone is PROGRESS (0.4)."""
+        result = get_next_milestone(0.5)
+        assert result is not None
+        threshold, milestone, _ = result
+        assert threshold == 0.4
+        assert milestone == AmbiguityMilestone.PROGRESS
+
+    def test_progress_score_next_is_refined(self) -> None:
+        """From PROGRESS (0.35), next milestone is REFINED (0.3)."""
+        result = get_next_milestone(0.35)
+        assert result is not None
+        threshold, milestone, _ = result
+        assert threshold == 0.3
+        assert milestone == AmbiguityMilestone.REFINED
+
+    def test_refined_score_next_is_ready(self) -> None:
+        """From REFINED (0.25), next milestone is READY (0.2)."""
+        result = get_next_milestone(0.25)
+        assert result is not None
+        threshold, milestone, _ = result
+        assert threshold == AMBIGUITY_THRESHOLD
+        assert milestone == AmbiguityMilestone.READY
+
+    def test_ready_score_returns_none(self) -> None:
+        """At READY (0.15), there is no next milestone."""
+        result = get_next_milestone(0.15)
+        assert result is None
+
+    def test_exactly_at_threshold_returns_none(self) -> None:
+        """At exactly AMBIGUITY_THRESHOLD, no next milestone."""
+        result = get_next_milestone(0.2)
+        assert result is None
+
+    def test_zero_returns_none(self) -> None:
+        """At perfect clarity, no next milestone."""
+        result = get_next_milestone(0.0)
+        assert result is None
+
+    def test_score_1_0_next_is_progress(self) -> None:
+        """From maximum ambiguity, next milestone is PROGRESS."""
+        result = get_next_milestone(1.0)
+        assert result is not None
+        _, milestone, _ = result
+        assert milestone == AmbiguityMilestone.PROGRESS
+
+    def test_boundary_0_41_next_is_progress(self) -> None:
+        """Score just above 0.4 points to PROGRESS as next."""
+        result = get_next_milestone(0.41)
+        assert result is not None
+        assert result[0] == 0.4
+
+    def test_boundary_0_31_next_is_refined(self) -> None:
+        """Score just above 0.3 points to REFINED as next."""
+        result = get_next_milestone(0.31)
+        assert result is not None
+        assert result[0] == 0.3
+
+    def test_boundary_0_21_next_is_ready(self) -> None:
+        """Score just above threshold points to READY as next."""
+        result = get_next_milestone(0.21)
+        assert result is not None
+        assert result[0] == AMBIGUITY_THRESHOLD
