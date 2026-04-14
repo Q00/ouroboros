@@ -24,6 +24,7 @@ from ouroboros.bigbang.ambiguity import (
     ComponentScore,
     ScoreBreakdown,
     get_completion_floor_failures,
+    get_milestone,
     qualifies_for_seed_completion,
 )
 from ouroboros.bigbang.interview import (
@@ -161,10 +162,21 @@ def _completion_gate_reason(
     return "requirements are not stable enough to close yet"
 
 
+def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
+    """Return the milestone label for an ambiguity score, or None."""
+    if score is None:
+        return None
+    milestone, _ = get_milestone(score.overall_score)
+    return milestone.value
+
+
 def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
     """Attach the current ambiguity score to a question for display."""
     if score is None:
         return question
+    milestone_label = _milestone_for_score(score)
+    if milestone_label:
+        return f"(ambiguity: {score.overall_score:.2f} [{milestone_label}]) {question}"
     return f"(ambiguity: {score.overall_score:.2f}) {question}"
 
 
@@ -634,6 +646,7 @@ class InterviewHandler:
                 meta={
                     "session_id": session_id,
                     "ambiguity_score": (score.overall_score if score is not None else None),
+                    "milestone": _milestone_for_score(score),
                     "seed_ready": False,
                 },
             )
@@ -675,7 +688,10 @@ class InterviewHandler:
 
         score_line = ""
         if score is not None:
-            score_line = f"(ambiguity: {score.overall_score:.2f}) Ready for Seed generation.\n"
+            ms_label = _milestone_for_score(score)
+            score_line = (
+                f"(ambiguity: {score.overall_score:.2f} [{ms_label}]) Ready for Seed generation.\n"
+            )
 
         return Result.ok(
             MCPToolResult(
@@ -694,6 +710,7 @@ class InterviewHandler:
                     "session_id": session_id,
                     "completed": True,
                     "ambiguity_score": score.overall_score if score is not None else None,
+                    "milestone": _milestone_for_score(score),
                     "seed_ready": score.is_ready_for_seed if score is not None else None,
                 },
             )
@@ -903,6 +920,7 @@ class InterviewHandler:
                             "ambiguity_score": (
                                 live_score.overall_score if live_score is not None else None
                             ),
+                            "milestone": _milestone_for_score(live_score),
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
                             ),
@@ -941,6 +959,11 @@ class InterviewHandler:
                             meta={
                                 "session_id": session_id,
                                 "ambiguity_score": state.ambiguity_score,
+                                "milestone": (
+                                    get_milestone(state.ambiguity_score)[0].value
+                                    if state.ambiguity_score is not None
+                                    else None
+                                ),
                                 "seed_ready": (
                                     state.ambiguity_score is not None
                                     and state.ambiguity_score <= AMBIGUITY_THRESHOLD
@@ -1153,6 +1176,7 @@ class InterviewHandler:
                             "ambiguity_score": (
                                 live_score.overall_score if live_score is not None else None
                             ),
+                            "milestone": _milestone_for_score(live_score),
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
                             ),

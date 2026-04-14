@@ -615,28 +615,42 @@ class InterviewEngine:
             AmbiguityScore,
             ScoreBreakdown,
             get_completion_floor_failures,
+            get_milestone,
+            get_next_milestone,
         )
+
+        milestone, milestone_desc = get_milestone(state.ambiguity_score)
+        next_ms = get_next_milestone(state.ambiguity_score)
 
         lines = [
             "## Current Ambiguity Snapshot",
             f"- Overall ambiguity: {state.ambiguity_score:.2f}",
-            f"- Seed-ready threshold: {AMBIGUITY_THRESHOLD:.2f}",
-            f"- Closure-mode threshold: {SEED_CLOSER_ACTIVATION_THRESHOLD:.2f}",
-            (
-                "- Seed-ready now: yes"
-                if state.ambiguity_score <= AMBIGUITY_THRESHOLD
-                else "- Seed-ready now: no"
-            ),
-            (
-                "- Closure mode active: yes"
-                if state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
-                else "- Closure mode active: no"
-            ),
-            (
-                "- Completion candidate streak: "
-                f"{state.completion_candidate_streak}/{AUTO_COMPLETE_STREAK_REQUIRED}"
-            ),
+            f"- Milestone: **{milestone.value.upper()}** — {milestone_desc}",
         ]
+        if next_ms is not None:
+            lines.append(
+                f"- Next milestone: {next_ms[1].value} (<= {next_ms[0]:.1f}) — {next_ms[2]}"
+            )
+        lines.extend(
+            [
+                f"- Seed-ready threshold: {AMBIGUITY_THRESHOLD:.2f}",
+                f"- Closure-mode threshold: {SEED_CLOSER_ACTIVATION_THRESHOLD:.2f}",
+                (
+                    "- Seed-ready now: yes"
+                    if state.ambiguity_score <= AMBIGUITY_THRESHOLD
+                    else "- Seed-ready now: no"
+                ),
+                (
+                    "- Closure mode active: yes"
+                    if state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
+                    else "- Closure mode active: no"
+                ),
+                (
+                    "- Completion candidate streak: "
+                    f"{state.completion_candidate_streak}/{AUTO_COMPLETE_STREAK_REQUIRED}"
+                ),
+            ]
+        )
 
         reconstructed_score: AmbiguityScore | None = None
         if isinstance(state.ambiguity_breakdown, dict):

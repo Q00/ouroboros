@@ -23,7 +23,7 @@ class FakeInterviewHandler(InterviewHandler):
                     content=(
                         MCPContentItem(
                             type=ContentType.TEXT,
-                            text="Session sess_1\n\n(ambiguity: 0.80) What should this do?",
+                            text="Session sess_1\n\n(ambiguity: 0.80 [initial]) What should this do?",
                         ),
                     ),
                     is_error=False,
