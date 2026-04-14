@@ -1969,9 +1969,7 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["completed"] is True
         assert result.value.meta["ambiguity_score"] == 0.18
         assert "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
-        # With parallel scoring+question generation, ask_next_question IS
-        # called concurrently but its result is discarded on early completion.
-        mock_engine.ask_next_question.assert_called_once()
+        mock_engine.ask_next_question.assert_not_called()
 
 
 class TestGenerateSeedHandlerAmbiguity:

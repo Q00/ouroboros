@@ -1,8 +1,9 @@
-"""Tests for InterviewHandler — parallel ambiguity scoring + question generation.
+"""Tests for InterviewHandler — sequential ambiguity scoring + question generation.
 
-Verifies that when answered rounds >= MIN_ROUNDS_BEFORE_EARLY_EXIT, both
-ambiguity scoring and question generation run concurrently via asyncio.gather,
-and that early-exit still works correctly when scoring triggers completion.
+Verifies that when answered rounds >= MIN_ROUNDS_BEFORE_EARLY_EXIT, ambiguity
+scoring runs **before** question generation so the question prompt sees the
+freshly mutated state (ambiguity_score, completion_candidate_streak, closure
+mode).  Early-exit still works correctly when scoring triggers completion.
 
 See: https://github.com/Q00/ouroboros/issues/286
 """
@@ -26,7 +27,7 @@ from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 
 
 def _make_state(
-    interview_id: str = "test-parallel",
+    interview_id: str = "test-scoring",
     answered_rounds: int = 0,
 ) -> InterviewState:
     """Create an InterviewState with the given number of answered rounds."""
@@ -90,12 +91,12 @@ def _build_handler() -> InterviewHandler:
 # ── Tests ────────────────────────────────────────────────────────────────────
 
 
-class TestParallelScoringAndQuestionGeneration:
-    """Scoring and question generation run concurrently for rounds >= MIN."""
+class TestScoringBeforeQuestionGeneration:
+    """Scoring runs before question generation for rounds >= MIN."""
 
     @pytest.mark.asyncio
-    async def test_both_run_concurrently(self) -> None:
-        """Scoring and question gen both execute when answered >= MIN_ROUNDS."""
+    async def test_scoring_then_question_gen(self) -> None:
+        """Both scoring and question gen are called when answered >= MIN_ROUNDS."""
         handler = _build_handler()
         state = _make_state(answered_rounds=MIN_ROUNDS_BEFORE_EARLY_EXIT)
 
@@ -103,7 +104,7 @@ class TestParallelScoringAndQuestionGeneration:
         mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
-            return_value=MagicMock(is_err=False, value="Parallel question?")
+            return_value=MagicMock(is_err=False, value="Next question?")
         )
         mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
 
@@ -126,18 +127,15 @@ class TestParallelScoringAndQuestionGeneration:
                 return_value=mock_engine,
             ),
         ):
-            result = await handler.handle({"session_id": "test-parallel", "answer": "My answer"})
+            result = await handler.handle({"session_id": "test-scoring", "answer": "My answer"})
 
-            # Both must be called
             mock_score.assert_called_once()
             mock_engine.ask_next_question.assert_called_once()
-
-            # Question should be in the result (not re-generated)
             assert result.is_ok
 
     @pytest.mark.asyncio
-    async def test_early_exit_when_score_ready(self) -> None:
-        """When scoring returns is_ready_for_seed, interview completes."""
+    async def test_early_exit_skips_question_gen(self) -> None:
+        """When scoring triggers completion, question gen is never called."""
         handler = _build_handler()
         state = _make_state(answered_rounds=MIN_ROUNDS_BEFORE_EARLY_EXIT)
 
@@ -145,7 +143,7 @@ class TestParallelScoringAndQuestionGeneration:
         mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
         mock_engine.ask_next_question = AsyncMock(
-            return_value=MagicMock(is_err=False, value="Discarded question")
+            return_value=MagicMock(is_err=False, value="Should not be called")
         )
         mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
 
@@ -174,14 +172,15 @@ class TestParallelScoringAndQuestionGeneration:
                 return_value=mock_engine,
             ),
         ):
-            await handler.handle({"session_id": "test-parallel", "answer": "Final clarification"})
+            await handler.handle({"session_id": "test-scoring", "answer": "Final clarification"})
 
-            # Early completion should trigger
             mock_complete.assert_called_once()
+            # Sequential: question gen is skipped on early completion
+            mock_engine.ask_next_question.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_scoring_failure_does_not_block_question(self) -> None:
-        """If scoring raises an exception, question gen result is still used."""
+    async def test_scoring_returns_none_still_generates_question(self) -> None:
+        """If scoring returns None (internal failure), question gen still runs."""
         handler = _build_handler()
         state = _make_state(answered_rounds=MIN_ROUNDS_BEFORE_EARLY_EXIT)
 
@@ -198,7 +197,7 @@ class TestParallelScoringAndQuestionGeneration:
                 handler,
                 "_score_interview_state",
                 new_callable=AsyncMock,
-                side_effect=RuntimeError("Scoring exploded"),
+                return_value=None,
             ),
             patch.object(handler, "_emit_event", new_callable=AsyncMock),
             patch(
@@ -210,62 +209,18 @@ class TestParallelScoringAndQuestionGeneration:
                 return_value=mock_engine,
             ),
         ):
-            result = await handler.handle({"session_id": "test-parallel", "answer": "Some answer"})
+            result = await handler.handle({"session_id": "test-scoring", "answer": "Some answer"})
 
-            # Question gen should still succeed
-            assert result.is_ok
-
-    @pytest.mark.asyncio
-    async def test_question_failure_falls_back_to_sequential(self) -> None:
-        """If parallel question gen fails, it retries sequentially."""
-        handler = _build_handler()
-        state = _make_state(answered_rounds=MIN_ROUNDS_BEFORE_EARLY_EXIT)
-
-        call_count = 0
-
-        async def _question_side_effect(s):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RuntimeError("First attempt failed")
-            return MagicMock(is_err=False, value="Retry question")
-
-        mock_engine = MagicMock()
-        mock_engine.load_state = AsyncMock(return_value=MagicMock(is_err=False, value=state))
-        mock_engine.record_response = AsyncMock(return_value=MagicMock(is_err=False, value=state))
-        mock_engine.ask_next_question = AsyncMock(side_effect=_question_side_effect)
-        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_err=False))
-
-        with (
-            patch.object(
-                handler,
-                "_score_interview_state",
-                new_callable=AsyncMock,
-                return_value=_make_not_ready_score(),
-            ),
-            patch.object(handler, "_emit_event", new_callable=AsyncMock),
-            patch(
-                "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
-                return_value=MagicMock(),
-            ),
-            patch(
-                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
-                return_value=mock_engine,
-            ),
-        ):
-            result = await handler.handle({"session_id": "test-parallel", "answer": "Some answer"})
-
-            # Should have been called twice: once parallel (failed), once sequential (retry)
-            assert mock_engine.ask_next_question.call_count == 2
+            mock_engine.ask_next_question.assert_called_once()
             assert result.is_ok
 
 
-class TestNoParallelizationBelowThreshold:
+class TestNoScoringBelowThreshold:
     """Below MIN_ROUNDS, scoring is skipped and question gen runs alone."""
 
     @pytest.mark.asyncio
-    async def test_early_round_no_parallel(self) -> None:
-        """At round 1, only question gen runs (no scoring, no parallelization)."""
+    async def test_early_round_no_scoring(self) -> None:
+        """At round 1, only question gen runs (no scoring)."""
         handler = _build_handler()
         state = _make_state(answered_rounds=1)
 
@@ -289,7 +244,7 @@ class TestNoParallelizationBelowThreshold:
                 return_value=mock_engine,
             ),
         ):
-            result = await handler.handle({"session_id": "test-parallel", "answer": "Early answer"})
+            result = await handler.handle({"session_id": "test-scoring", "answer": "Early answer"})
 
             mock_score.assert_not_called()
             mock_engine.ask_next_question.assert_called_once()

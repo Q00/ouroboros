@@ -5,7 +5,6 @@ Contains handlers for interview and seed generation tools:
 - InterviewHandler: Manages interactive requirement-clarification interviews.
 """
 
-import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -1019,35 +1018,14 @@ class InterviewHandler:
                     # and completion-candidate streak.
                     answered = _count_answered_rounds(state)
                     if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
-                        # Parallelize scoring and question generation.
-                        # Both are independent LLM calls (~3-8 s each);
-                        # running concurrently cuts per-round latency ~50%.
-                        _par_score, _par_question = await asyncio.gather(
-                            self._score_interview_state(llm_adapter, state),
-                            engine.ask_next_question(state),
-                            return_exceptions=True,
-                        )
-
-                        # Unwrap scoring result
-                        if isinstance(_par_score, BaseException):
-                            log.warning(
-                                "mcp.tool.interview.parallel_scoring_failed",
-                                session_id=session_id,
-                                error=str(_par_score),
-                            )
-                            live_score = None
-                        else:
-                            live_score = _par_score
-
-                        # Unwrap question result (kept for reuse below)
-                        if isinstance(_par_question, BaseException):
-                            log.warning(
-                                "mcp.tool.interview.parallel_question_failed",
-                                session_id=session_id,
-                                error=str(_par_question),
-                            )
-                            _par_question = None
-
+                        # Scoring must complete before question generation:
+                        # _score_interview_state mutates state.ambiguity_score,
+                        # completion_candidate_streak, and ambiguity_breakdown.
+                        # ask_next_question reads those fields to build the
+                        # system prompt (closure mode, seed-ready, streak).
+                        # Running them in parallel would give the question
+                        # generator stale routing context.
+                        live_score = await self._score_interview_state(llm_adapter, state)
                         if (
                             live_score is not None
                             and qualifies_for_seed_completion(
@@ -1062,18 +1040,12 @@ class InterviewHandler:
                                 session_id,
                                 live_score,
                             )
-                            # Reuse parallel result or fall back to fresh call
-                        if _par_question is not None:
-                            question_result = _par_question
-                        else:
-                            question_result = await engine.ask_next_question(state)
+                        question_result = await engine.ask_next_question(state)
                     else:
                         live_score = None
-                        _par_question = None
                         question_result = await engine.ask_next_question(state)
                 else:
                     live_score = _load_state_ambiguity_score(state)
-                    _par_question = None
                     question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
