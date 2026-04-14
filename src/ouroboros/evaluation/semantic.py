@@ -41,6 +41,16 @@ SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
             "description": "Suspicion that the artifact games the evaluator rather than solving the real task 0.0-1.0. Distinct from drift_score.",
         },
         "reasoning": {"type": "string", "description": "Brief explanation of evaluation"},
+        "questions_used": {
+            "type": "array",
+            "description": "Socratic / ontology-gap questions used to verify the artifact (shown to the user).",
+            "items": {"type": "string"},
+        },
+        "evidence": {
+            "type": "array",
+            "description": "Concrete evidence from the artifact or source files supporting the verdict (shown to the user).",
+            "items": {"type": "string"},
+        },
     },
     "required": [
         "score",
@@ -50,6 +60,8 @@ SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
         "uncertainty",
         "reward_hacking_risk",
         "reasoning",
+        "questions_used",
+        "evidence",
     ],
 }
 
@@ -140,6 +152,12 @@ Before scoring, verify the artifact actually works rather than merely appearing 
 - Check whether the artifact solves the real task or just matches the surface wording of the AC.
 - Set reward_hacking_risk near 0.0 when behavior genuinely matches intent; set it near 1.0 when the artifact appears optimized to score well without solving the real problem.
 
+## Evaluation Transparency (anti-reward-hacking)
+You MUST show your work so the user can audit the verdict:
+- Populate `questions_used` with the concrete Socratic / ontology-gap questions you asked while verifying the artifact.
+- Populate `evidence` with concrete references (file paths, snippets, observed behavior) you relied on.
+- An empty `questions_used` or `evidence` is treated as a verification failure — the evaluator is claiming success without showing proof.
+
 Respond with ONLY a JSON object. No explanation, no preamble, no markdown fences."""
 
 
@@ -205,6 +223,22 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
         uncertainty = max(0.0, min(1.0, float(data["uncertainty"])))
         reward_hacking_risk = max(0.0, min(1.0, float(data["reward_hacking_risk"])))
 
+        # Optional transparency fields (#367).  Accept missing/empty
+        # gracefully so the parser stays backward compatible with older
+        # evaluator responses that predate the prompt update.
+        raw_questions = data.get("questions_used") or []
+        raw_evidence = data.get("evidence") or []
+        questions_used = tuple(
+            str(item).strip()
+            for item in raw_questions
+            if isinstance(item, (str, int, float)) and str(item).strip()
+        )
+        evidence = tuple(
+            str(item).strip()
+            for item in raw_evidence
+            if isinstance(item, (str, int, float)) and str(item).strip()
+        )
+
         return Result.ok(
             SemanticResult(
                 score=score,
@@ -214,6 +248,8 @@ def parse_semantic_response(response_text: str) -> Result[SemanticResult, Valida
                 uncertainty=uncertainty,
                 reasoning=str(data["reasoning"]),
                 reward_hacking_risk=reward_hacking_risk,
+                questions_used=questions_used,
+                evidence=evidence,
             )
         )
     except (TypeError, ValueError) as e:

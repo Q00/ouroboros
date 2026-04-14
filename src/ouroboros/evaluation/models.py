@@ -113,6 +113,12 @@ class SemanticResult:
         reward_hacking_risk: Suspicion that the artifact games the
             evaluator rather than solving the real task (0.0-1.0).
             Distinct from drift_score.
+        questions_used: Socratic / ontology-gap questions the evaluator
+            actually asked while verifying the artifact.  Exposing these
+            to the user is an anti-reward-hacking mechanism (#367) —
+            the evaluator has to show its work.
+        evidence: Concrete evidence (file snippets, behavior observations,
+            etc.) the evaluator relied on when deciding the verdict.
     """
 
     score: float
@@ -122,6 +128,8 @@ class SemanticResult:
     uncertainty: float
     reasoning: str
     reward_hacking_risk: float = 0.0
+    questions_used: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate score ranges."""

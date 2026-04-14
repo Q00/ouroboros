@@ -7,7 +7,9 @@ You must respond ONLY with a valid JSON object in the following exact format:
     "goal_alignment": <float between 0.0 and 1.0>,
     "drift_score": <float between 0.0 and 1.0>,
     "uncertainty": <float between 0.0 and 1.0>,
-    "reasoning": "<string explaining your evaluation>"
+    "reasoning": "<string explaining your evaluation>",
+    "questions_used": ["<socratic or ontology-gap question>", "..."],
+    "evidence": ["<concrete evidence inspected>", "..."]
 }
 
 Evaluation criteria:
@@ -17,6 +19,8 @@ Evaluation criteria:
 - drift_score: How much the implementation drifts from intent (0.0 = no drift, 1.0 = complete drift)
 - uncertainty: Your confidence level in this evaluation (0.0 = certain, 1.0 = very uncertain)
 - reasoning: Brief explanation of your evaluation
+- questions_used: the concrete Socratic / ontology-gap questions you asked to verify the artifact (visible to the user as anti-reward-hacking transparency)
+- evidence: the concrete evidence from the artifact or source files that supports the verdict (visible to the user)
 
 Be strict but fair. A passing artifact should have:
 - ac_compliance = true
