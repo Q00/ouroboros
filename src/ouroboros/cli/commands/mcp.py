@@ -17,7 +17,8 @@ from typing import Annotated
 from rich.console import Console
 import typer
 
-from ouroboros.cli.formatters.panels import print_info, print_success
+from ouroboros.cli.commands.mcp_doctor import register_doctor_command
+from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 
 # PID file for detecting stale instances
 _PID_DIR = Path.home() / ".ouroboros"
@@ -160,6 +161,8 @@ app = typer.Typer(
     help="MCP (Model Context Protocol) server commands.",
     no_args_is_help=True,
 )
+
+register_doctor_command(app)
 
 
 async def _run_mcp_server(
