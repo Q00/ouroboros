@@ -1640,6 +1640,104 @@ class TestOrchestratorRunner:
             max_turns=1,
         )
 
+    def test_build_dependency_analyzer_uses_public_llm_backend_property(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """_build_dependency_analyzer must use the public llm_backend property, not _llm_backend."""
+        mock_adapter.runtime_backend = "opencode"
+        mock_adapter.llm_backend = "codex"  # override via public property
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        llm_adapter = object()
+        dependency_analyzer_cls = MagicMock()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                return_value=llm_adapter,
+            ) as mock_create_llm_adapter,
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer",
+                dependency_analyzer_cls,
+            ),
+        ):
+            analyzer = runner._build_dependency_analyzer()
+
+        assert analyzer is dependency_analyzer_cls.return_value
+        # llm_backend="codex" takes precedence over runtime_backend="opencode"
+        mock_create_llm_adapter.assert_called_once_with(
+            backend="codex",
+            permission_mode="acceptEdits",
+            cli_path=None,
+            cwd="/tmp/project",
+            max_turns=1,
+        )
+
+    def test_build_dependency_analyzer_falls_back_to_runtime_backend_when_llm_backend_none(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """When llm_backend is None, runtime_backend is used as the LLM backend."""
+        mock_adapter.runtime_backend = "opencode"
+        mock_adapter.llm_backend = None
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        llm_adapter = object()
+        dependency_analyzer_cls = MagicMock()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                return_value=llm_adapter,
+            ) as mock_create_llm_adapter,
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer",
+                dependency_analyzer_cls,
+            ),
+        ):
+            analyzer = runner._build_dependency_analyzer()
+
+        assert analyzer is dependency_analyzer_cls.return_value
+        mock_create_llm_adapter.assert_called_once_with(
+            backend="opencode",
+            permission_mode="acceptEdits",
+            cli_path=None,
+            cwd="/tmp/project",
+            max_turns=1,
+        )
+
+    def test_build_dependency_analyzer_prints_console_warning_on_llm_failure(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """When create_llm_adapter fails, a user-facing console warning is emitted."""
+        mock_adapter.runtime_backend = "opencode"
+        mock_adapter.llm_backend = None
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with patch(
+            "ouroboros.orchestrator.runner.create_llm_adapter",
+            side_effect=RuntimeError("LLM unavailable"),
+        ):
+            analyzer = runner._build_dependency_analyzer()
+
+        # Should return a plain DependencyAnalyzer (no llm_adapter)
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
+        assert isinstance(analyzer, DependencyAnalyzer)
+        # User-facing console warning must be emitted
+        mock_console.print.assert_called_once()
+        warning_text = mock_console.print.call_args[0][0]
+        assert "LLM-assisted dependency analysis unavailable" in warning_text
+        assert "suboptimal" in warning_text
+
     @pytest.mark.asyncio
     async def test_execute_seed_uses_inherited_runtime_handle(
         self,

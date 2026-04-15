@@ -577,7 +577,7 @@ class OrchestratorRunner:
         """Create a dependency analyzer wired to the active LLM backend when available."""
         from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
 
-        llm_backend = getattr(self._adapter, "_llm_backend", None)
+        llm_backend = self._adapter.llm_backend
         backend = (
             llm_backend
             if isinstance(llm_backend, str) and llm_backend
@@ -598,6 +598,11 @@ class OrchestratorRunner:
                 "orchestrator.runner.dependency_analysis_llm_unavailable",
                 backend=backend,
                 error=str(exc),
+            )
+            self._console.print(
+                "[yellow]⚠ LLM-assisted dependency analysis unavailable — "
+                "falling back to structured-only analysis. "
+                "AC execution order may be suboptimal.[/yellow]"
             )
             return DependencyAnalyzer()
 
