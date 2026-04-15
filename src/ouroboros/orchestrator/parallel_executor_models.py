@@ -243,9 +243,7 @@ class ParallelExecutionResult:
         about non-empty coverage should also check len(self.results).
         """
         has_no_failures = (
-            self.failure_count == 0
-            and self.blocked_count == 0
-            and self.invalid_count == 0
+            self.failure_count == 0 and self.blocked_count == 0 and self.invalid_count == 0
         )
         # Empty set is trivially successful (no failures); non-empty requires >=1 satisfied
         if not self.results:
