@@ -2163,6 +2163,74 @@ class TestOrchestratorRunnerWithMCP:
         assert provider is None
 
     @pytest.mark.asyncio
+    async def test_get_merged_tools_preserves_inherited_capabilities_after_discovery(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        mock_mcp_manager: MagicMock,
+    ) -> None:
+        """Inherited MCP capabilities survive MCP discovery replacing session_catalog."""
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            mcp_manager=mock_mcp_manager,
+            inherited_tools=["Read", "mcp__chrome-devtools__click"],
+        )
+
+        merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
+
+        # MCP discovery succeeded — provider found 'external_tool'
+        assert provider is not None
+        assert "external_tool" in merged_tools
+        # The inherited MCP capability must survive discovery replacing
+        # the catalog — this was Regression 2 from Q00's review.
+        assert tool_catalog is not None
+        assert "mcp__chrome-devtools__click" in tool_catalog.inherited_capabilities
+
+    @pytest.mark.asyncio
+    async def test_runtime_handle_tool_catalog_round_trip_with_inherited_capabilities(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Serialized dict tool catalog round-trips through runtime_handle_tool_catalog."""
+        from dataclasses import replace as dc_replace
+
+        from ouroboros.orchestrator.adapter import RuntimeHandle, runtime_handle_tool_catalog
+        from ouroboros.orchestrator.mcp_tools import (
+            assemble_session_tool_catalog,
+            normalize_serialized_tool_catalog,
+            serialize_tool_catalog,
+        )
+
+        catalog = assemble_session_tool_catalog(["Read", "Edit"])
+        catalog = dc_replace(
+            catalog,
+            inherited_capabilities=frozenset({"mcp__chrome-devtools__click"}),
+        )
+        serialized = serialize_tool_catalog(catalog)
+        # serialize_tool_catalog returns dict when inherited_capabilities present
+        assert isinstance(serialized, dict)
+
+        handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="s1",
+            metadata={"tool_catalog": serialized},
+        )
+        # runtime_handle_tool_catalog must accept the dict format
+        raw = runtime_handle_tool_catalog(handle)
+        assert raw is not None
+        assert isinstance(raw, dict)
+
+        # Full round-trip through normalize_serialized_tool_catalog
+        restored = normalize_serialized_tool_catalog(raw)
+        assert restored is not None
+        assert "mcp__chrome-devtools__click" in restored.inherited_capabilities
+
+    @pytest.mark.asyncio
     async def test_get_merged_tools_mcp_failure(
         self,
         mock_adapter: MagicMock,

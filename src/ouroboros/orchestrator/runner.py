@@ -1130,6 +1130,14 @@ class OrchestratorRunner:
             return merged_tools, provider, session_catalog
 
         session_catalog = provider.session_catalog
+        # Preserve inherited MCP capabilities after discovery replaces the
+        # catalog.  The provider builds a fresh catalog from live connections
+        # which does not know about the parent's capability grant.
+        if inherited_mcp:
+            session_catalog = replace(
+                session_catalog,
+                inherited_capabilities=frozenset(inherited_mcp),
+            )
         capability_graph = build_capability_graph(session_catalog)
         merged_tools = allowed_capability_names(
             capability_graph,

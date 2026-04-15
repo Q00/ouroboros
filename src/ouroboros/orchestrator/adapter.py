@@ -313,15 +313,22 @@ def _runtime_handle_lifecycle_state(
 
 def runtime_handle_tool_catalog(
     runtime_handle: RuntimeHandle | None,
-) -> list[dict[str, Any]] | None:
-    """Return a copy of the serialized startup tool catalog when present."""
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """Return a copy of the serialized startup tool catalog when present.
+
+    Accepts both the legacy ``list`` format and the ``dict`` format produced
+    by :func:`serialize_tool_catalog` when ``inherited_capabilities`` are
+    present.
+    """
     if runtime_handle is None:
         return None
 
     tool_catalog = runtime_handle.metadata.get("tool_catalog")
-    if not isinstance(tool_catalog, list):
-        return None
-    return list(tool_catalog)
+    if isinstance(tool_catalog, list):
+        return list(tool_catalog)
+    if isinstance(tool_catalog, dict):
+        return dict(tool_catalog)
+    return None
 
 
 def runtime_handle_capability_graph(

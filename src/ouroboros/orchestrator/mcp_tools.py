@@ -1270,15 +1270,20 @@ def merge_session_tool_catalogs(
 
     builtin_tools: list[MCPToolDefinition] = []
     attached_tools: list[MCPToolDefinition] = []
+    inherited_caps: set[str] = set()
     for catalog in present_catalogs:
         builtin_tools.extend(_builtin_tools_from_catalog(catalog))
         attached_tools.extend(_attached_tools_from_catalog(catalog))
+        inherited_caps.update(catalog.inherited_capabilities)
 
-    return assemble_session_tool_catalog(
+    result = assemble_session_tool_catalog(
         builtin_tools=builtin_tools,
         attached_tools=attached_tools,
         tool_prefix=tool_prefix,
     )
+    if inherited_caps:
+        result = replace(result, inherited_capabilities=frozenset(inherited_caps))
+    return result
 
 
 def normalize_runtime_tool_result(
