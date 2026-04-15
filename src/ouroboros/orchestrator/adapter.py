@@ -32,6 +32,7 @@ from ouroboros.orchestrator.rate_limit import (
     DEFAULT_ANTHROPIC_RPM_CEILING,
     DEFAULT_ANTHROPIC_TPM_CEILING,
     RATE_LIMIT_HEARTBEAT_SECONDS,
+    RATE_LIMIT_MAX_WAIT_SECONDS,
     RateLimitSnapshot,
     SharedRateLimitBucket,
     estimate_runtime_request_tokens,
@@ -867,14 +868,26 @@ class ClaudeAgentAdapter:
         *,
         estimated_tokens: int,
         attempt: int,
+        max_wait_seconds: float = RATE_LIMIT_MAX_WAIT_SECONDS,
     ) -> AsyncIterator[AgentMessage]:
         """Yield heartbeat messages while waiting for shared budget headroom."""
         if not self._rate_limit_bucket.enabled:
             return
 
+        total_waited = 0.0
         while True:
             wait_seconds, snapshot = await self._rate_limit_bucket.acquire(estimated_tokens)
             if wait_seconds <= 0:
+                return
+
+            if total_waited >= max_wait_seconds:
+                log.warning(
+                    "orchestrator.adapter.rate_limit_timeout",
+                    total_waited=total_waited,
+                    max_wait_seconds=max_wait_seconds,
+                    estimated_tokens=estimated_tokens,
+                )
+                # Force-acquire: proceed anyway to avoid permanent starvation
                 return
 
             sleep_seconds = min(wait_seconds, RATE_LIMIT_HEARTBEAT_SECONDS)
@@ -888,11 +901,14 @@ class ClaudeAgentAdapter:
                     "subtype": "rate_limit_backoff",
                     "backoff_seconds": sleep_seconds,
                     "retry_attempt": attempt,
+                    "total_waited": total_waited,
+                    "max_wait_seconds": max_wait_seconds,
                     "source": "shared_rate_limit_bucket",
                     **self._rate_limit_snapshot_data(snapshot),
                 },
             )
             await asyncio.sleep(sleep_seconds)
+            total_waited += sleep_seconds
 
     @staticmethod
     def _transient_backoff_subtype(error: Exception) -> str:
