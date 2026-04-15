@@ -124,7 +124,7 @@ class TestBaseEventSerialization:
         )
 
         db_dict = event.to_db_dict()
-        assert db_dict["payload"] == {"key": "value"}
+        assert db_dict["payload"] == {"key": "value", "event_version": 1}
 
     def test_to_db_dict_excludes_raw_subscribed_payloads(self) -> None:
         """Raw subscribed runtime payloads are stripped before persistence."""
@@ -161,7 +161,8 @@ class TestBaseEventSerialization:
                         "resume_token": "resume-123",
                     },
                 },
-            }
+            },
+            "event_version": 1,
         }
 
     def test_to_db_dict_excludes_raw_subscribed_payloads_inside_tuples(self) -> None:
@@ -204,7 +205,8 @@ class TestBaseEventSerialization:
                         },
                     }
                 },
-            ]
+            ],
+            "event_version": 1,
         }
 
     def test_from_db_row_reconstructs_event(self) -> None:
@@ -253,3 +255,91 @@ class TestBaseEventSerialization:
         assert restored.aggregate_type == original.aggregate_type
         assert restored.aggregate_id == original.aggregate_id
         assert restored.data == original.data
+        assert restored.event_version == original.event_version
+
+
+class TestBaseEventVersion:
+    """Test event_version lifecycle."""
+
+    def test_new_events_default_to_version_1(self) -> None:
+        """Newly created events have event_version=1."""
+        event = BaseEvent(
+            type="test.event.created",
+            aggregate_type="test",
+            aggregate_id="test-123",
+        )
+        assert event.event_version == 1
+
+    def test_to_db_dict_injects_event_version_into_payload(self) -> None:
+        """to_db_dict() writes event_version inside the payload JSON."""
+        event = BaseEvent(
+            type="test.event.created",
+            aggregate_type="test",
+            aggregate_id="test-123",
+            data={"key": "value"},
+        )
+        db_dict = event.to_db_dict()
+        assert db_dict["payload"]["event_version"] == 1
+
+    def test_legacy_rows_without_event_version_default_to_0(self) -> None:
+        """DB rows written before this feature deserialize as version 0."""
+        row = {
+            "id": "legacy-123",
+            "event_type": "test.event.created",
+            "timestamp": datetime.now(UTC),
+            "aggregate_type": "test",
+            "aggregate_id": "test-456",
+            "payload": {"key": "value"},
+        }
+        event = BaseEvent.from_db_row(row)
+        assert event.event_version == 0
+        assert event.data == {"key": "value"}
+
+    def test_event_version_stripped_from_data_on_deserialization(self) -> None:
+        """event_version does not leak into the data dict after from_db_row."""
+        row = {
+            "id": "ver-123",
+            "event_type": "test.event.created",
+            "timestamp": datetime.now(UTC),
+            "aggregate_type": "test",
+            "aggregate_id": "test-456",
+            "payload": {"key": "value", "event_version": 1},
+        }
+        event = BaseEvent.from_db_row(row)
+        assert "event_version" not in event.data
+        assert event.event_version == 1
+
+    def test_roundtrip_preserves_event_version(self) -> None:
+        """event_version survives a to_db_dict -> from_db_row roundtrip."""
+        original = BaseEvent(
+            type="test.event.created",
+            aggregate_type="test",
+            aggregate_id="test-123",
+            data={"concept": "auth"},
+        )
+        db_dict = original.to_db_dict()
+        db_row = {
+            "id": db_dict["id"],
+            "event_type": db_dict["event_type"],
+            "timestamp": db_dict["timestamp"],
+            "aggregate_type": db_dict["aggregate_type"],
+            "aggregate_id": db_dict["aggregate_id"],
+            "payload": db_dict["payload"],
+        }
+        restored = BaseEvent.from_db_row(db_row)
+        assert restored.event_version == 1
+        assert restored.data == {"concept": "auth"}
+        assert "event_version" not in restored.data
+
+    def test_non_int_event_version_defaults_to_0(self) -> None:
+        """Corrupted event_version values fall back to 0."""
+        row = {
+            "id": "corrupt-123",
+            "event_type": "test.event.created",
+            "timestamp": datetime.now(UTC),
+            "aggregate_type": "test",
+            "aggregate_id": "test-456",
+            "payload": {"key": "value", "event_version": "invalid"},
+        }
+        event = BaseEvent.from_db_row(row)
+        assert event.event_version == 0
