@@ -87,7 +87,10 @@ def generate_pm_markdown(seed: PMSeed) -> str:
     lines.append("")
     if seed.created_at:
         lines.append(f"*Created At: {seed.created_at}*")
-        lines.append("")
+    else:
+        from datetime import UTC, datetime
+        lines.append(f"*Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}*")
+    lines.append("")
 
     # Goal
     lines.append("## Goal")
@@ -151,7 +154,8 @@ def generate_pm_markdown(seed: PMSeed) -> str:
             name = repo.get("name") or repo.get("path") or "Unknown"
             desc = repo.get("desc", "")
             path = repo.get("path") or ""
-            if path:
+            is_name_from_path = not repo.get("name") and path
+            if path and not is_name_from_path:
                 lines.append(f"- **{name}** (`{path}`)")
             else:
                 lines.append(f"- **{name}**")
@@ -463,7 +467,11 @@ class PMDocumentGenerator:
                 name = repo.get("name") or repo.get("path") or "Unknown"
                 path = repo.get("path") or ""
                 desc = repo.get("desc", "")
-                label = f"{name} ({path})" if path else name
+                is_name_from_path = not repo.get("name") and path
+                if path and not is_name_from_path:
+                    label = f"{name} ({path})"
+                else:
+                    label = name
                 parts.append(f"- {label}{f' — {desc}' if desc else ''}")
             parts.append("")
 
