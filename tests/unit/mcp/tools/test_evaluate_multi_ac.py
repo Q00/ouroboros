@@ -102,10 +102,8 @@ class TestMultiACRoutingBoundary:
         return mock_pipeline
 
     async def test_single_item_list_uses_single_ac_path(self) -> None:
-        """A 1-element acceptance_criteria list falls back to single-AC path.
-
-        We don't assert the content here — just that the multi-AC meta
-        flag is NOT set, proving the request didn't enter _handle_multi_ac.
+        """A 1-element acceptance_criteria list falls back to single-AC path
+        and the provided AC text is actually used (not the default).
         """
         mock_pipeline = self._install_pipeline_mock([_passing_eval("s1")])
 
@@ -129,6 +127,61 @@ class TestMultiACRoutingBoundary:
         assert result.is_ok
         # Single-AC path — no multi_ac flag in meta.
         assert result.value.meta.get("multi_ac") is not True
+        # The provided AC text must reach the pipeline, not the default.
+        ctx_arg = mock_pipeline.evaluate.call_args[0][0]
+        assert ctx_arg.current_ac == "Only AC"
+
+    async def test_single_item_list_does_not_use_default_ac(self) -> None:
+        """Regression: a 1-item acceptance_criteria must NOT fall back to the
+        generic default 'Verify execution output meets requirements'.
+        """
+        mock_pipeline = self._install_pipeline_mock([_passing_eval("s1")])
+
+        with (
+            patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline,
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=AsyncMock(initialize=AsyncMock()),
+            ),
+        ):
+            MockPipeline.return_value = mock_pipeline
+            handler = EvaluateHandler()
+            await handler.handle(
+                {
+                    "session_id": "s1",
+                    "artifact": "x = 1",
+                    "acceptance_criteria": ["Payment webhook fires on success"],
+                }
+            )
+
+        ctx_arg = mock_pipeline.evaluate.call_args[0][0]
+        assert ctx_arg.current_ac == "Payment webhook fires on success"
+        assert ctx_arg.current_ac != "Verify execution output meets requirements"
+
+    async def test_singular_acceptance_criterion_forwarded(self) -> None:
+        """The legacy ``acceptance_criterion`` (singular) param sets current_ac."""
+        mock_pipeline = self._install_pipeline_mock([_passing_eval("s1")])
+
+        with (
+            patch("ouroboros.evaluation.EvaluationPipeline") as MockPipeline,
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=AsyncMock(initialize=AsyncMock()),
+            ),
+        ):
+            MockPipeline.return_value = mock_pipeline
+            handler = EvaluateHandler()
+            result = await handler.handle(
+                {
+                    "session_id": "s1",
+                    "artifact": "def f(): pass",
+                    "acceptance_criterion": "Legacy AC",
+                }
+            )
+
+        assert result.is_ok
+        ctx_arg = mock_pipeline.evaluate.call_args[0][0]
+        assert ctx_arg.current_ac == "Legacy AC"
 
     async def test_two_passing_acs_produce_all_passed_checklist(self) -> None:
         """Two ACs both passing → meta.final_approved True, checklist populated."""
