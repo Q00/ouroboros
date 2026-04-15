@@ -171,12 +171,15 @@ def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
 
 
 def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
-    """Attach the current ambiguity score to a question for display."""
+    """Attach the current ambiguity score to a question for display.
+
+    The text format uses ``(ambiguity: <score>)`` without the milestone
+    label to preserve backward compatibility with downstream consumers
+    that parse the score via regex.  Milestone data is available in the
+    structured ``meta.milestone`` field of the MCP response.
+    """
     if score is None:
         return question
-    milestone_label = _milestone_for_score(score)
-    if milestone_label:
-        return f"(ambiguity: {score.overall_score:.2f} [{milestone_label}]) {question}"
     return f"(ambiguity: {score.overall_score:.2f}) {question}"
 
 
@@ -688,9 +691,8 @@ class InterviewHandler:
 
         score_line = ""
         if score is not None:
-            ms_label = _milestone_for_score(score)
             score_line = (
-                f"(ambiguity: {score.overall_score:.2f} [{ms_label}]) Ready for Seed generation.\n"
+                f"(ambiguity: {score.overall_score:.2f}) Ready for Seed generation.\n"
             )
 
         return Result.ok(
