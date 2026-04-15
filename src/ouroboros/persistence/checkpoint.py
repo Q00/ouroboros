@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 from ouroboros.core.errors import PersistenceError
@@ -166,6 +167,63 @@ class CheckpointStore:
         This method is idempotent - safe to call multiple times.
         """
         self._base_path.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _sanitize_seed_id(seed_id: str) -> str:
+        """Sanitize seed_id to prevent path traversal attacks.
+
+        Strips null bytes, removes path separators and parent-directory
+        sequences, and enforces a maximum length of 255 characters.
+
+        Args:
+            seed_id: Raw seed identifier.
+
+        Returns:
+            Sanitized seed identifier safe for use in filenames.
+
+        Raises:
+            ValueError: If seed_id is empty or becomes empty after sanitization.
+        """
+        if not seed_id:
+            raise ValueError("seed_id must not be empty")
+
+        # Strip null bytes
+        sanitized = seed_id.replace("\x00", "")
+
+        # Remove parent-directory traversal sequences before stripping separators
+        # so that inputs like "x/../../PWNED" are neutralised.
+        sanitized = sanitized.replace("..", "")
+
+        # Replace path separators with underscores
+        sanitized = re.sub(r"[/\\]", "_", sanitized)
+
+        # Limit length to 255 characters (common filesystem limit)
+        sanitized = sanitized[:255]
+
+        # Final check: must still be non-empty after sanitization
+        if not sanitized or not sanitized.strip():
+            raise ValueError(
+                f"seed_id is empty after sanitization (original: {seed_id!r})"
+            )
+
+        return sanitized
+
+    def _validate_path_containment(self, path: Path) -> None:
+        """Verify that *path* is inside the checkpoint base directory.
+
+        Args:
+            path: Resolved path to validate.
+
+        Raises:
+            ValueError: If path escapes the base directory.
+        """
+        resolved = path.resolve()
+        base_resolved = self._base_path.resolve()
+        # Use os.path so the check works on all platforms.
+        if not str(resolved).startswith(str(base_resolved) + os.sep) and resolved != base_resolved:
+            raise ValueError(
+                f"Path traversal detected: {resolved} is outside {base_resolved}"
+            )
 
     def save(self, checkpoint: CheckpointData) -> Result[None, PersistenceError]:
         """Save checkpoint to disk.
@@ -327,17 +385,26 @@ class CheckpointStore:
     def _get_checkpoint_path(self, seed_id: str, level: int = 0) -> Path:
         """Get file path for checkpoint at specific rollback level.
 
+        The seed_id is sanitized to prevent path traversal, and the
+        resulting path is validated to stay within the base directory.
+
         Args:
             seed_id: Seed identifier.
             level: Rollback level (0=current, 1-3=previous).
 
         Returns:
             Path to checkpoint file.
+
+        Raises:
+            ValueError: If seed_id is invalid or path escapes base directory.
         """
-        filename = f"checkpoint_{seed_id}.json"
+        safe_id = self._sanitize_seed_id(seed_id)
+        filename = f"checkpoint_{safe_id}.json"
         if level > 0:
-            filename = f"checkpoint_{seed_id}.json.{level}"
-        return self._base_path / filename
+            filename = f"checkpoint_{safe_id}.json.{level}"
+        path = self._base_path / filename
+        self._validate_path_containment(path)
+        return path
 
 
 class PeriodicCheckpointer:
