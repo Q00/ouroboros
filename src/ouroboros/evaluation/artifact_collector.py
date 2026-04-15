@@ -92,6 +92,81 @@ _SKIP_DIRS: frozenset[str] = frozenset(
     }
 )
 
+# Sensitive filenames that must never be collected — blocks credential
+# leaks via artifact bundles (env files, SSH keys, cloud credentials, etc.).
+_SENSITIVE_FILENAMES: frozenset[str] = frozenset(
+    {
+        ".env",
+        ".env.local",
+        ".env.development",
+        ".env.production",
+        ".env.staging",
+        ".env.test",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".pgpass",
+        ".my.cnf",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
+        "credentials.json",
+        "service-account.json",
+        "secrets.yaml",
+        "secrets.yml",
+        "secrets.json",
+        ".htpasswd",
+    }
+)
+
+# Sensitive file extensions (certificates, private keys, terraform vars).
+_SENSITIVE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".pem",
+        ".key",
+        ".crt",
+        ".cert",
+        ".pfx",
+        ".p12",
+        ".keystore",
+        ".jks",
+        ".tfvars",
+    }
+)
+
+# Allowlist for legitimate template/example env files — these are
+# commonly checked into repositories and contain no real secrets.
+_ENV_TEMPLATE_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        ".env.example",
+        ".env.sample",
+        ".env.dist",
+        ".env.template",
+    }
+)
+
+
+def _is_sensitive_file(fname: str) -> bool:
+    """Return True when ``fname`` should be excluded as sensitive.
+
+    The check is case-insensitive. Template/example env files listed in
+    ``_ENV_TEMPLATE_ALLOWLIST`` are explicitly permitted. Any file whose
+    name is in ``_SENSITIVE_FILENAMES``, whose extension is in
+    ``_SENSITIVE_EXTENSIONS``, or whose name starts with ``.env.``
+    (catching unlisted dotenv variants) is treated as sensitive.
+    """
+    lowered = fname.lower()
+    if lowered in _ENV_TEMPLATE_ALLOWLIST:
+        return False
+    if lowered in _SENSITIVE_FILENAMES:
+        return True
+    ext = os.path.splitext(lowered)[1]
+    if ext in _SENSITIVE_EXTENSIONS:
+        return True
+    # Catch unlisted dotenv variants (e.g. .env.ci, .env.foo).
+    return lowered.startswith(".env.")
+
 
 class ArtifactCollector:
     """Collects file artifacts from execution output.
@@ -188,10 +263,21 @@ class ArtifactCollector:
                 path = match.group(1)
                 if path in seen:
                     continue
-                if not os.path.isfile(path):
+                # Block sensitive files (env, credentials, private keys) even
+                # when they appear in tool-call output.
+                if _is_sensitive_file(os.path.basename(path)):
                     continue
-                # Path boundary check: only allow files within project_dir
-                if real_project and not os.path.realpath(path).startswith(real_project + os.sep):
+                try:
+                    if not os.path.isfile(path):
+                        continue
+                    # Path boundary check: only allow files within project_dir
+                    if real_project and not os.path.realpath(path).startswith(
+                        real_project + os.sep
+                    ):
+                        continue
+                except OSError:
+                    # File vanished between stat calls, permission denied,
+                    # or unreadable symlink — skip defensively.
                     continue
                 paths.append(path)
                 seen.add(path)
@@ -217,8 +303,15 @@ class ArtifactCollector:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext in _SKIP_EXTENSIONS:
                     continue
+                if _is_sensitive_file(fname):
+                    continue
                 full = os.path.join(root, fname)
-                if os.path.getsize(full) > MAX_FILE_SIZE:
+                try:
+                    if os.path.getsize(full) > MAX_FILE_SIZE:
+                        continue
+                except OSError:
+                    # Symlink loop, permission denied, or file vanished
+                    # between os.walk() and the stat — skip defensively.
                     continue
                 try:
                     mtime = os.path.getmtime(full)
