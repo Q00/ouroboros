@@ -106,6 +106,19 @@ class EvaluationPipeline:
                 lint/build/test once and share the outcome across parallel
                 semantic evaluations.
 
+                INVARIANT: Stage 1 checks (lint, build, test, static
+                analysis, coverage) must be AC-agnostic — they verify
+                project-wide code quality, not AC-specific behavior.  The
+                multi-AC checklist path (``_handle_multi_ac`` in
+                ``EvaluateHandler``, introduced in #385) relies on this
+                invariant to run Stage 1 exactly once across all ACs and
+                share the result via this parameter.
+
+                If future Stage 1 additions become AC-specific (e.g.
+                AC-tagged test filtering or per-AC coverage thresholds),
+                this dedup becomes incorrect and the multi-AC caller must
+                be updated to run Stage 1 per AC again.
+
         Returns:
             Result containing EvaluationResult or error
         """
