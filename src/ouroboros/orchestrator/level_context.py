@@ -137,7 +137,10 @@ def _build_public_api_summary(
         # Path containment check: skip files outside workspace
         if resolved_root is not None:
             resolved_file = os.path.realpath(file_path)
-            if not resolved_file.startswith(resolved_root + os.sep) and resolved_file != resolved_root:
+            if (
+                not resolved_file.startswith(resolved_root + os.sep)
+                and resolved_file != resolved_root
+            ):
                 continue
         sigs = _extract_public_api(file_path)
         processed += 1
