@@ -1628,6 +1628,7 @@ class TestInterviewHandlerCwd:
         assert state.ambiguity_score == 0.44
         assert state.ambiguity_breakdown is not None
         assert "(ambiguity: 0.44) Next question?" in result.value.content[0].text
+        assert result.value.meta["milestone"] == "initial"
 
     async def test_interview_handle_done_completes_without_new_question(self) -> None:
         """Explicit completion signals should stop the interview instead of asking again."""
@@ -1690,6 +1691,7 @@ class TestInterviewHandlerCwd:
         assert state.ambiguity_score == 0.14
         mock_engine.ask_next_question.assert_not_called()
         assert result.value.meta["completed"] is True
+        assert result.value.meta["milestone"] == "ready"
 
     async def test_interview_handle_done_refuses_when_component_floors_fail(self) -> None:
         """Low ambiguity alone should not allow completion when weak dimensions remain."""
@@ -1768,6 +1770,7 @@ class TestInterviewHandlerCwd:
         assert result.is_ok
         assert state.status == InterviewStatus.IN_PROGRESS
         assert result.value.meta["seed_ready"] is False
+        assert result.value.meta["milestone"] == "ready"
         assert "completion floors are unmet" in result.value.content[0].text
         mock_engine.complete_interview.assert_not_called()
         mock_engine.ask_next_question.assert_not_called()
@@ -1846,6 +1849,7 @@ class TestInterviewHandlerCwd:
         assert result.is_ok
         assert state.status == InterviewStatus.COMPLETED
         assert result.value.meta["completed"] is True
+        assert result.value.meta["milestone"] == "ready"
         mock_score.assert_called_once()
         mock_engine.complete_interview.assert_called_once()
         mock_engine.ask_next_question.assert_not_called()
@@ -1968,7 +1972,10 @@ class TestInterviewHandlerCwd:
         assert state.status == InterviewStatus.COMPLETED
         assert result.value.meta["completed"] is True
         assert result.value.meta["ambiguity_score"] == 0.18
-        assert "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
+        assert result.value.meta["milestone"] == "ready"
+        assert (
+            "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
+        )
         mock_engine.ask_next_question.assert_not_called()
 
 
