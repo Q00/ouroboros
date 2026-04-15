@@ -1711,32 +1711,60 @@ class TestOrchestratorRunner:
             max_turns=1,
         )
 
-    def test_build_dependency_analyzer_prints_console_warning_on_llm_failure(
+    def test_build_dependency_analyzer_catches_expected_exceptions(
         self,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> None:
-        """When create_llm_adapter fails, a user-facing console warning is emitted."""
-        mock_adapter.runtime_backend = "opencode"
-        mock_adapter.llm_backend = None
+        """RuntimeError from create_llm_adapter is caught and returns a no-LLM analyzer."""
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
         runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
 
         with patch(
             "ouroboros.orchestrator.runner.create_llm_adapter",
-            side_effect=RuntimeError("LLM unavailable"),
+            side_effect=RuntimeError("CLI not found"),
         ):
             analyzer = runner._build_dependency_analyzer()
 
-        # Should return a plain DependencyAnalyzer (no llm_adapter)
-        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
-
         assert isinstance(analyzer, DependencyAnalyzer)
-        # User-facing console warning must be emitted
-        mock_console.print.assert_called_once()
-        warning_text = mock_console.print.call_args[0][0]
-        assert "LLM-assisted dependency analysis unavailable" in warning_text
-        assert "suboptimal" in warning_text
+
+    def test_build_dependency_analyzer_does_not_catch_type_error(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """TypeError from create_llm_adapter propagates uncaught (programming error)."""
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                side_effect=TypeError("unexpected keyword argument"),
+            ),
+            pytest.raises(TypeError),
+        ):
+            runner._build_dependency_analyzer()
+
+    def test_build_dependency_analyzer_does_not_catch_attribute_error(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """AttributeError from create_llm_adapter propagates uncaught (programming error)."""
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                side_effect=AttributeError("object has no attribute"),
+            ),
+            pytest.raises(AttributeError),
+        ):
+            runner._build_dependency_analyzer()
 
     @pytest.mark.asyncio
     async def test_execute_seed_uses_inherited_runtime_handle(

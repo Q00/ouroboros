@@ -593,16 +593,11 @@ class OrchestratorRunner:
                 cwd=self._effective_cwd(),
                 max_turns=1,
             )
-        except Exception as exc:
+        except (RuntimeError, ImportError, ConnectionError, OSError, ValueError) as exc:
             log.warning(
                 "orchestrator.runner.dependency_analysis_llm_unavailable",
                 backend=backend,
                 error=str(exc),
-            )
-            self._console.print(
-                "[yellow]⚠ LLM-assisted dependency analysis unavailable — "
-                "falling back to structured-only analysis. "
-                "AC execution order may be suboptimal.[/yellow]"
             )
             return DependencyAnalyzer()
 
