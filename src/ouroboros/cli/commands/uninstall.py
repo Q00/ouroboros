@@ -22,13 +22,13 @@ from typing import Annotated
 
 import typer
 
-from ouroboros.cli.opencode_config import find_opencode_config
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import (
     print_info,
     print_success,
     print_warning,
 )
+from ouroboros.cli.opencode_config import find_opencode_config
 
 app = typer.Typer(
     name="uninstall",
