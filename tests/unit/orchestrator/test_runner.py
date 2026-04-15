@@ -1766,6 +1766,42 @@ class TestOrchestratorRunner:
         ):
             runner._build_dependency_analyzer()
 
+    def test_legacy_adapter_without_llm_backend_degrades_gracefully(
+        self,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Legacy adapters predating v0.28.6 (no llm_backend attr) fall back to structured-only.
+
+        Protects downstream Protocol implementers (custom runtimes, test mocks)
+        from the v0.28.6 AgentRuntime Protocol addition. Instead of raising
+        AttributeError at the call site, _build_dependency_analyzer returns a
+        structured-only DependencyAnalyzer, preserving pre-v0.28.6 behavior.
+        """
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
+        class LegacyAdapter:
+            """Pre-v0.28.6 adapter stub without llm_backend attribute."""
+
+            runtime_backend = "opencode"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+        legacy_adapter = LegacyAdapter()
+        assert not hasattr(legacy_adapter, "llm_backend")
+
+        runner = OrchestratorRunner(legacy_adapter, mock_event_store, mock_console)  # type: ignore[arg-type]
+
+        with patch(
+            "ouroboros.orchestrator.runner.create_llm_adapter"
+        ) as mock_create_llm_adapter:
+            analyzer = runner._build_dependency_analyzer()
+
+        # Must not attempt to wire an LLM adapter when the legacy runtime
+        # lacks llm_backend - that path is the breaking-change path.
+        mock_create_llm_adapter.assert_not_called()
+        assert isinstance(analyzer, DependencyAnalyzer)
+
     @pytest.mark.asyncio
     async def test_execute_seed_uses_inherited_runtime_handle(
         self,

@@ -574,10 +574,28 @@ class OrchestratorRunner:
         return cwd if isinstance(cwd, str) and cwd else None
 
     def _build_dependency_analyzer(self) -> DependencyAnalyzer:
-        """Create a dependency analyzer wired to the active LLM backend when available."""
+        """Create a dependency analyzer wired to the active LLM backend when available.
+
+        Legacy ``AgentRuntime`` implementations (custom runtimes, test mocks)
+        predating the ``llm_backend`` Protocol addition in v0.28.6 may not
+        define the property. We probe it via ``getattr`` and degrade to a
+        structured-only ``DependencyAnalyzer`` when the attribute is absent,
+        preserving pre-v0.28.6 behavior for downstream Protocol implementers.
+        """
         from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
 
-        llm_backend = self._adapter.llm_backend
+        # Legacy-compat: adapters predating the llm_backend Protocol addition
+        # (v0.28.6) lack this attribute. Fall back to structured-only analysis
+        # rather than raising AttributeError.
+        _llm_backend_sentinel = object()
+        llm_backend = getattr(self._adapter, "llm_backend", _llm_backend_sentinel)
+        if llm_backend is _llm_backend_sentinel:
+            log.info(
+                "orchestrator.runner.dependency_analyzer.legacy_adapter_without_llm_backend",
+                adapter_type=type(self._adapter).__name__,
+            )
+            return DependencyAnalyzer()
+
         backend = (
             llm_backend
             if isinstance(llm_backend, str) and llm_backend

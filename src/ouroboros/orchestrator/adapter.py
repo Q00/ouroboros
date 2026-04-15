@@ -658,7 +658,17 @@ class AgentRuntime(Protocol):
 
     @property
     def llm_backend(self) -> str | None:
-        """LLM backend identifier for non-runtime LLM tasks, or ``None``."""
+        """LLM backend name for dependency analyzer wiring.
+
+        Added in v0.28.6. Legacy runtime implementations without this property
+        are handled via ``getattr()`` fallback at call sites - they degrade to
+        structured-only dependency analysis. New implementations SHOULD define
+        this to enable LLM-assisted dependency inference.
+
+        Returns the canonical LLM backend identifier (e.g. ``"claude"``,
+        ``"codex"``, ``"opencode"``, ``"litellm"``) used for non-runtime LLM
+        tasks, or ``None`` to fall back to ``runtime_backend``.
+        """
         ...
 
     @property
