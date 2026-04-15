@@ -211,9 +211,7 @@ class TestCheckpointStore:
 class TestCheckpointStorePathTraversal:
     """Test that path traversal attacks via seed_id are blocked."""
 
-    def test_traversal_with_slashes_is_sanitized(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_traversal_with_slashes_is_sanitized(self, checkpoint_store: CheckpointStore) -> None:
         """seed_id with path separators is sanitized to underscores."""
         cp = CheckpointData.create("x/../../PWNED", "phase1", {"a": 1})
         result = checkpoint_store.save(cp)
@@ -233,23 +231,18 @@ class TestCheckpointStorePathTraversal:
         expected = checkpoint_store._base_path / "checkpoint_x___PWNED.json"
         assert expected.exists()
 
-    def test_traversal_does_not_escape_base_dir(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_traversal_does_not_escape_base_dir(self, checkpoint_store: CheckpointStore) -> None:
         """No checkpoint file is created outside the base directory."""
         cp = CheckpointData.create("../../../etc/passwd", "phase1", {})
         result = checkpoint_store.save(cp)
         assert result.is_ok
         # Ensure nothing was written outside the checkpoint dir
-        import os
 
         for entry in checkpoint_store._base_path.parent.iterdir():
             if entry != checkpoint_store._base_path:
                 assert "passwd" not in entry.name
 
-    def test_normal_seed_id_still_works(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_normal_seed_id_still_works(self, checkpoint_store: CheckpointStore) -> None:
         """Normal seed_ids without traversal patterns work correctly."""
         cp = CheckpointData.create("my-seed-123", "phase1", {"step": 1})
         result = checkpoint_store.save(cp)
@@ -259,16 +252,12 @@ class TestCheckpointStorePathTraversal:
         assert load_result.is_ok
         assert load_result.value.seed_id == "my-seed-123"
 
-    def test_empty_seed_id_raises_value_error(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_empty_seed_id_raises_value_error(self, checkpoint_store: CheckpointStore) -> None:
         """Empty seed_id raises ValueError."""
         with pytest.raises(ValueError, match="seed_id must not be empty"):
             checkpoint_store._get_checkpoint_path("")
 
-    def test_null_byte_seed_id_raises_value_error(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_null_byte_seed_id_raises_value_error(self, checkpoint_store: CheckpointStore) -> None:
         """seed_id consisting only of null bytes raises ValueError."""
         with pytest.raises(ValueError, match="empty after sanitization"):
             checkpoint_store._get_checkpoint_path("\x00\x00")
@@ -280,9 +269,7 @@ class TestCheckpointStorePathTraversal:
         with pytest.raises(ValueError, match="empty after sanitization"):
             checkpoint_store._get_checkpoint_path("..")
 
-    def test_seed_id_with_null_bytes_stripped(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_seed_id_with_null_bytes_stripped(self, checkpoint_store: CheckpointStore) -> None:
         """Null bytes are stripped but remaining content is preserved."""
         cp = CheckpointData.create("seed\x00id", "phase1", {"a": 1})
         result = checkpoint_store.save(cp)
@@ -290,9 +277,7 @@ class TestCheckpointStorePathTraversal:
         expected = checkpoint_store._base_path / "checkpoint_seedid.json"
         assert expected.exists()
 
-    def test_long_seed_id_is_truncated(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_long_seed_id_is_truncated(self, checkpoint_store: CheckpointStore) -> None:
         """seed_id longer than 255 chars is truncated."""
         long_id = "a" * 300
         path = checkpoint_store._get_checkpoint_path(long_id)
@@ -300,9 +285,7 @@ class TestCheckpointStorePathTraversal:
         assert len(long_id[:255]) == 255
         assert path.name == f"checkpoint_{'a' * 255}.json"
 
-    def test_load_with_traversal_seed_id(
-        self, checkpoint_store: CheckpointStore
-    ) -> None:
+    def test_load_with_traversal_seed_id(self, checkpoint_store: CheckpointStore) -> None:
         """load() with a traversal seed_id is safely handled."""
         # Save with a traversal-attempt seed_id
         cp = CheckpointData.create("x/../secret", "phase1", {"a": 1})
