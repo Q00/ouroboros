@@ -33,6 +33,10 @@ _MAX_KEY_OUTPUT_CHARS = 200
 _MAX_LEVEL_CONTEXT_CHARS = 2000
 # Maximum characters for public API summary per AC
 _MAX_PUBLIC_API_CHARS = 500
+# Maximum file size (bytes) to read for API extraction (1 MB)
+_MAX_FILE_SIZE_BYTES = 1_048_576
+# Maximum number of files to process for public API summary
+_MAX_FILES_FOR_API = 20
 
 
 def _extract_public_api(file_path: str) -> list[str]:
@@ -47,7 +51,12 @@ def _extract_public_api(file_path: str) -> list[str]:
         ["class UserService", "def get_user(id: str) -> User"]
     """
     try:
-        with open(file_path) as f:
+        # Resolve symlinks to prevent symlink-based path traversal
+        resolved = os.path.realpath(file_path)
+        # Check file size before reading to avoid memory exhaustion
+        if os.path.getsize(resolved) > _MAX_FILE_SIZE_BYTES:
+            return []
+        with open(resolved) as f:
             content = f.read()
     except (OSError, UnicodeDecodeError):
         return []
@@ -99,18 +108,39 @@ def _extract_public_api(file_path: str) -> list[str]:
     return signatures
 
 
-def _build_public_api_summary(files_modified: tuple[str, ...]) -> str:
+def _build_public_api_summary(
+    files_modified: tuple[str, ...],
+    workspace_root: str | None = None,
+) -> str:
     """Build a public API summary across all modified files.
+
+    Args:
+        files_modified: Tuple of file paths to scan.
+        workspace_root: If provided, only files whose realpath falls within
+            this directory are processed (prevents path-traversal reads).
 
     Returns a compact string like:
         user_service.py: class UserService, def get_user(id: str) -> User;
         models.py: class User
     """
+    resolved_root: str | None = None
+    if workspace_root is not None:
+        resolved_root = os.path.realpath(workspace_root)
+
     parts: list[str] = []
+    processed = 0
     for file_path in files_modified:
+        if processed >= _MAX_FILES_FOR_API:
+            break
         if not os.path.isfile(file_path):
             continue
+        # Path containment check: skip files outside workspace
+        if resolved_root is not None:
+            resolved_file = os.path.realpath(file_path)
+            if not resolved_file.startswith(resolved_root + os.sep) and resolved_file != resolved_root:
+                continue
         sigs = _extract_public_api(file_path)
+        processed += 1
         if sigs:
             basename = os.path.basename(file_path)
             parts.append(f"{basename}: {', '.join(sigs)}")
@@ -249,6 +279,7 @@ def build_context_prompt(level_contexts: list[LevelContext]) -> str:
 def extract_level_context(
     ac_results: list[tuple[int, str, bool, tuple[AgentMessage, ...], str]],
     level_num: int,
+    workspace_root: str | None = None,
 ) -> LevelContext:
     """Extract context from completed AC results in a level.
 
@@ -256,6 +287,7 @@ def extract_level_context(
         ac_results: List of (ac_index, ac_content, success, messages, final_message)
             tuples from the completed level.
         level_num: Level number for tracking.
+        workspace_root: If provided, restricts file reads to this directory tree.
 
     Returns:
         LevelContext with summaries of completed work.
@@ -281,7 +313,11 @@ def extract_level_context(
             key_output = final_message[-_MAX_KEY_OUTPUT_CHARS:].strip()
 
         sorted_files = tuple(sorted(files_modified))
-        public_api = _build_public_api_summary(sorted_files) if success else ""
+        public_api = (
+            _build_public_api_summary(sorted_files, workspace_root=workspace_root)
+            if success
+            else ""
+        )
 
         summaries.append(
             ACContextSummary(

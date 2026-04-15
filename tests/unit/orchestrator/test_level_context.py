@@ -7,6 +7,8 @@ import pytest
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.level_context import (
+    _MAX_FILE_SIZE_BYTES,
+    _MAX_FILES_FOR_API,
     ACContextSummary,
     LevelContext,
     _build_public_api_summary,
@@ -553,6 +555,47 @@ class TestExtractPublicApi:
         p.write_text('{"key": "value"}')
         assert _extract_public_api(str(p)) == []
 
+    def test_file_exceeding_size_limit_returns_empty(self, tmp_path: object) -> None:
+        """Test that files larger than _MAX_FILE_SIZE_BYTES are skipped."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "huge.py"
+        # Write a file just over the limit
+        p.write_text("class Big:\n    pass\n" + "x" * (_MAX_FILE_SIZE_BYTES + 1))
+        assert _extract_public_api(str(p)) == []
+
+    def test_file_within_size_limit_is_read(self, tmp_path: object) -> None:
+        """Test that files within _MAX_FILE_SIZE_BYTES are read normally."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "small.py"
+        p.write_text("class Small:\n    pass\n")
+        sigs = _extract_public_api(str(p))
+        assert "class Small" in sigs
+
+    def test_symlink_resolved_before_read(self, tmp_path: object) -> None:
+        """Test that symlinks are resolved via realpath before reading."""
+        import pathlib
+
+        real_file = pathlib.Path(str(tmp_path)) / "real.py"
+        real_file.write_text("class RealClass:\n    pass\n")
+        link = pathlib.Path(str(tmp_path)) / "link.py"
+        link.symlink_to(real_file)
+
+        sigs = _extract_public_api(str(link))
+        assert "class RealClass" in sigs
+
+    def test_symlink_to_large_file_returns_empty(self, tmp_path: object) -> None:
+        """Test that symlinks to oversized files are rejected after resolution."""
+        import pathlib
+
+        real_file = pathlib.Path(str(tmp_path)) / "huge_real.py"
+        real_file.write_text("class Big:\n    pass\n" + "x" * (_MAX_FILE_SIZE_BYTES + 1))
+        link = pathlib.Path(str(tmp_path)) / "link_to_huge.py"
+        link.symlink_to(real_file)
+
+        assert _extract_public_api(str(link)) == []
+
 
 class TestBuildPublicApiSummary:
     """Tests for _build_public_api_summary."""
@@ -587,6 +630,101 @@ class TestBuildPublicApiSummary:
         """Test that missing files are silently skipped."""
         summary = _build_public_api_summary(("/nonexistent/a.py", "/nonexistent/b.py"))
         assert summary == ""
+
+    def test_workspace_root_rejects_outside_files(self, tmp_path: object) -> None:
+        """Test that files outside workspace_root are skipped."""
+        import pathlib
+        import tempfile
+
+        workspace = pathlib.Path(str(tmp_path)) / "project"
+        workspace.mkdir()
+        inside = workspace / "service.py"
+        inside.write_text("class InsideService:\n    pass\n")
+
+        # Create a file outside the workspace
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
+            f.write("class OutsideService:\n    pass\n")
+            outside_path = f.name
+
+        try:
+            summary = _build_public_api_summary(
+                (str(inside), outside_path),
+                workspace_root=str(workspace),
+            )
+            assert "InsideService" in summary
+            assert "OutsideService" not in summary
+        finally:
+            pathlib.Path(outside_path).unlink(missing_ok=True)
+
+    def test_workspace_root_allows_inside_files(self, tmp_path: object) -> None:
+        """Test that files inside workspace_root are processed normally."""
+        import pathlib
+
+        workspace = pathlib.Path(str(tmp_path)) / "project"
+        workspace.mkdir()
+        f = workspace / "models.py"
+        f.write_text("class User:\n    pass\n")
+
+        summary = _build_public_api_summary(
+            (str(f),),
+            workspace_root=str(workspace),
+        )
+        assert "class User" in summary
+
+    def test_workspace_root_rejects_symlink_escape(self, tmp_path: object) -> None:
+        """Test that symlinks pointing outside workspace are rejected."""
+        import pathlib
+        import tempfile
+
+        workspace = pathlib.Path(str(tmp_path)) / "project"
+        workspace.mkdir()
+
+        # Create a file outside the workspace
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
+            f.write("class EscapedClass:\n    pass\n")
+            outside_path = f.name
+
+        # Symlink inside workspace pointing outside
+        link = workspace / "sneaky.py"
+        link.symlink_to(outside_path)
+
+        try:
+            summary = _build_public_api_summary(
+                (str(link),),
+                workspace_root=str(workspace),
+            )
+            assert "EscapedClass" not in summary
+            assert summary == ""
+        finally:
+            pathlib.Path(outside_path).unlink(missing_ok=True)
+
+    def test_no_workspace_root_allows_all_files(self, tmp_path: object) -> None:
+        """Test that without workspace_root, all valid files are processed."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "anywhere.py"
+        p.write_text("class Anywhere:\n    pass\n")
+
+        summary = _build_public_api_summary((str(p),), workspace_root=None)
+        assert "class Anywhere" in summary
+
+    def test_file_cap_limits_processed_files(self, tmp_path: object) -> None:
+        """Test that at most _MAX_FILES_FOR_API files are processed."""
+        import pathlib
+
+        workspace = pathlib.Path(str(tmp_path))
+        paths: list[str] = []
+        for i in range(_MAX_FILES_FOR_API + 5):
+            p = workspace / f"mod_{i}.py"
+            p.write_text(f"class Class{i}:\n    pass\n")
+            paths.append(str(p))
+
+        summary = _build_public_api_summary(tuple(paths))
+        # Count how many distinct "mod_N.py:" entries appear
+        import re as _re
+
+        file_entries = _re.findall(r"mod_\d+\.py:", summary)
+        assert len(file_entries) <= _MAX_FILES_FOR_API
 
 
 class TestPromptTextWithPublicApi:

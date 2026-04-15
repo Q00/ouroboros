@@ -1886,7 +1886,11 @@ class ParallelACExecutor:
                         for r in stage_ac_results
                         if r.ac_index in executable
                     ]
-                    level_ctx = extract_level_context(level_ac_data, level_num)
+                    level_ctx = extract_level_context(
+                        level_ac_data,
+                        level_num,
+                        workspace_root=self._task_cwd,
+                    )
 
                     # Coordinator: detect and resolve file conflicts (Approach A)
                     level_ac_results = [r for r in stage_ac_results if r.ac_index in executable]
