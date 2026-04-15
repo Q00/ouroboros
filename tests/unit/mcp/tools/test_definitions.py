@@ -2569,3 +2569,35 @@ class TestInterviewHandlerDrain:
 
         assert len(handler._bg_tasks) == 0
         mock_store.close.assert_awaited_once()
+
+    async def test_emit_event_bg_after_close_is_noop(self) -> None:
+        """_emit_event_bg() after close() must not create tasks or re-initialize."""
+        mock_store = AsyncMock()
+        handler = InterviewHandler(event_store=mock_store)
+        handler._owns_event_store = True
+
+        await handler.close()
+        assert handler._closed is True
+
+        # Reset the mock to track post-close calls only
+        mock_store.initialize.reset_mock()
+        mock_store.append.reset_mock()
+
+        handler._emit_event_bg({"type": "late_event"})
+
+        # Give any accidentally created tasks a chance to run
+        await asyncio.sleep(0.05)
+
+        assert len(handler._bg_tasks) == 0
+        mock_store.initialize.assert_not_awaited()
+        mock_store.append.assert_not_awaited()
+
+    async def test_close_sets_closed_flag(self) -> None:
+        """close() must set _closed before draining tasks."""
+        mock_store = AsyncMock()
+        handler = InterviewHandler(event_store=mock_store)
+        handler._owns_event_store = True
+
+        assert handler._closed is False
+        await handler.close()
+        assert handler._closed is True

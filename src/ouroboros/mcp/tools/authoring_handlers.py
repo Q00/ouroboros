@@ -545,6 +545,7 @@ class InterviewHandler:
         self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._initialized = False
+        self._closed = False
         self._bg_tasks: set[asyncio.Task] = set()
 
     async def _ensure_initialized(self) -> None:
@@ -568,6 +569,7 @@ class InterviewHandler:
 
     async def close(self) -> None:
         """Drain pending event tasks, then close the event store if owned."""
+        self._closed = True
         await self._drain_bg_tasks()
         if self._owns_event_store:
             await self._event_store.close()
@@ -583,6 +585,8 @@ class InterviewHandler:
 
     def _emit_event_bg(self, event: Any) -> None:
         """Fire-and-forget event emission — non-blocking on the hot path."""
+        if self._closed:
+            return
         task = asyncio.create_task(self._emit_event(event))
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
