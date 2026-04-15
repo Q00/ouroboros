@@ -271,13 +271,16 @@ class TestAdapterOverheadReductions:
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "claude_agent_sdk": sdk_module,
-                "claude_agent_sdk._errors": sdk_module._errors,
-            },
-        ), patch.dict("os.environ", {}, clear=False):
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "claude_agent_sdk": sdk_module,
+                    "claude_agent_sdk._errors": sdk_module._errors,
+                },
+            ),
+            patch.dict("os.environ", {}, clear=False),
+        ):
             # Ensure the override var is NOT set
             os.environ.pop("OUROBOROS_SKIP_VERSION_CHECK", None)
             await adapter._execute_single_request("test prompt", config)
@@ -304,13 +307,16 @@ class TestAdapterOverheadReductions:
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "claude_agent_sdk": sdk_module,
-                "claude_agent_sdk._errors": sdk_module._errors,
-            },
-        ), patch.dict("os.environ", {"OUROBOROS_SKIP_VERSION_CHECK": "0"}):
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "claude_agent_sdk": sdk_module,
+                    "claude_agent_sdk._errors": sdk_module._errors,
+                },
+            ),
+            patch.dict("os.environ", {"OUROBOROS_SKIP_VERSION_CHECK": "0"}),
+        ):
             await adapter._execute_single_request("test prompt", config)
 
         options_call_kwargs = mock_options_cls.call_args.kwargs
