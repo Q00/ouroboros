@@ -642,9 +642,7 @@ class TestCreateOuroborosServerCwdFallback:
             "ouroboros.mcp.tools.definitions.JobStatusHandler": _mock_handler(
                 "ouroboros_job_status"
             ),
-            "ouroboros.mcp.tools.definitions.JobWaitHandler": _mock_handler(
-                "ouroboros_job_wait"
-            ),
+            "ouroboros.mcp.tools.definitions.JobWaitHandler": _mock_handler("ouroboros_job_wait"),
             "ouroboros.mcp.tools.definitions.JobResultHandler": _mock_handler(
                 "ouroboros_job_result"
             ),
@@ -663,9 +661,7 @@ class TestCreateOuroborosServerCwdFallback:
             "ouroboros.mcp.tools.definitions.InterviewHandler": _mock_handler(
                 "ouroboros_interview"
             ),
-            "ouroboros.mcp.tools.definitions.EvaluateHandler": _mock_handler(
-                "ouroboros_evaluate"
-            ),
+            "ouroboros.mcp.tools.definitions.EvaluateHandler": _mock_handler("ouroboros_evaluate"),
             "ouroboros.mcp.tools.definitions.LateralThinkHandler": _mock_handler(
                 "ouroboros_lateral_think"
             ),
@@ -702,9 +698,7 @@ class TestCreateOuroborosServerCwdFallback:
             "ouroboros.config.get_semantic_model": MagicMock(return_value="test-model"),
             "ouroboros.config.get_wonder_model": MagicMock(return_value="test-model"),
             "ouroboros.config.get_reflect_model": MagicMock(return_value="test-model"),
-            "ouroboros.config.get_assertion_extraction_model": MagicMock(
-                return_value="test-model"
-            ),
+            "ouroboros.config.get_assertion_extraction_model": MagicMock(return_value="test-model"),
         }
 
         with contextlib.ExitStack() as stack:
@@ -713,7 +707,7 @@ class TestCreateOuroborosServerCwdFallback:
 
             from ouroboros.mcp.server.adapter import create_ouroboros_server
 
-            server = create_ouroboros_server(event_store=mock_event_store)
+            create_ouroboros_server(event_store=mock_event_store)
 
         # 1) Runtime adapter received the fallback directory
         runtime_call = mock_create_runtime.call_args_list[0]
