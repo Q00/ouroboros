@@ -364,8 +364,13 @@ class EvaluateHandler:
         artifact_type = arguments.get("artifact_type", "code")
         trigger_consensus = arguments.get("trigger_consensus", False)
 
-        # Normalize the optional multi-AC list (#366): filter out empty/blank
-        # entries so callers can safely pass `[""]` or an accidental null.
+        # Normalize all AC inputs into a single tuple (#366 fix):
+        # 1. If acceptance_criteria (plural, ARRAY) has valid entries, use them.
+        # 2. Else if acceptance_criterion (singular, STRING) is set, wrap it.
+        # 3. Else empty — single-AC path will use a default.
+        # This ensures a 1-item list is honoured as the effective AC,
+        # fixing the contract violation where the input shape was accepted
+        # but its meaning was silently ignored.
         acceptance_criteria: tuple[str, ...] = ()
         if isinstance(acceptance_criteria_raw, list):
             acceptance_criteria = tuple(
@@ -373,6 +378,8 @@ class EvaluateHandler:
                 for item in acceptance_criteria_raw
                 if isinstance(item, (str, int, float)) and str(item).strip()
             )
+        if not acceptance_criteria and acceptance_criterion and str(acceptance_criterion).strip():
+            acceptance_criteria = (str(acceptance_criterion).strip(),)
 
         log.info(
             "mcp.tool.evaluate",
@@ -417,8 +424,14 @@ class EvaluateHandler:
                 except Exception:
                     pass  # Best-effort enrichment
 
-            # Use acceptance_criterion or derive from seed
-            current_ac = acceptance_criterion or "Verify execution output meets requirements"
+            # Derive current_ac from the unified acceptance_criteria tuple.
+            # The tuple already incorporates both the plural and singular params,
+            # so we only need to index or fall back to a default.
+            current_ac = (
+                acceptance_criteria[0]
+                if acceptance_criteria
+                else "Verify execution output meets requirements"
+            )
 
             # Evaluation reads multiple spec files (one Read call per AC).
             # Use a dedicated adapter with a higher turn budget — the shared
