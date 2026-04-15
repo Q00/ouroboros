@@ -612,10 +612,15 @@ class EvaluateHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         """Evaluate each AC individually and return an aggregated checklist (#366).
 
-        Runs the evaluation pipeline once per acceptance criterion in
-        parallel via ``asyncio.gather``.  Per-AC results are then folded
-        into a single ``ACChecklistResult`` so the caller sees one
-        pass/fail checklist with per-item evidence and failure reasons.
+        Stage 1 (mechanical verification — lint/build/test) is AC-agnostic,
+        so we run it exactly once via the first AC's full pipeline call and
+        inject the result into the remaining per-AC evaluations.  Only
+        Stage 2+ (semantic evaluation) is parallelized per AC via
+        ``asyncio.gather``.
+
+        Per-AC results are then folded into a single ``ACChecklistResult``
+        so the caller sees one pass/fail checklist with per-item evidence
+        and failure reasons.
 
         Single-AC callers never reach this path — see ``handle()``.
         """
@@ -628,6 +633,39 @@ class EvaluateHandler:
             format_checklist,
         )
 
+        log.info(
+            "mcp.tool.evaluate.multi_ac_started",
+            session_id=session_id,
+            ac_count=len(acceptance_criteria),
+        )
+
+        # --- Stage 1: run once via the first AC's full pipeline call ---
+        first_context = EvaluationContext(
+            execution_id=session_id,
+            seed_id=seed_id,
+            current_ac=acceptance_criteria[0],
+            artifact=artifact,
+            artifact_type=artifact_type,
+            goal=goal,
+            constraints=constraints,
+            trigger_consensus=trigger_consensus,
+            artifact_bundle=artifact_bundle,
+        )
+        first_result = await pipeline.evaluate(first_context)  # type: ignore[attr-defined]
+        if first_result.is_err:
+            err = first_result.error
+            rendered = err.format_details() if hasattr(err, "format_details") else str(err)
+            return Result.err(
+                MCPToolError(
+                    f"Evaluation failed: {rendered}",
+                    tool_name="ouroboros_evaluate",
+                )
+            )
+
+        # Extract Stage 1 result to share with remaining ACs.
+        shared_stage1 = first_result.value.stage1_result
+
+        # --- Stage 2+: parallelize remaining ACs (Stage 1 injected) ---
         async def _run_one(ac_text: str) -> Result[object, object]:
             context = EvaluationContext(
                 execution_id=session_id,
@@ -640,18 +678,16 @@ class EvaluateHandler:
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
             )
-            return await pipeline.evaluate(context)  # type: ignore[attr-defined]
+            return await pipeline.evaluate(  # type: ignore[attr-defined]
+                context,
+                stage1_result=shared_stage1,
+            )
 
-        log.info(
-            "mcp.tool.evaluate.multi_ac_started",
-            session_id=session_id,
-            ac_count=len(acceptance_criteria),
-        )
-
-        gathered = await asyncio.gather(
-            *(_run_one(ac) for ac in acceptance_criteria),
+        remaining_gathered = await asyncio.gather(
+            *(_run_one(ac) for ac in acceptance_criteria[1:]),
             return_exceptions=True,
         )
+        gathered = (first_result, *remaining_gathered)
 
         # Any exception or err-Result aborts the whole checklist —
         # otherwise we'd aggregate over a half-evaluated set.

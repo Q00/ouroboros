@@ -95,7 +95,7 @@ class TestMultiACRoutingBoundary:
         # `evaluate()` returns Result objects in order per call.
         results_iter = iter(eval_results)
 
-        async def _evaluate(_context: object) -> object:
+        async def _evaluate(_context: object, **_kwargs: object) -> object:
             return Result.ok(next(results_iter))
 
         mock_pipeline.evaluate = AsyncMock(side_effect=_evaluate)

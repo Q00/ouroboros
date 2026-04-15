@@ -21,6 +21,7 @@ from ouroboros.evaluation.models import (
     CheckType,
     EvaluationContext,
     EvaluationResult,
+    MechanicalResult,
 )
 from ouroboros.evaluation.semantic import SemanticConfig, SemanticEvaluator
 from ouroboros.evaluation.trigger import (
@@ -91,23 +92,39 @@ class EvaluationPipeline:
         self,
         context: EvaluationContext,
         trigger_context: TriggerContext | None = None,
+        *,
+        stage1_result: MechanicalResult | None = None,
     ) -> Result[EvaluationResult, ProviderError | ValidationError]:
         """Run the evaluation pipeline.
 
         Args:
             context: Evaluation context with artifact
             trigger_context: Optional pre-populated trigger context
+            stage1_result: Pre-computed Stage 1 result.  When provided,
+                Stage 1 mechanical verification is skipped and this result
+                is reused.  This allows multi-AC callers to run
+                lint/build/test once and share the outcome across parallel
+                semantic evaluations.
 
         Returns:
             Result containing EvaluationResult or error
         """
         events: list[BaseEvent] = []
-        stage1_result = None
         stage2_result = None
         stage3_result = None
 
         # Stage 1: Mechanical Verification
-        if self._config.stage1_enabled:
+        # When a pre-computed result is injected, skip re-running the
+        # AC-agnostic lint/build/test checks.
+        if stage1_result is not None:
+            if not stage1_result.passed:
+                return self._build_result(
+                    context.execution_id,
+                    events,
+                    stage1_result=stage1_result,
+                    final_approved=False,
+                )
+        elif self._config.stage1_enabled:
             result = await self._mechanical.verify(
                 context.execution_id,
                 checks=[
