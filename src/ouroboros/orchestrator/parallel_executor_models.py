@@ -237,13 +237,30 @@ class ParallelExecutionResult:
 
     @property
     def all_succeeded(self) -> bool:
-        """Return True if all ACs succeeded."""
-        return self.failure_count == 0 and self.blocked_count == 0 and self.invalid_count == 0
+        """Return True if all ACs satisfied (executed or externally) with no failures.
+
+        An empty result set is considered trivially successful — callers that care
+        about non-empty coverage should also check len(self.results).
+        """
+        has_no_failures = (
+            self.failure_count == 0
+            and self.blocked_count == 0
+            and self.invalid_count == 0
+        )
+        # Empty set is trivially successful (no failures); non-empty requires >=1 satisfied
+        if not self.results:
+            return has_no_failures
+        return has_no_failures and self.total_satisfied > 0
 
     @property
     def any_succeeded(self) -> bool:
         """Return True if at least one AC succeeded."""
         return self.success_count > 0 or self.externally_satisfied_count > 0
+
+    @property
+    def total_satisfied(self) -> int:
+        """Total ACs that passed, whether executed or externally satisfied."""
+        return self.success_count + self.externally_satisfied_count
 
 
 __all__ = [
