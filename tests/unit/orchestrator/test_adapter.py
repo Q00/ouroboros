@@ -1187,6 +1187,76 @@ class TestBuildRuntimeHandleFreshPath:
         assert messages[0].data["backoff_seconds"] == 1.0
         assert messages[-1].is_final is True
 
+    @pytest.mark.asyncio
+    async def test_wait_for_shared_rate_limit_force_reserves_on_timeout(self) -> None:
+        """The timeout branch must force-reserve capacity instead of bypassing it.
+
+        Regression guard: previously, hitting the max-wait budget caused the
+        wait loop to ``return`` without updating the bucket. With N concurrent
+        workers, all N would bypass the bucket simultaneously, causing N× RPM
+        to hit the upstream API in lockstep — worse than starvation.
+        """
+
+        class _AlwaysBlockedBucket:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.acquire_calls = 0
+                self.force_reserve_calls: list[int] = []
+                self._snapshot = RateLimitSnapshot(
+                    runtime_backend="claude",
+                    requests_in_window=1,
+                    request_limit=1,
+                    tokens_in_window=512,
+                    token_limit=4_096,
+                )
+
+            async def acquire(
+                self, estimated_tokens: int
+            ) -> tuple[float, RateLimitSnapshot]:
+                del estimated_tokens
+                self.acquire_calls += 1
+                # Always report a wait so the loop keeps blocking until timeout.
+                return 60.0, self._snapshot
+
+            async def force_reserve(
+                self, estimated_tokens: int
+            ) -> RateLimitSnapshot:
+                self.force_reserve_calls.append(estimated_tokens)
+                return RateLimitSnapshot(
+                    runtime_backend="claude",
+                    requests_in_window=2,
+                    request_limit=1,
+                    tokens_in_window=512 + estimated_tokens,
+                    token_limit=4_096,
+                )
+
+        adapter = ClaudeAgentAdapter(api_key="test")
+        bucket = _AlwaysBlockedBucket()
+        adapter._rate_limit_bucket = bucket
+
+        with patch("ouroboros.orchestrator.adapter.asyncio.sleep", new=AsyncMock()):
+            messages = [
+                message
+                async for message in adapter._wait_for_shared_rate_limit_budget(
+                    estimated_tokens=1_234,
+                    attempt=1,
+                    max_wait_seconds=30.0,
+                )
+            ]
+
+        # force_reserve must have been called with the original token estimate.
+        assert bucket.force_reserve_calls == [1_234]
+
+        # The final system message must advertise the force-reserve subtype so
+        # downstream observability can distinguish it from normal backoff.
+        assert messages, "expected at least one system message before force reserving"
+        final = messages[-1]
+        assert final.type == "system"
+        assert final.data["subtype"] == "rate_limit_timeout_force_reserve"
+        assert final.data["max_wait_seconds"] == 30.0
+        assert final.data["source"] == "shared_rate_limit_bucket"
+
 
 class TestNonStringSelectorErrorMessage:
     """Tests for improved error messages when selectors are non-string types."""

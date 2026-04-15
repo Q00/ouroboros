@@ -112,6 +112,22 @@ class SharedRateLimitBucket:
                 return 0.0, self._snapshot()
             return wait_seconds, self._snapshot()
 
+    async def force_reserve(self, estimated_tokens: int) -> RateLimitSnapshot:
+        """Reserve capacity unconditionally (for timeout escape hatch).
+
+        Used when the wait loop has exhausted its maximum wait budget and
+        must proceed regardless. This preserves the budget accounting
+        invariant — without this, N workers timing out simultaneously
+        would each bypass the bucket, causing N× the intended RPM to
+        hit the upstream API in lockstep.
+        """
+        normalized_tokens = max(1, estimated_tokens)
+        async with self._lock:
+            now = self._time()
+            self._prune(now)
+            self._reservations.append((now, normalized_tokens))
+            return self._snapshot()
+
 
 def estimate_runtime_request_tokens(
     prompt: str,

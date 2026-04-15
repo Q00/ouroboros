@@ -881,13 +881,31 @@ class ClaudeAgentAdapter:
                 return
 
             if total_waited >= max_wait_seconds:
+                # Reserve the capacity anyway — otherwise concurrent timeout-fallbacks
+                # would all bypass the bucket simultaneously, causing an N× RPM burst
+                # to hit the upstream API (worse than starvation per review).
+                snapshot = await self._rate_limit_bucket.force_reserve(estimated_tokens)
                 log.warning(
-                    "orchestrator.adapter.rate_limit_timeout",
+                    "orchestrator.adapter.rate_limit_timeout_force_reserve",
                     total_waited=total_waited,
                     max_wait_seconds=max_wait_seconds,
                     estimated_tokens=estimated_tokens,
+                    **self._rate_limit_snapshot_data(snapshot),
                 )
-                # Force-acquire: proceed anyway to avoid permanent starvation
+                yield AgentMessage(
+                    type="system",
+                    content=(
+                        f"Shared rate limit budget wait exceeded {max_wait_seconds:.0f}s; "
+                        "proceeding with force-reserved capacity."
+                    ),
+                    data={
+                        "subtype": "rate_limit_timeout_force_reserve",
+                        "total_waited": total_waited,
+                        "max_wait_seconds": max_wait_seconds,
+                        "source": "shared_rate_limit_bucket",
+                        **self._rate_limit_snapshot_data(snapshot),
+                    },
+                )
                 return
 
             sleep_seconds = min(wait_seconds, RATE_LIMIT_HEARTBEAT_SECONDS)

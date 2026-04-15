@@ -57,3 +57,40 @@ def test_estimate_runtime_request_tokens_adds_completion_cushion() -> None:
     estimate = estimate_runtime_request_tokens("abcd" * 100, system_prompt="system")
 
     assert estimate > 100
+
+
+@pytest.mark.asyncio
+async def test_force_reserve_appends_unconditionally() -> None:
+    """force_reserve must append to _reservations regardless of current budget."""
+    bucket = SharedRateLimitBucket(
+        runtime_backend="claude",
+        request_limit=2,
+        token_limit=None,
+    )
+    # Fill the bucket beyond capacity
+    for _ in range(5):
+        await bucket.force_reserve(1000)
+    # All 5 reservations should exist — force_reserve bypasses the budget check.
+    assert len(bucket._reservations) == 5
+
+
+@pytest.mark.asyncio
+async def test_force_reserve_reports_snapshot_reflecting_new_reservation() -> None:
+    """force_reserve must surface a snapshot that includes the new reservation."""
+    bucket = SharedRateLimitBucket(
+        runtime_backend="claude",
+        request_limit=1,
+        token_limit=4_096,
+    )
+
+    # Saturate the request budget first via the normal path.
+    wait_seconds, _ = await bucket.acquire(estimated_tokens=500)
+    assert wait_seconds == 0.0
+
+    # force_reserve should proceed even though acquire() would now block.
+    snapshot = await bucket.force_reserve(estimated_tokens=750)
+
+    assert snapshot.requests_in_window == 2
+    assert snapshot.tokens_in_window == 1_250
+    assert snapshot.request_limit == 1
+    assert snapshot.token_limit == 4_096
