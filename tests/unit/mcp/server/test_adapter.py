@@ -15,6 +15,7 @@ from ouroboros.mcp.server.adapter import (
     _extract_feedback_metadata_from_artifact,
     _project_dir_from_artifact,
     _project_dir_from_seed,
+    _safe_cwd,
     validate_transport,
 )
 from ouroboros.mcp.types import (
@@ -537,3 +538,34 @@ class TestServeTransport:
             match="FastMCP transport does not support rate limiting",
         ):
             await adapter.serve(transport="stdio")
+
+
+# ── _safe_cwd helper ──────────────────────────────────────────────────
+
+
+class TestSafeCwd:
+    """Tests for _safe_cwd() fallback logic (issue #400)."""
+
+    def test_returns_cwd_when_writable_and_not_root(self, tmp_path, monkeypatch):
+        """Normal writable directory is returned as-is."""
+        monkeypatch.chdir(tmp_path)
+        assert _safe_cwd() == tmp_path
+
+    def test_falls_back_to_home_when_cwd_is_root(self, monkeypatch):
+        """When cwd is /, _safe_cwd should return Path.home()."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with patch("ouroboros.mcp.server.adapter.Path.cwd", return_value=Path("/")):
+            result = _safe_cwd()
+        assert result == Path.home()
+
+    def test_falls_back_to_home_when_cwd_not_writable(self, tmp_path, monkeypatch):
+        """When cwd is not writable, _safe_cwd should return Path.home()."""
+        from pathlib import Path
+        from unittest.mock import patch
+
+        monkeypatch.chdir(tmp_path)
+        with patch("os.access", return_value=False):
+            result = _safe_cwd()
+        assert result == Path.home()
