@@ -28,6 +28,7 @@ Layout:
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
@@ -76,6 +77,11 @@ STATUS_ICONS = {
     "complete": "[bold green]●[/]",
     "failed": "[bold red]✖[/]",
     "cancelled": "[bold yellow]⊘[/]",
+}
+
+_TOOL_ACTIVITY_FALLBACK_LABELS = {
+    "missing": "working",
+    "unavailable": "working",
 }
 
 
@@ -459,7 +465,7 @@ class SelectableACTree(Static):
                 label += "..."
 
             # P2: Show inline tool activity for executing nodes
-            activity = self._active_tools.get(child_id)
+            activity = self._active_tools.get(child_id) or self._activity_from_node(child_data)
             if activity and status in ("executing", "running"):
                 label += f"\n     [dim italic]{activity}[/]"
 
@@ -489,6 +495,81 @@ class SelectableACTree(Static):
         """Clear inline tool activity for a node."""
         self._active_tools.pop(ac_id, None)
         self._rebuild_tree()
+
+    @staticmethod
+    def _activity_from_node(node: Mapping[str, Any]) -> str:
+        """Derive compact inline activity text from a node payload."""
+        status = str(node.get("status", "")).strip().lower()
+        if status not in {"executing", "running"}:
+            return ""
+
+        summary = SelectableACTree._summarize_tool_activity(node.get("current_tool_activity"))
+        if summary:
+            return summary
+
+        summary = SelectableACTree._summarize_tool_activity(node.get("tool_activity"))
+        if summary:
+            return summary
+
+        summary = SelectableACTree._summarize_tool_activity(node.get("last_update"))
+        if summary:
+            return summary
+
+        for key in ("tool_activity_summary", "tool_detail"):
+            value = node.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        return ""
+
+    @staticmethod
+    def _summarize_tool_activity(raw_activity: object) -> str:
+        """Reduce runtime activity payloads into a single readable line."""
+        if not isinstance(raw_activity, Mapping):
+            return ""
+
+        message_type = str(raw_activity.get("message_type", "")).strip().lower()
+        runtime_status = str(raw_activity.get("runtime_status", "")).strip().lower()
+        if (
+            raw_activity.get("tool_result") is not None
+            or message_type in {"tool_result", "tool_result_chunk", "tool_completed"}
+            or runtime_status in {"completed", "failed", "cancelled", "paused"}
+        ):
+            return ""
+
+        for key in ("summary", "tool_detail", "activity_detail", "detail"):
+            value = raw_activity.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        tool_name = ""
+        for key in ("tool_name", "current_tool", "active_tool", "tool"):
+            value = raw_activity.get(key)
+            if isinstance(value, str) and value.strip():
+                tool_name = value.strip()
+                break
+
+        tool_input = raw_activity.get("tool_input")
+        if not isinstance(tool_input, Mapping):
+            tool_input = raw_activity.get("input")
+
+        path_hint = ""
+        if isinstance(tool_input, Mapping):
+            for key in ("file_path", "path", "target", "uri"):
+                value = tool_input.get(key)
+                if isinstance(value, str) and value.strip():
+                    path_hint = value.strip()
+                    break
+
+        if tool_name and path_hint:
+            return f"{tool_name} {path_hint}"
+        if tool_name:
+            return tool_name
+
+        state = raw_activity.get("state")
+        if isinstance(state, str):
+            return _TOOL_ACTIVITY_FALLBACK_LABELS.get(state.strip().lower(), "")
+        return ""
 
     def on_tree_node_selected(self, event: Tree.NodeSelected[dict[str, Any]]) -> None:
         if event.node.data:

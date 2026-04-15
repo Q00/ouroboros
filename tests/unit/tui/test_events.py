@@ -12,6 +12,7 @@ from ouroboros.tui.events import (
     PauseRequested,
     PhaseChanged,
     ResumeRequested,
+    SubtaskUpdated,
     TUIState,
     WorkflowProgressUpdated,
     create_message_from_event,
@@ -386,18 +387,58 @@ class TestCreateMessageFromEvent:
     def test_ac_event(self) -> None:
         """Test converting AC-related events."""
         event = BaseEvent(
-            type="decomposition.ac.marked_atomic",
-            aggregate_type="execution",
-            aggregate_id="exec_123",
-            data={"ac_id": "ac_abc", "depth": 1, "is_atomic": True},
+            type="ac.marked_atomic",
+            aggregate_type="ac_decomposition",
+            aggregate_id="ac_abc",
+            data={"execution_id": "exec_123", "depth": 1, "is_atomic": True},
         )
 
         msg = create_message_from_event(event)
 
         assert isinstance(msg, ACUpdated)
+        assert msg.execution_id == "exec_123"
         assert msg.ac_id == "ac_abc"
         assert msg.status == "atomic"
         assert msg.is_atomic is True
+
+    def test_subtask_event_preserves_runtime_activity_payload(self) -> None:
+        """Live Sub-AC events should keep tool activity attached for the dashboard."""
+        event = BaseEvent(
+            type="execution.subtask.updated",
+            aggregate_type="execution",
+            aggregate_id="exec_123",
+            data={
+                "ac_index": 1,
+                "sub_task_index": 2,
+                "sub_task_id": "ac_1_sub_2",
+                "content": "Patch the event bridge",
+                "status": "executing",
+                "current_tool_activity": {
+                    "message_type": "tool",
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "src/ouroboros/tui/events.py"},
+                },
+                "last_update": {
+                    "message_type": "tool",
+                    "tool_name": "Edit",
+                    "tool_input": {"file_path": "src/ouroboros/tui/events.py"},
+                },
+            },
+        )
+
+        msg = create_message_from_event(event)
+
+        assert isinstance(msg, SubtaskUpdated)
+        assert msg.current_tool_activity == {
+            "message_type": "tool",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/ouroboros/tui/events.py"},
+        }
+        assert msg.last_update == {
+            "message_type": "tool",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/ouroboros/tui/events.py"},
+        }
 
     def test_cost_updated_event(self) -> None:
         """Test converting cost.updated event."""

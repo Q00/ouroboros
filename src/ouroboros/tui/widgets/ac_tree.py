@@ -113,6 +113,7 @@ class ACTreeWidget(Widget):
         self._node_map: dict[str, TreeNode[str]] = {}
         # Internal data cache to avoid triggering reactive watch
         self._tree_data_cache: dict[str, Any] = {}
+        self._pending_recompose = False
 
         super().__init__(name=name, id=id, classes=classes)
         self.tree_data = tree_data or {}
@@ -187,7 +188,7 @@ class ACTreeWidget(Widget):
 
         # Build label with status icon
         status_icon = STATUS_ICONS.get(status, "[ ]")
-        if is_atomic:
+        if is_atomic and status in {"atomic", "pending"}:
             status_icon = STATUS_ICONS["atomic"]
 
         # Highlight current AC
@@ -246,9 +247,17 @@ class ACTreeWidget(Widget):
         # Sync internal cache
         self._tree_data_cache = new_data
 
+        if self._pending_recompose:
+            self._pending_recompose = False
+            self.refresh(recompose=True)
+            return
+
         # Only recompose if tree doesn't exist (initial build or was cleared)
         if self._tree_widget is None or not self._node_map:
             self.refresh(recompose=True)
+            return
+
+        self._sync_existing_nodes(new_data)
 
     def watch_current_ac_id(self, new_id: str) -> None:
         """React to current_ac_id changes.
@@ -286,12 +295,52 @@ class ACTreeWidget(Widget):
             current_ac_id: Optional new current AC ID.
             force_rebuild: If True, force full recompose instead of incremental update.
         """
-        if force_rebuild:
+        if force_rebuild or self._tree_structure_changed(tree_data):
             self._node_map.clear()
+            self._pending_recompose = True
 
         self.tree_data = tree_data
         if current_ac_id is not None:
             self.current_ac_id = current_ac_id
+
+    def _tree_structure_changed(self, new_data: dict[str, Any]) -> bool:
+        """Return True when node membership or parent/child edges changed."""
+        if self._tree_widget is None or not self._node_map:
+            return False
+
+        old_data = self._tree_data_cache or self.tree_data
+        old_nodes = old_data.get("nodes")
+        new_nodes = new_data.get("nodes")
+        if not isinstance(old_nodes, dict) or not isinstance(new_nodes, dict):
+            return True
+
+        if old_data.get("root_id") != new_data.get("root_id"):
+            return True
+
+        if set(old_nodes) != set(new_nodes):
+            return True
+
+        for node_id, new_node in new_nodes.items():
+            old_node = old_nodes.get(node_id)
+            if not isinstance(old_node, dict) or not isinstance(new_node, dict):
+                return True
+            if list(old_node.get("children_ids", [])) != list(new_node.get("children_ids", [])):
+                return True
+
+        return False
+
+    def _sync_existing_nodes(self, tree_data: dict[str, Any]) -> None:
+        """Patch labels in-place when only node content/status changed."""
+        nodes = tree_data.get("nodes")
+        if not isinstance(nodes, dict):
+            return
+
+        for node_id, tree_node in self._node_map.items():
+            node_data = nodes.get(node_id)
+            if not isinstance(node_data, dict):
+                continue
+            is_current = node_id == self.current_ac_id
+            tree_node.set_label(self._format_node_label(node_data, is_current))
 
     def update_node_status(self, ac_id: str, status: str) -> None:
         """Update status of a single node without recompose.

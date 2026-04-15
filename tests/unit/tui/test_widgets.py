@@ -1,5 +1,7 @@
 """Unit tests for TUI widgets."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from ouroboros.tui.widgets.ac_progress import ACProgressItem, ACProgressWidget
@@ -263,6 +265,120 @@ class TestACTreeWidget:
 
         assert widget._node_map == {}
 
+    def test_update_tree_recomposes_when_subtask_changes_tree_shape(self) -> None:
+        """New Sub-AC nodes should force a rebuild so the rendered tree stays in sync."""
+        initial_tree = {
+            "root_id": "root",
+            "nodes": {
+                "root": {
+                    "id": "root",
+                    "content": "Acceptance Criteria",
+                    "children_ids": ["ac_1"],
+                },
+                "ac_1": {
+                    "id": "ac_1",
+                    "content": "Composite AC",
+                    "status": "executing",
+                    "children_ids": [],
+                },
+            },
+        }
+        updated_tree = {
+            "root_id": "root",
+            "nodes": {
+                **initial_tree["nodes"],
+                "ac_1": {
+                    "id": "ac_1",
+                    "content": "Composite AC",
+                    "status": "executing",
+                    "children_ids": ["ac_1_sub_1"],
+                },
+                "ac_1_sub_1": {
+                    "id": "ac_1_sub_1",
+                    "content": "Draft migration plan",
+                    "status": "executing",
+                    "is_atomic": True,
+                    "children_ids": [],
+                },
+            },
+        }
+
+        widget = ACTreeWidget(tree_data=initial_tree)
+        widget._tree_widget = MagicMock()
+        widget._tree_data_cache = initial_tree
+        widget._node_map = {"root": MagicMock(), "ac_1": MagicMock()}
+        widget.refresh = MagicMock()
+
+        widget.update_tree(updated_tree)
+
+        assert any(
+            call.kwargs.get("recompose") is True for call in widget.refresh.call_args_list
+        )
+        assert widget._node_map == {}
+
+    def test_update_tree_syncs_existing_labels_for_rapid_subtask_status_changes(self) -> None:
+        """Status-only Sub-AC updates should patch the rendered labels without a full rebuild."""
+        initial_tree = {
+            "root_id": "root",
+            "nodes": {
+                "root": {
+                    "id": "root",
+                    "content": "Acceptance Criteria",
+                    "children_ids": ["ac_1"],
+                },
+                "ac_1": {
+                    "id": "ac_1",
+                    "content": "Composite AC",
+                    "status": "executing",
+                    "children_ids": ["ac_1_sub_1"],
+                },
+                "ac_1_sub_1": {
+                    "id": "ac_1_sub_1",
+                    "content": "Draft migration plan",
+                    "status": "executing",
+                    "is_atomic": True,
+                    "children_ids": [],
+                },
+            },
+        }
+        updated_tree = {
+            "root_id": "root",
+            "nodes": {
+                **initial_tree["nodes"],
+                "ac_1_sub_1": {
+                    "id": "ac_1_sub_1",
+                    "content": "Draft migration plan",
+                    "status": "completed",
+                    "is_atomic": True,
+                    "children_ids": [],
+                },
+            },
+        }
+
+        root_node = MagicMock()
+        ac_node = MagicMock()
+        subtask_node = MagicMock()
+
+        widget = ACTreeWidget(tree_data=initial_tree)
+        widget._tree_widget = MagicMock()
+        widget._tree_data_cache = initial_tree
+        widget._node_map = {
+            "root": root_node,
+            "ac_1": ac_node,
+            "ac_1_sub_1": subtask_node,
+        }
+        widget.refresh = MagicMock()
+
+        widget.update_tree(updated_tree)
+
+        assert not any(
+            call.kwargs.get("recompose") is True for call in widget.refresh.call_args_list
+        )
+        subtask_node.set_label.assert_called_once()
+        rendered_label = subtask_node.set_label.call_args[0][0]
+        assert "[green][OK][/green]" in rendered_label
+        assert "Draft migration plan" in rendered_label
+
     def test_update_node_status(self) -> None:
         """Test updating a node's status."""
         tree_data = {
@@ -325,6 +441,20 @@ class TestACTreeWidget:
         label = widget._format_node_label(node_data)
 
         assert "[blue][A][/blue]" in label
+
+    def test_format_node_label_atomic_subtask_keeps_runtime_status_icon(self) -> None:
+        """Atomic Sub-ACs should still surface live execution status changes."""
+        widget = ACTreeWidget()
+        node_data = {
+            "status": "completed",
+            "content": "Atomic subtask",
+            "is_atomic": True,
+        }
+
+        label = widget._format_node_label(node_data)
+
+        assert "[green][OK][/green]" in label
+        assert "[blue][A][/blue]" not in label
 
     def test_format_node_label_current(self) -> None:
         """Test formatting label for current AC."""

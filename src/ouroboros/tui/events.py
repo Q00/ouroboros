@@ -385,6 +385,8 @@ class SubtaskUpdated(Message):
         sub_task_id: Unique sub-task ID.
         content: Sub-task description.
         status: Sub-task status (executing, completed, failed).
+        current_tool_activity: Latest normalized tool-activity payload for the Sub-AC.
+        last_update: Latest runtime artifact snapshot associated with the Sub-AC.
     """
 
     def __init__(
@@ -395,6 +397,8 @@ class SubtaskUpdated(Message):
         sub_task_id: str,
         content: str,
         status: str,
+        current_tool_activity: dict[str, Any] | None = None,
+        last_update: dict[str, Any] | None = None,
     ) -> None:
         """Initialize SubtaskUpdated message."""
         super().__init__()
@@ -404,6 +408,10 @@ class SubtaskUpdated(Message):
         self.sub_task_id = sub_task_id
         self.content = content
         self.status = status
+        self.current_tool_activity = (
+            dict(current_tool_activity) if isinstance(current_tool_activity, dict) else {}
+        )
+        self.last_update = dict(last_update) if isinstance(last_update, dict) else {}
 
 
 class LineageSelected(Message):
@@ -699,18 +707,21 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             tokens_this_phase=data.get("tokens_this_phase", 0),
         )
 
-    elif event_type.startswith("decomposition.ac."):
+    elif event_type.startswith("decomposition.ac.") or event_type in {
+        "ac.decomposition.completed",
+        "ac.marked_atomic",
+    }:
         status = "pending"
-        if "completed" in event_type:
-            status = "completed"
+        if event_type in {"ac.decomposition.completed", "decomposition.ac.completed"}:
+            status = "decomposed"
         elif "started" in event_type:
             status = "executing"
-        elif "marked_atomic" in event_type:
+        elif event_type in {"ac.marked_atomic", "decomposition.ac.marked_atomic"}:
             status = "atomic"
 
         return ACUpdated(
-            execution_id=event.aggregate_id,
-            ac_id=data.get("ac_id", ""),
+            execution_id=data.get("execution_id", event.aggregate_id),
+            ac_id=data.get("ac_id", event.aggregate_id),
             status=status,
             depth=data.get("depth", 0),
             is_atomic=data.get("is_atomic", False),
@@ -794,6 +805,8 @@ def create_message_from_event(event: BaseEvent) -> Message | None:
             sub_task_id=data.get("sub_task_id", ""),
             content=data.get("content", ""),
             status=data.get("status", "pending"),
+            current_tool_activity=data.get("current_tool_activity"),
+            last_update=data.get("last_update"),
         )
 
     elif event_type == "execution.tool.started":
