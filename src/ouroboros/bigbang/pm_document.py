@@ -89,6 +89,7 @@ def generate_pm_markdown(seed: PMSeed) -> str:
         lines.append(f"*Created At: {seed.created_at}*")
     else:
         from datetime import UTC, datetime
+
         lines.append(f"*Generated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}*")
     lines.append("")
 
