@@ -39,6 +39,16 @@ elif command -v pipx &>/dev/null; then
   echo "  pipx:   $(pipx --version)"
 fi
 
+# NOTE: Interpreter selection branches (uv, pipx, pip) are not covered
+# by automated tests. When modifying this logic, manually verify:
+#   1. `uv` available → uses `uv tool install --python ">=3.12"` (uv manages Python)
+#   2. `pipx` available, no `uv` → probes python3.{14,13,12}/python3/python,
+#      picks first >= 3.12, passes --python to pipx; exits if none found
+#   3. Neither available → falls back to `python3 -m pip install --user`;
+#      exits if python3/python < 3.12
+#   4. Python < 3.12 with no uv/pipx → prints error and exits
+# See bot review on PR #432 for context.
+
 # Helper: check whether a Python executable meets MIN_PYTHON
 _python_ok() {
   local cmd="$1"
