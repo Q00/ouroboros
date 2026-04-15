@@ -95,10 +95,12 @@ class TestMultiACRoutingBoundary:
         # `evaluate()` returns Result objects in order per call.
         results_iter = iter(eval_results)
 
-        async def _evaluate(_context: object) -> object:
+        async def _evaluate(_context: object, **kwargs: object) -> object:
             return Result.ok(next(results_iter))
 
         mock_pipeline.evaluate = AsyncMock(side_effect=_evaluate)
+        # run_stage1 returns (None, []) — Stage 1 disabled / passed.
+        mock_pipeline.run_stage1 = AsyncMock(return_value=Result.ok((None, [])))
         return mock_pipeline
 
     async def test_single_item_list_uses_single_ac_path(self) -> None:
@@ -284,6 +286,7 @@ class TestMultiACRoutingBoundary:
     async def test_multi_ac_pipeline_error_propagates(self) -> None:
         """If any AC evaluation errors, the whole handle() returns err."""
         mock_pipeline = AsyncMock()
+        mock_pipeline.run_stage1 = AsyncMock(return_value=Result.ok((None, [])))
         calls = [
             Result.ok(_passing_eval("s4")),
             Result.err(ValueError("semantic stage exploded")),

@@ -21,6 +21,7 @@ from ouroboros.evaluation.models import (
     CheckType,
     EvaluationContext,
     EvaluationResult,
+    MechanicalResult,
 )
 from ouroboros.evaluation.semantic import SemanticConfig, SemanticEvaluator
 from ouroboros.evaluation.trigger import (
@@ -87,27 +88,74 @@ class EvaluationPipeline:
         self._consensus = ConsensusEvaluator(llm_adapter, self._config.consensus)
         self._trigger = ConsensusTrigger(self._config.trigger)
 
+    async def run_stage1(
+        self,
+        context: EvaluationContext,
+    ) -> Result[
+        tuple[MechanicalResult | None, list[BaseEvent]],
+        ProviderError | ValidationError,
+    ]:
+        """Run Stage 1 (mechanical verification) in isolation.
+
+        Returns ``(MechanicalResult, events)`` or ``(None, [])`` when
+        Stage 1 is disabled.  Callers can feed the result into
+        :meth:`evaluate` via ``stage1_result`` to avoid re-running
+        the AC-agnostic lint/build/test checks in multi-AC loops.
+        """
+        if not self._config.stage1_enabled:
+            return Result.ok((None, []))
+
+        result = await self._mechanical.verify(
+            context.execution_id,
+            checks=[
+                CheckType.LINT,
+                CheckType.BUILD,
+                CheckType.TEST,
+                CheckType.STATIC,
+                CheckType.COVERAGE,
+            ],
+        )
+        if result.is_err:
+            return Result.err(result.error)
+
+        stage1_result, stage1_events = result.value
+        return Result.ok((stage1_result, list(stage1_events)))
+
     async def evaluate(
         self,
         context: EvaluationContext,
         trigger_context: TriggerContext | None = None,
+        *,
+        stage1_result: MechanicalResult | None = None,
     ) -> Result[EvaluationResult, ProviderError | ValidationError]:
         """Run the evaluation pipeline.
 
         Args:
             context: Evaluation context with artifact
             trigger_context: Optional pre-populated trigger context
+            stage1_result: Pre-computed Stage 1 result.  When provided,
+                Stage 1 is skipped and this result is reused.  Pass the
+                output of :meth:`run_stage1` to avoid re-running
+                mechanical verification in multi-AC loops.
 
         Returns:
             Result containing EvaluationResult or error
         """
         events: list[BaseEvent] = []
-        stage1_result = None
         stage2_result = None
         stage3_result = None
 
         # Stage 1: Mechanical Verification
-        if self._config.stage1_enabled:
+        # When a pre-computed result is injected, skip re-running.
+        if stage1_result is not None:
+            if not stage1_result.passed:
+                return self._build_result(
+                    context.execution_id,
+                    events,
+                    stage1_result=stage1_result,
+                    final_approved=False,
+                )
+        elif self._config.stage1_enabled:
             result = await self._mechanical.verify(
                 context.execution_id,
                 checks=[
@@ -124,7 +172,6 @@ class EvaluationPipeline:
             stage1_result, stage1_events = result.value
             events.extend(stage1_events)
 
-            # If Stage 1 fails, stop here
             if not stage1_result.passed:
                 return self._build_result(
                     context.execution_id,

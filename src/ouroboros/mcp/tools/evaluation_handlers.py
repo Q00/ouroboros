@@ -628,6 +628,81 @@ class EvaluateHandler:
             format_checklist,
         )
 
+        log.info(
+            "mcp.tool.evaluate.multi_ac_started",
+            session_id=session_id,
+            ac_count=len(acceptance_criteria),
+        )
+
+        # Run Stage 1 (mechanical verification) once.  Lint/build/test
+        # results are project-wide and AC-agnostic, so sharing them
+        # across per-AC evaluations avoids N redundant runs.
+        stage1_ctx = EvaluationContext(
+            execution_id=session_id,
+            seed_id=seed_id,
+            current_ac=acceptance_criteria[0],
+            artifact=artifact,
+            artifact_type=artifact_type,
+            goal=goal,
+            constraints=constraints,
+            trigger_consensus=trigger_consensus,
+            artifact_bundle=artifact_bundle,
+        )
+        stage1_pre = await pipeline.run_stage1(stage1_ctx)  # type: ignore[attr-defined]
+        if stage1_pre.is_err:
+            return Result.err(
+                MCPToolError(
+                    f"Stage 1 mechanical verification failed: {stage1_pre.error}",
+                    tool_name="ouroboros_evaluate",
+                )
+            )
+        pre_stage1_result, _ = stage1_pre.value
+
+        # If Stage 1 failed, short-circuit before per-AC semantic runs.
+        if pre_stage1_result is not None and not pre_stage1_result.passed:
+            from ouroboros.evaluation.models import EvaluationResult as _ER
+
+            fail = _ER(
+                execution_id=session_id,
+                stage1_result=pre_stage1_result,
+                final_approved=False,
+            )
+            fail_results = tuple(fail for _ in acceptance_criteria)
+            checklist = aggregate_results(acceptance_criteria, fail_results)
+            feedback = build_run_feedback(checklist)
+            code_changes = await self._has_code_changes(working_dir)
+            text = format_checklist(checklist)
+            if code_changes is False:
+                text += "\nNote: no code changes detected in the working tree."
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=text),),
+                    is_error=False,
+                    meta={
+                        "session_id": session_id,
+                        "final_approved": False,
+                        "multi_ac": True,
+                        "ac_count": checklist.total,
+                        "passed_count": 0,
+                        "pass_rate": 0.0,
+                        "checklist": [
+                            {
+                                "ac_text": item.ac_text,
+                                "passed": item.passed,
+                                "reasoning": item.reasoning,
+                                "evidence": list(item.evidence),
+                                "questions_used": list(item.questions_used),
+                                "failure_reason": item.failure_reason,
+                            }
+                            for item in checklist.items
+                        ],
+                        "run_feedback": list(feedback),
+                        "code_changes_detected": code_changes,
+                    },
+                )
+            )
+
+        # Stage 2+3 per-AC in parallel, injecting the shared Stage 1 result.
         async def _run_one(ac_text: str) -> Result[object, object]:
             context = EvaluationContext(
                 execution_id=session_id,
@@ -640,13 +715,10 @@ class EvaluateHandler:
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
             )
-            return await pipeline.evaluate(context)  # type: ignore[attr-defined]
-
-        log.info(
-            "mcp.tool.evaluate.multi_ac_started",
-            session_id=session_id,
-            ac_count=len(acceptance_criteria),
-        )
+            return await pipeline.evaluate(  # type: ignore[attr-defined]
+                context,
+                stage1_result=pre_stage1_result,
+            )
 
         gathered = await asyncio.gather(
             *(_run_one(ac) for ac in acceptance_criteria),
