@@ -31,6 +31,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
+import os
 import platform
 import re
 import subprocess
@@ -1886,10 +1887,15 @@ class ParallelACExecutor:
                         for r in stage_ac_results
                         if r.ac_index in executable
                     ]
+                    # workspace_root is required: fall back through
+                    # adapter working directory, then process cwd. Never None.
+                    workspace_root = (
+                        self._task_cwd or self._adapter.working_directory or os.getcwd()
+                    )
                     level_ctx = extract_level_context(
                         level_ac_data,
                         level_num,
-                        workspace_root=self._task_cwd,
+                        workspace_root=workspace_root,
                     )
 
                     # Coordinator: detect and resolve file conflicts (Approach A)

@@ -8,7 +8,9 @@ through file system exploration.
 Usage:
     from ouroboros.orchestrator.level_context import extract_level_context
 
-    context = extract_level_context(results, level_num=0)
+    context = extract_level_context(
+        results, level_num=0, workspace_root="/path/to/session/workspace"
+    )
     prompt_text = context.to_prompt_text()
 """
 
@@ -39,7 +41,7 @@ _MAX_FILE_SIZE_BYTES = 1_048_576
 _MAX_FILES_FOR_API = 20
 
 
-def _extract_public_api(file_path: str) -> list[str]:
+def _extract_public_api(file_path: str, workspace_root: str) -> list[str]:
     """Extract public API signatures from a source file.
 
     Reads the file and extracts top-level public definitions:
@@ -47,12 +49,27 @@ def _extract_public_api(file_path: str) -> list[str]:
     - TypeScript/JS: exported functions/classes/interfaces/types
     - Go: exported (capitalized) func/type signatures
 
+    Args:
+        file_path: Path to the source file to scan.
+        workspace_root: Required workspace directory. Files whose resolved
+            path falls outside this root are rejected (defence in depth against
+            callers that forget to pre-filter). May be passed raw or already
+            resolved — this function applies realpath() internally.
+
     Returns list of signature strings like:
         ["class UserService", "def get_user(id: str) -> User"]
     """
+    if not workspace_root:
+        # Required sentinel — empty root means reject everything.
+        return []
     try:
+        resolved_root = os.path.realpath(workspace_root)
         # Resolve symlinks to prevent symlink-based path traversal
         resolved = os.path.realpath(file_path)
+        # Defence-in-depth: reject paths outside the workspace root even if
+        # callers skipped their own containment check.
+        if resolved != resolved_root and not resolved.startswith(resolved_root + os.sep):
+            return []
         # Check file size before reading to avoid memory exhaustion
         if os.path.getsize(resolved) > _MAX_FILE_SIZE_BYTES:
             return []
@@ -110,22 +127,27 @@ def _extract_public_api(file_path: str) -> list[str]:
 
 def _build_public_api_summary(
     files_modified: tuple[str, ...],
-    workspace_root: str | None = None,
+    *,
+    workspace_root: str,
 ) -> str:
     """Build a public API summary across all modified files.
 
     Args:
         files_modified: Tuple of file paths to scan.
-        workspace_root: If provided, only files whose realpath falls within
-            this directory are processed (prevents path-traversal reads).
+        workspace_root: Required workspace directory. Only files whose
+            realpath falls within this directory are processed. Passing an
+            empty string or a path outside any expected tree will cause all
+            files to be rejected — there is no bypass path.
 
     Returns a compact string like:
         user_service.py: class UserService, def get_user(id: str) -> User;
         models.py: class User
     """
-    resolved_root: str | None = None
-    if workspace_root is not None:
-        resolved_root = os.path.realpath(workspace_root)
+    if not workspace_root:
+        # Explicitly reject empty paths: a missing workspace would be a
+        # containment bypass if silently treated as "/" or CWD.
+        return ""
+    resolved_root = os.path.realpath(workspace_root)
 
     parts: list[str] = []
     processed = 0
@@ -135,14 +157,10 @@ def _build_public_api_summary(
         if not os.path.isfile(file_path):
             continue
         # Path containment check: skip files outside workspace
-        if resolved_root is not None:
-            resolved_file = os.path.realpath(file_path)
-            if (
-                not resolved_file.startswith(resolved_root + os.sep)
-                and resolved_file != resolved_root
-            ):
-                continue
-        sigs = _extract_public_api(file_path)
+        resolved_file = os.path.realpath(file_path)
+        if not resolved_file.startswith(resolved_root + os.sep) and resolved_file != resolved_root:
+            continue
+        sigs = _extract_public_api(file_path, resolved_root)
         processed += 1
         if sigs:
             basename = os.path.basename(file_path)
@@ -282,7 +300,8 @@ def build_context_prompt(level_contexts: list[LevelContext]) -> str:
 def extract_level_context(
     ac_results: list[tuple[int, str, bool, tuple[AgentMessage, ...], str]],
     level_num: int,
-    workspace_root: str | None = None,
+    *,
+    workspace_root: str,
 ) -> LevelContext:
     """Extract context from completed AC results in a level.
 
@@ -290,7 +309,10 @@ def extract_level_context(
         ac_results: List of (ac_index, ac_content, success, messages, final_message)
             tuples from the completed level.
         level_num: Level number for tracking.
-        workspace_root: If provided, restricts file reads to this directory tree.
+        workspace_root: Required workspace directory that bounds all file
+            reads performed while building public-API summaries. Callers that
+            do not have a session workspace MUST pass an explicit sentinel
+            (e.g., ``os.getcwd()`` or a temp dir) — there is no silent bypass.
 
     Returns:
         LevelContext with summaries of completed work.
