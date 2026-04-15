@@ -71,6 +71,13 @@ class MCPServerConfig:
         ):
             msg = f"url is required for {self.transport} transport"
             raise ValueError(msg)
+        if self.url:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(self.url)
+            if parsed.scheme not in ("http", "https"):
+                msg = f"Only http:// and https:// URLs are supported for {self.transport} transport, got: {parsed.scheme}://"
+                raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)

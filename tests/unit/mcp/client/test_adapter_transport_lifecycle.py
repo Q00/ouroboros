@@ -311,7 +311,7 @@ class TestHTTPTransportConnect:
         with (
             patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
             patch("mcp.ClientSession", return_value=session),
-            patch("mcp.shared._httpx_utils.create_mcp_http_client"),
+            patch("httpx.AsyncClient"),
         ):
             result = await adapter.connect(_make_http_config())
 
@@ -329,7 +329,7 @@ class TestHTTPTransportConnect:
         with (
             patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
             patch("mcp.ClientSession", return_value=session),
-            patch("mcp.shared._httpx_utils.create_mcp_http_client"),
+            patch("httpx.AsyncClient"),
         ):
             result = await adapter.connect(
                 _make_http_config(transport=TransportType.STREAMABLE_HTTP)
@@ -355,7 +355,7 @@ class TestHTTPTransportConnect:
         with (
             patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
             patch("mcp.ClientSession", return_value=session),
-            patch("mcp.shared._httpx_utils.create_mcp_http_client"),
+            patch("httpx.AsyncClient"),
         ):
             result = await adapter.connect(_make_http_config())
 
@@ -366,7 +366,7 @@ class TestHTTPTransportConnect:
 
     @pytest.mark.asyncio
     async def test_http_connect_passes_headers(self):
-        """When config has headers, create_mcp_http_client called with them."""
+        """When config has headers, httpx.AsyncClient is called with them."""
         adapter = MCPClientAdapter()
         transport_cm = _mock_http_transport_cm()
         session = _mock_session()
@@ -383,17 +383,17 @@ class TestHTTPTransportConnect:
                 "mcp.client.streamable_http.streamable_http_client", return_value=transport_cm
             ) as mock_http,
             patch("mcp.ClientSession", return_value=session),
-            patch("mcp.shared._httpx_utils.create_mcp_http_client") as mock_factory,
+            patch("httpx.AsyncClient") as mock_async_client,
         ):
             result = await adapter.connect(config)
 
         assert result.is_ok
-        mock_factory.assert_called_once()
-        call_kwargs = mock_factory.call_args
+        mock_async_client.assert_called_once()
+        call_kwargs = mock_async_client.call_args
         assert call_kwargs.kwargs["headers"] == {"Authorization": "Bearer token123"}
         mock_http.assert_called_once_with(
             "http://localhost:3000",
-            http_client=mock_factory.return_value,
+            http_client=mock_async_client.return_value,
         )
 
     @pytest.mark.asyncio
@@ -413,7 +413,7 @@ class TestHTTPTransportConnect:
         with (
             patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
             patch("mcp.ClientSession", return_value=session),
-            patch("mcp.shared._httpx_utils.create_mcp_http_client") as mock_factory,
+            patch("httpx.AsyncClient") as mock_async_client,
             patch("httpx.Timeout") as mock_timeout,
         ):
             result = await adapter.connect(config)
@@ -421,7 +421,7 @@ class TestHTTPTransportConnect:
         assert result.is_ok
         # read timeout should be max(config.timeout, 300.0) for SSE streaming
         mock_timeout.assert_called_once_with(15.0, read=300.0)
-        mock_factory.assert_called_once_with(
+        mock_async_client.assert_called_once_with(
             headers=None,
             timeout=mock_timeout.return_value,
         )
@@ -436,7 +436,7 @@ class TestHTTPTransportConnect:
         with (
             patch("mcp.client.streamable_http.streamable_http_client", return_value=transport_cm),
             patch("mcp.ClientSession", return_value=session),
-            patch("mcp.shared._httpx_utils.create_mcp_http_client"),
+            patch("httpx.AsyncClient"),
         ):
             result = await adapter.connect(_make_http_config())
 

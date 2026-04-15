@@ -111,6 +111,46 @@ class TestMCPServerConfig:
         assert config.env == {}
         assert config.headers == {}
 
+    @pytest.mark.parametrize("scheme", ["file", "gopher", "ftp"])
+    def test_rejects_non_http_url_schemes(self, scheme: str) -> None:
+        """MCPServerConfig rejects non-http(s) URL schemes to prevent SSRF."""
+        url = f"{scheme}://example.com/path"
+        with pytest.raises(ValueError, match="Only http:// and https:// URLs are supported"):
+            MCPServerConfig(
+                name="test",
+                transport=TransportType.SSE,
+                url=url,
+            )
+
+    @pytest.mark.parametrize("scheme", ["file", "gopher", "ftp"])
+    def test_rejects_non_http_url_schemes_streamable_http(self, scheme: str) -> None:
+        """MCPServerConfig rejects non-http(s) schemes for STREAMABLE_HTTP transport."""
+        url = f"{scheme}://example.com/path"
+        with pytest.raises(ValueError, match="Only http:// and https:// URLs are supported"):
+            MCPServerConfig(
+                name="test",
+                transport=TransportType.STREAMABLE_HTTP,
+                url=url,
+            )
+
+    def test_accepts_http_url(self) -> None:
+        """MCPServerConfig accepts http:// URLs."""
+        config = MCPServerConfig(
+            name="test",
+            transport=TransportType.SSE,
+            url="http://localhost:8080/sse",
+        )
+        assert config.url == "http://localhost:8080/sse"
+
+    def test_accepts_https_url(self) -> None:
+        """MCPServerConfig accepts https:// URLs."""
+        config = MCPServerConfig(
+            name="test",
+            transport=TransportType.STREAMABLE_HTTP,
+            url="https://api.example.com/mcp",
+        )
+        assert config.url == "https://api.example.com/mcp"
+
 
 class TestMCPToolParameter:
     """Test MCPToolParameter dataclass."""
