@@ -1211,17 +1211,13 @@ class TestBuildRuntimeHandleFreshPath:
                     token_limit=4_096,
                 )
 
-            async def acquire(
-                self, estimated_tokens: int
-            ) -> tuple[float, RateLimitSnapshot]:
+            async def acquire(self, estimated_tokens: int) -> tuple[float, RateLimitSnapshot]:
                 del estimated_tokens
                 self.acquire_calls += 1
                 # Always report a wait so the loop keeps blocking until timeout.
                 return 60.0, self._snapshot
 
-            async def force_reserve(
-                self, estimated_tokens: int
-            ) -> RateLimitSnapshot:
+            async def force_reserve(self, estimated_tokens: int) -> RateLimitSnapshot:
                 self.force_reserve_calls.append(estimated_tokens)
                 return RateLimitSnapshot(
                     runtime_backend="claude",
