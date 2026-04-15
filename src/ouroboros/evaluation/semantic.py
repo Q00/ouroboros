@@ -58,10 +58,7 @@ SEMANTIC_RESULT_SCHEMA: dict[str, object] = {
         "goal_alignment",
         "drift_score",
         "uncertainty",
-        "reward_hacking_risk",
         "reasoning",
-        "questions_used",
-        "evidence",
     ],
 }
 
