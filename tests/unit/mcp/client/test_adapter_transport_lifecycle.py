@@ -390,7 +390,12 @@ class TestHTTPTransportConnect:
         assert result.is_ok
         mock_async_client.assert_called_once()
         call_kwargs = mock_async_client.call_args
-        assert call_kwargs.kwargs["headers"] == {"Authorization": "Bearer token123"}
+        # Caller-supplied headers must survive merging with the default UA.
+        headers = call_kwargs.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer token123"
+        assert headers["User-Agent"].startswith("ouroboros-mcp-client/")
+        # SSRF hardening: redirects disabled on the transport httpx client.
+        assert call_kwargs.kwargs["follow_redirects"] is False
         mock_http.assert_called_once_with(
             "http://localhost:3000",
             http_client=mock_async_client.return_value,
@@ -421,10 +426,13 @@ class TestHTTPTransportConnect:
         assert result.is_ok
         # read timeout should be max(config.timeout, 300.0) for SSE streaming
         mock_timeout.assert_called_once_with(15.0, read=300.0)
-        mock_async_client.assert_called_once_with(
-            headers=None,
-            timeout=mock_timeout.return_value,
-        )
+        mock_async_client.assert_called_once()
+        call_kwargs = mock_async_client.call_args.kwargs
+        # With no caller headers, we still set a default User-Agent so
+        # MCP servers can identify the ouroboros client in their logs.
+        assert call_kwargs["headers"]["User-Agent"].startswith("ouroboros-mcp-client/")
+        assert call_kwargs["timeout"] is mock_timeout.return_value
+        assert call_kwargs["follow_redirects"] is False
 
     @pytest.mark.asyncio
     async def test_http_disconnect_cleans_transport_on_error(self):

@@ -259,10 +259,30 @@ class MCPClientAdapter:
             import httpx
             from mcp.client.streamable_http import streamable_http_client
 
+            from ouroboros import __version__ as _ouroboros_version
+
             timeout = httpx.Timeout(config.timeout, read=max(config.timeout, 300.0))
+
+            # Compose headers with a stable User-Agent for observability.
+            # Now that we own the httpx client (no longer going through the
+            # mcp SDK's private helper), set the UA explicitly so that MCP
+            # servers can still identify the ouroboros client in their logs.
+            # Caller-supplied headers take precedence.
+            default_headers = {
+                "User-Agent": f"ouroboros-mcp-client/{_ouroboros_version}",
+            }
+            if config.headers:
+                merged_headers: dict[str, str] = {**default_headers, **config.headers}
+            else:
+                merged_headers = default_headers
+
             http_client = httpx.AsyncClient(
-                headers=config.headers if config.headers else None,
+                headers=merged_headers,
                 timeout=timeout,
+                # SSRF hardening: do not follow redirects. An attacker-controlled
+                # server could otherwise 302 us into a loopback / metadata URL
+                # that bypasses the static URL validation in MCPServerConfig.
+                follow_redirects=False,
             )
             self._http_client = http_client
 

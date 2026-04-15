@@ -8,7 +8,92 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import ipaddress
+import os
 from typing import Any
+from urllib.parse import urlparse
+
+# Schemes permitted for SSE / HTTP / STREAMABLE_HTTP transports.
+_ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
+
+# Environment flag that intentionally re-enables loopback / private / link-local
+# IP literals for local development. Leave unset in production.
+_ALLOW_LOCAL_TRANSPORT_ENV = "OUROBOROS_ALLOW_LOCAL_TRANSPORT"
+
+
+def _validate_transport_url(url: str, transport: str) -> None:
+    """Validate a transport URL against common SSRF vectors.
+
+    The MCP client will dial whatever URL is configured for SSE, HTTP, or
+    STREAMABLE_HTTP transports. Without hardening, that turns any untrusted
+    caller that can influence the ``url`` field into an SSRF primitive able to
+    reach cloud metadata services (169.254.169.254), loopback services, or
+    private RFC1918 ranges. This helper rejects the common vectors before a
+    connection is attempted.
+
+    Blocks:
+        * Non-http(s) schemes (``file://``, ``gopher://``, ``ftp://`` ...).
+        * URLs carrying userinfo (``user:pass@host``) used for credential
+          smuggling / host confusion.
+        * URLs with an empty hostname (e.g. bare ``http://``).
+        * Literal IPs resolving to loopback, link-local, or private ranges,
+          unless the ``OUROBOROS_ALLOW_LOCAL_TRANSPORT=1`` dev escape is set.
+
+    DNS resolution is intentionally out of scope for this static validation;
+    runtime code that follows redirects should be hardened separately (the
+    adapter sets ``follow_redirects=False``).
+
+    Args:
+        url: The transport URL to validate.
+        transport: Name of the transport (used only in error messages).
+
+    Raises:
+        ValueError: If any SSRF guard is triggered.
+    """
+
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        msg = (
+            f"Only http:// and https:// URLs are supported for {transport} "
+            f"transport, got: {parsed.scheme}://"
+        )
+        raise ValueError(msg)
+
+    if parsed.username or parsed.password:
+        msg = "Transport URL must not contain userinfo (credentials)"
+        raise ValueError(msg)
+
+    hostname = parsed.hostname
+    if not hostname:
+        msg = "Transport URL must include a hostname"
+        raise ValueError(msg)
+
+    allow_local = os.environ.get(_ALLOW_LOCAL_TRANSPORT_ENV, "0") == "1"
+
+    # Strip IPv6 brackets (urlparse already does, but be defensive).
+    host_literal = hostname.strip("[]")
+
+    try:
+        ip = ipaddress.ip_address(host_literal)
+    except ValueError:
+        # Not an IP literal -- a DNS name. Static validation ends here.
+        return
+
+    if allow_local:
+        return
+
+    if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_multicast:
+        msg = (
+            f"Transport URL points to loopback/link-local/private IP: "
+            f"{hostname}. Set {_ALLOW_LOCAL_TRANSPORT_ENV}=1 for local dev."
+        )
+        raise ValueError(msg)
+
+    if ip.is_reserved or ip.is_unspecified:
+        msg = f"Transport URL points to reserved/unspecified IP: {hostname}"
+        raise ValueError(msg)
 
 
 class TransportType(StrEnum):
@@ -72,12 +157,7 @@ class MCPServerConfig:
             msg = f"url is required for {self.transport} transport"
             raise ValueError(msg)
         if self.url:
-            from urllib.parse import urlparse
-
-            parsed = urlparse(self.url)
-            if parsed.scheme not in ("http", "https"):
-                msg = f"Only http:// and https:// URLs are supported for {self.transport} transport, got: {parsed.scheme}://"
-                raise ValueError(msg)
+            _validate_transport_url(self.url, str(self.transport))
 
 
 @dataclass(frozen=True, slots=True)
