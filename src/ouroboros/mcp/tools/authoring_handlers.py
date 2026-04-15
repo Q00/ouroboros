@@ -691,9 +691,7 @@ class InterviewHandler:
 
         score_line = ""
         if score is not None:
-            score_line = (
-                f"(ambiguity: {score.overall_score:.2f}) Ready for Seed generation.\n"
-            )
+            score_line = f"(ambiguity: {score.overall_score:.2f}) Ready for Seed generation.\n"
 
         return Result.ok(
             MCPToolResult(

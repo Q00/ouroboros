@@ -1968,9 +1968,7 @@ class TestInterviewHandlerCwd:
         assert state.status == InterviewStatus.COMPLETED
         assert result.value.meta["completed"] is True
         assert result.value.meta["ambiguity_score"] == 0.18
-        assert (
-            "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
-        )
+        assert "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
         mock_engine.ask_next_question.assert_not_called()
 
 
