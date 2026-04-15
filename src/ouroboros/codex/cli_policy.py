@@ -139,12 +139,14 @@ def build_codex_child_env(
 
 
 def _which(name: str) -> str | None:
-    """Small local ``which`` helper to keep path resolution pure/testable."""
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = os.path.join(directory, name)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return None
+    """Locate an executable on ``PATH``, delegating to :func:`shutil.which`.
+
+    Using the stdlib implementation ensures correct behavior on all
+    platforms, including Windows ``PATHEXT`` resolution.
+    """
+    import shutil
+
+    return shutil.which(name)
 
 
 __all__ = [
