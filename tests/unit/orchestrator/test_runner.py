@@ -1792,9 +1792,7 @@ class TestOrchestratorRunner:
 
         runner = OrchestratorRunner(legacy_adapter, mock_event_store, mock_console)  # type: ignore[arg-type]
 
-        with patch(
-            "ouroboros.orchestrator.runner.create_llm_adapter"
-        ) as mock_create_llm_adapter:
+        with patch("ouroboros.orchestrator.runner.create_llm_adapter") as mock_create_llm_adapter:
             analyzer = runner._build_dependency_analyzer()
 
         # Must not attempt to wire an LLM adapter when the legacy runtime
