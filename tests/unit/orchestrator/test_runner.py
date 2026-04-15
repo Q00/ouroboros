@@ -1640,6 +1640,61 @@ class TestOrchestratorRunner:
             max_turns=1,
         )
 
+    def test_build_dependency_analyzer_catches_expected_exceptions(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """RuntimeError from create_llm_adapter is caught and returns a no-LLM analyzer."""
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with patch(
+            "ouroboros.orchestrator.runner.create_llm_adapter",
+            side_effect=RuntimeError("CLI not found"),
+        ):
+            analyzer = runner._build_dependency_analyzer()
+
+        assert isinstance(analyzer, DependencyAnalyzer)
+
+    def test_build_dependency_analyzer_does_not_catch_type_error(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """TypeError from create_llm_adapter propagates uncaught (programming error)."""
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                side_effect=TypeError("unexpected keyword argument"),
+            ),
+            pytest.raises(TypeError),
+        ):
+            runner._build_dependency_analyzer()
+
+    def test_build_dependency_analyzer_does_not_catch_attribute_error(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """AttributeError from create_llm_adapter propagates uncaught (programming error)."""
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                side_effect=AttributeError("object has no attribute"),
+            ),
+            pytest.raises(AttributeError),
+        ):
+            runner._build_dependency_analyzer()
+
     @pytest.mark.asyncio
     async def test_execute_seed_uses_inherited_runtime_handle(
         self,

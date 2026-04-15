@@ -593,7 +593,7 @@ class OrchestratorRunner:
                 cwd=self._effective_cwd(),
                 max_turns=1,
             )
-        except Exception as exc:
+        except (RuntimeError, ImportError, ConnectionError, OSError, ValueError) as exc:
             log.warning(
                 "orchestrator.runner.dependency_analysis_llm_unavailable",
                 backend=backend,
