@@ -40,6 +40,12 @@ _SESSION_STATUS_EVENT_TYPES = frozenset(
         "orchestrator.session.cancelled",
     }
 )
+_TREE_CHANGE_EVENT_TYPES = frozenset(
+    {
+        "workflow.progress.updated",
+        "execution.subtask.updated",
+    }
+)
 
 _STATUS_ICONS = {
     "completed": "●",
@@ -307,23 +313,14 @@ def _find_latest_progress_event(events: list[Any]) -> Any | None:
     return latest
 
 
-def _find_latest_prior_progress_event(
-    events: list[Any], excluded_event_ids: set[str]
-) -> Any | None:
-    """Return the newest workflow.progress.updated event excluding newer cursor events."""
-    latest = None
-    for event in events:
-        if getattr(event, "type", None) != "workflow.progress.updated":
-            continue
-        if getattr(event, "id", None) in excluded_event_ids:
-            continue
-        latest = event
-    return latest
-
-
 def _has_status_change_event(events: list[Any]) -> bool:
     """Return True when new session lifecycle events should force a rerender."""
     return any(getattr(event, "type", None) in _SESSION_STATUS_EVENT_TYPES for event in events)
+
+
+def _has_tree_change_event(events: list[Any]) -> bool:
+    """Return True when execution events may change the rendered AC tree."""
+    return any(getattr(event, "type", None) in _TREE_CHANGE_EVENT_TYPES for event in events)
 
 
 def _valid_tree_payload(value: object) -> bool:
@@ -486,6 +483,131 @@ def _extract_tree_snapshot(progress_data: Mapping[str, Any]) -> dict[str, Any]:
         progress_data.get("acceptance_criteria"),
         current_ac_index=_coerce_int(progress_data.get("current_ac_index"), 0) or None,
     )
+
+
+def _find_node_id_for_ac_index(
+    nodes: Mapping[str, Mapping[str, Any]],
+    ac_index: int,
+) -> str | None:
+    """Resolve the top-level node ID associated with a 1-based AC index."""
+    if ac_index <= 0:
+        return None
+
+    conventional_id = f"ac_{ac_index}"
+    if conventional_id in nodes:
+        return conventional_id
+
+    for node_id, raw_node in nodes.items():
+        if not isinstance(raw_node, Mapping):
+            continue
+        if _coerce_int(raw_node.get("index"), 0) != ac_index:
+            continue
+        if _coerce_int(raw_node.get("depth"), 0) > 1:
+            continue
+        return node_id
+
+    return None
+
+
+def _merge_subtask_events_into_snapshot(
+    snapshot: Mapping[str, Any],
+    execution_events: list[Any],
+) -> dict[str, Any]:
+    """Augment a tree snapshot with ``execution.subtask.updated`` events."""
+    raw_nodes = snapshot.get("nodes")
+    root_id = _coerce_non_empty_string(snapshot.get("root_id")) or _ROOT_ID
+    if not isinstance(raw_nodes, Mapping):
+        return {"root_id": root_id, "nodes": {}}
+
+    nodes: dict[str, dict[str, Any]] = {}
+    for node_id, raw_node in raw_nodes.items():
+        if not isinstance(raw_node, Mapping):
+            continue
+        nodes[str(node_id)] = dict(raw_node)
+
+    for event in execution_events:
+        if getattr(event, "type", None) != "execution.subtask.updated":
+            continue
+
+        data = getattr(event, "data", None)
+        if not isinstance(data, Mapping):
+            continue
+
+        ac_index = _coerce_int(data.get("ac_index"), 0)
+        parent_id = _find_node_id_for_ac_index(nodes, ac_index)
+        if parent_id is None or parent_id not in nodes:
+            continue
+
+        sub_task_index = _coerce_int(data.get("sub_task_index"), 0)
+        sub_task_id = _coerce_non_empty_string(data.get("sub_task_id"))
+        if sub_task_id is None:
+            if sub_task_index <= 0:
+                continue
+            sub_task_id = f"ac_{ac_index}_sub_{sub_task_index}"
+
+        parent_node = nodes[parent_id]
+        existing_node = nodes.get(sub_task_id, {})
+        depth = max(1, _coerce_int(parent_node.get("depth"), 1) + 1)
+        children_ids = _coerce_children_ids(existing_node.get("children_ids"))
+        status = _normalize_status(data.get("status") or existing_node.get("status"))
+        raw_activity = (
+            data.get("current_tool_activity")
+            if data.get("current_tool_activity") is not None
+            else data.get("last_update")
+        )
+
+        node = {
+            "id": sub_task_id,
+            "content": _coerce_non_empty_string(data.get("content"))
+            or _coerce_non_empty_string(existing_node.get("content"))
+            or sub_task_id,
+            "status": status,
+            "depth": depth,
+            "index": sub_task_index if sub_task_index > 0 else existing_node.get("index"),
+            "parent_id": parent_id,
+            "children_ids": children_ids,
+            "_order": (
+                sub_task_index
+                if sub_task_index > 0
+                else _coerce_int(existing_node.get("_order"), len(nodes))
+            ),
+        }
+        node.update(
+            _executing_tool_activity_fields(
+                status,
+                raw_activity=raw_activity,
+                fallback_tool_name=data.get("tool_name"),
+                fallback_tool_detail=data.get("tool_detail"),
+                fallback_tool_input=data.get("tool_input"),
+            )
+        )
+        nodes[sub_task_id] = node
+
+        parent_children = _coerce_children_ids(parent_node.get("children_ids"))
+        if sub_task_id not in parent_children:
+            parent_children.append(sub_task_id)
+        parent_node["children_ids"] = parent_children
+
+    return {"root_id": root_id, "nodes": nodes}
+
+
+def _compose_progress_data(
+    progress_data: Mapping[str, Any],
+    execution_events: list[Any],
+) -> dict[str, Any]:
+    """Project the effective HUD progress payload from execution history.
+
+    ``workflow.progress.updated`` stays the coarse-grained snapshot, while
+    ``execution.subtask.updated`` carries the fine-grained Sub-AC transitions
+    between those snapshots. Folding both together here keeps cursor polling
+    responsive even when only subtask-status events have arrived.
+    """
+    composed = dict(progress_data)
+    composed["ac_tree"] = _merge_subtask_events_into_snapshot(
+        _extract_tree_snapshot(progress_data),
+        execution_events,
+    )
+    return composed
 
 
 def _tree_snapshot_changed(
@@ -966,30 +1088,63 @@ class ACTreeHUDHandler:
                 cursor,
             )
             new_cursor = max(session_cursor, execution_cursor)
-            latest_new_progress_event = _find_latest_progress_event(new_events)
             has_status_change_event = _has_status_change_event(session_events)
+            has_tree_change_event = _has_tree_change_event(new_events)
 
-            if latest_new_progress_event is None:
-                latest_historical_events = await self._event_store.query_events(
-                    aggregate_id=execution_id,
-                    event_type="workflow.progress.updated",
-                    limit=1,
-                )
-                latest_progress_event = (
-                    latest_historical_events[0] if latest_historical_events else None
-                )
-                if latest_progress_event is None:
-                    return Result.ok(
-                        _warning_result(
-                            session_id=session_id,
-                            execution_id=execution_id,
-                            status=tracker.status.value,
-                            cursor=new_cursor,
-                            message="waiting for the first AC tree update.",
-                        )
+            if cursor > 0 and not has_status_change_event and not has_tree_change_event:
+                return Result.ok(
+                    MCPToolResult(
+                        content=(
+                            MCPContentItem(
+                                type=ContentType.TEXT,
+                                text=f"No AC tree change since cursor {cursor}.",
+                            ),
+                        ),
+                        is_error=False,
+                        meta={
+                            "session_id": session_id,
+                            "execution_id": execution_id,
+                            "status": tracker.status.value,
+                            "cursor": new_cursor,
+                            "changed": False,
+                        },
                     )
+                )
 
-                if cursor > 0 and not has_status_change_event:
+            execution_history = await self._event_store.replay("execution", execution_id)
+            latest_progress_event = _find_latest_progress_event(execution_history)
+            if latest_progress_event is None:
+                return Result.ok(
+                    _warning_result(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        status=tracker.status.value,
+                        cursor=new_cursor,
+                        message="waiting for the first AC tree update.",
+                    )
+                )
+
+            progress_data = _compose_progress_data(latest_progress_event.data, execution_history)
+
+            if cursor > 0 and not has_status_change_event:
+                new_event_ids = {
+                    event_id
+                    for event in new_events
+                    if (event_id := _coerce_non_empty_string(getattr(event, "id", None))) is not None
+                }
+                previous_execution_history = [
+                    event
+                    for event in execution_history
+                    if _coerce_non_empty_string(getattr(event, "id", None)) not in new_event_ids
+                ]
+                previous_progress_event = _find_latest_progress_event(previous_execution_history)
+                previous_progress_data = (
+                    _compose_progress_data(previous_progress_event.data, previous_execution_history)
+                    if previous_progress_event is not None
+                    and isinstance(previous_progress_event.data, Mapping)
+                    else None
+                )
+                if not _tree_snapshot_changed(previous_progress_data, progress_data):
                     return Result.ok(
                         MCPToolResult(
                             content=(
@@ -1009,46 +1164,6 @@ class ACTreeHUDHandler:
                         )
                     )
 
-                progress_data = latest_progress_event.data
-            else:
-                if cursor > 0 and not has_status_change_event:
-                    execution_history = await self._event_store.replay("execution", execution_id)
-                    new_event_ids = {
-                        getattr(event, "id", "")
-                        for event in new_events
-                        if _coerce_non_empty_string(getattr(event, "id", None))
-                    }
-                    previous_progress_event = _find_latest_prior_progress_event(
-                        execution_history,
-                        new_event_ids,
-                    )
-                    if not _tree_snapshot_changed(
-                        previous_progress_event.data
-                        if previous_progress_event is not None
-                        and isinstance(previous_progress_event.data, Mapping)
-                        else None,
-                        latest_new_progress_event.data,
-                    ):
-                        return Result.ok(
-                            MCPToolResult(
-                                content=(
-                                    MCPContentItem(
-                                        type=ContentType.TEXT,
-                                        text=f"No AC tree change since cursor {cursor}.",
-                                    ),
-                                ),
-                                is_error=False,
-                                meta={
-                                    "session_id": session_id,
-                                    "execution_id": execution_id,
-                                    "status": tracker.status.value,
-                                    "cursor": new_cursor,
-                                    "changed": False,
-                                },
-                            )
-                        )
-                progress_data = latest_new_progress_event.data
-
             markdown = render_ac_tree_hud_markdown(
                 session_id=session_id,
                 execution_id=execution_id,
@@ -1066,9 +1181,7 @@ class ACTreeHUDHandler:
                         "status": tracker.status.value,
                         "cursor": new_cursor,
                         "changed": (
-                            latest_new_progress_event is not None
-                            or has_status_change_event
-                            or cursor == 0
+                            has_tree_change_event or has_status_change_event or cursor == 0
                         ),
                     },
                 )
