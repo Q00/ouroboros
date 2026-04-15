@@ -1674,13 +1674,15 @@ class ParallelACExecutor:
                     if ac_idx < 0 or ac_idx >= total_acs:
                         continue
 
-                    if ac_idx in external_completed:
-                        externally_satisfied.append(ac_idx)
-                        continue
-
+                    # Always validate dependencies first — even externally
+                    # satisfied ACs must be blocked if their upstream
+                    # dependencies failed, because the "satisfied" state may
+                    # be stale relative to the current execution.
                     deps = execution_plan.get_dependencies(ac_idx)
                     if any(dep in failed_indices or dep in blocked_indices for dep in deps):
                         blocked.append(ac_idx)
+                    elif ac_idx in external_completed:
+                        externally_satisfied.append(ac_idx)
                     else:
                         executable.append(ac_idx)
 
