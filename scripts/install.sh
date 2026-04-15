@@ -39,27 +39,50 @@ elif command -v pipx &>/dev/null; then
   echo "  pipx:   $(pipx --version)"
 fi
 
-# Python check: only required when falling back to pip (no uv, no pipx)
-if [ "$HAS_UV" = false ] && [ "$HAS_PIPX" = false ]; then
-  for cmd in python3 python; do
-    if command -v "$cmd" &>/dev/null; then
-      ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || true)
-      if [ -n "$ver" ] && [ "$(printf '%s\n' "$MIN_PYTHON" "$ver" | sort -V | head -n1)" = "$MIN_PYTHON" ]; then
+# Helper: check whether a Python executable meets MIN_PYTHON
+_python_ok() {
+  local cmd="$1"
+  local ver
+  ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || true)
+  [ -n "$ver" ] && [ "$(printf '%s\n' "$MIN_PYTHON" "$ver" | sort -V | head -n1)" = "$MIN_PYTHON" ]
+}
+
+# Python check: always required for pip; also needed by pipx to pick the right interpreter.
+if [ "$HAS_UV" = false ]; then
+  if [ "$HAS_PIPX" = true ]; then
+    # For pipx: probe versioned candidates first, then fall back to generic names.
+    for cmd in python3.14 python3.13 python3.12 python3 python; do
+      if command -v "$cmd" &>/dev/null && _python_ok "$cmd"; then
+        PYTHON="$(command -v "$cmd")"
+        break
+      fi
+    done
+    if [ -z "$PYTHON" ]; then
+      echo "Error: pipx requires Python >=${MIN_PYTHON} but none was found."
+      echo ""
+      echo "Install Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
+      echo "Or switch to uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh"
+      exit 1
+    fi
+    echo "  Python: $($PYTHON --version)"
+  else
+    # pip fallback: any matching python3/python will do.
+    for cmd in python3 python; do
+      if command -v "$cmd" &>/dev/null && _python_ok "$cmd"; then
         PYTHON="$cmd"
         break
       fi
+    done
+    if [ -z "$PYTHON" ]; then
+      echo "Error: No installer found (uv, pipx) and Python >=${MIN_PYTHON} not available."
+      echo ""
+      echo "Install one of:"
+      echo "  • uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh"
+      echo "  • Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
+      exit 1
     fi
-  done
-
-  if [ -z "$PYTHON" ]; then
-    echo "Error: No installer found (uv, pipx) and Python >=${MIN_PYTHON} not available."
-    echo ""
-    echo "Install one of:"
-    echo "  • uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh"
-    echo "  • Python ${MIN_PYTHON}+: https://www.python.org/downloads/"
-    exit 1
+    echo "  Python: $($PYTHON --version)"
   fi
-  echo "  Python: $($PYTHON --version)"
 fi
 
 # 2. Detect runtimes
@@ -133,7 +156,7 @@ echo "Installing ${INSTALL_SPEC} ..."
 INSTALL_METHOD=""
 if [ "$HAS_UV" = true ]; then
   INSTALL_METHOD="uv"
-  UV_ARGS=(tool install --upgrade "$PACKAGE_NAME")
+  UV_ARGS=(tool install --upgrade --python ">=3.12" "$PACKAGE_NAME")
   if [ -n "$PRE_FLAG" ]; then
     UV_ARGS+=(--prerelease=allow)
   fi
@@ -150,9 +173,9 @@ if [ "$HAS_UV" = true ]; then
 elif [ "$HAS_PIPX" = true ]; then
   INSTALL_METHOD="pipx"
   if [ -n "$PRE_FLAG" ]; then
-    pipx install --force --pip-args='--pre' "$INSTALL_SPEC"
+    pipx install --force --python "$PYTHON" --pip-args='--pre' "$INSTALL_SPEC"
   else
-    pipx install --force "$INSTALL_SPEC"
+    pipx install --force --python "$PYTHON" "$INSTALL_SPEC"
   fi
 else
   INSTALL_METHOD="pip"
