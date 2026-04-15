@@ -202,9 +202,7 @@ class CheckpointStore:
 
         # Final check: must still be non-empty after sanitization
         if not sanitized or not sanitized.strip():
-            raise ValueError(
-                f"seed_id is empty after sanitization (original: {seed_id!r})"
-            )
+            raise ValueError(f"seed_id is empty after sanitization (original: {seed_id!r})")
 
         return sanitized
 
@@ -221,9 +219,7 @@ class CheckpointStore:
         base_resolved = self._base_path.resolve()
         # Use os.path so the check works on all platforms.
         if not str(resolved).startswith(str(base_resolved) + os.sep) and resolved != base_resolved:
-            raise ValueError(
-                f"Path traversal detected: {resolved} is outside {base_resolved}"
-            )
+            raise ValueError(f"Path traversal detected: {resolved} is outside {base_resolved}")
 
     def save(self, checkpoint: CheckpointData) -> Result[None, PersistenceError]:
         """Save checkpoint to disk.
