@@ -191,7 +191,9 @@ async def _run_mcp_server(
     try:
         transport = validate_transport(transport)
     except ValueError:
-        _stderr_console.print(f"[red]Invalid transport {transport!r}. Must be 'stdio' or 'sse'.[/red]")
+        _stderr_console.print(
+            f"[red]Invalid transport {transport!r}. Must be 'stdio' or 'sse'.[/red]"
+        )
         raise typer.Exit(code=1)
 
     # Create EventStore with custom path if provided
