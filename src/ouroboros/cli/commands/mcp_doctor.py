@@ -4,7 +4,7 @@ Run ``ouroboros mcp doctor`` to check whether your environment is set up
 correctly for the MCP server.  Each check returns a :class:`CheckResult`
 with a pass/warn/fail status and an optional remediation hint.
 
-The ``--json`` flag emits a machine-readable JSON object suitable for
+The ``--json`` flag emits a machine-readable JSON array suitable for
 inclusion in bug reports or CI pipelines.  Exit code 1 is returned if any
 check has status ``fail``; 0 otherwise.
 """
@@ -252,6 +252,8 @@ def check_pid_file() -> CheckResult:
             message="No PID file (server not running or cleanly stopped)",
         )
 
+    _rm_cmd = "del" if platform.system() == "Windows" else "rm"
+
     try:
         raw = _PID_FILE.read_text(encoding="utf-8").strip()
         pid = int(raw)
@@ -260,7 +262,7 @@ def check_pid_file() -> CheckResult:
             name="pid_file",
             status="warn",
             message=f"PID file unreadable: {exc}",
-            remediation=f"Remove the stale file: rm {_PID_FILE}",
+            remediation=f"Remove the stale file: {_rm_cmd} {_PID_FILE}",
         )
 
     if _pid_is_alive(pid):
@@ -273,7 +275,7 @@ def check_pid_file() -> CheckResult:
         name="pid_file",
         status="warn",
         message=f"Stale PID file: process {pid} is not running",
-        remediation=f"Remove the stale file: rm {_PID_FILE}",
+        remediation=f"Remove the stale file: {_rm_cmd} {_PID_FILE}",
     )
 
 
