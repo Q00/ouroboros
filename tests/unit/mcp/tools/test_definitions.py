@@ -1627,7 +1627,7 @@ class TestInterviewHandlerCwd:
         assert result.is_ok
         assert state.ambiguity_score == 0.44
         assert state.ambiguity_breakdown is not None
-        assert "(ambiguity: 0.44 [initial]) Next question?" in result.value.content[0].text
+        assert "(ambiguity: 0.44) Next question?" in result.value.content[0].text
 
     async def test_interview_handle_done_completes_without_new_question(self) -> None:
         """Explicit completion signals should stop the interview instead of asking again."""
@@ -1969,7 +1969,7 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["completed"] is True
         assert result.value.meta["ambiguity_score"] == 0.18
         assert (
-            "(ambiguity: 0.18 [ready]) Ready for Seed generation." in result.value.content[0].text
+            "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
         )
         mock_engine.ask_next_question.assert_not_called()
 
