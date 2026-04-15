@@ -566,7 +566,11 @@ class ClaudeCodeAdapter:
             # to verify version compatibility.  This is advisory-only — version
             # mismatches surface naturally as API errors — and saves ~0.3-0.8 s
             # latency on every LLM call.
-            "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": "1",
+            # Honour OUROBOROS_SKIP_VERSION_CHECK if the user/operator sets it
+            # (e.g. "0" to re-enable the check for debugging).
+            "CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK": os.environ.get(
+                "OUROBOROS_SKIP_VERSION_CHECK", "1"
+            ),
         }
         if claudecode_present:
             env_overrides["CLAUDECODE"] = ""
