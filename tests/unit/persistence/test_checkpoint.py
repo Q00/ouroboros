@@ -277,13 +277,67 @@ class TestCheckpointStorePathTraversal:
         expected = checkpoint_store._base_path / "checkpoint_seedid.json"
         assert expected.exists()
 
-    def test_long_seed_id_is_truncated(self, checkpoint_store: CheckpointStore) -> None:
-        """seed_id longer than 255 chars is truncated."""
+    def test_long_seed_id_is_truncated_within_filename_budget(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """seed_id is capped so the full filename never exceeds 255 bytes."""
         long_id = "a" * 300
         path = checkpoint_store._get_checkpoint_path(long_id)
-        # The seed portion in the filename should be at most 255 chars
-        assert len(long_id[:255]) == 255
-        assert path.name == f"checkpoint_{'a' * 255}.json"
+        # The full basename must fit in 255 bytes for any rollback level
+        assert len(path.name) <= 255
+        # The sanitized seed portion is at most _MAX_SEED_LEN (237)
+        seed_part = path.name.removeprefix("checkpoint_").removesuffix(".json")
+        assert len(seed_part) <= CheckpointStore._MAX_SEED_LEN
+        # With rollback suffix the basename still fits
+        path_with_level = checkpoint_store._get_checkpoint_path(long_id, level=3)
+        assert len(path_with_level.name) <= 255
+
+    def test_long_seed_id_has_hash_suffix_for_collision_resistance(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """Truncated seed ids include a hash suffix to avoid collisions."""
+        import hashlib
+
+        long_id = "a" * 300
+        sanitized = CheckpointStore._sanitize_seed_id(long_id)
+        # Must end with _<8-hex-char hash>
+        assert "_" in sanitized
+        hash_suffix = sanitized.rsplit("_", 1)[-1]
+        assert len(hash_suffix) == CheckpointStore._HASH_SUFFIX_LEN
+        # Verify the hash is derived from the full (pre-truncation) sanitized id
+        expected_hash = hashlib.sha256(long_id.encode()).hexdigest()[
+            : CheckpointStore._HASH_SUFFIX_LEN
+        ]
+        assert hash_suffix == expected_hash
+
+    def test_long_seed_id_write_and_read_roundtrip(self, checkpoint_store: CheckpointStore) -> None:
+        """Regression: a checkpoint with a very long seed_id can be written and read back."""
+        long_id = "b" * 300
+        cp = CheckpointData.create(long_id, "phase1", {"step": 42})
+        result = checkpoint_store.save(cp)
+        assert result.is_ok
+
+        # The file must actually exist on disk
+        path = checkpoint_store._get_checkpoint_path(long_id)
+        assert path.exists(), f"checkpoint file was not created: {path}"
+        assert len(path.name) <= 255
+
+        # Read it back via load (which re-sanitizes the seed_id identically)
+        load_result = checkpoint_store.load(long_id)
+        assert load_result.is_ok
+        assert load_result.value.phase == "phase1"
+        assert load_result.value.state == {"step": 42}
+
+    def test_long_seed_id_different_ids_do_not_collide(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """Two long seed_ids that share a 228-char prefix map to different files."""
+        prefix = "x" * 228
+        id_a = prefix + "a" * 72
+        id_b = prefix + "b" * 72
+        path_a = checkpoint_store._get_checkpoint_path(id_a)
+        path_b = checkpoint_store._get_checkpoint_path(id_b)
+        assert path_a != path_b, "distinct long seed_ids must not collide"
 
     def test_load_with_traversal_seed_id(self, checkpoint_store: CheckpointStore) -> None:
         """load() with a traversal seed_id is safely handled."""

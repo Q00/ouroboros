@@ -168,15 +168,30 @@ class CheckpointStore:
         """
         self._base_path.mkdir(parents=True, exist_ok=True)
 
+    # Filename components used by _get_checkpoint_path:
+    #   "checkpoint_" + <seed> + ".json"         (level 0)
+    #   "checkpoint_" + <seed> + ".json.N"       (level 1-3)
+    # file_lock appends ".lock", so worst-case basename is:
+    #   "checkpoint_" + <seed> + ".json.N.lock"
+    _FILENAME_PREFIX = "checkpoint_"
+    _FILENAME_SUFFIX_WORST = ".json.0.lock"  # longest possible basename suffix
+    _MAX_SEED_LEN = 255 - len(_FILENAME_PREFIX) - len(_FILENAME_SUFFIX_WORST)  # 232
+    # When truncating, reserve space for a collision-resistant hash suffix.
+    _HASH_SUFFIX_LEN = 8  # hex chars from SHA-256
+
     @staticmethod
-    def _sanitize_seed_id(seed_id: str) -> str:
+    def _sanitize_seed_id(seed_id: str, *, max_len: int | None = None) -> str:
         """Sanitize seed_id to prevent path traversal attacks.
 
         Strips null bytes, removes path separators and parent-directory
-        sequences, and enforces a maximum length of 255 characters.
+        sequences, and caps length so that the **full** checkpoint
+        filename (prefix + seed + suffix) stays within the 255-byte
+        filesystem limit.  When truncation is needed a SHA-256 hash
+        fragment is appended to keep the mapping collision-resistant.
 
         Args:
             seed_id: Raw seed identifier.
+            max_len: Override for maximum sanitized length (used in tests).
 
         Returns:
             Sanitized seed identifier safe for use in filenames.
@@ -186,6 +201,8 @@ class CheckpointStore:
         """
         if not seed_id:
             raise ValueError("seed_id must not be empty")
+
+        budget = max_len if max_len is not None else CheckpointStore._MAX_SEED_LEN
 
         # Strip null bytes
         sanitized = seed_id.replace("\x00", "")
@@ -197,8 +214,14 @@ class CheckpointStore:
         # Replace path separators with underscores
         sanitized = re.sub(r"[/\\]", "_", sanitized)
 
-        # Limit length to 255 characters (common filesystem limit)
-        sanitized = sanitized[:255]
+        # Cap length to the remaining filename budget.
+        # When truncation is required, append a hash suffix for collision resistance.
+        if len(sanitized) > budget:
+            hash_hex = hashlib.sha256(sanitized.encode()).hexdigest()[
+                : CheckpointStore._HASH_SUFFIX_LEN
+            ]
+            truncated_len = budget - CheckpointStore._HASH_SUFFIX_LEN - 1  # 1 for "_"
+            sanitized = f"{sanitized[:truncated_len]}_{hash_hex}"
 
         # Final check: must still be non-empty after sanitization
         if not sanitized or not sanitized.strip():
