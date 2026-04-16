@@ -417,8 +417,14 @@ class EvaluateHandler:
                 except Exception:
                     pass  # Best-effort enrichment
 
-            # Use acceptance_criterion or derive from seed
-            current_ac = acceptance_criterion or "Verify execution output meets requirements"
+            # Use acceptance_criterion or derive from seed.
+            # When a 1-item acceptance_criteria list was provided (e.g. from
+            # ChecklistVerifyHandler forwarding a seed with a single AC),
+            # honour it instead of falling back to the generic default.
+            if len(acceptance_criteria) == 1:
+                current_ac = acceptance_criteria[0]
+            else:
+                current_ac = acceptance_criterion or "Verify execution output meets requirements"
 
             # Evaluation reads multiple spec files (one Read call per AC).
             # Use a dedicated adapter with a higher turn budget — the shared
