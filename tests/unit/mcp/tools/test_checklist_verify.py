@@ -37,6 +37,30 @@ metadata:
 """
 
 
+VALID_SEED_WITH_SINGLE_AC = """
+goal: Add a logging module
+constraints:
+  - Must use structured logging
+acceptance_criteria:
+  - Log output is JSON-formatted
+ontology_schema:
+  name: Logging
+  description: Logging module
+  fields:
+    - name: format
+      field_type: string
+      description: Log format
+evaluation_principles: []
+exit_conditions: []
+metadata:
+  seed_id: seed-log-1
+  version: "1.0.0"
+  created_at: "2024-01-01T00:00:00Z"
+  ambiguity_score: 0.15
+  interview_id: null
+"""
+
+
 VALID_SEED_NO_AC = """
 goal: Empty goal
 constraints: []
@@ -189,6 +213,44 @@ class TestChecklistVerifyDelegation:
         ]
         # seed_content must be forwarded so EvaluateHandler can pull goal/constraints
         assert call_args["seed_content"] == VALID_SEED_WITH_MULTI_AC
+
+    async def test_single_ac_seed_delegates_correctly(self) -> None:
+        """A seed with exactly one AC must forward that AC, not the fallback string."""
+        mock_evaluate = MagicMock(spec=EvaluateHandler)
+        mock_evaluate.handle = AsyncMock(
+            return_value=Result.ok(
+                MCPToolResult(
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT,
+                            text="Evaluation Results",
+                        ),
+                    ),
+                    is_error=False,
+                    meta={
+                        "final_approved": True,
+                        "session_id": "s1",
+                    },
+                )
+            )
+        )
+        handler = ChecklistVerifyHandler(evaluate_handler=mock_evaluate)
+
+        result = await handler.handle(
+            {
+                "session_id": "s1",
+                "seed_content": VALID_SEED_WITH_SINGLE_AC,
+                "artifact": "import structlog; log = structlog.get_logger()",
+            }
+        )
+
+        assert result.is_ok
+        # Verify the inner call received exactly the one AC from the seed.
+        mock_evaluate.handle.assert_awaited_once()
+        call_args = mock_evaluate.handle.await_args.args[0]
+        assert call_args["acceptance_criteria"] == ["Log output is JSON-formatted"]
+        # seed_content forwarded so EvaluateHandler can extract goal/constraints
+        assert call_args["seed_content"] == VALID_SEED_WITH_SINGLE_AC
 
     async def test_augments_meta_with_verify_flag(self) -> None:
         """Response meta gets checklist_verify=True and seed_goal."""
