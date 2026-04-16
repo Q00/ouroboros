@@ -291,6 +291,6 @@ class TestResumeCLIWithSessions:
         assert result.exit_code == 1
 
     def test_status_hint_included_in_output(self) -> None:
-        """The output suggests `ooo status <exec_id>` for re-attachment."""
+        """The output suggests `ouroboros status execution <exec_id>` for re-attachment."""
         result = self._invoke_with_sessions("1\n")
-        assert "ooo status" in result.output
+        assert "ouroboros status execution" in result.output

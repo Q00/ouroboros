@@ -1,7 +1,8 @@
 """Resume command for Ouroboros.
 
 List in-flight sessions directly from the EventStore (no MCP dependency)
-and surface the exec_id so the user can re-attach with `ooo status`.
+and surface the exec_id so the user can re-attach with
+`ouroboros status execution <exec_id>`.
 """
 
 from __future__ import annotations
@@ -155,7 +156,7 @@ async def _interactive_resume() -> None:
         f"Session selected: [bold]{selected.session_id}[/]\n"
         f"Execution ID:     [bold cyan]{exec_id}[/]\n\n"
         "Re-attach by running:\n\n"
-        f"    ooo status {exec_id}",
+        f"    ouroboros status execution {exec_id}",
         "Re-attach",
     )
 
@@ -168,7 +169,7 @@ def resume(ctx: typer.Context) -> None:
     command after an unexpected MCP disconnect to recover the execution ID
     and re-attach with:
 
-        ooo status <exec_id>
+        ouroboros status execution <exec_id>
 
     Examples:
 

@@ -40,7 +40,7 @@ When the user invokes this skill:
 3. Re-attach using:
 
    ```
-   ooo status <exec_id>
+   ouroboros status execution <exec_id>
    ```
 
 ## Fallback (No sessions found)
@@ -70,13 +70,13 @@ Enter number to re-attach (1-1), or 'q' to quit: 1
 │                                                      │
 │ Re-attach by running:                                │
 │                                                      │
-│     ooo status exec-xyz789                           │
+│     ouroboros status execution exec-xyz789             │
 ╰──────────────────────────────────────────────────────╯
 ```
 
 ## Next Steps
 
 After re-attaching:
-- `ooo status <exec_id>` — Check current execution status and drift
+- `ouroboros status execution <exec_id>` — Check current execution status and drift
 - `ooo evaluate` — Evaluate results once execution completes
 - `ooo cancel execution <exec_id>` — Cancel if the session is stuck
