@@ -155,6 +155,8 @@ class TestCheckMcpImport:
 
 
 class TestCheckClaudeAgentSdkImport:
+    """Tests for check_claude_agent_sdk_import — backend-aware behaviour."""
+
     def test_passes_when_importable(self):
         mock_sdk = MagicMock()
         with (
@@ -164,11 +166,44 @@ class TestCheckClaudeAgentSdkImport:
             result = check_claude_agent_sdk_import()
         assert result.status == "pass"
 
-    def test_fails_when_not_importable(self):
-        with patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")):
+    def test_fails_when_not_importable_on_claude_backend(self):
+        """Missing SDK on a Claude runtime is a hard fail."""
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
+                return_value="claude",
+            ),
+            patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
+        ):
             result = check_claude_agent_sdk_import()
         assert result.status == "fail"
         assert result.remediation != ""
+
+    def test_warns_when_not_importable_on_codex_backend(self):
+        """Missing SDK on a Codex runtime is only a warning, not a failure."""
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
+                return_value="codex",
+            ),
+            patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
+        ):
+            result = check_claude_agent_sdk_import()
+        assert result.status == "warn"
+        assert "codex" in result.message
+
+    def test_warns_when_not_importable_on_opencode_backend(self):
+        """Missing SDK on an OpenCode runtime is only a warning."""
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
+                return_value="opencode",
+            ),
+            patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
+        ):
+            result = check_claude_agent_sdk_import()
+        assert result.status == "warn"
+        assert "opencode" in result.message
 
     def test_passes_with_unknown_version(self):
         mock_sdk = MagicMock()
@@ -182,6 +217,32 @@ class TestCheckClaudeAgentSdkImport:
             result = check_claude_agent_sdk_import()
         assert result.status == "pass"
         assert "unknown" in result.message
+
+    def test_passes_when_importable_regardless_of_backend(self):
+        """If the SDK is installed, the check passes even on non-Claude backends."""
+        mock_sdk = MagicMock()
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
+                return_value="codex",
+            ),
+            patch.dict("sys.modules", {"claude_agent_sdk": mock_sdk}),
+            patch("importlib.metadata.version", return_value="0.5.0"),
+        ):
+            result = check_claude_agent_sdk_import()
+        assert result.status == "pass"
+
+    def test_fails_on_claude_code_backend(self):
+        """claude_code is also a Claude backend — missing SDK should fail."""
+        with (
+            patch(
+                "ouroboros.cli.commands.mcp_doctor._get_runtime_backend",
+                return_value="claude_code",
+            ),
+            patch("builtins.__import__", side_effect=_import_error_for("claude_agent_sdk")),
+        ):
+            result = check_claude_agent_sdk_import()
+        assert result.status == "fail"
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +503,22 @@ class TestDoctorCommand:
         assert result.exit_code == 1
         data = json.loads(result.output)
         assert data[0]["status"] == "fail"
+
+    def test_exits_0_on_codex_backend_without_claude_sdk(self):
+        """On a Codex backend, missing claude-agent-sdk should not cause exit 1."""
+        app = _make_app()
+        warn_result = CheckResult(
+            name="claude_agent_sdk_import",
+            status="warn",
+            message="claude-agent-sdk not installed (not required for codex runtime)",
+        )
+        pass_result = CheckResult(name="mcp_import", status="pass", message="mcp 1.26.0")
+        with patch(
+            "ouroboros.cli.commands.mcp_doctor._ALL_CHECKS",
+            [lambda: pass_result, lambda: warn_result],
+        ):
+            result = runner.invoke(app, [])
+        assert result.exit_code == 0
 
 
 # ---------------------------------------------------------------------------

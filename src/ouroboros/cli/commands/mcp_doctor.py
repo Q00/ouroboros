@@ -129,8 +129,30 @@ def check_mcp_import() -> CheckResult:
     )
 
 
+_CLAUDE_RUNTIME_BACKENDS = frozenset({"claude", "claude_code"})
+
+
+def _get_runtime_backend() -> str:
+    """Return the configured agent runtime backend, with a safe fallback."""
+    try:
+        from ouroboros.config.loader import get_agent_runtime_backend
+
+        return get_agent_runtime_backend()
+    except Exception:
+        return "claude"
+
+
 def check_claude_agent_sdk_import() -> CheckResult:
-    """Check that the ``claude`` extra (claude-agent-sdk) is installed."""
+    """Check that the ``claude`` extra (claude-agent-sdk) is installed.
+
+    The check is backend-aware: when the configured runtime is *not*
+    Claude-based (e.g. ``codex`` or ``opencode``), a missing
+    ``claude-agent-sdk`` is downgraded to **warn** instead of **fail**
+    because the package is not required for that backend.
+    """
+    runtime = _get_runtime_backend()
+    needs_claude = runtime in _CLAUDE_RUNTIME_BACKENDS
+
     try:
         import claude_agent_sdk  # noqa: F401
 
@@ -144,11 +166,18 @@ def check_claude_agent_sdk_import() -> CheckResult:
             message=f"claude-agent-sdk {version}",
         )
     except ImportError:
+        if needs_claude:
+            return CheckResult(
+                name="claude_agent_sdk_import",
+                status="fail",
+                message="claude-agent-sdk not importable",
+                remediation="pip install 'ouroboros-ai[claude]'  or  uv add 'ouroboros-ai[claude]'",
+            )
         return CheckResult(
             name="claude_agent_sdk_import",
-            status="fail",
-            message="claude-agent-sdk not importable",
-            remediation="pip install 'ouroboros-ai[claude]'  or  uv add 'ouroboros-ai[claude]'",
+            status="warn",
+            message=f"claude-agent-sdk not installed (not required for {runtime} runtime)",
+            remediation="Install if switching to Claude runtime: pip install 'ouroboros-ai[claude]'",
         )
 
 
@@ -313,7 +342,9 @@ def register_doctor_command(app: typer.Typer) -> None:
         """Run environment diagnostics for the MCP server.
 
         Checks Python version, installed extras (mcp, claude-agent-sdk,
-        litellm), EventStore health, and PID file liveness.  Exit code 1
+        litellm), EventStore health, and PID file liveness.  Backend-specific
+        extras are validated against the configured runtime so that non-Claude
+        setups (codex, opencode) do not produce false failures.  Exit code 1
         if any check fails.
 
         Examples:
@@ -349,6 +380,7 @@ def register_doctor_command(app: typer.Typer) -> None:
 __all__ = [
     "CheckResult",
     "Status",
+    "_CLAUDE_RUNTIME_BACKENDS",
     "check_python_version",
     "check_platform",
     "check_ouroboros_version",
