@@ -71,8 +71,9 @@ class TestMCPServerConfig:
                 transport=TransportType.HTTP,
             )
 
-    def test_valid_http_config(self) -> None:
+    def test_valid_http_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Valid HTTP config is created successfully."""
+        monkeypatch.setenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", "1")
         config = MCPServerConfig(
             name="test",
             transport=TransportType.HTTP,
@@ -80,8 +81,9 @@ class TestMCPServerConfig:
         )
         assert config.url == "http://localhost:3000"
 
-    def test_valid_sse_config(self) -> None:
+    def test_valid_sse_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Valid SSE config is created successfully."""
+        monkeypatch.setenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", "1")
         config = MCPServerConfig(
             name="test",
             transport=TransportType.SSE,
@@ -133,8 +135,9 @@ class TestMCPServerConfig:
                 url=url,
             )
 
-    def test_accepts_http_url(self) -> None:
+    def test_accepts_http_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """MCPServerConfig accepts http:// URLs."""
+        monkeypatch.setenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", "1")
         config = MCPServerConfig(
             name="test",
             transport=TransportType.SSE,
@@ -284,6 +287,35 @@ class TestMCPServerConfigSSRFHardening:
                 transport=TransportType.HTTP,
                 url="http://127.0.0.1/",
             )
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost/",
+            "http://localhost:3000/",
+            "http://localhost:8080/sse",
+            "https://localhost/",
+        ],
+    )
+    def test_rejects_localhost(self, url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Loopback hostnames (localhost) are rejected without escape hatch."""
+        monkeypatch.delenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", raising=False)
+        with pytest.raises(ValueError, match="local hostname"):
+            MCPServerConfig(
+                name="test",
+                transport=TransportType.HTTP,
+                url=url,
+            )
+
+    def test_localhost_allowed_with_escape_hatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """OUROBOROS_ALLOW_LOCAL_TRANSPORT=1 permits localhost for local dev."""
+        monkeypatch.setenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", "1")
+        config = MCPServerConfig(
+            name="test",
+            transport=TransportType.HTTP,
+            url="http://localhost:3000/",
+        )
+        assert config.url == "http://localhost:3000/"
 
 
 class TestMCPToolParameter:

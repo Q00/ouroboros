@@ -20,6 +20,11 @@ _ALLOWED_URL_SCHEMES = frozenset({"http", "https"})
 # IP literals for local development. Leave unset in production.
 _ALLOW_LOCAL_TRANSPORT_ENV = "OUROBOROS_ALLOW_LOCAL_TRANSPORT"
 
+# Well-known hostnames that resolve to loopback addresses.  These bypass the
+# ``ipaddress.ip_address()`` check (they raise ``ValueError`` because they are
+# not IP literals), so we must block them explicitly.
+_LOOPBACK_HOSTNAMES = frozenset({"localhost"})
+
 
 def _validate_transport_url(url: str, transport: str) -> None:
     """Validate a transport URL against common SSRF vectors.
@@ -74,6 +79,19 @@ def _validate_transport_url(url: str, transport: str) -> None:
 
     # Strip IPv6 brackets (urlparse already does, but be defensive).
     host_literal = hostname.strip("[]")
+
+    # Check for well-known loopback hostnames before attempting IP parsing.
+    # These bypass the IP-literal checks because they are DNS names, but
+    # they resolve to loopback addresses and must be blocked unless the
+    # dev escape hatch is enabled.
+    if host_literal in _LOOPBACK_HOSTNAMES:
+        if allow_local:
+            return
+        msg = (
+            f"Transport URL points to a local hostname: "
+            f"{hostname}. Set {_ALLOW_LOCAL_TRANSPORT_ENV}=1 for local dev."
+        )
+        raise ValueError(msg)
 
     try:
         ip = ipaddress.ip_address(host_literal)

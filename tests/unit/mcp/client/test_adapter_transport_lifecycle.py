@@ -17,6 +17,12 @@ from ouroboros.mcp.client.adapter import MCPClientAdapter
 from ouroboros.mcp.types import MCPServerConfig, TransportType
 
 
+@pytest.fixture(autouse=True)
+def _allow_local_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests use localhost URLs — enable the local transport escape hatch."""
+    monkeypatch.setenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", "1")
+
+
 def _make_stdio_config(name: str = "test") -> MCPServerConfig:
     return MCPServerConfig(
         name=name,
