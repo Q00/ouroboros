@@ -32,6 +32,7 @@ from ouroboros.orchestrator.rate_limit import (
     DEFAULT_ANTHROPIC_RPM_CEILING,
     DEFAULT_ANTHROPIC_TPM_CEILING,
     RATE_LIMIT_HEARTBEAT_SECONDS,
+    RATE_LIMIT_MAX_WAIT_SECONDS,
     RateLimitSnapshot,
     SharedRateLimitBucket,
     estimate_runtime_request_tokens,
@@ -313,15 +314,22 @@ def _runtime_handle_lifecycle_state(
 
 def runtime_handle_tool_catalog(
     runtime_handle: RuntimeHandle | None,
-) -> list[dict[str, Any]] | None:
-    """Return a copy of the serialized startup tool catalog when present."""
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """Return a copy of the serialized startup tool catalog when present.
+
+    Accepts both the legacy ``list`` format and the ``dict`` format produced
+    by :func:`serialize_tool_catalog` when ``inherited_capabilities`` are
+    present.
+    """
     if runtime_handle is None:
         return None
 
     tool_catalog = runtime_handle.metadata.get("tool_catalog")
-    if not isinstance(tool_catalog, list):
-        return None
-    return list(tool_catalog)
+    if isinstance(tool_catalog, list):
+        return list(tool_catalog)
+    if isinstance(tool_catalog, dict):
+        return dict(tool_catalog)
+    return None
 
 
 def runtime_handle_capability_graph(
@@ -657,6 +665,21 @@ class AgentRuntime(Protocol):
         ...
 
     @property
+    def llm_backend(self) -> str | None:
+        """LLM backend name for dependency analyzer wiring.
+
+        Added in v0.28.6. Legacy runtime implementations without this property
+        are handled via ``getattr()`` fallback at call sites - they degrade to
+        structured-only dependency analysis. New implementations SHOULD define
+        this to enable LLM-assisted dependency inference.
+
+        Returns the canonical LLM backend identifier (e.g. ``"claude"``,
+        ``"codex"``, ``"opencode"``, ``"litellm"``) used for non-runtime LLM
+        tasks, or ``None`` to fall back to ``runtime_backend``.
+        """
+        ...
+
+    @property
     def working_directory(self) -> str | None:
         """Working directory for task execution, or ``None`` if unset."""
         ...
@@ -793,6 +816,10 @@ class ClaudeAgentAdapter:
         return self._runtime_handle_backend
 
     @property
+    def llm_backend(self) -> str | None:
+        return self._runtime_handle_backend  # "claude" → resolved to "claude_code" by factory
+
+    @property
     def working_directory(self) -> str | None:
         return self._cwd
 
@@ -867,14 +894,44 @@ class ClaudeAgentAdapter:
         *,
         estimated_tokens: int,
         attempt: int,
+        max_wait_seconds: float = RATE_LIMIT_MAX_WAIT_SECONDS,
     ) -> AsyncIterator[AgentMessage]:
         """Yield heartbeat messages while waiting for shared budget headroom."""
         if not self._rate_limit_bucket.enabled:
             return
 
+        total_waited = 0.0
         while True:
             wait_seconds, snapshot = await self._rate_limit_bucket.acquire(estimated_tokens)
             if wait_seconds <= 0:
+                return
+
+            if total_waited >= max_wait_seconds:
+                # Reserve the capacity anyway — otherwise concurrent timeout-fallbacks
+                # would all bypass the bucket simultaneously, causing an N× RPM burst
+                # to hit the upstream API (worse than starvation per review).
+                snapshot = await self._rate_limit_bucket.force_reserve(estimated_tokens)
+                log.warning(
+                    "orchestrator.adapter.rate_limit_timeout_force_reserve",
+                    total_waited=total_waited,
+                    max_wait_seconds=max_wait_seconds,
+                    estimated_tokens=estimated_tokens,
+                    **self._rate_limit_snapshot_data(snapshot),
+                )
+                yield AgentMessage(
+                    type="system",
+                    content=(
+                        f"Shared rate limit budget wait exceeded {max_wait_seconds:.0f}s; "
+                        "proceeding with force-reserved capacity."
+                    ),
+                    data={
+                        "subtype": "rate_limit_timeout_force_reserve",
+                        "total_waited": total_waited,
+                        "max_wait_seconds": max_wait_seconds,
+                        "source": "shared_rate_limit_bucket",
+                        **self._rate_limit_snapshot_data(snapshot),
+                    },
+                )
                 return
 
             sleep_seconds = min(wait_seconds, RATE_LIMIT_HEARTBEAT_SECONDS)
@@ -888,11 +945,14 @@ class ClaudeAgentAdapter:
                     "subtype": "rate_limit_backoff",
                     "backoff_seconds": sleep_seconds,
                     "retry_attempt": attempt,
+                    "total_waited": total_waited,
+                    "max_wait_seconds": max_wait_seconds,
                     "source": "shared_rate_limit_bucket",
                     **self._rate_limit_snapshot_data(snapshot),
                 },
             )
             await asyncio.sleep(sleep_seconds)
+            total_waited += sleep_seconds
 
     @staticmethod
     def _transient_backoff_subtype(error: Exception) -> str:

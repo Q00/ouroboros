@@ -218,6 +218,10 @@ class OpenCodeRuntime:
         return self._runtime_handle_backend
 
     @property
+    def llm_backend(self) -> str | None:
+        return self._llm_backend
+
+    @property
     def working_directory(self) -> str | None:
         """Return the working directory used by this runtime.
 

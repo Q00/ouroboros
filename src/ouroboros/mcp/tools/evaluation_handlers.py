@@ -842,9 +842,20 @@ class EvaluateHandler:
                     f"Reasoning: {s2.reasoning[:200]}..."
                     if len(s2.reasoning) > 200
                     else f"Reasoning: {s2.reasoning}",
-                    "",
                 ]
             )
+            # Anti-reward-hacking transparency (#367): surface the concrete
+            # Socratic questions and evidence the evaluator relied on so
+            # the user can audit whether the verdict was earned.
+            if s2.questions_used:
+                lines.append("Questions Used:")
+                for question in s2.questions_used:
+                    lines.append(f"  - {question}")
+            if s2.evidence:
+                lines.append("Evidence:")
+                for item in s2.evidence:
+                    lines.append(f"  - {item}")
+            lines.append("")
 
         # Stage 3 results
         if result.stage3_result:

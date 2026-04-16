@@ -14,12 +14,17 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import tempfile
 from typing import Any
 
 import structlog
 
+from ouroboros.codex.cli_policy import (
+    DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS,
+    DEFAULT_MAX_OUROBOROS_DEPTH,
+    build_codex_child_env,
+    resolve_codex_cli_path,
+)
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
     resolve_codex_permission_mode,
@@ -44,8 +49,6 @@ from ouroboros.providers.codex_cli_stream import (
 log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
-_MAX_OUROBOROS_DEPTH = 5
-
 _RETRYABLE_ERROR_PATTERNS = (
     "rate limit",
     "temporarily unavailable",
@@ -65,6 +68,9 @@ class CodexCliLLMAdapter:
     _tempfile_prefix = "ouroboros-codex-llm-"
     _schema_tempfile_prefix = "ouroboros-codex-schema-"
     _process_shutdown_timeout_seconds = 5.0
+    _log_namespace = "codex_cli_adapter"
+    _max_ouroboros_depth = DEFAULT_MAX_OUROBOROS_DEPTH
+    _child_session_env_keys = DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS
 
     def __init__(
         self,
@@ -106,19 +112,14 @@ class CodexCliLLMAdapter:
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
         """Resolve Codex CLI path from explicit path, config, or PATH."""
-        if cli_path is not None:
-            candidate = str(Path(cli_path).expanduser())
-        else:
-            candidate = (
-                self._get_configured_cli_path()
-                or shutil.which(self._default_cli_name)
-                or self._default_cli_name
-            )
-
-        path = Path(candidate).expanduser()
-        if path.exists():
-            return str(path)
-        return candidate
+        resolution = resolve_codex_cli_path(
+            explicit_cli_path=cli_path,
+            configured_cli_path=self._get_configured_cli_path(),
+            default_cli_name=self._default_cli_name,
+            logger=log,
+            log_namespace=self._log_namespace,
+        )
+        return resolution.cli_path
 
     def _normalize_model(self, model: str) -> str | None:
         """Normalize a model name for Codex CLI.
@@ -623,31 +624,21 @@ class CodexCliLLMAdapter:
 
         return stdout_lines, stderr_lines, session_id, last_content
 
-    @staticmethod
-    def _build_child_env() -> dict[str, str]:
+    @classmethod
+    def _build_child_env(cls) -> dict[str, str]:
         """Build an isolated environment for child Codex processes.
 
         Strips Ouroboros MCP env vars to prevent recursive startup (#185).
         """
-        env = os.environ.copy()
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
-            env.pop(key, None)
-        env.pop("CODEX_THREAD_ID", None)
-        # Strip CLAUDECODE so child codex doesn't hang in nested session
-        # detection when invoked from within Claude Code (#269).
-        env.pop("CLAUDECODE", None)
-        try:
-            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-        except (ValueError, TypeError):
-            depth = 1
-        if depth > _MAX_OUROBOROS_DEPTH:
-            raise ProviderError(
-                message=f"Maximum Ouroboros nesting depth ({_MAX_OUROBOROS_DEPTH}) exceeded",
-                provider="codex_cli",
+        return build_codex_child_env(
+            max_depth=cls._max_ouroboros_depth,
+            child_session_env_keys=cls._child_session_env_keys,
+            depth_error_factory=lambda depth, max_depth: ProviderError(
+                message=f"Maximum Ouroboros nesting depth ({max_depth}) exceeded",
+                provider=cls._provider_name,
                 details={"depth": depth},
-            )
-        env["_OUROBOROS_DEPTH"] = str(depth)
-        return env
+            ),
+        )
 
     async def _complete_once(
         self,

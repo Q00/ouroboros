@@ -790,6 +790,69 @@ class TestParallelACExecutor:
         assert "abc1234" in result.results[0].final_message
         executor._execute_ac_batch.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_externally_satisfied_ac_blocked_when_dependency_failed(self) -> None:
+        """Externally satisfied ACs must be BLOCKED when an upstream dep failed.
+
+        Regression guard for #401: a stale --skip-completed marker must never
+        bypass dependency validation. If AC0 fails and AC1 (which depends on
+        AC0) is flagged externally_satisfied, AC1 must be BLOCKED — not
+        SATISFIED_EXTERNALLY — because the supposed satisfied state is stale
+        relative to the current failed run.
+        """
+        seed = _make_seed("AC 0 foundation", "AC 1 dependent flow")
+        dependency_graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=(0,)),
+            ),
+            execution_levels=((0,), (1,)),
+        )
+        executor = _make_executor()
+        executed_batches: list[list[int]] = []
+
+        async def fake_execute_ac_batch(**kwargs: Any) -> list[ACExecutionResult]:
+            batch_indices = list(kwargs["batch_indices"])
+            executed_batches.append(batch_indices)
+            return [
+                ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=seed.acceptance_criteria[ac_index],
+                    success=False,
+                    error="Foundation failed",
+                    outcome=ACExecutionOutcome.FAILED,
+                )
+                for ac_index in batch_indices
+            ]
+
+        executor._execute_ac_batch = fake_execute_ac_batch  # type: ignore[method-assign]
+
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=dependency_graph.to_execution_plan(),
+            session_id="orch_stale_external_satisfied",
+            execution_id="exec_stale_external_satisfied",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            externally_satisfied_acs={
+                1: {"reason": "Previously satisfied", "commit": "deadbeef"},
+            },
+        )
+
+        # Only AC0 should be executed (and fails). AC1 must NOT run even
+        # though it was flagged externally satisfied — its upstream dep failed.
+        assert executed_batches == [[0]]
+
+        ac1_result = next(r for r in result.results if r.ac_index == 1)
+        assert ac1_result.outcome == ACExecutionOutcome.BLOCKED
+        assert ac1_result.success is False
+        assert ac1_result.error == "Skipped: dependency failed"
+
+        assert result.externally_satisfied_count == 0
+        assert result.blocked_count == 1
+        assert result.failure_count == 1
+
     def test_verification_report_emits_depth_warning_feedback_metadata(self) -> None:
         """Verification report should expose depth warnings as structured metadata."""
         parallel_result = ParallelExecutionResult(

@@ -8,6 +8,7 @@ being embedded as XML in the user prompt.
 from __future__ import annotations
 
 import asyncio
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -253,8 +254,8 @@ class TestAdapterOverheadReductions:
     """Test per-call overhead optimizations in ClaudeCodeAdapter."""
 
     @pytest.mark.asyncio
-    async def test_version_check_skip_env_is_set(self) -> None:
-        """CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK=1 is passed to ClaudeAgentOptions."""
+    async def test_version_check_skip_env_defaults_to_one(self) -> None:
+        """CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK defaults to '1' when OUROBOROS_SKIP_VERSION_CHECK is unset."""
         adapter = ClaudeCodeAdapter()
         config = CompletionConfig(model="claude-sonnet-4-6")
 
@@ -270,18 +271,57 @@ class TestAdapterOverheadReductions:
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "claude_agent_sdk": sdk_module,
-                "claude_agent_sdk._errors": sdk_module._errors,
-            },
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "claude_agent_sdk": sdk_module,
+                    "claude_agent_sdk._errors": sdk_module._errors,
+                },
+            ),
+            patch.dict("os.environ", {}, clear=False),
         ):
+            # Ensure the override var is NOT set
+            os.environ.pop("OUROBOROS_SKIP_VERSION_CHECK", None)
             await adapter._execute_single_request("test prompt", config)
 
         options_call_kwargs = mock_options_cls.call_args.kwargs
         env = options_call_kwargs.get("env", {})
         assert env.get("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK") == "1"
+
+    @pytest.mark.asyncio
+    async def test_version_check_skip_env_respects_override(self) -> None:
+        """OUROBOROS_SKIP_VERSION_CHECK=0 disables the SDK version-check skip."""
+        adapter = ClaudeCodeAdapter()
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def fake_query(*args, **kwargs):
+            msg = MagicMock()
+            type(msg).__name__ = "ResultMessage"
+            msg.structured_output = None
+            msg.result = "test response"
+            msg.is_error = False
+            yield msg
+
+        sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=fake_query))
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "claude_agent_sdk": sdk_module,
+                    "claude_agent_sdk._errors": sdk_module._errors,
+                },
+            ),
+            patch.dict("os.environ", {"OUROBOROS_SKIP_VERSION_CHECK": "0"}),
+        ):
+            await adapter._execute_single_request("test prompt", config)
+
+        options_call_kwargs = mock_options_cls.call_args.kwargs
+        env = options_call_kwargs.get("env", {})
+        assert env.get("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK") == "0"
 
     def test_initial_backoff_is_half_second(self) -> None:
         """_INITIAL_BACKOFF_SECONDS should be 0.5 for interactive responsiveness."""

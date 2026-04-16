@@ -101,3 +101,28 @@ class TestCodexCliAdapterChildEnv:
         with patch.dict(os.environ, {"_OUROBOROS_DEPTH": "garbage"}):
             env = CodexCliLLMAdapter._build_child_env()
         assert env["_OUROBOROS_DEPTH"] == "1"
+
+
+class TestCodexChildEnvParity:
+    """Runtime/provider should share the same Codex child-env policy."""
+
+    def test_runtime_and_provider_build_identical_env(self) -> None:
+        runtime = _make_runtime()
+        runtime._child_session_env_keys = ("CODEX_THREAD_ID",)
+        runtime._max_ouroboros_depth = 5
+
+        with patch.dict(
+            os.environ,
+            {
+                "OUROBOROS_AGENT_RUNTIME": "codex",
+                "OUROBOROS_LLM_BACKEND": "codex",
+                "CODEX_THREAD_ID": "thread-123",
+                "CLAUDECODE": "1",
+                "_OUROBOROS_DEPTH": "1",
+                "PRESERVE_ME": "yes",
+            },
+        ):
+            runtime_env = runtime._build_child_env()
+            provider_env = CodexCliLLMAdapter._build_child_env()
+
+        assert runtime_env == provider_env

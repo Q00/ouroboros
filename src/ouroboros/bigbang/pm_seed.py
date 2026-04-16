@@ -196,7 +196,7 @@ class PMSeed:
                 pass  # Preserve as raw dict if Seed import/parse fails
 
         return cls(
-            pm_id=data.get("pm_id", ""),
+            pm_id=data.get("pm_id") or f"pm_seed_{uuid4().hex[:12]}",
             product_name=data.get("product_name", ""),
             goal=data.get("goal", ""),
             user_stories=stories,

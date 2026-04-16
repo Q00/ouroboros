@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -164,6 +165,18 @@ class TestCodexCliRuntime:
     """Tests for CodexCliRuntime."""
 
     @staticmethod
+    def _write_wrapper(path: Path) -> Path:
+        path.write_bytes(b"\xcf\xfa\xed\xfe")
+        path.chmod(0o755)
+        return path
+
+    @staticmethod
+    def _write_real_cli(path: Path) -> Path:
+        path.write_text("#!/usr/bin/env node\nconsole.log('codex')\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    @staticmethod
     def _write_skill(
         skills_dir: Path,
         skill_name: str,
@@ -217,6 +230,31 @@ class TestCodexCliRuntime:
         assert command.index("--output-last-message") < resume_index
         assert command.index("-C") < resume_index
         assert command[command.index("-C") + 1] == "/tmp/project"
+
+    def test_resolve_cli_path_falls_back_from_wrapper(self, tmp_path: Path) -> None:
+        """Runtime should bypass wrappers the same way provider adapters do."""
+        wrapper = self._write_wrapper(tmp_path / "codex-wrapper")
+        real_dir = tmp_path / "bin"
+        real_dir.mkdir()
+        real_cli = self._write_real_cli(real_dir / "codex")
+
+        with (
+            patch.dict(os.environ, {"PATH": str(real_dir)}),
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
+            patch("ouroboros.orchestrator.codex_cli_runtime.log.info") as mock_info,
+        ):
+            runtime = CodexCliRuntime(cli_path=wrapper)
+
+        assert runtime._cli_path == str(real_cli)
+        mock_warning.assert_called_once_with(
+            "codex_cli_runtime.cli_wrapper_detected",
+            wrapper_path=str(wrapper),
+            hint="Searching PATH for the real Node.js codex CLI.",
+        )
+        mock_info.assert_any_call(
+            "codex_cli_runtime.cli_resolved_via_fallback",
+            fallback_path=str(real_cli),
+        )
 
     def test_build_command_uses_read_only_for_default_permission_mode(self) -> None:
         """Default permission mode keeps the runtime in read-only mode."""

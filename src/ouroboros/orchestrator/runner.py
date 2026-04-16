@@ -64,6 +64,7 @@ from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
     SessionToolCatalog,
     assemble_session_tool_catalog,
+    enumerate_runtime_builtin_tool_definitions,
     serialize_tool_catalog,
 )
 from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
@@ -574,23 +575,44 @@ class OrchestratorRunner:
         return cwd if isinstance(cwd, str) and cwd else None
 
     def _build_dependency_analyzer(self) -> DependencyAnalyzer:
-        """Create a dependency analyzer wired to the active LLM backend when available."""
+        """Create a dependency analyzer wired to the active LLM backend when available.
+
+        Legacy ``AgentRuntime`` implementations (custom runtimes, test mocks)
+        predating the ``llm_backend`` Protocol addition in v0.28.6 may not
+        define the property. We probe it via ``getattr`` and degrade to a
+        structured-only ``DependencyAnalyzer`` when the attribute is absent,
+        preserving pre-v0.28.6 behavior for downstream Protocol implementers.
+        """
         from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
 
-        llm_backend = getattr(self._adapter, "_llm_backend", None)
+        # Legacy-compat: adapters predating the llm_backend Protocol addition
+        # (v0.28.6) lack this attribute. Fall back to structured-only analysis
+        # rather than raising AttributeError.
+        _llm_backend_sentinel = object()
+        llm_backend = getattr(self._adapter, "llm_backend", _llm_backend_sentinel)
+        if llm_backend is _llm_backend_sentinel:
+            log.info(
+                "orchestrator.runner.dependency_analyzer.legacy_adapter_without_llm_backend",
+                adapter_type=type(self._adapter).__name__,
+            )
+            return DependencyAnalyzer()
+
         backend = (
             llm_backend
             if isinstance(llm_backend, str) and llm_backend
             else (self._adapter.runtime_backend)
         )
+        cli_path = getattr(self._adapter, "cli_path", None)
+        resolved_cli_path = cli_path if isinstance(cli_path, str) and cli_path else None
         try:
             llm_adapter = create_llm_adapter(
                 backend=backend,
                 permission_mode=self._adapter.permission_mode,
+                cli_path=resolved_cli_path,
                 cwd=self._effective_cwd(),
                 max_turns=1,
             )
-        except Exception as exc:
+        except (RuntimeError, ImportError, ConnectionError, OSError, ValueError) as exc:
             log.warning(
                 "orchestrator.runner.dependency_analysis_llm_unavailable",
                 backend=backend,
@@ -1057,11 +1079,38 @@ class OrchestratorRunner:
         """
         # Start with strategy tools (or DEFAULT_TOOLS as fallback)
         base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
+        inherited_mcp: set[str] = set()
         if self._inherited_tools:
+            # Separate inherited tools into two buckets:
+            #
+            # 1. **Builtins** (Read, Edit, Bash, …) → added to ``base_tools``
+            #    so they receive real catalog entries with handlers.
+            #
+            # 2. **Bridge / MCP tools** → stored as ``inherited_capabilities``
+            #    on the session catalog.  They are *not* added to
+            #    ``base_tools`` because that would synthesize phantom catalog
+            #    entries (definitions with no backing handler).  When
+            #    ``self._mcp_manager`` is set, ``MCPToolProvider.get_tools()``
+            #    below discovers them with real server connections.  When the
+            #    manager is absent the names are still preserved so the
+            #    delegated-session capability contract is not silently lost.
+            known_builtins = {d.name for d in enumerate_runtime_builtin_tool_definitions()}
             for tool_name in self._inherited_tools:
-                if tool_name not in base_tools:
+                if tool_name in known_builtins and tool_name not in base_tools:
                     base_tools.append(tool_name)
+                elif tool_name not in known_builtins:
+                    inherited_mcp.add(tool_name)
+                    log.info(
+                        "orchestrator.runner.inherited_mcp_capability_preserved",
+                        tool=tool_name,
+                        has_mcp_manager=self._mcp_manager is not None,
+                    )
         session_catalog = assemble_session_tool_catalog(base_tools)
+        if inherited_mcp:
+            session_catalog = replace(
+                session_catalog,
+                inherited_capabilities=frozenset(inherited_mcp),
+            )
         capability_graph = build_capability_graph(session_catalog)
         merged_tools = allowed_capability_names(
             capability_graph,
@@ -1099,6 +1148,14 @@ class OrchestratorRunner:
             return merged_tools, provider, session_catalog
 
         session_catalog = provider.session_catalog
+        # Preserve inherited MCP capabilities after discovery replaces the
+        # catalog.  The provider builds a fresh catalog from live connections
+        # which does not know about the parent's capability grant.
+        if inherited_mcp:
+            session_catalog = replace(
+                session_catalog,
+                inherited_capabilities=frozenset(inherited_mcp),
+            )
         capability_graph = build_capability_graph(session_catalog)
         merged_tools = allowed_capability_names(
             capability_graph,

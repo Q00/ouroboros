@@ -10,6 +10,7 @@ import time
 
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 RATE_LIMIT_HEARTBEAT_SECONDS = 30.0
+RATE_LIMIT_MAX_WAIT_SECONDS = 120.0
 DEFAULT_ANTHROPIC_RPM_CEILING = 40
 DEFAULT_ANTHROPIC_TPM_CEILING = 32_000
 _TOKEN_ESTIMATE_DIVISOR = 4
@@ -111,6 +112,22 @@ class SharedRateLimitBucket:
                 return 0.0, self._snapshot()
             return wait_seconds, self._snapshot()
 
+    async def force_reserve(self, estimated_tokens: int) -> RateLimitSnapshot:
+        """Reserve capacity unconditionally (for timeout escape hatch).
+
+        Used when the wait loop has exhausted its maximum wait budget and
+        must proceed regardless. This preserves the budget accounting
+        invariant — without this, N workers timing out simultaneously
+        would each bypass the bucket, causing N× the intended RPM to
+        hit the upstream API in lockstep.
+        """
+        normalized_tokens = max(1, estimated_tokens)
+        async with self._lock:
+            now = self._time()
+            self._prune(now)
+            self._reservations.append((now, normalized_tokens))
+            return self._snapshot()
+
 
 def estimate_runtime_request_tokens(
     prompt: str,
@@ -128,6 +145,7 @@ __all__ = [
     "DEFAULT_ANTHROPIC_RPM_CEILING",
     "DEFAULT_ANTHROPIC_TPM_CEILING",
     "RATE_LIMIT_HEARTBEAT_SECONDS",
+    "RATE_LIMIT_MAX_WAIT_SECONDS",
     "RATE_LIMIT_WINDOW_SECONDS",
     "RateLimitSnapshot",
     "SharedRateLimitBucket",

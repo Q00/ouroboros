@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -95,6 +96,18 @@ class _FakeProcess:
 class TestCodexCliLLMAdapter:
     """Tests for CodexCliLLMAdapter."""
 
+    @staticmethod
+    def _write_wrapper(path: Path) -> Path:
+        path.write_bytes(b"\xcf\xfa\xed\xfe")
+        path.chmod(0o755)
+        return path
+
+    @staticmethod
+    def _write_real_cli(path: Path) -> Path:
+        path.write_text("#!/usr/bin/env node\nconsole.log('codex')\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
     def test_build_prompt_preserves_system_and_roles(self) -> None:
         """Prompt builder keeps system instructions and conversation order."""
         adapter = CodexCliLLMAdapter(cli_path="codex", cwd="/tmp/project")
@@ -158,6 +171,31 @@ class TestCodexCliLLMAdapter:
 
         assert adapter._normalize_model("default") is None
         assert adapter._normalize_model(" o3 ") == "o3"
+
+    def test_resolve_cli_path_falls_back_from_wrapper(self, tmp_path: Path) -> None:
+        """Provider adapter should apply the same wrapper-safe fallback as runtime."""
+        wrapper = self._write_wrapper(tmp_path / "codex-wrapper")
+        real_dir = tmp_path / "bin"
+        real_dir.mkdir()
+        real_cli = self._write_real_cli(real_dir / "codex")
+
+        with (
+            patch.dict(os.environ, {"PATH": str(real_dir)}),
+            patch("ouroboros.providers.codex_cli_adapter.log.warning") as mock_warning,
+            patch("ouroboros.providers.codex_cli_adapter.log.info") as mock_info,
+        ):
+            adapter = CodexCliLLMAdapter(cli_path=wrapper)
+
+        assert adapter._cli_path == str(real_cli)
+        mock_warning.assert_called_once_with(
+            "codex_cli_adapter.cli_wrapper_detected",
+            wrapper_path=str(wrapper),
+            hint="Searching PATH for the real Node.js codex CLI.",
+        )
+        mock_info.assert_called_once_with(
+            "codex_cli_adapter.cli_resolved_via_fallback",
+            fallback_path=str(real_cli),
+        )
 
     def test_build_command_uses_read_only_by_default(self) -> None:
         """Default permission mode maps to a read-only sandbox."""

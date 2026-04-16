@@ -5,6 +5,7 @@ Contains handlers for interview and seed generation tools:
 - InterviewHandler: Manages interactive requirement-clarification interviews.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ from ouroboros.bigbang.ambiguity import (
     ComponentScore,
     ScoreBreakdown,
     get_completion_floor_failures,
+    get_milestone,
     qualifies_for_seed_completion,
 )
 from ouroboros.bigbang.interview import (
@@ -160,8 +162,22 @@ def _completion_gate_reason(
     return "requirements are not stable enough to close yet"
 
 
+def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
+    """Return the milestone label for an ambiguity score, or None."""
+    if score is None:
+        return None
+    milestone, _ = get_milestone(score.overall_score)
+    return milestone.value
+
+
 def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
-    """Attach the current ambiguity score to a question for display."""
+    """Attach the current ambiguity score to a question for display.
+
+    The text format uses ``(ambiguity: <score>)`` without the milestone
+    label to preserve backward compatibility with downstream consumers
+    that parse the score via regex.  Milestone data is available in the
+    structured ``meta.milestone`` field of the MCP response.
+    """
     if score is None:
         return question
     return f"(ambiguity: {score.overall_score:.2f}) {question}"
@@ -532,6 +548,8 @@ class InterviewHandler:
         self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._initialized = False
+        self._closed = False
+        self._bg_tasks: set[asyncio.Task] = set()
 
     async def _ensure_initialized(self) -> None:
         """Ensure the event store is initialized."""
@@ -539,8 +557,23 @@ class InterviewHandler:
             await self._event_store.initialize()
             self._initialized = True
 
+    async def _drain_bg_tasks(self, timeout: float = 5.0) -> None:
+        """Await all pending background event tasks before shutdown."""
+        if not self._bg_tasks:
+            return
+        tasks = list(self._bg_tasks)
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for t in pending:
+            t.cancel()
+        # Await cancelled tasks so CancelledError propagates cleanly
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._bg_tasks.clear()
+
     async def close(self) -> None:
-        """Close the event store if this handler owns it."""
+        """Drain pending event tasks, then close the event store if owned."""
+        self._closed = True
+        await self._drain_bg_tasks()
         if self._owns_event_store:
             await self._event_store.close()
             self._initialized = False
@@ -552,6 +585,14 @@ class InterviewHandler:
             await self._event_store.append(event)
         except Exception as e:
             log.warning("mcp.tool.interview.event_emission_failed", error=str(e))
+
+    def _emit_event_bg(self, event: Any) -> None:
+        """Fire-and-forget event emission — non-blocking on the hot path."""
+        if self._closed:
+            return
+        task = asyncio.create_task(self._emit_event(event))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def _score_interview_state(
         self,
@@ -612,6 +653,7 @@ class InterviewHandler:
                 meta={
                     "session_id": session_id,
                     "ambiguity_score": (score.overall_score if score is not None else None),
+                    "milestone": _milestone_for_score(score),
                     "seed_ready": False,
                 },
             )
@@ -644,7 +686,7 @@ class InterviewHandler:
 
         from ouroboros.events.interview import interview_completed
 
-        await self._emit_event(
+        self._emit_event_bg(
             interview_completed(
                 interview_id=session_id,
                 total_rounds=len(state.rounds),
@@ -672,6 +714,7 @@ class InterviewHandler:
                     "session_id": session_id,
                     "completed": True,
                     "ambiguity_score": score.overall_score if score is not None else None,
+                    "milestone": _milestone_for_score(score),
                     "seed_ready": score.is_ready_for_seed if score is not None else None,
                 },
             )
@@ -785,7 +828,7 @@ class InterviewHandler:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_failed(
                             state.interview_id,
                             error_msg,
@@ -852,7 +895,7 @@ class InterviewHandler:
                 # Emit interview started event
                 from ouroboros.events.interview import interview_started
 
-                await self._emit_event(
+                self._emit_event_bg(
                     interview_started(
                         state.interview_id,
                         resolved_context.value,
@@ -881,6 +924,7 @@ class InterviewHandler:
                             "ambiguity_score": (
                                 live_score.overall_score if live_score is not None else None
                             ),
+                            "milestone": _milestone_for_score(live_score),
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
                             ),
@@ -919,6 +963,11 @@ class InterviewHandler:
                             meta={
                                 "session_id": session_id,
                                 "ambiguity_score": state.ambiguity_score,
+                                "milestone": (
+                                    get_milestone(state.ambiguity_score)[0].value
+                                    if state.ambiguity_score is not None
+                                    else None
+                                ),
                                 "seed_ready": (
                                     state.ambiguity_score is not None
                                     and state.ambiguity_score <= AMBIGUITY_THRESHOLD
@@ -991,7 +1040,7 @@ class InterviewHandler:
                     # Emit response recorded event
                     from ouroboros.events.interview import interview_response_recorded
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_response_recorded(
                             interview_id=session_id,
                             round_number=len(state.rounds),
@@ -1018,6 +1067,13 @@ class InterviewHandler:
                     # and completion-candidate streak.
                     answered = _count_answered_rounds(state)
                     if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
+                        # Scoring must complete before question generation:
+                        # _score_interview_state mutates state.ambiguity_score,
+                        # completion_candidate_streak, and ambiguity_breakdown.
+                        # ask_next_question reads those fields to build the
+                        # system prompt (closure mode, seed-ready, streak).
+                        # Running them in parallel would give the question
+                        # generator stale routing context.
                         live_score = await self._score_interview_state(llm_adapter, state)
                         if (
                             live_score is not None
@@ -1044,7 +1100,7 @@ class InterviewHandler:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_failed(
                             session_id,
                             error_msg,
@@ -1124,6 +1180,7 @@ class InterviewHandler:
                             "ambiguity_score": (
                                 live_score.overall_score if live_score is not None else None
                             ),
+                            "milestone": _milestone_for_score(live_score),
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
                             ),
@@ -1144,7 +1201,7 @@ class InterviewHandler:
             if _interview_id:
                 from ouroboros.events.interview import interview_failed
 
-                await self._emit_event(
+                self._emit_event_bg(
                     interview_failed(
                         _interview_id,
                         str(e),

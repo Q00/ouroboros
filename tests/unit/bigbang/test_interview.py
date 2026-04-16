@@ -810,6 +810,7 @@ class TestInterviewEngineSystemPrompt:
 
         assert "## Current Ambiguity Snapshot" in prompt
         assert "Overall ambiguity: 0.24" in prompt
+        assert "Milestone:" in prompt
         assert "Weakest area: Constraint Clarity" in prompt
         assert "Constraints need work." in prompt
 

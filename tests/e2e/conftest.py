@@ -273,6 +273,10 @@ class MockClaudeAgentAdapter:
         return "claude"
 
     @property
+    def llm_backend(self) -> str | None:
+        return "claude"
+
+    @property
     def working_directory(self) -> str | None:
         return None
 

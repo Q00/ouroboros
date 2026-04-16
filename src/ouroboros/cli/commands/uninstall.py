@@ -28,6 +28,7 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
+from ouroboros.cli.opencode_config import find_opencode_config
 
 app = typer.Typer(
     name="uninstall",
@@ -182,15 +183,11 @@ def _strip_jsonc(text: str) -> str:
 def _find_opencode_config() -> Path | None:
     """Locate existing OpenCode config (``opencode.jsonc`` or ``opencode.json``).
 
-    Returns the first file that exists, or ``None`` if neither is present.
-    Mirrors the lookup order that OpenCode itself uses.
+    Delegates to :func:`ouroboros.cli.opencode_config.find_opencode_config`
+    with ``allow_default=False`` so that uninstall skips cleanly when no
+    config file exists.
     """
-    config_dir = Path.home() / ".config" / "opencode"
-    for name in ("opencode.jsonc", "opencode.json"):
-        candidate = config_dir / name
-        if candidate.exists():
-            return candidate
-    return None
+    return find_opencode_config(allow_default=False)
 
 
 def _remove_opencode_mcp(dry_run: bool) -> bool:
@@ -213,6 +210,18 @@ def _remove_opencode_mcp(dry_run: bool) -> bool:
         return True
 
     del mcp["ouroboros"]
+
+    # Warn if we're about to overwrite a .jsonc file that contained comments.
+    if config_path.suffix == ".jsonc":
+        try:
+            original_text = config_path.read_text(encoding="utf-8")
+        except OSError:
+            original_text = ""
+        if "//" in original_text or "/*" in original_text:
+            print_warning(
+                f"Note: JSONC comments in {config_path} were removed during config update."
+            )
+
     try:
         config_path.write_text(json.dumps(data, indent=2) + "\n")
     except OSError:
