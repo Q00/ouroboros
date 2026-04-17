@@ -782,6 +782,8 @@ class StartEvolveStepHandler:
     evolve_handler: EvolveStepHandler | None = field(default=None, repr=False)
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
@@ -812,6 +814,26 @@ class StartEvolveStepHandler:
                 )
             )
 
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        # Own-gate parity with StartExecuteSeedHandler. Plugin mode is
+        # terminal: return envelope, skip background-job enqueue entirely.
+        payload = build_evolve_subagent(
+            lineage_id=lineage_id,
+            seed_content=arguments.get("seed_content"),
+            execute=arguments.get("execute", True),
+            parallel=arguments.get("parallel", True),
+            skip_qa=arguments.get("skip_qa", False),
+            project_dir=arguments.get("project_dir"),
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self._event_store,
+                session_id=lineage_id,
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real background job path.
         async def _runner() -> MCPToolResult:
             result = await self._evolve_handler.handle(arguments)
             if result.is_err:

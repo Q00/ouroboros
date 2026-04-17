@@ -884,53 +884,64 @@ def build_evolve_subagent(
 ) -> SubagentPayload:
     """Build subagent payload for one generation of the evolutionary loop.
 
-    Parity with ``build_execute_subagent`` / ``build_qa_subagent``: emits a
-    single dispatch envelope so the opencode bridge can run the generation
-    as a Task subagent. One MCP call = one generation.
+    Mirrors ``build_execute_subagent``: the subagent runs the generation
+    end-to-end (Gen 1 = Execute → Evaluate; Gen 2+ = Wonder → Reflect →
+    Execute → Evaluate) and returns a generation report.
     """
     seed_note = ""
     if seed_content:
-        seed_note = f"\n## Seed (Gen 1)\n```yaml\n{seed_content}\n```\n"
-    else:
-        seed_note = (
-            "\n## Seed\n(Gen 2+ — reconstruct from lineage events / prior generation output.)\n"
-        )
+        seed_note = f"\n## Seed Specification (Gen 1)\n```yaml\n{seed_content}\n```\n"
 
-    project_note = ""
+    project_dir_note = ""
     if project_dir:
-        project_note = f"\n## Project Directory\n{project_dir}\n"
+        project_dir_note = f"\n## Project Directory\n{project_dir}\n"
 
-    qa_note = (
-        "\n## QA\nSkip QA after generation.\n"
-        if skip_qa
-        else "\n## QA\nRun QA evaluation after the generation completes.\n"
+    parallel_note = (
+        "\n## Parallel\nExecute acceptance criteria in parallel.\n"
+        if parallel
+        else "\n## Parallel\nExecute acceptance criteria sequentially.\n"
     )
+
+    qa_note = ""
+    if skip_qa:
+        qa_note = "\n## QA\nSkip QA after the generation completes.\n"
+    else:
+        qa_note = "\n## QA\nRun QA evaluation after the generation completes.\n"
+
+    if execute:
+        mode_note = "\n## Mode\nFull pipeline: Execute the seed, then Evaluate the output.\n"
+    else:
+        mode_note = (
+            "\n## Mode\nOntology-only: skip execution and evaluation. Perform "
+            "Wonder → Reflect to evolve the ontology from prior generation "
+            "state.\n"
+        )
 
     prompt = f"""## Your Task
 
-Run exactly ONE generation of the evolutionary loop for this lineage.
-Execute the seed, evaluate the output, detect ontology drift, and report
-the convergence signal.
+Run exactly ONE generation of the evolutionary loop for the given lineage.
+
+Gen 1 lifecycle (seed provided):
+1. Execute(Seed) → execution_output
+2. Evaluate(execution_output) → evaluation summary
+3. Record generation, report convergence signal.
+
+Gen 2+ lifecycle (no seed — reconstruct from prior generation):
+1. Wonder(ontology, evaluation) → open questions
+2. Reflect(seed, output, evaluation, wonder) → ontology mutations
+3. Generate next Seed from reflect output
+4. Execute(Seed) → execution_output
+5. Evaluate(execution_output) → evaluation summary
+6. Record generation, report convergence signal.
 
 ## Lineage ID
 {lineage_id}
-
-## Execute mode
-{"full pipeline (Execute → Validate → Evaluate)" if execute else "ontology-only (no execution)"}
-
-## Parallel ACs
-{parallel}
-{seed_note}{project_note}{qa_note}
-## Output shape
-Return a concise report containing:
-1. Generation number and phase.
-2. Execution output summary.
-3. Evaluation verdict (pass/fail, score, failed ACs).
-4. Ontology delta (added / removed / modified fields).
-5. Convergence signal and recommended next action
-   (continue / converged / stagnated / exhausted / failed).
-
-Be tight. The orchestrator consumes your report verbatim."""
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}
+Return a generation report containing: generation number, phase, action
+(continue / converged / stagnated / exhausted / failed), ontology similarity,
+evaluation verdict, and any ontology delta (added / removed / modified
+fields). Stop after one generation — the orchestrator decides whether to
+call you again."""
 
     context: dict[str, Any] = {
         "lineage_id": lineage_id,

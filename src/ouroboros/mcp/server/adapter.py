@@ -1456,6 +1456,8 @@ def create_ouroboros_server(
             evolve_handler=evolve_step,
             event_store=event_store,
             job_manager=job_manager,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
         ),
         LineageStatusHandler(
             event_store=event_store,
