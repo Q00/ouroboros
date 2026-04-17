@@ -34,7 +34,6 @@ from ouroboros.observability.drift import (
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
-from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
@@ -240,7 +239,6 @@ class EvaluateHandler:
     """
 
     event_store: EventStore | None = field(default=None, repr=False)
-    llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
     TIMEOUT_SECONDS: int = 0  # No server-side timeout; client/runtime decides.
 
@@ -278,6 +276,17 @@ class EvaluateHandler:
                     name="acceptance_criterion",
                     type=ToolInputType.STRING,
                     description="Specific acceptance criterion to evaluate against",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    name="acceptance_criteria",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "Multiple acceptance criteria for checklist evaluation. "
+                        "When two or more items are provided, each AC is evaluated "
+                        "independently and the results are aggregated into a "
+                        "pass/fail checklist (#366). Overrides acceptance_criterion."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -351,13 +360,32 @@ class EvaluateHandler:
 
         seed_content = arguments.get("seed_content")
         acceptance_criterion = arguments.get("acceptance_criterion")
+        acceptance_criteria_raw = arguments.get("acceptance_criteria")
         artifact_type = arguments.get("artifact_type", "code")
         trigger_consensus = arguments.get("trigger_consensus", False)
+
+        # Normalize all AC inputs into a single tuple (#366 fix):
+        # 1. If acceptance_criteria (plural, ARRAY) has valid entries, use them.
+        # 2. Else if acceptance_criterion (singular, STRING) is set, wrap it.
+        # 3. Else empty — single-AC path will use a default.
+        # This ensures a 1-item list is honoured as the effective AC,
+        # fixing the contract violation where the input shape was accepted
+        # but its meaning was silently ignored.
+        acceptance_criteria: tuple[str, ...] = ()
+        if isinstance(acceptance_criteria_raw, list):
+            acceptance_criteria = tuple(
+                str(item).strip()
+                for item in acceptance_criteria_raw
+                if isinstance(item, (str, int, float)) and str(item).strip()
+            )
+        if not acceptance_criteria and acceptance_criterion and str(acceptance_criterion).strip():
+            acceptance_criteria = (str(acceptance_criterion).strip(),)
 
         log.info(
             "mcp.tool.evaluate",
             session_id=session_id,
             has_seed=seed_content is not None,
+            multi_ac_count=len(acceptance_criteria),
             trigger_consensus=trigger_consensus,
         )
 
@@ -396,13 +424,19 @@ class EvaluateHandler:
                 except Exception:
                     pass  # Best-effort enrichment
 
-            # Use acceptance_criterion or derive from seed
-            current_ac = acceptance_criterion or "Verify execution output meets requirements"
+            # Derive current_ac from the unified acceptance_criteria tuple.
+            # The tuple already incorporates both the plural and singular params,
+            # so we only need to index or fall back to a default.
+            current_ac = (
+                acceptance_criteria[0]
+                if acceptance_criteria
+                else "Verify execution output meets requirements"
+            )
 
-            # Use injected or create services.
-            # Evaluation reads multiple spec files (one Read call per AC), so
-            # max_turns must be well above 1.
-            llm_adapter = self.llm_adapter or create_llm_adapter(
+            # Evaluation reads multiple spec files (one Read call per AC).
+            # Use a dedicated adapter with a higher turn budget — the shared
+            # MCP adapter is max_turns=1 (tuned for interview/seed single-shot).
+            llm_adapter = create_llm_adapter(
                 backend=self.llm_backend,
                 max_turns=20,
             )
@@ -419,7 +453,18 @@ class EvaluateHandler:
 
             # Collect file-based artifacts for richer semantic evaluation.
             # working_dir is used as the project root for artifact resolution.
+            #
+            # Write the artifact text to a file in working_dir so the
+            # ArtifactCollector can pick it up naturally during its scan
+            # instead of inlining the full text (potentially 50KB+) into
+            # the evaluation prompt.
             from ouroboros.evaluation.artifact_collector import ArtifactCollector
+
+            artifact_file = working_dir / ".ouroboros_eval_artifact.md"
+            try:
+                artifact_file.write_text(artifact, encoding="utf-8")
+            except OSError:
+                pass  # Non-critical — evaluator falls back to text_summary
 
             try:
                 artifact_bundle = ArtifactCollector().collect(artifact, str(working_dir))
@@ -430,6 +475,33 @@ class EvaluateHandler:
                     working_dir=str(working_dir),
                 )
                 artifact_bundle = None
+
+            mechanical_config = build_mechanical_config(working_dir)
+            config = PipelineConfig(
+                mechanical=mechanical_config,
+                semantic=SemanticConfig(model=get_semantic_model(self.llm_backend)),
+            )
+            pipeline = EvaluationPipeline(llm_adapter, config)
+
+            # Multi-AC checklist path (#366):
+            # When the caller provides >= 2 acceptance criteria we run the
+            # pipeline once per AC and aggregate the results into a
+            # checklist.  Single-AC callers keep the original single-pass
+            # behaviour — no extra cost or behaviour change for them.
+            if len(acceptance_criteria) >= 2:
+                return await self._handle_multi_ac(
+                    session_id=session_id,
+                    seed_id=seed_id,
+                    acceptance_criteria=acceptance_criteria,
+                    artifact=artifact,
+                    artifact_type=artifact_type,
+                    goal=goal,
+                    constraints=constraints,
+                    trigger_consensus=trigger_consensus,
+                    artifact_bundle=artifact_bundle,
+                    pipeline=pipeline,
+                    working_dir=working_dir,
+                )
 
             context = EvaluationContext(
                 execution_id=session_id,
@@ -442,12 +514,6 @@ class EvaluateHandler:
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
             )
-            mechanical_config = build_mechanical_config(working_dir)
-            config = PipelineConfig(
-                mechanical=mechanical_config,
-                semantic=SemanticConfig(model=get_semantic_model(self.llm_backend)),
-            )
-            pipeline = EvaluationPipeline(llm_adapter, config)
             result = await pipeline.evaluate(context)
 
             if result.is_err:
@@ -529,6 +595,144 @@ class EvaluateHandler:
             if owns_event_store and store is not None:
                 await store.close()
 
+    async def _handle_multi_ac(
+        self,
+        *,
+        session_id: str,
+        seed_id: str,
+        acceptance_criteria: tuple[str, ...],
+        artifact: str,
+        artifact_type: str,
+        goal: str,
+        constraints: tuple[str, ...],
+        trigger_consensus: bool,
+        artifact_bundle: object | None,
+        pipeline: object,  # EvaluationPipeline — typed as object to avoid import cycle
+        working_dir: Path,
+    ) -> Result[MCPToolResult, MCPServerError]:
+        """Evaluate each AC individually and return an aggregated checklist (#366).
+
+        Runs the evaluation pipeline once per acceptance criterion in
+        parallel via ``asyncio.gather``.  Per-AC results are then folded
+        into a single ``ACChecklistResult`` so the caller sees one
+        pass/fail checklist with per-item evidence and failure reasons.
+
+        Single-AC callers never reach this path — see ``handle()``.
+        """
+        import asyncio
+
+        from ouroboros.evaluation import EvaluationContext
+        from ouroboros.evaluation.checklist import (
+            aggregate_results,
+            build_run_feedback,
+            format_checklist,
+        )
+
+        async def _run_one(ac_text: str) -> Result[object, object]:
+            context = EvaluationContext(
+                execution_id=session_id,
+                seed_id=seed_id,
+                current_ac=ac_text,
+                artifact=artifact,
+                artifact_type=artifact_type,
+                goal=goal,
+                constraints=constraints,
+                trigger_consensus=trigger_consensus,
+                artifact_bundle=artifact_bundle,
+            )
+            return await pipeline.evaluate(context)  # type: ignore[attr-defined]
+
+        log.info(
+            "mcp.tool.evaluate.multi_ac_started",
+            session_id=session_id,
+            ac_count=len(acceptance_criteria),
+        )
+
+        gathered = await asyncio.gather(
+            *(_run_one(ac) for ac in acceptance_criteria),
+            return_exceptions=True,
+        )
+
+        # Any exception or err-Result aborts the whole checklist —
+        # otherwise we'd aggregate over a half-evaluated set.
+        for entry in gathered:
+            if isinstance(entry, BaseException):
+                log.exception(
+                    "mcp.tool.evaluate.multi_ac_exception",
+                    session_id=session_id,
+                )
+                return Result.err(
+                    MCPToolError(
+                        f"Evaluation failed during multi-AC run: {entry}",
+                        tool_name="ouroboros_evaluate",
+                    )
+                )
+            if entry.is_err:  # type: ignore[union-attr]
+                err = entry.error  # type: ignore[union-attr]
+                rendered = err.format_details() if hasattr(err, "format_details") else str(err)
+                log.warning(
+                    "mcp.tool.evaluate.multi_ac_pipeline_failed",
+                    session_id=session_id,
+                    error=rendered,
+                )
+                return Result.err(
+                    MCPToolError(
+                        f"Evaluation failed: {rendered}",
+                        tool_name="ouroboros_evaluate",
+                    )
+                )
+
+        eval_results = tuple(entry.value for entry in gathered)  # type: ignore[union-attr]
+        checklist = aggregate_results(acceptance_criteria, eval_results)
+        feedback = build_run_feedback(checklist)
+
+        code_changes: bool | None = None
+        if any(r.stage1_result and not r.stage1_result.passed for r in eval_results):
+            code_changes = await self._has_code_changes(working_dir)
+
+        text_parts = [format_checklist(checklist)]
+        if code_changes is False:
+            text_parts.append("\nNote: no code changes detected in the working tree.")
+        result_text = "\n".join(text_parts)
+
+        meta = {
+            "session_id": session_id,
+            "final_approved": checklist.all_passed,
+            "multi_ac": True,
+            "ac_count": checklist.total,
+            "passed_count": checklist.passed_count,
+            "pass_rate": checklist.pass_rate,
+            "checklist": [
+                {
+                    "ac_text": item.ac_text,
+                    "passed": item.passed,
+                    "reasoning": item.reasoning,
+                    "evidence": list(item.evidence),
+                    "questions_used": list(item.questions_used),
+                    "failure_reason": item.failure_reason,
+                }
+                for item in checklist.items
+            ],
+            "run_feedback": list(feedback),
+            "code_changes_detected": code_changes,
+        }
+
+        log.info(
+            "mcp.tool.evaluate.multi_ac_completed",
+            session_id=session_id,
+            passed=checklist.passed_count,
+            total=checklist.total,
+            all_passed=checklist.all_passed,
+        )
+
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text=result_text),),
+                is_error=False,
+                meta=meta,
+            )
+        )
+
     async def _has_code_changes(self, working_dir: Path) -> bool | None:
         """Detect whether the working tree has code changes.
 
@@ -602,9 +806,20 @@ class EvaluateHandler:
                     f"Reasoning: {s2.reasoning[:200]}..."
                     if len(s2.reasoning) > 200
                     else f"Reasoning: {s2.reasoning}",
-                    "",
                 ]
             )
+            # Anti-reward-hacking transparency (#367): surface the concrete
+            # Socratic questions and evidence the evaluator relied on so
+            # the user can audit whether the verdict was earned.
+            if s2.questions_used:
+                lines.append("Questions Used:")
+                for question in s2.questions_used:
+                    lines.append(f"  - {question}")
+            if s2.evidence:
+                lines.append("Evidence:")
+                for item in s2.evidence:
+                    lines.append(f"  - {item}")
+            lines.append("")
 
         # Stage 3 results
         if result.stage3_result:

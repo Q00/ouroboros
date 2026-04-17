@@ -326,13 +326,15 @@ class TestPMDocumentGeneratorPrompt:
         assert "**Interview ID:** int_abc" in prompt
 
     def test_prompt_brownfield_repo_empty_name_uses_path(self):
-        """Prompt builder falls back to path when brownfield repo name is empty."""
+        """Prompt builder falls back to path when brownfield repo name is empty, without duplicate."""
         seed = _make_seed(
             brownfield_repos=({"name": "", "path": "/repo/path", "desc": "desc"},),
         )
         prompt = PMDocumentGenerator._build_generation_prompt(seed)
 
-        assert "/repo/path (/repo/path)" in prompt
+        # Name falls back to path, so parenthetical path is NOT shown
+        assert "/repo/path" in prompt
+        assert "/repo/path (/repo/path)" not in prompt
         assert "desc" in prompt
 
     def test_prompt_brownfield_repo_none_name_uses_path(self):

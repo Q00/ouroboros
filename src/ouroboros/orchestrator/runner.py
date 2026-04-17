@@ -64,8 +64,10 @@ from ouroboros.orchestrator.mcp_tools import (
     MCPToolProvider,
     SessionToolCatalog,
     assemble_session_tool_catalog,
+    enumerate_runtime_builtin_tool_definitions,
     serialize_tool_catalog,
 )
+from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.policy import (
     PolicyContext,
     PolicyExecutionPhase,
@@ -345,6 +347,8 @@ class OrchestratorRunner:
         task_cwd: str | None = None,
         task_workspace: TaskWorkspace | None = None,
         checkpoint_store: CheckpointStore | None = None,
+        max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
+        max_parallel_workers: int = 3,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -367,6 +371,8 @@ class OrchestratorRunner:
             task_workspace: Managed task workspace metadata for persistence and cleanup.
             checkpoint_store: Optional checkpoint store for execution state persistence
                         and recovery. When provided, enables per-level state snapshots.
+            max_decomposition_depth: Maximum recursive AC decomposition depth.
+            max_parallel_workers: Maximum concurrent AC workers for parallel execution.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -381,6 +387,8 @@ class OrchestratorRunner:
         self._inherited_tools = list(inherited_tools) if inherited_tools else None
         self._task_cwd = task_cwd
         self._task_workspace = task_workspace
+        self._max_decomposition_depth = max(0, max_decomposition_depth)
+        self._max_parallel_workers = max(1, max_parallel_workers)
         # Track active session for external cancellation by execution_id
         self._active_sessions: dict[str, str] = {}  # execution_id -> session_id
 
@@ -567,23 +575,44 @@ class OrchestratorRunner:
         return cwd if isinstance(cwd, str) and cwd else None
 
     def _build_dependency_analyzer(self) -> DependencyAnalyzer:
-        """Create a dependency analyzer wired to the active LLM backend when available."""
+        """Create a dependency analyzer wired to the active LLM backend when available.
+
+        Legacy ``AgentRuntime`` implementations (custom runtimes, test mocks)
+        predating the ``llm_backend`` Protocol addition in v0.28.6 may not
+        define the property. We probe it via ``getattr`` and degrade to a
+        structured-only ``DependencyAnalyzer`` when the attribute is absent,
+        preserving pre-v0.28.6 behavior for downstream Protocol implementers.
+        """
         from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
 
-        llm_backend = getattr(self._adapter, "_llm_backend", None)
+        # Legacy-compat: adapters predating the llm_backend Protocol addition
+        # (v0.28.6) lack this attribute. Fall back to structured-only analysis
+        # rather than raising AttributeError.
+        _llm_backend_sentinel = object()
+        llm_backend = getattr(self._adapter, "llm_backend", _llm_backend_sentinel)
+        if llm_backend is _llm_backend_sentinel:
+            log.info(
+                "orchestrator.runner.dependency_analyzer.legacy_adapter_without_llm_backend",
+                adapter_type=type(self._adapter).__name__,
+            )
+            return DependencyAnalyzer()
+
         backend = (
             llm_backend
             if isinstance(llm_backend, str) and llm_backend
             else (self._adapter.runtime_backend)
         )
+        cli_path = getattr(self._adapter, "cli_path", None)
+        resolved_cli_path = cli_path if isinstance(cli_path, str) and cli_path else None
         try:
             llm_adapter = create_llm_adapter(
                 backend=backend,
                 permission_mode=self._adapter.permission_mode,
+                cli_path=resolved_cli_path,
                 cwd=self._effective_cwd(),
                 max_turns=1,
             )
-        except Exception as exc:
+        except (RuntimeError, ImportError, ConnectionError, OSError, ValueError) as exc:
             log.warning(
                 "orchestrator.runner.dependency_analysis_llm_unavailable",
                 backend=backend,
@@ -1050,11 +1079,38 @@ class OrchestratorRunner:
         """
         # Start with strategy tools (or DEFAULT_TOOLS as fallback)
         base_tools = strategy.get_tools() if strategy else list(DEFAULT_TOOLS)
+        inherited_mcp: set[str] = set()
         if self._inherited_tools:
+            # Separate inherited tools into two buckets:
+            #
+            # 1. **Builtins** (Read, Edit, Bash, …) → added to ``base_tools``
+            #    so they receive real catalog entries with handlers.
+            #
+            # 2. **Bridge / MCP tools** → stored as ``inherited_capabilities``
+            #    on the session catalog.  They are *not* added to
+            #    ``base_tools`` because that would synthesize phantom catalog
+            #    entries (definitions with no backing handler).  When
+            #    ``self._mcp_manager`` is set, ``MCPToolProvider.get_tools()``
+            #    below discovers them with real server connections.  When the
+            #    manager is absent the names are still preserved so the
+            #    delegated-session capability contract is not silently lost.
+            known_builtins = {d.name for d in enumerate_runtime_builtin_tool_definitions()}
             for tool_name in self._inherited_tools:
-                if tool_name not in base_tools:
+                if tool_name in known_builtins and tool_name not in base_tools:
                     base_tools.append(tool_name)
+                elif tool_name not in known_builtins:
+                    inherited_mcp.add(tool_name)
+                    log.info(
+                        "orchestrator.runner.inherited_mcp_capability_preserved",
+                        tool=tool_name,
+                        has_mcp_manager=self._mcp_manager is not None,
+                    )
         session_catalog = assemble_session_tool_catalog(base_tools)
+        if inherited_mcp:
+            session_catalog = replace(
+                session_catalog,
+                inherited_capabilities=frozenset(inherited_mcp),
+            )
         capability_graph = build_capability_graph(session_catalog)
         merged_tools = allowed_capability_names(
             capability_graph,
@@ -1092,6 +1148,14 @@ class OrchestratorRunner:
             return merged_tools, provider, session_catalog
 
         session_catalog = provider.session_catalog
+        # Preserve inherited MCP capabilities after discovery replaces the
+        # catalog.  The provider builds a fresh catalog from live connections
+        # which does not know about the parent's capability grant.
+        if inherited_mcp:
+            session_catalog = replace(
+                session_catalog,
+                inherited_capabilities=frozenset(inherited_mcp),
+            )
         capability_graph = build_capability_graph(session_catalog)
         merged_tools = allowed_capability_names(
             capability_graph,
@@ -1260,6 +1324,7 @@ class OrchestratorRunner:
         execution_id: str | None = None,
         session_id: str | None = None,
         parallel: bool = True,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed via Claude Agent.
 
@@ -1273,6 +1338,8 @@ class OrchestratorRunner:
             session_id: Optional session ID to preallocate for external tracking.
             parallel: Enable parallel AC execution. When True, independent ACs
                      run concurrently. Default: True (parallel execution).
+            externally_satisfied_acs: Top-level ACs already satisfied by the
+                current working tree and therefore skipped for re-execution.
 
         Returns:
             Result containing OrchestratorResult on success.
@@ -1281,11 +1348,15 @@ class OrchestratorRunner:
         if session_result.is_err:
             return Result.err(session_result.error)
 
-        return await self.execute_precreated_session(
-            seed=seed,
-            tracker=session_result.value,
-            parallel=parallel,
-        )
+        execute_kwargs: dict[str, Any] = {
+            "seed": seed,
+            "tracker": session_result.value,
+            "parallel": parallel,
+        }
+        if externally_satisfied_acs:
+            execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+
+        return await self.execute_precreated_session(**execute_kwargs)
 
     async def prepare_session(
         self,
@@ -1336,6 +1407,7 @@ class OrchestratorRunner:
         seed: Seed,
         tracker: SessionTracker,
         parallel: bool = True,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute a seed using an already-persisted orchestrator session."""
         exec_id = tracker.execution_id
@@ -1389,15 +1461,19 @@ class OrchestratorRunner:
 
             # Check for parallel execution mode
             if parallel and len(seed.acceptance_criteria) > 1:
-                return await self._execute_parallel(
-                    seed=seed,
-                    exec_id=exec_id,
-                    tracker=tracker,
-                    merged_tools=merged_tools,
-                    tool_catalog=tool_catalog,
-                    system_prompt=system_prompt,
-                    start_time=start_time,
-                )
+                parallel_kwargs: dict[str, Any] = {
+                    "seed": seed,
+                    "exec_id": exec_id,
+                    "tracker": tracker,
+                    "merged_tools": merged_tools,
+                    "tool_catalog": tool_catalog,
+                    "system_prompt": system_prompt,
+                    "start_time": start_time,
+                }
+                if externally_satisfied_acs:
+                    parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+
+                return await self._execute_parallel(**parallel_kwargs)
         except Exception as e:
             self._cleanup_pre_execution_state(
                 exec_id,
@@ -1723,6 +1799,7 @@ class OrchestratorRunner:
         tool_catalog: SessionToolCatalog,
         system_prompt: str,
         start_time: datetime,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed with parallel AC execution.
 
@@ -1736,6 +1813,8 @@ class OrchestratorRunner:
             merged_tools: Available tools.
             system_prompt: System prompt for agents.
             start_time: Execution start time.
+            externally_satisfied_acs: Top-level ACs already satisfied by the
+                current working tree and therefore skipped for re-execution.
 
         Returns:
             Result containing OrchestratorResult on success.
@@ -1806,6 +1885,8 @@ class OrchestratorRunner:
             event_store=self._event_store,
             console=self._console,
             enable_decomposition=self._enable_decomposition,
+            max_concurrent=self._max_parallel_workers,
+            max_decomposition_depth=self._max_decomposition_depth,
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
             checkpoint_store=self._checkpoint_store,
@@ -1828,6 +1909,7 @@ class OrchestratorRunner:
             tools=merged_tools,
             tool_catalog=tool_catalog.tools,
             system_prompt=system_prompt,
+            externally_satisfied_acs=externally_satisfied_acs,
         )
 
         # Check for cancellation after parallel execution
@@ -1852,17 +1934,24 @@ class OrchestratorRunner:
         verification_report = render_parallel_verification_report(
             parallel_result,
             len(seed.acceptance_criteria),
+            max_decomposition_depth=self._max_decomposition_depth,
         )
         execution_summary = {
             "goal": seed.goal,
             "acceptance_criteria_count": len(seed.acceptance_criteria),
             "parallel_execution": True,
             "success_count": parallel_result.success_count,
+            "externally_satisfied_count": parallel_result.externally_satisfied_count,
+            "satisfied_count": (
+                parallel_result.success_count + parallel_result.externally_satisfied_count
+            ),
             "failure_count": parallel_result.failure_count,
             "blocked_count": parallel_result.blocked_count,
             "invalid_count": parallel_result.invalid_count,
             "skipped_count": parallel_result.skipped_count,
             "total_levels": execution_plan.total_stages,
+            "max_decomposition_depth": self._max_decomposition_depth,
+            "max_parallel_workers": self._max_parallel_workers,
             "verification_report": verification_report,
             **self._task_summary(),
         }

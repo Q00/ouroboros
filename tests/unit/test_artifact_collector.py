@@ -62,13 +62,14 @@ class TestArtifactCollector:
         bundle = collector.collect(output, project_dir=tmpdir)
         assert len(bundle.files) == 0
 
-    def test_no_paths_in_output(self) -> None:
+    def test_no_paths_in_output_falls_back_to_directory_scan(self) -> None:
         tmpdir = self._create_project({"a.py": "code"})
         output = "No file operations here."
 
         collector = ArtifactCollector()
         bundle = collector.collect(output, project_dir=tmpdir)
-        assert len(bundle.files) == 0
+        # Directory scan fallback finds the source file.
+        assert len(bundle.files) >= 1
         assert bundle.text_summary == output
 
     def test_total_chars_tracked(self) -> None:

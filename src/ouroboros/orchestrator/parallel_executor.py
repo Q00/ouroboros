@@ -31,6 +31,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
+import os
 import platform
 import re
 import subprocess
@@ -103,8 +104,9 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 # Decomposition constants
-# Depth >= MAX_DECOMPOSITION_DEPTH forces atomic execution as a soft safety net.
-MAX_DECOMPOSITION_DEPTH = 3
+# Depth >= max_decomposition_depth forces atomic execution as a soft safety net.
+DEFAULT_MAX_DECOMPOSITION_DEPTH = 2
+MAX_DECOMPOSITION_DEPTH = DEFAULT_MAX_DECOMPOSITION_DEPTH
 MIN_SUB_ACS = 2
 MAX_SUB_ACS = 5
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
@@ -329,12 +331,17 @@ def _collect_decomposition_depth_warning_paths(
 def render_parallel_verification_report(
     parallel_result: ParallelExecutionResult,
     total_acceptance_criteria: int,
+    *,
+    max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
 ) -> str:
     """Build the canonical QA artifact for parallel execution results."""
+    total_satisfied = parallel_result.success_count + parallel_result.externally_satisfied_count
     lines = [
         "Parallel Execution Verification Report",
-        f"Success: {parallel_result.success_count}/{total_acceptance_criteria}",
+        f"Success: {total_satisfied}/{total_acceptance_criteria}",
     ]
+    if parallel_result.externally_satisfied_count > 0:
+        lines.append(f"Externally Satisfied: {parallel_result.externally_satisfied_count}")
     if parallel_result.failure_count > 0:
         lines.append(f"Failed: {parallel_result.failure_count}")
     if parallel_result.skipped_count > 0:
@@ -361,7 +368,7 @@ def render_parallel_verification_report(
                     ),
                     "source": "parallel_executor",
                     "details": {
-                        "max_depth": MAX_DECOMPOSITION_DEPTH,
+                        "max_depth": max_decomposition_depth,
                         "affected_count": len(warning_paths),
                         "affected_ac_paths": warning_paths,
                     },
@@ -391,10 +398,13 @@ def render_parallel_completion_message(
     total_acceptance_criteria: int,
 ) -> str:
     """Build a concise operator-facing completion summary."""
+    total_satisfied = parallel_result.success_count + parallel_result.externally_satisfied_count
     lines = [
         "Parallel Execution Complete",
-        f"Success: {parallel_result.success_count}/{total_acceptance_criteria}",
+        f"Success: {total_satisfied}/{total_acceptance_criteria}",
     ]
+    if parallel_result.externally_satisfied_count > 0:
+        lines.append(f"Externally Satisfied: {parallel_result.externally_satisfied_count}")
     if parallel_result.failure_count > 0:
         lines.append(f"Failed: {parallel_result.failure_count}")
     if parallel_result.skipped_count > 0:
@@ -403,8 +413,12 @@ def render_parallel_completion_message(
     lines.append("")
     lines.append("AC Status:")
     for result in parallel_result.results:
-        status = "PASS" if result.success else "FAIL"
-        suffix = f" ({len(result.sub_results)} sub-ACs)" if result.is_decomposed else ""
+        if result.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY:
+            status = "PASS"
+            suffix = " (externally satisfied)"
+        else:
+            status = "PASS" if result.success else "FAIL"
+            suffix = f" ({len(result.sub_results)} sub-ACs)" if result.is_decomposed else ""
         lines.append(f"- AC {result.ac_index + 1}: [{status}] {result.ac_content}{suffix}")
     return "\n".join(lines)
 
@@ -424,6 +438,7 @@ class ParallelACExecutor:
         console: Console | None = None,
         enable_decomposition: bool = True,
         max_concurrent: int = 3,
+        max_decomposition_depth: int = DEFAULT_MAX_DECOMPOSITION_DEPTH,
         checkpoint_store: Any | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
         task_cwd: str | None = None,
@@ -436,6 +451,7 @@ class ParallelACExecutor:
             console: Rich console for output.
             enable_decomposition: Enable Claude to decompose complex ACs.
             max_concurrent: Maximum number of concurrent AC executions.
+            max_decomposition_depth: Maximum recursive decomposition depth.
             checkpoint_store: Optional CheckpointStore for state recovery (RC3).
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions.
@@ -445,6 +461,7 @@ class ParallelACExecutor:
         self._event_store = event_store
         self._console = console or Console()
         self._enable_decomposition = enable_decomposition
+        self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._inherited_runtime_handle = inherited_runtime_handle
         self._task_cwd = task_cwd
         self._coordinator = LevelCoordinator(
@@ -1440,6 +1457,7 @@ class ParallelACExecutor:
         dependency_graph: DependencyGraph | None = None,
         execution_plan: StagedExecutionPlan | None = None,
         reconciled_level_contexts: list[LevelContext] | None = None,
+        externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
     ) -> ParallelExecutionResult:
         """Execute ACs according to a staged execution plan.
 
@@ -1455,6 +1473,8 @@ class ParallelACExecutor:
                 from a previous execution attempt. Reopened ACs receive these
                 as prompt context so they continue from the current shared
                 workspace state instead of the original failed-attempt state.
+            externally_satisfied_acs: Top-level ACs already satisfied by the
+                current working tree and therefore skipped for re-execution.
 
         Returns:
             ParallelExecutionResult with outcomes for all ACs.
@@ -1474,6 +1494,7 @@ class ParallelACExecutor:
 
         total_levels = execution_plan.total_stages
         total_acs = len(seed.acceptance_criteria)
+        external_completed = externally_satisfied_acs or {}
         execution_counters = {
             "messages_count": 0,
             "tool_calls_count": 0,
@@ -1646,6 +1667,7 @@ class ParallelACExecutor:
                 # Check for blocked ACs (dependencies failed or were blocked upstream)
                 executable: list[int] = []
                 blocked: list[int] = []
+                externally_satisfied: list[int] = []
                 stage_ac_results: list[ACExecutionResult] = []
 
                 for ac_idx in level:
@@ -1653,11 +1675,53 @@ class ParallelACExecutor:
                     if ac_idx < 0 or ac_idx >= total_acs:
                         continue
 
+                    # Always validate dependencies first — even externally
+                    # satisfied ACs must be blocked if their upstream
+                    # dependencies failed, because the "satisfied" state may
+                    # be stale relative to the current execution.
                     deps = execution_plan.get_dependencies(ac_idx)
                     if any(dep in failed_indices or dep in blocked_indices for dep in deps):
                         blocked.append(ac_idx)
+                    elif ac_idx in external_completed:
+                        externally_satisfied.append(ac_idx)
                     else:
                         executable.append(ac_idx)
+
+                level_success = 0
+                level_failed = 0
+
+                for ac_idx in externally_satisfied:
+                    metadata = external_completed.get(ac_idx, {})
+                    reason = metadata.get("reason")
+                    commit = metadata.get("commit")
+                    notes: list[str] = [
+                        "Skipped via --skip-completed; existing working tree state is treated as satisfied."
+                    ]
+                    if isinstance(reason, str) and reason.strip():
+                        notes.append(f"Reason: {reason.strip()}")
+                    if isinstance(commit, str) and commit.strip():
+                        notes.append(f"Commit: {commit.strip()}")
+
+                    satisfied_result = ACExecutionResult(
+                        ac_index=ac_idx,
+                        ac_content=seed.acceptance_criteria[ac_idx],
+                        success=True,
+                        final_message="\n".join(notes),
+                        retry_attempt=ac_retry_attempts[ac_idx],
+                        outcome=ACExecutionOutcome.SATISFIED_EXTERNALLY,
+                    )
+                    all_results.append(satisfied_result)
+                    stage_ac_results.append(satisfied_result)
+                    ac_statuses[ac_idx] = "completed"
+                    completed_count += 1
+                    level_success += 1
+                    log.info(
+                        "parallel_executor.ac.satisfied_externally",
+                        session_id=session_id,
+                        ac_index=ac_idx,
+                        reason=reason,
+                        commit=commit,
+                    )
 
                 # Add blocked results
                 for ac_idx in blocked:
@@ -1681,20 +1745,21 @@ class ParallelACExecutor:
                     )
 
                 if not executable:
+                    stage_started = bool(externally_satisfied)
                     stage_result = ParallelExecutionStageResult(
                         stage_index=level_idx,
                         ac_indices=tuple(level),
                         results=tuple(sorted(stage_ac_results, key=lambda result: result.ac_index)),
-                        started=False,
+                        started=stage_started,
                     )
                     stage_results.append(stage_result)
                     await self._emit_level_completed(
                         session_id=session_id,
                         level=level_num,
-                        success_count=0,
-                        failure_count=0,
+                        success_count=stage_result.success_count,
+                        failure_count=stage_result.failure_count,
                         blocked_count=stage_result.blocked_count,
-                        started=False,
+                        started=stage_started,
                         outcome=stage_result.outcome.value,
                     )
                     continue
@@ -1719,10 +1784,6 @@ class ParallelACExecutor:
 
                 # Capture current contexts for this level's closure
                 current_contexts = list(level_contexts)
-
-                # Process results
-                level_success = 0
-                level_failed = 0
 
                 for batch_index, batch in enumerate(stage_batches, start=1):
                     batch_executable = [ac_idx for ac_idx in batch if ac_idx in executable]
@@ -1880,13 +1941,22 @@ class ParallelACExecutor:
                 self._flush_console()
 
                 # Extract context from this level for next level's ACs
-                if level_success > 0:
+                if executable and level_success > 0:
                     level_ac_data = [
                         (r.ac_index, r.ac_content, r.success, r.messages, r.final_message)
                         for r in stage_ac_results
                         if r.ac_index in executable
                     ]
-                    level_ctx = extract_level_context(level_ac_data, level_num)
+                    # workspace_root is required: fall back through
+                    # adapter working directory, then process cwd. Never None.
+                    workspace_root = (
+                        self._task_cwd or self._adapter.working_directory or os.getcwd()
+                    )
+                    level_ctx = extract_level_context(
+                        level_ac_data,
+                        level_num,
+                        workspace_root=workspace_root,
+                    )
 
                     # Coordinator: detect and resolve file conflicts (Approach A)
                     level_ac_results = [r for r in stage_ac_results if r.ac_index in executable]
@@ -1991,6 +2061,9 @@ class ParallelACExecutor:
         sorted_results = sorted(all_results, key=lambda r: r.ac_index)
         total_duration = (datetime.now(UTC) - start_time).total_seconds()
         success_count = sum(1 for r in sorted_results if r.outcome == ACExecutionOutcome.SUCCEEDED)
+        externally_satisfied_count = sum(
+            1 for r in sorted_results if r.outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
+        )
         failure_count = sum(1 for r in sorted_results if r.outcome == ACExecutionOutcome.FAILED)
         blocked_count = sum(1 for r in sorted_results if r.outcome == ACExecutionOutcome.BLOCKED)
         invalid_count = sum(1 for r in sorted_results if r.outcome == ACExecutionOutcome.INVALID)
@@ -2001,6 +2074,7 @@ class ParallelACExecutor:
             "parallel_executor.execution.completed",
             session_id=session_id,
             success_count=success_count,
+            externally_satisfied_count=externally_satisfied_count,
             failure_count=failure_count,
             blocked_count=blocked_count,
             invalid_count=invalid_count,
@@ -2013,6 +2087,7 @@ class ParallelACExecutor:
             results=tuple(sorted_results),
             success_count=success_count,
             failure_count=failure_count,
+            externally_satisfied_count=externally_satisfied_count,
             skipped_count=skipped_count,
             blocked_count=blocked_count,
             invalid_count=invalid_count,
@@ -2073,7 +2148,7 @@ class ParallelACExecutor:
         )
 
         # Try decomposition if enabled and not too deep
-        if self._enable_decomposition and depth < MAX_DECOMPOSITION_DEPTH:
+        if self._enable_decomposition and depth < self._max_decomposition_depth:
             self._console.print(f"  [dim]AC {ac_index + 1}: Analyzing complexity...[/dim]")
             self._flush_console()
             sub_acs = await self._try_decompose_ac(
@@ -2220,7 +2295,7 @@ class ParallelACExecutor:
         # Depth-limit canary: execution is forced atomic once the soft recursion
         # safety net is reached, so downstream stages can detect decomposition pressure.
         decomposition_depth_warning = (
-            self._enable_decomposition and depth >= MAX_DECOMPOSITION_DEPTH
+            self._enable_decomposition and depth >= self._max_decomposition_depth
         )
 
         # Stall recovery belongs to atomic leaves only. Once this method decides

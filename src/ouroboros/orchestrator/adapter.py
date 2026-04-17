@@ -28,6 +28,15 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
+from ouroboros.orchestrator.rate_limit import (
+    DEFAULT_ANTHROPIC_RPM_CEILING,
+    DEFAULT_ANTHROPIC_TPM_CEILING,
+    RATE_LIMIT_HEARTBEAT_SECONDS,
+    RATE_LIMIT_MAX_WAIT_SECONDS,
+    RateLimitSnapshot,
+    SharedRateLimitBucket,
+    estimate_runtime_request_tokens,
+)
 
 if TYPE_CHECKING:
     from ouroboros.providers.base import CompletionConfig, CompletionResponse, Message
@@ -307,15 +316,22 @@ def _runtime_handle_lifecycle_state(
 
 def runtime_handle_tool_catalog(
     runtime_handle: RuntimeHandle | None,
-) -> list[dict[str, Any]] | None:
-    """Return a copy of the serialized startup tool catalog when present."""
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    """Return a copy of the serialized startup tool catalog when present.
+
+    Accepts both the legacy ``list`` format and the ``dict`` format produced
+    by :func:`serialize_tool_catalog` when ``inherited_capabilities`` are
+    present.
+    """
     if runtime_handle is None:
         return None
 
     tool_catalog = runtime_handle.metadata.get("tool_catalog")
-    if not isinstance(tool_catalog, list):
-        return None
-    return list(tool_catalog)
+    if isinstance(tool_catalog, list):
+        return list(tool_catalog)
+    if isinstance(tool_catalog, dict):
+        return dict(tool_catalog)
+    return None
 
 
 def runtime_handle_capability_graph(
@@ -651,6 +667,21 @@ class AgentRuntime(Protocol):
         ...
 
     @property
+    def llm_backend(self) -> str | None:
+        """LLM backend name for dependency analyzer wiring.
+
+        Added in v0.28.6. Legacy runtime implementations without this property
+        are handled via ``getattr()`` fallback at call sites - they degrade to
+        structured-only dependency analysis. New implementations SHOULD define
+        this to enable LLM-assisted dependency inference.
+
+        Returns the canonical LLM backend identifier (e.g. ``"claude"``,
+        ``"codex"``, ``"opencode"``, ``"litellm"``) used for non-runtime LLM
+        tasks, or ``None`` to fall back to ``runtime_backend``.
+        """
+        ...
+
+    @property
     def working_directory(self) -> str | None:
         """Working directory for task execution, or ``None`` if unset."""
         ...
@@ -769,6 +800,7 @@ class ClaudeAgentAdapter:
         self._model = model
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
         self._cli_path = str(Path(cli_path).expanduser()) if cli_path is not None else None
+        self._rate_limit_bucket = self._build_rate_limit_bucket()
 
         log.info(
             "orchestrator.adapter.initialized",
@@ -776,6 +808,7 @@ class ClaudeAgentAdapter:
             has_api_key=bool(self._api_key),
             cwd=self._cwd,
             cli_path=self._cli_path,
+            shared_rate_limit_enabled=self._rate_limit_bucket.enabled,
         )
 
     # -- AgentRuntime protocol properties ----------------------------------
@@ -783,6 +816,10 @@ class ClaudeAgentAdapter:
     @property
     def runtime_backend(self) -> str:
         return self._runtime_handle_backend
+
+    @property
+    def llm_backend(self) -> str | None:
+        return self._runtime_handle_backend  # "claude" → resolved to "claude_code" by factory
 
     @property
     def working_directory(self) -> str | None:
@@ -803,6 +840,129 @@ class ClaudeAgentAdapter:
         """
         error_str = str(error).lower()
         return any(pattern in error_str for pattern in TRANSIENT_ERROR_PATTERNS)
+
+    @staticmethod
+    def _parse_optional_positive_int(
+        env_name: str,
+        *,
+        default: int,
+    ) -> int | None:
+        """Parse an optional positive integer env var; 0 disables the limit."""
+        raw_value = os.environ.get(env_name, "").strip()
+        if not raw_value:
+            return default
+
+        try:
+            parsed = int(raw_value)
+        except ValueError:
+            log.warning(
+                "orchestrator.adapter.invalid_rate_limit_env",
+                env_name=env_name,
+                raw_value=raw_value,
+            )
+            return default
+
+        if parsed <= 0:
+            return None
+        return parsed
+
+    def _build_rate_limit_bucket(self) -> SharedRateLimitBucket:
+        """Create the shared Anthropic rate-limit bucket for orchestrator workers."""
+        return SharedRateLimitBucket(
+            runtime_backend=self._runtime_backend,
+            request_limit=self._parse_optional_positive_int(
+                "OUROBOROS_ANTHROPIC_RPM_CEILING",
+                default=DEFAULT_ANTHROPIC_RPM_CEILING,
+            ),
+            token_limit=self._parse_optional_positive_int(
+                "OUROBOROS_ANTHROPIC_TPM_CEILING",
+                default=DEFAULT_ANTHROPIC_TPM_CEILING,
+            ),
+        )
+
+    @staticmethod
+    def _rate_limit_snapshot_data(snapshot: RateLimitSnapshot) -> dict[str, Any]:
+        """Serialize a shared-budget snapshot into message metadata."""
+        return {
+            "runtime_backend": snapshot.runtime_backend,
+            "requests_in_window": snapshot.requests_in_window,
+            "request_limit": snapshot.request_limit,
+            "tokens_in_window": snapshot.tokens_in_window,
+            "token_limit": snapshot.token_limit,
+        }
+
+    async def _wait_for_shared_rate_limit_budget(
+        self,
+        *,
+        estimated_tokens: int,
+        attempt: int,
+        max_wait_seconds: float = RATE_LIMIT_MAX_WAIT_SECONDS,
+    ) -> AsyncIterator[AgentMessage]:
+        """Yield heartbeat messages while waiting for shared budget headroom."""
+        if not self._rate_limit_bucket.enabled:
+            return
+
+        total_waited = 0.0
+        while True:
+            wait_seconds, snapshot = await self._rate_limit_bucket.acquire(estimated_tokens)
+            if wait_seconds <= 0:
+                return
+
+            if total_waited >= max_wait_seconds:
+                # Reserve the capacity anyway — otherwise concurrent timeout-fallbacks
+                # would all bypass the bucket simultaneously, causing an N× RPM burst
+                # to hit the upstream API (worse than starvation per review).
+                snapshot = await self._rate_limit_bucket.force_reserve(estimated_tokens)
+                log.warning(
+                    "orchestrator.adapter.rate_limit_timeout_force_reserve",
+                    total_waited=total_waited,
+                    max_wait_seconds=max_wait_seconds,
+                    estimated_tokens=estimated_tokens,
+                    **self._rate_limit_snapshot_data(snapshot),
+                )
+                yield AgentMessage(
+                    type="system",
+                    content=(
+                        f"Shared rate limit budget wait exceeded {max_wait_seconds:.0f}s; "
+                        "proceeding with force-reserved capacity."
+                    ),
+                    data={
+                        "subtype": "rate_limit_timeout_force_reserve",
+                        "total_waited": total_waited,
+                        "max_wait_seconds": max_wait_seconds,
+                        "source": "shared_rate_limit_bucket",
+                        **self._rate_limit_snapshot_data(snapshot),
+                    },
+                )
+                return
+
+            sleep_seconds = min(wait_seconds, RATE_LIMIT_HEARTBEAT_SECONDS)
+            yield AgentMessage(
+                type="system",
+                content=(
+                    "Shared Anthropic budget saturated; waiting "
+                    f"{sleep_seconds:.1f}s before retrying worker dispatch."
+                ),
+                data={
+                    "subtype": "rate_limit_backoff",
+                    "backoff_seconds": sleep_seconds,
+                    "retry_attempt": attempt,
+                    "total_waited": total_waited,
+                    "max_wait_seconds": max_wait_seconds,
+                    "source": "shared_rate_limit_bucket",
+                    **self._rate_limit_snapshot_data(snapshot),
+                },
+            )
+            await asyncio.sleep(sleep_seconds)
+            total_waited += sleep_seconds
+
+    @staticmethod
+    def _transient_backoff_subtype(error: Exception) -> str:
+        """Classify transient backoff messages for observability."""
+        error_text = str(error).lower()
+        if "429" in error_text or "rate" in error_text or "concurrency" in error_text:
+            return "rate_limit_backoff"
+        return "transient_backoff"
 
     def _build_runtime_handle(
         self,
@@ -988,10 +1148,17 @@ class ClaudeAgentAdapter:
         last_error: Exception | None = None
         current_runtime_handle = dispatch.runtime_handle
         current_session_id = dispatch.resume_session_id
+        estimated_tokens = estimate_runtime_request_tokens(prompt, system_prompt=system_prompt)
 
         while attempt < MAX_RETRIES:
             attempt += 1
             try:
+                async for budget_message in self._wait_for_shared_rate_limit_budget(
+                    estimated_tokens=estimated_tokens,
+                    attempt=attempt,
+                ):
+                    yield budget_message
+
                 effective_permission_mode = (
                     current_runtime_handle.approval_mode
                     if current_runtime_handle and current_runtime_handle.approval_mode
@@ -1086,6 +1253,17 @@ class ClaudeAgentAdapter:
                     wait_time = min(
                         RETRY_WAIT_INITIAL * (2 ** (attempt - 1)),
                         RETRY_WAIT_MAX,
+                    )
+                    yield AgentMessage(
+                        type="system",
+                        content=(
+                            f"Transient backend backoff for {wait_time:.1f}s before retrying: {e!s}"
+                        ),
+                        data={
+                            "subtype": self._transient_backoff_subtype(e),
+                            "backoff_seconds": wait_time,
+                            "retry_attempt": attempt,
+                        },
                     )
                     log.warning(
                         "orchestrator.adapter.transient_error_retry",

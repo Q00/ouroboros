@@ -6,6 +6,7 @@ Supports both standard workflow execution and agent-runtime orchestrator mode.
 
 import asyncio
 from enum import Enum
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 from uuid import uuid4
@@ -29,6 +30,7 @@ from ouroboros.core.worktree import (
     maybe_restore_task_workspace,
 )
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
+from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 
 
 class _DefaultWorkflowGroup(typer.core.TyperGroup):
@@ -111,6 +113,129 @@ def _resolve_cli_project_dir(seed: "Seed", seed_file: Path) -> Path:
     return resolve_seed_project_path(seed, stable_base=stable_base) or stable_base
 
 
+def _coerce_non_negative_int(value: object, *, source: str) -> int:
+    """Parse a non-negative integer from CLI, env, or seed config."""
+    if isinstance(value, bool):
+        print_error(f"{source} must be a non-negative integer")
+        raise typer.Exit(1)
+
+    try:
+        if isinstance(value, int):
+            parsed = value
+        elif isinstance(value, str):
+            parsed = int(value)
+        else:
+            raise TypeError
+    except (TypeError, ValueError) as exc:
+        print_error(f"{source} must be a non-negative integer")
+        raise typer.Exit(1) from exc
+
+    if parsed < 0:
+        print_error(f"{source} must be a non-negative integer")
+        raise typer.Exit(1)
+    return parsed
+
+
+def _coerce_positive_int(value: object, *, source: str) -> int:
+    """Parse a positive integer from CLI or env config."""
+    parsed = _coerce_non_negative_int(value, source=source)
+    if parsed <= 0:
+        print_error(f"{source} must be greater than 0")
+        raise typer.Exit(1)
+    return parsed
+
+
+def _resolve_max_decomposition_depth(seed_data: dict[str, Any], cli_value: int | None) -> int:
+    """Resolve decomposition depth from CLI, env, seed config, then default."""
+    if cli_value is not None:
+        return _coerce_non_negative_int(cli_value, source="--max-decomposition-depth")
+
+    env_value = os.environ.get("OUROBOROS_MAX_DECOMPOSITION_DEPTH", "").strip()
+    if env_value:
+        return _coerce_non_negative_int(
+            env_value,
+            source="OUROBOROS_MAX_DECOMPOSITION_DEPTH",
+        )
+
+    orchestrator_config = seed_data.get("orchestrator")
+    if isinstance(orchestrator_config, dict) and "max_decomposition_depth" in orchestrator_config:
+        return _coerce_non_negative_int(
+            orchestrator_config.get("max_decomposition_depth"),
+            source="seed.orchestrator.max_decomposition_depth",
+        )
+
+    return DEFAULT_MAX_DECOMPOSITION_DEPTH
+
+
+def _load_skip_completed_markers(
+    marker_path: str | None,
+    *,
+    total_acs: int,
+) -> dict[int, dict[str, Any]]:
+    """Load a YAML marker file describing already-satisfied top-level ACs."""
+    if not marker_path:
+        return {}
+
+    path = Path(marker_path).expanduser()
+    if not path.exists() or not path.is_file():
+        print_error(f"--skip-completed file not found: {path}")
+        raise typer.Exit(1)
+
+    try:
+        raw_data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print_error(f"Failed to read --skip-completed file: {exc}")
+        raise typer.Exit(1) from exc
+
+    if raw_data is None:
+        return {}
+
+    if isinstance(raw_data, dict):
+        raw_entries = raw_data.get("completed_acs", [])
+    elif isinstance(raw_data, list):
+        raw_entries = raw_data
+    else:
+        print_error("--skip-completed must be a YAML list or a mapping with completed_acs")
+        raise typer.Exit(1)
+
+    if not isinstance(raw_entries, list):
+        print_error("--skip-completed completed_acs must be a YAML list")
+        raise typer.Exit(1)
+
+    resolved: dict[int, dict[str, Any]] = {}
+    for index, entry in enumerate(raw_entries, start=1):
+        source = f"{path}: completed_acs[{index}]"
+        if isinstance(entry, dict):
+            ac_number = _coerce_non_negative_int(entry.get("ac"), source=f"{source}.ac")
+            metadata = {
+                "reason": entry.get("reason"),
+                "commit": entry.get("commit"),
+            }
+        else:
+            ac_number = _coerce_non_negative_int(entry, source=source)
+            metadata = {}
+
+        if ac_number < 1 or ac_number > total_acs:
+            print_error(
+                f"{source} references AC {ac_number}, but the seed only has {total_acs} ACs"
+            )
+            raise typer.Exit(1)
+        resolved[ac_number - 1] = metadata
+
+    return resolved
+
+
+def _resolve_max_parallel_workers() -> int:
+    """Resolve the parallel worker cap from the environment."""
+    env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
+    if env_value:
+        return _coerce_positive_int(
+            env_value,
+            source="OUROBOROS_MAX_PARALLEL_WORKERS",
+        )
+    return 3
+
+
 async def _initialize_mcp_manager(
     config_path: Path,
     tool_prefix: str,  # noqa: ARG001
@@ -182,6 +307,8 @@ async def _run_orchestrator(
     parallel: bool = True,
     no_qa: bool = False,
     runtime_backend: str | None = None,
+    max_decomposition_depth: int | None = None,
+    skip_completed: str | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -194,6 +321,8 @@ async def _run_orchestrator(
         parallel: Execute independent ACs in parallel. Default: True.
         no_qa: Skip post-execution QA. Default: False.
         runtime_backend: Optional orchestrator runtime backend override.
+        max_decomposition_depth: Optional recursive decomposition depth cap override.
+        skip_completed: Optional path to a marker file for already-satisfied ACs.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
@@ -209,9 +338,28 @@ async def _run_orchestrator(
         print_error(f"Invalid seed format: {e}")
         raise typer.Exit(1) from e
 
+    resolved_max_decomposition_depth = _resolve_max_decomposition_depth(
+        seed_data,
+        max_decomposition_depth,
+    )
+    resolved_max_parallel_workers = _resolve_max_parallel_workers()
+    externally_satisfied_acs: dict[int, dict[str, Any]] | None = None
+    if skip_completed:
+        if resume_session:
+            print_warning("--skip-completed is ignored when resuming an existing session.")
+        else:
+            externally_satisfied_acs = _load_skip_completed_markers(
+                skip_completed,
+                total_acs=len(seed.acceptance_criteria),
+            )
+
     if debug:
         print_info(f"Loaded seed: {seed.goal[:80]}...")
         print_info(f"Acceptance criteria: {len(seed.acceptance_criteria)}")
+        print_info(f"Max decomposition depth: {resolved_max_decomposition_depth}")
+        print_info(f"Max parallel workers: {resolved_max_parallel_workers}")
+        if externally_satisfied_acs:
+            print_info(f"Externally satisfied ACs: {len(externally_satisfied_acs)}")
 
     # Initialize MCP manager if config provided
     mcp_manager = None
@@ -221,8 +369,6 @@ async def _run_orchestrator(
         mcp_manager = await _initialize_mcp_manager(mcp_config, mcp_tool_prefix)
 
     # Initialize components
-    import os
-
     db_path = os.path.expanduser("~/.ouroboros/ouroboros.db")
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
@@ -274,6 +420,8 @@ async def _run_orchestrator(
         mcp_tool_prefix=mcp_tool_prefix,
         debug=debug,
         task_workspace=workspace,
+        max_decomposition_depth=resolved_max_decomposition_depth,
+        max_parallel_workers=resolved_max_parallel_workers,
     )
 
     # Execute
@@ -289,12 +437,15 @@ async def _run_orchestrator(
                 print_info("Parallel mode: independent ACs will run concurrently")
             else:
                 print_info("Sequential mode: ACs will run one at a time")
-            result = await runner.execute_seed(
-                seed,
-                execution_id=execution_id,
-                session_id=session_id_for_run,
-                parallel=parallel,
-            )
+            execute_kwargs: dict[str, Any] = {
+                "seed": seed,
+                "execution_id": execution_id,
+                "session_id": session_id_for_run,
+                "parallel": parallel,
+            }
+            if externally_satisfied_acs:
+                execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+            result = await runner.execute_seed(**execute_kwargs)
 
         # Handle result
         if result.is_ok:
@@ -431,6 +582,27 @@ def workflow(
             help="Skip post-execution QA evaluation.",
         ),
     ] = False,
+    max_decomposition_depth: Annotated[
+        int | None,
+        typer.Option(
+            "--max-decomposition-depth",
+            min=0,
+            help=(
+                "Maximum recursive AC decomposition depth. "
+                "0 disables decomposition; 1 allows one split; default 2."
+            ),
+        ),
+    ] = None,
+    skip_completed: Annotated[
+        str | None,
+        typer.Option(
+            "--skip-completed",
+            help=(
+                "Path to a YAML marker file listing already-satisfied top-level ACs. "
+                "Entries use 1-based AC numbers under completed_acs."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Execute a workflow from a seed file.
 
@@ -469,6 +641,12 @@ def workflow(
 
         # Skip post-execution QA
         ouroboros run seed.yaml --no-qa
+
+        # Limit recursive decomposition depth
+        ouroboros run seed.yaml --max-decomposition-depth 1
+
+        # Skip ACs already satisfied by the working tree
+        ouroboros run seed.yaml --skip-completed docs/completed.yaml
     """
     # Validate MCP config requires orchestrator mode
     if mcp_config and not orchestrator and not resume_session:
@@ -493,6 +671,8 @@ def workflow(
                     parallel=not sequential,
                     no_qa=no_qa,
                     runtime_backend=runtime.value if runtime else None,
+                    max_decomposition_depth=max_decomposition_depth,
+                    skip_completed=skip_completed,
                 )
             )
         except (ValueError, NotImplementedError) as e:

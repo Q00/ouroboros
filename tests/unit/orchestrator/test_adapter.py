@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import ModuleType
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -16,6 +16,7 @@ from ouroboros.orchestrator.adapter import (
     TaskResult,
     _clone_runtime_handle_data,
 )
+from ouroboros.orchestrator.rate_limit import RateLimitSnapshot, SharedRateLimitBucket
 
 
 # Helper function to create mock SDK messages with correct class names
@@ -1091,6 +1092,166 @@ class TestBuildRuntimeHandleFreshPath:
         handle.metadata["config"]["key"] = "changed"
         assert nested_metadata["tools"][0]["name"] == "Read"  # type: ignore[index]
         assert nested_metadata["config"]["key"] == "val"  # type: ignore[index]
+
+    @pytest.mark.asyncio
+    async def test_execute_task_emits_shared_rate_limit_backoff_messages(self) -> None:
+        """Shared bucket waits should surface as system heartbeat messages."""
+
+        async def _query_impl(*, prompt: str, options: Any) -> Any:
+            del prompt, options
+            yield _create_mock_sdk_message(
+                "ResultMessage",
+                result="[TASK_COMPLETE]",
+                subtype="success",
+                is_error=False,
+                session_id="sess_123",
+            )
+
+        class _StubBucket:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def acquire(self, estimated_tokens: int) -> tuple[float, RateLimitSnapshot]:
+                self.calls += 1
+                if self.calls == 1:
+                    return (
+                        0.25,
+                        RateLimitSnapshot(
+                            runtime_backend="claude",
+                            requests_in_window=1,
+                            request_limit=1,
+                            tokens_in_window=estimated_tokens,
+                            token_limit=estimated_tokens * 2,
+                        ),
+                    )
+                return (
+                    0.0,
+                    RateLimitSnapshot(
+                        runtime_backend="claude",
+                        requests_in_window=1,
+                        request_limit=1,
+                        tokens_in_window=estimated_tokens,
+                        token_limit=estimated_tokens * 2,
+                    ),
+                )
+
+        adapter = ClaudeAgentAdapter(api_key="test")
+        adapter._rate_limit_bucket = _StubBucket()
+
+        with (
+            patch.dict("sys.modules", _build_mock_claude_agent_sdk(query_impl=_query_impl)),
+            patch("ouroboros.orchestrator.adapter.asyncio.sleep", new=AsyncMock()),
+        ):
+            messages = [message async for message in adapter.execute_task(prompt="Fix it")]
+
+        assert messages[0].type == "system"
+        assert messages[0].data["subtype"] == "rate_limit_backoff"
+        assert messages[0].data["source"] == "shared_rate_limit_bucket"
+        assert messages[-1].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_execute_task_emits_rate_limit_backoff_on_transient_retry(self) -> None:
+        """Retryable 429 errors should emit heartbeat-style backoff messages."""
+        attempts = {"count": 0}
+
+        async def _query_impl(*, prompt: str, options: Any) -> Any:
+            del prompt, options
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("429 rate limit")
+            yield _create_mock_sdk_message(
+                "ResultMessage",
+                result="[TASK_COMPLETE]",
+                subtype="success",
+                is_error=False,
+                session_id="sess_456",
+            )
+
+        adapter = ClaudeAgentAdapter(api_key="test")
+        adapter._rate_limit_bucket = SharedRateLimitBucket(
+            runtime_backend="claude",
+            request_limit=None,
+            token_limit=None,
+        )
+
+        with (
+            patch.dict("sys.modules", _build_mock_claude_agent_sdk(query_impl=_query_impl)),
+            patch("ouroboros.orchestrator.adapter.asyncio.sleep", new=AsyncMock()),
+        ):
+            messages = [message async for message in adapter.execute_task(prompt="Retry it")]
+
+        assert messages[0].type == "system"
+        assert messages[0].data["subtype"] == "rate_limit_backoff"
+        assert messages[0].data["backoff_seconds"] == 1.0
+        assert messages[-1].is_final is True
+
+    @pytest.mark.asyncio
+    async def test_wait_for_shared_rate_limit_force_reserves_on_timeout(self) -> None:
+        """The timeout branch must force-reserve capacity instead of bypassing it.
+
+        Regression guard: previously, hitting the max-wait budget caused the
+        wait loop to ``return`` without updating the bucket. With N concurrent
+        workers, all N would bypass the bucket simultaneously, causing N× RPM
+        to hit the upstream API in lockstep — worse than starvation.
+        """
+
+        class _AlwaysBlockedBucket:
+            enabled = True
+
+            def __init__(self) -> None:
+                self.acquire_calls = 0
+                self.force_reserve_calls: list[int] = []
+                self._snapshot = RateLimitSnapshot(
+                    runtime_backend="claude",
+                    requests_in_window=1,
+                    request_limit=1,
+                    tokens_in_window=512,
+                    token_limit=4_096,
+                )
+
+            async def acquire(self, estimated_tokens: int) -> tuple[float, RateLimitSnapshot]:
+                del estimated_tokens
+                self.acquire_calls += 1
+                # Always report a wait so the loop keeps blocking until timeout.
+                return 60.0, self._snapshot
+
+            async def force_reserve(self, estimated_tokens: int) -> RateLimitSnapshot:
+                self.force_reserve_calls.append(estimated_tokens)
+                return RateLimitSnapshot(
+                    runtime_backend="claude",
+                    requests_in_window=2,
+                    request_limit=1,
+                    tokens_in_window=512 + estimated_tokens,
+                    token_limit=4_096,
+                )
+
+        adapter = ClaudeAgentAdapter(api_key="test")
+        bucket = _AlwaysBlockedBucket()
+        adapter._rate_limit_bucket = bucket
+
+        with patch("ouroboros.orchestrator.adapter.asyncio.sleep", new=AsyncMock()):
+            messages = [
+                message
+                async for message in adapter._wait_for_shared_rate_limit_budget(
+                    estimated_tokens=1_234,
+                    attempt=1,
+                    max_wait_seconds=30.0,
+                )
+            ]
+
+        # force_reserve must have been called with the original token estimate.
+        assert bucket.force_reserve_calls == [1_234]
+
+        # The final system message must advertise the force-reserve subtype so
+        # downstream observability can distinguish it from normal backoff.
+        assert messages, "expected at least one system message before force reserving"
+        final = messages[-1]
+        assert final.type == "system"
+        assert final.data["subtype"] == "rate_limit_timeout_force_reserve"
+        assert final.data["max_wait_seconds"] == 30.0
+        assert final.data["source"] == "shared_rate_limit_bucket"
 
 
 class TestNonStringSelectorErrorMessage:

@@ -17,7 +17,7 @@ from typing import Annotated
 from rich.console import Console
 import typer
 
-from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.cli.formatters.panels import print_info, print_success
 
 # PID file for detecting stale instances
 _PID_DIR = Path.home() / ".ouroboros"
@@ -192,7 +192,9 @@ async def _run_mcp_server(
     try:
         transport = validate_transport(transport)
     except ValueError:
-        print_error(f"Invalid transport {transport!r}. Must be 'stdio' or 'sse'.")
+        _stderr_console.print(
+            f"[red]Invalid transport {transport!r}. Must be 'stdio' or 'sse'.[/red]"
+        )
         raise typer.Exit(code=1)
 
     # Create EventStore with custom path if provided

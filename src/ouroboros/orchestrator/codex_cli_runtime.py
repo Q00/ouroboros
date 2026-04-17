@@ -14,13 +14,18 @@ import os
 from pathlib import Path
 import re
 import shlex
-import shutil
 import tempfile
 from typing import Any
 
 import yaml
 
 from ouroboros.codex import resolve_packaged_codex_skill_path
+from ouroboros.codex.cli_policy import (
+    DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS,
+    DEFAULT_MAX_OUROBOROS_DEPTH,
+    build_codex_child_env,
+    resolve_codex_cli_path,
+)
 from ouroboros.codex_permissions import (
     build_codex_exec_permission_args,
     resolve_codex_permission_mode,
@@ -85,11 +90,11 @@ class CodexCliRuntime:
     _skills_package_uri = "packaged://ouroboros.codex/skills"
     _process_shutdown_timeout_seconds = 5.0
     _max_resume_retries = 3
-    _max_ouroboros_depth = 5
+    _max_ouroboros_depth = DEFAULT_MAX_OUROBOROS_DEPTH
     _startup_output_timeout_seconds = 60.0
     _stdout_idle_timeout_seconds = 300.0
     _max_stderr_lines = 512
-    _child_session_env_keys = ("CODEX_THREAD_ID",)
+    _child_session_env_keys = DEFAULT_CODEX_CHILD_SESSION_ENV_KEYS
 
     def __init__(
         self,
@@ -128,12 +133,21 @@ class CodexCliRuntime:
         return self._runtime_handle_backend
 
     @property
+    def llm_backend(self) -> str | None:
+        return self._llm_backend
+
+    @property
     def working_directory(self) -> str | None:
         return self._cwd
 
     @property
     def permission_mode(self) -> str | None:
         return self._permission_mode
+
+    @property
+    def cli_path(self) -> str:
+        """Resolved Codex CLI path used for subprocess execution."""
+        return self._cli_path
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
         """Validate and normalize the runtime permission mode."""
@@ -154,80 +168,15 @@ class CodexCliRuntime:
         return get_codex_cli_path()
 
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
-        """Resolve the Codex CLI path from explicit, config, or PATH values.
-
-        Validates that the resolved binary is the real Node.js CLI and not a
-        platform wrapper (e.g. zeude) that can fork-bomb when invoked without
-        a TTY.  When a wrapper is detected the method falls back to the next
-        ``codex`` on ``PATH`` that passes validation.
-        """
-        if cli_path is not None:
-            candidate = str(Path(cli_path).expanduser())
-        else:
-            candidate = (
-                self._get_configured_cli_path()
-                or shutil.which(self._default_cli_name)
-                or self._default_cli_name
-            )
-
-        path = Path(candidate).expanduser()
-        if path.exists():
-            resolved = str(path)
-            if not self._is_wrapper_binary(resolved):
-                return resolved
-            # The candidate is a wrapper — try to find the real CLI on PATH.
-            log.warning(
-                f"{self._log_namespace}.cli_wrapper_detected",
-                wrapper_path=resolved,
-                hint="Searching PATH for the real Node.js codex CLI.",
-            )
-            fallback = self._find_real_cli(skip=resolved)
-            if fallback is not None:
-                log.info(
-                    f"{self._log_namespace}.cli_resolved_via_fallback",
-                    fallback_path=fallback,
-                )
-                return fallback
-            # No fallback found — use the wrapper and hope for the best.
-            log.warning(
-                f"{self._log_namespace}.cli_no_fallback",
-                wrapper_path=resolved,
-            )
-            return resolved
-        return candidate
-
-    @staticmethod
-    def _is_wrapper_binary(path: str) -> bool:
-        """Return True when *path* looks like a compiled wrapper, not the real CLI.
-
-        The real ``codex`` CLI is a Node.js script (``#!/usr/bin/env node``).
-        Platform wrappers (e.g. zeude) are native Mach-O / ELF binaries that
-        delegate to the real CLI but may perform recursive version checks that
-        fork-bomb when invoked from a non-TTY subprocess.
-        """
-        try:
-            with open(path, "rb") as fh:
-                magic = fh.read(4)
-            # Mach-O: \xcf\xfa\xed\xfe (64-bit) or \xce\xfa\xed\xfe (32-bit)
-            # ELF:    \x7fELF
-            return magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\x7fELF")
-        except OSError:
-            return False
-
-    def _find_real_cli(self, *, skip: str) -> str | None:
-        """Walk ``PATH`` for the first ``codex`` that is not *skip* and not a wrapper."""
-        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
-        for d in path_dirs:
-            candidate = os.path.join(d, self._default_cli_name)
-            if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
-                continue
-            resolved = str(Path(candidate).resolve())
-            if resolved == str(Path(skip).resolve()):
-                continue
-            if self._is_wrapper_binary(candidate):
-                continue
-            return candidate
-        return None
+        """Resolve the Codex CLI path from explicit, config, or PATH values."""
+        resolution = resolve_codex_cli_path(
+            explicit_cli_path=cli_path,
+            configured_cli_path=self._get_configured_cli_path(),
+            default_cli_name=self._default_cli_name,
+            logger=log,
+            log_namespace=self._log_namespace,
+        )
+        return resolution.cli_path
 
     def _resolve_skills_dir(self, skills_dir: str | Path | None) -> Path | None:
         """Resolve an optional explicit skill override directory for intercept metadata."""
@@ -817,25 +766,13 @@ class CodexCliRuntime:
         parent Codex thread/session env so nested ``codex exec`` starts a fresh
         subprocess instead of inheriting the current agent thread.
         """
-        env = os.environ.copy()
-        # Prevent child from re-entering Ouroboros MCP
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
-            env.pop(key, None)
-        for key in self._child_session_env_keys:
-            env.pop(key, None)
-        # Strip CLAUDECODE so the child codex doesn't think it's a nested
-        # session inside Claude Code and refuse to start / hang (#269).
-        env.pop("CLAUDECODE", None)
-        # Track and enforce recursion depth to prevent fork bombs.
-        try:
-            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
-        except (ValueError, TypeError):
-            depth = 1
-        if depth > self._max_ouroboros_depth:
-            msg = f"Maximum Ouroboros nesting depth ({self._max_ouroboros_depth}) exceeded"
-            raise RuntimeError(msg)
-        env["_OUROBOROS_DEPTH"] = str(depth)
-        return env
+        return build_codex_child_env(
+            max_depth=self._max_ouroboros_depth,
+            child_session_env_keys=self._child_session_env_keys,
+            depth_error_factory=lambda _depth, max_depth: RuntimeError(
+                f"Maximum Ouroboros nesting depth ({max_depth}) exceeded"
+            ),
+        )
 
     def _requires_process_stdin(self) -> bool:
         """Return True when the runtime needs a writable stdin pipe."""

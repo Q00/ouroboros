@@ -1598,10 +1598,207 @@ class TestOrchestratorRunner:
         mock_create_llm_adapter.assert_called_once_with(
             backend="opencode",
             permission_mode="acceptEdits",
+            cli_path=None,
             cwd="/tmp/project",
             max_turns=1,
         )
         dependency_analyzer_cls.assert_called_once_with(llm_adapter=llm_adapter)
+
+    def test_build_dependency_analyzer_reuses_resolved_codex_cli_path(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Nested dependency analysis should inherit the runtime's resolved Codex CLI path."""
+        mock_adapter.runtime_backend = "codex"
+        mock_adapter.cli_path = "/tmp/real-codex"
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        llm_adapter = object()
+        dependency_analyzer_cls = MagicMock()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                return_value=llm_adapter,
+            ) as mock_create_llm_adapter,
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer",
+                dependency_analyzer_cls,
+            ),
+        ):
+            analyzer = runner._build_dependency_analyzer()
+
+        assert analyzer is dependency_analyzer_cls.return_value
+        mock_create_llm_adapter.assert_called_once_with(
+            backend="codex",
+            permission_mode="acceptEdits",
+            cli_path="/tmp/real-codex",
+            cwd="/tmp/project",
+            max_turns=1,
+        )
+
+    def test_build_dependency_analyzer_uses_public_llm_backend_property(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """_build_dependency_analyzer must use the public llm_backend property, not _llm_backend."""
+        mock_adapter.runtime_backend = "opencode"
+        mock_adapter.llm_backend = "codex"  # override via public property
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        llm_adapter = object()
+        dependency_analyzer_cls = MagicMock()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                return_value=llm_adapter,
+            ) as mock_create_llm_adapter,
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer",
+                dependency_analyzer_cls,
+            ),
+        ):
+            analyzer = runner._build_dependency_analyzer()
+
+        assert analyzer is dependency_analyzer_cls.return_value
+        # llm_backend="codex" takes precedence over runtime_backend="opencode"
+        mock_create_llm_adapter.assert_called_once_with(
+            backend="codex",
+            permission_mode="acceptEdits",
+            cli_path=None,
+            cwd="/tmp/project",
+            max_turns=1,
+        )
+
+    def test_build_dependency_analyzer_falls_back_to_runtime_backend_when_llm_backend_none(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """When llm_backend is None, runtime_backend is used as the LLM backend."""
+        mock_adapter.runtime_backend = "opencode"
+        mock_adapter.llm_backend = None
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        llm_adapter = object()
+        dependency_analyzer_cls = MagicMock()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                return_value=llm_adapter,
+            ) as mock_create_llm_adapter,
+            patch(
+                "ouroboros.orchestrator.dependency_analyzer.DependencyAnalyzer",
+                dependency_analyzer_cls,
+            ),
+        ):
+            analyzer = runner._build_dependency_analyzer()
+
+        assert analyzer is dependency_analyzer_cls.return_value
+        mock_create_llm_adapter.assert_called_once_with(
+            backend="opencode",
+            permission_mode="acceptEdits",
+            cli_path=None,
+            cwd="/tmp/project",
+            max_turns=1,
+        )
+
+    def test_build_dependency_analyzer_catches_expected_exceptions(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """RuntimeError from create_llm_adapter is caught and returns a no-LLM analyzer."""
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with patch(
+            "ouroboros.orchestrator.runner.create_llm_adapter",
+            side_effect=RuntimeError("CLI not found"),
+        ):
+            analyzer = runner._build_dependency_analyzer()
+
+        assert isinstance(analyzer, DependencyAnalyzer)
+
+    def test_build_dependency_analyzer_does_not_catch_type_error(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """TypeError from create_llm_adapter propagates uncaught (programming error)."""
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                side_effect=TypeError("unexpected keyword argument"),
+            ),
+            pytest.raises(TypeError),
+        ):
+            runner._build_dependency_analyzer()
+
+    def test_build_dependency_analyzer_does_not_catch_attribute_error(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """AttributeError from create_llm_adapter propagates uncaught (programming error)."""
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runner.create_llm_adapter",
+                side_effect=AttributeError("object has no attribute"),
+            ),
+            pytest.raises(AttributeError),
+        ):
+            runner._build_dependency_analyzer()
+
+    def test_legacy_adapter_without_llm_backend_degrades_gracefully(
+        self,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Legacy adapters predating v0.28.6 (no llm_backend attr) fall back to structured-only.
+
+        Protects downstream Protocol implementers (custom runtimes, test mocks)
+        from the v0.28.6 AgentRuntime Protocol addition. Instead of raising
+        AttributeError at the call site, _build_dependency_analyzer returns a
+        structured-only DependencyAnalyzer, preserving pre-v0.28.6 behavior.
+        """
+        from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
+
+        class LegacyAdapter:
+            """Pre-v0.28.6 adapter stub without llm_backend attribute."""
+
+            runtime_backend = "opencode"
+            working_directory = "/tmp/project"
+            permission_mode = "acceptEdits"
+
+        legacy_adapter = LegacyAdapter()
+        assert not hasattr(legacy_adapter, "llm_backend")
+
+        runner = OrchestratorRunner(legacy_adapter, mock_event_store, mock_console)  # type: ignore[arg-type]
+
+        with patch("ouroboros.orchestrator.runner.create_llm_adapter") as mock_create_llm_adapter:
+            analyzer = runner._build_dependency_analyzer()
+
+        # Must not attempt to wire an LLM adapter when the legacy runtime
+        # lacks llm_backend - that path is the breaking-change path.
+        mock_create_llm_adapter.assert_not_called()
+        assert isinstance(analyzer, DependencyAnalyzer)
 
     @pytest.mark.asyncio
     async def test_execute_seed_uses_inherited_runtime_handle(
@@ -1628,12 +1825,16 @@ class TestOrchestratorRunner:
             )
 
         mock_adapter.execute_task = mock_execute
+        # Inherit a known builtin (WebFetch) and a bridge tool
+        # (mcp__chrome-devtools__click).  The bridge tool should be
+        # deferred to MCPToolProvider discovery — not injected as a
+        # phantom builtin catalog entry.
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
             inherited_runtime_handle=inherited_handle,
-            inherited_tools=["mcp__chrome-devtools__click"],
+            inherited_tools=["WebFetch", "mcp__chrome-devtools__click"],
         )
 
         from ouroboros.core.types import Result
@@ -1656,7 +1857,10 @@ class TestOrchestratorRunner:
         assert resume_handle.backend == inherited_handle.backend
         assert resume_handle.native_session_id == inherited_handle.native_session_id
         assert resume_handle.metadata.get("fork_session") is True
-        assert "mcp__chrome-devtools__click" in captured_kwargs["tools"]
+        # Known builtin should be inherited
+        assert "WebFetch" in captured_kwargs["tools"]
+        # Bridge tool should NOT appear — it would be a phantom entry
+        assert "mcp__chrome-devtools__click" not in captured_kwargs["tools"]
 
     @pytest.mark.asyncio
     async def test_execute_parallel_passes_inherited_runtime_handle_to_executor(
@@ -2097,20 +2301,94 @@ class TestOrchestratorRunnerWithMCP:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> None:
-        """Delegated runners should merge inherited tools without duplicating built-ins."""
+        """Inherited builtin tools are merged; non-builtin tools are preserved as capabilities."""
         runner = OrchestratorRunner(
             mock_adapter,
             mock_event_store,
             mock_console,
+            inherited_tools=["Read", "WebFetch", "mcp__chrome-devtools__click"],
+        )
+
+        merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
+
+        # Known builtins are inherited and deduplicated
+        assert "WebFetch" in merged_tools
+        assert merged_tools.count("Read") == 1
+        # Bridge/MCP tools are NOT in merged_tools — they would create
+        # phantom entries.  Instead they are preserved as inherited
+        # capabilities on the catalog for authorization / observability.
+        assert "mcp__chrome-devtools__click" not in merged_tools
+        assert tool_catalog is not None
+        assert "mcp__chrome-devtools__click" in tool_catalog.inherited_capabilities
+        assert provider is None
+
+    @pytest.mark.asyncio
+    async def test_get_merged_tools_preserves_inherited_capabilities_after_discovery(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        mock_mcp_manager: MagicMock,
+    ) -> None:
+        """Inherited MCP capabilities survive MCP discovery replacing session_catalog."""
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            mcp_manager=mock_mcp_manager,
             inherited_tools=["Read", "mcp__chrome-devtools__click"],
         )
 
         merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
 
-        assert "mcp__chrome-devtools__click" in merged_tools
-        assert merged_tools.count("Read") == 1
-        assert provider is None
+        # MCP discovery succeeded — provider found 'external_tool'
+        assert provider is not None
+        assert "external_tool" in merged_tools
+        # The inherited MCP capability must survive discovery replacing
+        # the catalog — this was Regression 2 from Q00's review.
         assert tool_catalog is not None
+        assert "mcp__chrome-devtools__click" in tool_catalog.inherited_capabilities
+
+    @pytest.mark.asyncio
+    async def test_runtime_handle_tool_catalog_round_trip_with_inherited_capabilities(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Serialized dict tool catalog round-trips through runtime_handle_tool_catalog."""
+        from dataclasses import replace as dc_replace
+
+        from ouroboros.orchestrator.adapter import RuntimeHandle, runtime_handle_tool_catalog
+        from ouroboros.orchestrator.mcp_tools import (
+            assemble_session_tool_catalog,
+            normalize_serialized_tool_catalog,
+            serialize_tool_catalog,
+        )
+
+        catalog = assemble_session_tool_catalog(["Read", "Edit"])
+        catalog = dc_replace(
+            catalog,
+            inherited_capabilities=frozenset({"mcp__chrome-devtools__click"}),
+        )
+        serialized = serialize_tool_catalog(catalog)
+        # serialize_tool_catalog returns dict when inherited_capabilities present
+        assert isinstance(serialized, dict)
+
+        handle = RuntimeHandle(
+            backend="claude",
+            native_session_id="s1",
+            metadata={"tool_catalog": serialized},
+        )
+        # runtime_handle_tool_catalog must accept the dict format
+        raw = runtime_handle_tool_catalog(handle)
+        assert raw is not None
+        assert isinstance(raw, dict)
+
+        # Full round-trip through normalize_serialized_tool_catalog
+        restored = normalize_serialized_tool_catalog(raw)
+        assert restored is not None
+        assert "mcp__chrome-devtools__click" in restored.inherited_capabilities
 
     @pytest.mark.asyncio
     async def test_get_merged_tools_mcp_failure(

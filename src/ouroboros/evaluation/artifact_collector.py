@@ -2,6 +2,8 @@
 
 Extracts file paths from Write/Edit tool calls in execution output,
 reads the files, and bundles them for the semantic evaluator.
+Falls back to scanning project_dir for source files when no paths
+can be extracted from the artifact text.
 """
 
 from __future__ import annotations
@@ -14,9 +16,156 @@ from ouroboros.evaluation.models import ArtifactBundle, FileArtifact
 
 logger = logging.getLogger(__name__)
 
-MAX_TOTAL_CHARS = 150_000  # ~37K tokens
-MAX_FILES = 30
-MAX_FILE_SIZE = 50 * 1024  # 50KB per file
+MAX_TOTAL_CHARS = 150_000  # ~37K tokens — sole budget limiter
+MAX_FILE_SIZE = 100 * 1024  # 100KB per file (accommodate large artifact summaries)
+
+# Binary/generated extensions to skip — everything else is collected.
+_SKIP_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        # Images
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".svg",
+        ".ico",
+        ".webp",
+        ".bmp",
+        # Fonts
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+        ".otf",
+        # Media
+        ".mp4",
+        ".mp3",
+        ".wav",
+        ".avi",
+        ".mov",
+        ".webm",
+        # Archives
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        # Compiled/binary
+        ".pyc",
+        ".pyo",
+        ".so",
+        ".dll",
+        ".exe",
+        ".o",
+        ".a",
+        ".wasm",
+        # Lockfiles / generated
+        ".lock",
+        ".map",
+        ".min.js",
+        ".min.css",
+        # Data dumps
+        ".sqlite",
+        ".db",
+        ".bin",
+        ".dat",
+    }
+)
+
+# Directories to skip during directory scan fallback.
+_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".next",
+        "dist",
+        "build",
+        ".venv",
+        "venv",
+        ".cache",
+        ".tox",
+        "coverage",
+        ".nyc_output",
+    }
+)
+
+# Sensitive filenames that must never be collected — blocks credential
+# leaks via artifact bundles (env files, SSH keys, cloud credentials, etc.).
+_SENSITIVE_FILENAMES: frozenset[str] = frozenset(
+    {
+        ".env",
+        ".env.local",
+        ".env.development",
+        ".env.production",
+        ".env.staging",
+        ".env.test",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".pgpass",
+        ".my.cnf",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        "id_dsa",
+        "credentials.json",
+        "service-account.json",
+        "secrets.yaml",
+        "secrets.yml",
+        "secrets.json",
+        ".htpasswd",
+    }
+)
+
+# Sensitive file extensions (certificates, private keys, terraform vars).
+_SENSITIVE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".pem",
+        ".key",
+        ".crt",
+        ".cert",
+        ".pfx",
+        ".p12",
+        ".keystore",
+        ".jks",
+        ".tfvars",
+    }
+)
+
+# Allowlist for legitimate template/example env files — these are
+# commonly checked into repositories and contain no real secrets.
+_ENV_TEMPLATE_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        ".env.example",
+        ".env.sample",
+        ".env.dist",
+        ".env.template",
+    }
+)
+
+
+def _is_sensitive_file(fname: str) -> bool:
+    """Return True when ``fname`` should be excluded as sensitive.
+
+    The check is case-insensitive. Template/example env files listed in
+    ``_ENV_TEMPLATE_ALLOWLIST`` are explicitly permitted. Any file whose
+    name is in ``_SENSITIVE_FILENAMES``, whose extension is in
+    ``_SENSITIVE_EXTENSIONS``, or whose name starts with ``.env.``
+    (catching unlisted dotenv variants) is treated as sensitive.
+    """
+    lowered = fname.lower()
+    if lowered in _ENV_TEMPLATE_ALLOWLIST:
+        return False
+    if lowered in _SENSITIVE_FILENAMES:
+        return True
+    ext = os.path.splitext(lowered)[1]
+    if ext in _SENSITIVE_EXTENSIONS:
+        return True
+    # Catch unlisted dotenv variants (e.g. .env.ci, .env.foo).
+    return lowered.startswith(".env.")
 
 
 class ArtifactCollector:
@@ -46,12 +195,15 @@ class ArtifactCollector:
 
         file_paths = self._extract_file_paths(execution_output, project_dir)
         if not file_paths:
-            return ArtifactBundle(text_summary=execution_output)
+            # Fallback: scan project_dir for source files when the artifact
+            # text doesn't contain recognizable file path patterns (e.g.
+            # prose summaries from orchestrator execution).
+            file_paths = self._scan_directory(project_dir)
 
         artifacts: list[FileArtifact] = []
         total_chars = 0
 
-        for path in file_paths[:MAX_FILES]:
+        for path in file_paths:
             content = self._read_file(path)
             if content is None:
                 continue
@@ -111,15 +263,65 @@ class ArtifactCollector:
                 path = match.group(1)
                 if path in seen:
                     continue
-                if not os.path.isfile(path):
+                # Block sensitive files (env, credentials, private keys) even
+                # when they appear in tool-call output.
+                if _is_sensitive_file(os.path.basename(path)):
                     continue
-                # Path boundary check: only allow files within project_dir
-                if real_project and not os.path.realpath(path).startswith(real_project + os.sep):
+                try:
+                    if not os.path.isfile(path):
+                        continue
+                    # Path boundary check: only allow files within project_dir
+                    if real_project and not os.path.realpath(path).startswith(
+                        real_project + os.sep
+                    ):
+                        continue
+                except OSError:
+                    # File vanished between stat calls, permission denied,
+                    # or unreadable symlink — skip defensively.
                     continue
                 paths.append(path)
                 seen.add(path)
 
         return paths
+
+    def _scan_directory(self, project_dir: str) -> list[str]:
+        """Walk project_dir for source files when no paths were extractable.
+
+        Skips binary/generated files and common dependency/cache directories.
+        Files are sorted by modification time (newest first) so the evaluator
+        sees the most recently changed code. The total character budget
+        (MAX_TOTAL_CHARS) limits how many are actually read upstream.
+        """
+        real_project = os.path.realpath(project_dir)
+        paths: list[tuple[float, str]] = []
+
+        for root, dirs, files in os.walk(real_project, topdown=True):
+            # Prune skipped directories in-place
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
+
+            for fname in files:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in _SKIP_EXTENSIONS:
+                    continue
+                if _is_sensitive_file(fname):
+                    continue
+                full = os.path.join(root, fname)
+                try:
+                    if os.path.getsize(full) > MAX_FILE_SIZE:
+                        continue
+                except OSError:
+                    # Symlink loop, permission denied, or file vanished
+                    # between os.walk() and the stat — skip defensively.
+                    continue
+                try:
+                    mtime = os.path.getmtime(full)
+                except OSError:
+                    mtime = 0.0
+                paths.append((mtime, full))
+
+        # Newest files first — most likely to be the implementation.
+        paths.sort(reverse=True)
+        return [p for _, p in paths]
 
     def _read_file(self, file_path: str) -> str | None:
         """Read a file with size limits."""

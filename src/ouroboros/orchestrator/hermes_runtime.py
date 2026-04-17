@@ -168,6 +168,10 @@ class HermesCliRuntime(AgentRuntime):
     def permission_mode(self) -> str | None:
         return self._permission_mode
 
+    @property
+    def llm_backend(self) -> str | None:
+        return self._llm_backend
+
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
         """Resolve the Hermes CLI path."""
         if cli_path is not None:

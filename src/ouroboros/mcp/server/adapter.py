@@ -41,6 +41,26 @@ log = structlog.get_logger(__name__)
 VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "sse"})
 
 
+def _safe_cwd() -> Path:
+    """Return cwd if it looks like a usable project directory, else fall back to home.
+
+    OpenClaw gateways spawn the MCP server with ``cwd=/``, which is not a
+    writable project root.  This helper centralises the fallback so every
+    consumer inside ``create_ouroboros_server`` uses the same safe directory.
+    """
+    cwd = Path.cwd()
+    if cwd == Path("/") or not os.access(cwd, os.W_OK):
+        return Path.home()
+    return cwd
+
+
+def _default_interview_state_dir() -> Path:
+    """Return the global interview state directory for MCP handlers."""
+    from ouroboros.config.models import get_config_dir
+
+    return get_config_dir() / "data"
+
+
 def validate_transport(transport: str) -> str:
     """Normalize and validate a transport string.
 
@@ -726,7 +746,8 @@ def create_ouroboros_server(
         rate_limit_config: Optional rate limiting configuration.
         event_store: Optional EventStore instance. If not provided, creates default.
         state_dir: Optional pathlib.Path for interview state directory.
-                   If not provided, uses ~/.ouroboros/data.
+                   If not provided, uses ``get_config_dir() / "data"``
+                   (typically ``~/.ouroboros/data``).
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
 
@@ -791,21 +812,28 @@ def create_ouroboros_server(
 
     resolved_runtime_backend = resolve_agent_runtime_backend(runtime_backend)
 
+    # Resolve a safe working directory once so all consumers agree.
+    # When the MCP server is spawned with cwd=/ (OpenClaw gateways), Path.cwd()
+    # is unusable as a project root — _safe_cwd() falls back to $HOME.
+    effective_cwd = _safe_cwd()
+
     # Materialize the default runtime once at server creation so backend wiring
     # is validated up front and composition-root tests can assert the selected
     # runtime backend without waiting for a tool invocation.
     create_agent_runtime(
         backend=resolved_runtime_backend,
         model=None,
-        cwd=Path.cwd(),
+        cwd=effective_cwd,
         llm_backend=llm_backend,
     )
 
-    # Create shared LLM adapter for interview/seed/evaluation paths.
+    # Create shared LLM adapter for interview/seed paths.
+    # Evaluation constructs its own adapter with higher max_turns — see
+    # EvaluateHandler.handle in mcp/tools/evaluation_handlers.py.
     llm_adapter = create_llm_adapter(
         backend=llm_backend,
         max_turns=1,
-        cwd=Path.cwd(),
+        cwd=effective_cwd,
     )
 
     # Create or use provided EventStore
@@ -815,14 +843,15 @@ def create_ouroboros_server(
         event_store = EventStore()
 
     # Create state directory for interviews
-    if state_dir is None:
-        state_dir = Path.home() / ".ouroboros" / "data"
-    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir_path = (
+        _default_interview_state_dir() if state_dir is None else Path(state_dir).expanduser()
+    )
+    state_dir_path.mkdir(parents=True, exist_ok=True)
 
     # Create core service instances
     interview_engine = InterviewEngine(
         llm_adapter=llm_adapter,
-        state_dir=state_dir,
+        state_dir=state_dir_path,
         model=get_clarification_model(llm_backend),
     )
 
@@ -888,7 +917,7 @@ def create_ouroboros_server(
         runner_adapter = create_agent_runtime(
             backend=resolved_runtime_backend,
             model=execution_model,
-            cwd=task_cwd or Path.cwd(),
+            cwd=task_cwd or effective_cwd,
             llm_backend=llm_backend,
         )
         _evo_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
@@ -976,8 +1005,6 @@ def create_ouroboros_server(
 
     def _extract_project_dir(artifact: str, seed: Any = None) -> str | None:
         """Resolve project directory from explicit config, seed context, or artifacts."""
-        from pathlib import Path
-
         configured_project_dir = evolutionary_loop.get_project_dir()
         if configured_project_dir:
             return configured_project_dir
@@ -990,9 +1017,8 @@ def create_ouroboros_server(
         if artifact_project_dir:
             return artifact_project_dir
 
-        cwd = Path.cwd()
-        if _looks_like_project_root(cwd):
-            return str(cwd)
+        if _looks_like_project_root(effective_cwd):
+            return str(effective_cwd)
 
         return None
 
@@ -1283,7 +1309,6 @@ def create_ouroboros_server(
         validator=_evolution_validator,
     )
     job_manager = JobManager(event_store)
-    cwd = Path.cwd()
     openclaw_db_path = Path.home() / ".ouroboros" / "ouroboros.db"
     workflow_manager = ChannelWorkflowManager(openclaw_db_path)
     repo_registry = ChannelRepoRegistry(openclaw_db_path)
@@ -1346,7 +1371,7 @@ def create_ouroboros_server(
             llm_backend=llm_backend,
         ),
         PMInterviewHandler(
-            data_dir=state_dir,
+            data_dir=state_dir_path,
             llm_adapter=llm_adapter,
             llm_backend=llm_backend,
         ),
@@ -1354,7 +1379,7 @@ def create_ouroboros_server(
         ChannelWorkflowHandler(
             workflow_manager=workflow_manager,
             repo_registry=repo_registry,
-            default_repo=str(cwd) if str(cwd) != "/" else None,
+            default_repo=str(effective_cwd) if str(effective_cwd) != "/" else None,
             interview_handler=InterviewHandler(
                 interview_engine=interview_engine,
                 event_store=event_store,
@@ -1387,7 +1412,6 @@ def create_ouroboros_server(
         ),
         EvaluateHandler(
             event_store=event_store,
-            llm_adapter=llm_adapter,
             llm_backend=llm_backend,
         ),
         LateralThinkHandler(),

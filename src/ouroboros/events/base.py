@@ -74,6 +74,9 @@ class BaseEvent(BaseModel, frozen=True):
         aggregate_id: Unique identifier of the aggregate.
         data: Event-specific payload data.
         consensus_id: Optional consensus identifier for grouped events.
+        event_version: Schema version for the persisted payload.
+            Version 1 is the baseline. Legacy rows without this field
+            are deserialized as version 0.
 
     Example:
         event = BaseEvent(
@@ -91,20 +94,26 @@ class BaseEvent(BaseModel, frozen=True):
     aggregate_id: str
     data: dict[str, Any] = Field(default_factory=dict)
     consensus_id: str | None = Field(default=None)
+    event_version: int = Field(default=1)
 
     def to_db_dict(self) -> dict[str, Any]:
         """Convert event to dictionary for database insertion.
 
+        The ``event_version`` is injected into the persisted payload so
+        consumers can detect schema changes without a database migration.
+
         Returns:
             Dictionary with keys matching the events table columns.
         """
+        payload = sanitize_event_data_for_persistence(self.data)
+        payload["event_version"] = self.event_version
         return {
             "id": self.id,
             "event_type": self.type,
             "timestamp": self.timestamp,
             "aggregate_type": self.aggregate_type,
             "aggregate_id": self.aggregate_id,
-            "payload": sanitize_event_data_for_persistence(self.data),
+            "payload": payload,
             "consensus_id": self.consensus_id,
         }
 
@@ -112,17 +121,29 @@ class BaseEvent(BaseModel, frozen=True):
     def from_db_row(cls, row: dict[str, Any]) -> BaseEvent:
         """Create event from database row.
 
+        Legacy rows that predate the ``event_version`` field are loaded
+        with ``event_version=0`` so callers can distinguish old data.
+
         Args:
             row: Dictionary from database query result.
 
         Returns:
             BaseEvent instance.
         """
+        raw_payload = row["payload"]
+        event_version = 0
+        if isinstance(raw_payload, dict):
+            raw_version = raw_payload.get("event_version", 0)
+            event_version = raw_version if isinstance(raw_version, int) else 0
+            payload = {k: v for k, v in raw_payload.items() if k != "event_version"}
+        else:
+            payload = raw_payload
         return cls(
             id=row["id"],
             type=row["event_type"],
             timestamp=row["timestamp"],
             aggregate_type=row["aggregate_type"],
             aggregate_id=row["aggregate_id"],
-            data=row["payload"],
+            data=payload,
+            event_version=event_version,
         )

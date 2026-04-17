@@ -118,7 +118,7 @@ class TestEvaluateHandlerAdapterCreation:
             captured.update(kwargs)
             return _make_mock_adapter()
 
-        handler = EvaluateHandler(llm_adapter=None)
+        handler = EvaluateHandler()
 
         with (
             patch(
@@ -135,14 +135,64 @@ class TestEvaluateHandlerAdapterCreation:
             "at least one turn per AC file read. Use max_turns >= 10."
         )
 
-    async def test_injected_adapter_skips_create_llm_adapter(self):
-        """When an adapter is injected (e.g. in tests), create_llm_adapter is not called."""
-        handler = EvaluateHandler(llm_adapter=_make_mock_adapter())
+    async def test_always_creates_fresh_adapter(self):
+        """Evaluation always creates its own adapter via create_llm_adapter.
+
+        The handler owns its adapter lifecycle — no external adapter is
+        injected. This test verifies create_llm_adapter is called with a
+        sufficient max_turns budget for multi-turn spec file reads.
+        """
+        captured: dict = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return _make_mock_adapter()
+
+        handler = EvaluateHandler()
 
         with (
-            patch("ouroboros.mcp.tools.evaluation_handlers.create_llm_adapter") as mock_create,
+            patch(
+                "ouroboros.mcp.tools.evaluation_handlers.create_llm_adapter",
+                side_effect=_capture,
+            ),
             _patch_pipeline(),
         ):
             await handler.handle(_BASE_ARGUMENTS)
 
-        mock_create.assert_not_called()
+        assert "max_turns" in captured, (
+            "create_llm_adapter was not called — the handler must build a "
+            "fresh adapter for evaluation."
+        )
+        assert captured["max_turns"] >= 10, f"max_turns={captured['max_turns']} is too low."
+
+    async def test_adapter_has_sufficient_turns_in_pipeline(self):
+        """The adapter passed to EvaluationPipeline has sufficient max_turns.
+
+        Guards against a future refactor lowering the turn budget below
+        what the semantic evaluator needs for spec file reads.
+        """
+        handler = EvaluateHandler()
+
+        captured_pipeline_adapters: list = []
+
+        def _capture_pipeline(llm_adapter, config):  # noqa: ARG001
+            mock_pipeline = MagicMock()
+            mock_pipeline.evaluate = AsyncMock(
+                return_value=Result.ok(_make_approved_eval_result()),
+            )
+            captured_pipeline_adapters.append(llm_adapter)
+            return mock_pipeline
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.evaluation_handlers.create_llm_adapter",
+                return_value=_make_mock_adapter(),
+            ),
+            patch(
+                "ouroboros.evaluation.EvaluationPipeline",
+                side_effect=_capture_pipeline,
+            ),
+        ):
+            await handler.handle(_BASE_ARGUMENTS)
+
+        assert captured_pipeline_adapters, "EvaluationPipeline was not constructed"

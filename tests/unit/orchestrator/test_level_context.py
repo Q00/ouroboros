@@ -7,6 +7,8 @@ import pytest
 from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.level_context import (
+    _MAX_FILE_SIZE_BYTES,
+    _MAX_FILES_FOR_API,
     ACContextSummary,
     LevelContext,
     _build_public_api_summary,
@@ -223,25 +225,25 @@ class TestBuildContextPrompt:
 class TestExtractLevelContext:
     """Tests for extract_level_context function."""
 
-    def test_extract_from_empty_results(self) -> None:
+    def test_extract_from_empty_results(self, tmp_path: object) -> None:
         """Test extraction from empty result list."""
-        ctx = extract_level_context([], level_num=0)
+        ctx = extract_level_context([], level_num=0, workspace_root=str(tmp_path))
         assert ctx.level_number == 0
         assert ctx.completed_acs == ()
 
-    def test_extract_basic_context(self) -> None:
+    def test_extract_basic_context(self, tmp_path: object) -> None:
         """Test extracting context from simple AC results."""
         results = [
             (0, "Create the model", True, (), "Model created successfully"),
         ]
-        ctx = extract_level_context(results, level_num=1)
+        ctx = extract_level_context(results, level_num=1, workspace_root=str(tmp_path))
         assert ctx.level_number == 1
         assert len(ctx.completed_acs) == 1
         assert ctx.completed_acs[0].ac_index == 0
         assert ctx.completed_acs[0].success is True
         assert "Model created" in ctx.completed_acs[0].key_output
 
-    def test_extract_tools_and_files(self) -> None:
+    def test_extract_tools_and_files(self, tmp_path: object) -> None:
         """Test that tools and modified files are extracted from messages."""
         messages = (
             AgentMessage(type="tool", content="", tool_name="Read"),
@@ -262,7 +264,7 @@ class TestExtractLevelContext:
         results = [
             (0, "Implement feature", True, messages, "Feature implemented"),
         ]
-        ctx = extract_level_context(results, level_num=0)
+        ctx = extract_level_context(results, level_num=0, workspace_root=str(tmp_path))
         summary = ctx.completed_acs[0]
 
         assert "Bash" in summary.tools_used
@@ -272,29 +274,29 @@ class TestExtractLevelContext:
         assert "src/main.py" in summary.files_modified
         assert "src/utils.py" in summary.files_modified
 
-    def test_extract_truncates_key_output(self) -> None:
+    def test_extract_truncates_key_output(self, tmp_path: object) -> None:
         """Test that key_output is truncated to max chars."""
         long_output = "x" * 500
         results = [
             (0, "Big task", True, (), long_output),
         ]
-        ctx = extract_level_context(results, level_num=0)
+        ctx = extract_level_context(results, level_num=0, workspace_root=str(tmp_path))
         assert len(ctx.completed_acs[0].key_output) <= 200
 
-    def test_extract_multiple_acs(self) -> None:
+    def test_extract_multiple_acs(self, tmp_path: object) -> None:
         """Test extracting context from multiple ACs."""
         results = [
             (0, "AC zero", True, (), "Done zero"),
             (1, "AC one", False, (), "Failed one"),
             (2, "AC two", True, (), "Done two"),
         ]
-        ctx = extract_level_context(results, level_num=0)
+        ctx = extract_level_context(results, level_num=0, workspace_root=str(tmp_path))
         assert len(ctx.completed_acs) == 3
         assert ctx.completed_acs[0].success is True
         assert ctx.completed_acs[1].success is False
         assert ctx.completed_acs[2].success is True
 
-    def test_extract_notebook_edit_file_tracking(self) -> None:
+    def test_extract_notebook_edit_file_tracking(self, tmp_path: object) -> None:
         """Test that NotebookEdit file paths are tracked alongside Write/Edit."""
         messages = (
             AgentMessage(
@@ -313,7 +315,7 @@ class TestExtractLevelContext:
         results = [
             (0, "Update notebook and code", True, messages, "Done"),
         ]
-        ctx = extract_level_context(results, level_num=0)
+        ctx = extract_level_context(results, level_num=0, workspace_root=str(tmp_path))
         summary = ctx.completed_acs[0]
         assert "notebooks/analysis.ipynb" in summary.files_modified
         assert "src/main.py" in summary.files_modified
@@ -451,7 +453,7 @@ class TestExtractPublicApi:
             "async def create_user(name: str, email: str) -> User:\n"
             "    pass\n"
         )
-        sigs = _extract_public_api(str(p))
+        sigs = _extract_public_api(str(p), str(tmp_path))
         assert "class UserService" in sigs
         assert "def get_user(id: str) -> User" in sigs
         assert any("async def create_user" in s for s in sigs)
@@ -471,7 +473,7 @@ class TestExtractPublicApi:
             "def public_fn() -> str:\n"
             "    pass\n"
         )
-        sigs = _extract_public_api(str(p))
+        sigs = _extract_public_api(str(p), str(tmp_path))
         assert len(sigs) == 1
         assert "public_fn" in sigs[0]
 
@@ -488,7 +490,7 @@ class TestExtractPublicApi:
             ") -> dict[str, Any]:\n"
             "    pass\n"
         )
-        sigs = _extract_public_api(str(p))
+        sigs = _extract_public_api(str(p), str(tmp_path))
         assert len(sigs) == 1
         assert "arg1: str" in sigs[0]
         assert "arg2: int" in sigs[0]
@@ -514,7 +516,7 @@ class TestExtractPublicApi:
             "\n"
             "function privateHelper() {}\n"
         )
-        sigs = _extract_public_api(str(p))
+        sigs = _extract_public_api(str(p), str(tmp_path))
         assert any("getUser" in s for s in sigs)
         assert any("UserController" in s for s in sigs)
         assert any("UserDTO" in s for s in sigs)
@@ -536,14 +538,16 @@ class TestExtractPublicApi:
             "\n"
             "func privateHelper() {}\n"
         )
-        sigs = _extract_public_api(str(p))
+        sigs = _extract_public_api(str(p), str(tmp_path))
         assert any("GetUser" in s for s in sigs)
         assert any("UserService" in s for s in sigs)
         assert not any("privateHelper" in s for s in sigs)
 
-    def test_nonexistent_file(self) -> None:
+    def test_nonexistent_file(self, tmp_path: object) -> None:
         """Test that nonexistent files return empty list."""
-        assert _extract_public_api("/nonexistent/file.py") == []
+        # Point both file and workspace inside tmp_path so rejection is
+        # driven by OSError from getsize(), not by containment.
+        assert _extract_public_api(str(tmp_path) + "/nonexistent.py", str(tmp_path)) == []
 
     def test_unsupported_extension(self, tmp_path: object) -> None:
         """Test that unsupported file types return empty list."""
@@ -551,7 +555,48 @@ class TestExtractPublicApi:
 
         p = pathlib.Path(str(tmp_path)) / "data.json"
         p.write_text('{"key": "value"}')
-        assert _extract_public_api(str(p)) == []
+        assert _extract_public_api(str(p), str(tmp_path)) == []
+
+    def test_file_exceeding_size_limit_returns_empty(self, tmp_path: object) -> None:
+        """Test that files larger than _MAX_FILE_SIZE_BYTES are skipped."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "huge.py"
+        # Write a file just over the limit
+        p.write_text("class Big:\n    pass\n" + "x" * (_MAX_FILE_SIZE_BYTES + 1))
+        assert _extract_public_api(str(p), str(tmp_path)) == []
+
+    def test_file_within_size_limit_is_read(self, tmp_path: object) -> None:
+        """Test that files within _MAX_FILE_SIZE_BYTES are read normally."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "small.py"
+        p.write_text("class Small:\n    pass\n")
+        sigs = _extract_public_api(str(p), str(tmp_path))
+        assert "class Small" in sigs
+
+    def test_symlink_resolved_before_read(self, tmp_path: object) -> None:
+        """Test that symlinks are resolved via realpath before reading."""
+        import pathlib
+
+        real_file = pathlib.Path(str(tmp_path)) / "real.py"
+        real_file.write_text("class RealClass:\n    pass\n")
+        link = pathlib.Path(str(tmp_path)) / "link.py"
+        link.symlink_to(real_file)
+
+        sigs = _extract_public_api(str(link), str(tmp_path))
+        assert "class RealClass" in sigs
+
+    def test_symlink_to_large_file_returns_empty(self, tmp_path: object) -> None:
+        """Test that symlinks to oversized files are rejected after resolution."""
+        import pathlib
+
+        real_file = pathlib.Path(str(tmp_path)) / "huge_real.py"
+        real_file.write_text("class Big:\n    pass\n" + "x" * (_MAX_FILE_SIZE_BYTES + 1))
+        link = pathlib.Path(str(tmp_path)) / "link_to_huge.py"
+        link.symlink_to(real_file)
+
+        assert _extract_public_api(str(link), str(tmp_path)) == []
 
 
 class TestBuildPublicApiSummary:
@@ -566,7 +611,10 @@ class TestBuildPublicApiSummary:
         p2 = pathlib.Path(str(tmp_path)) / "service.py"
         p2.write_text("def get_user(id: str) -> User:\n    pass\n")
 
-        summary = _build_public_api_summary((str(p1), str(p2)))
+        summary = _build_public_api_summary(
+            (str(p1), str(p2)),
+            workspace_root=str(tmp_path),
+        )
         assert "models.py:" in summary
         assert "service.py:" in summary
         assert "class User" in summary
@@ -580,13 +628,133 @@ class TestBuildPublicApiSummary:
         lines = [f"def function_{i}(arg: str) -> str:\n    pass\n" for i in range(100)]
         p.write_text("\n".join(lines))
 
-        summary = _build_public_api_summary((str(p),))
+        summary = _build_public_api_summary(
+            (str(p),),
+            workspace_root=str(tmp_path),
+        )
         assert len(summary) <= 500
 
-    def test_summary_skips_missing_files(self) -> None:
+    def test_summary_skips_missing_files(self, tmp_path: object) -> None:
         """Test that missing files are silently skipped."""
-        summary = _build_public_api_summary(("/nonexistent/a.py", "/nonexistent/b.py"))
+        summary = _build_public_api_summary(
+            (str(tmp_path) + "/nonexistent/a.py", str(tmp_path) + "/nonexistent/b.py"),
+            workspace_root=str(tmp_path),
+        )
         assert summary == ""
+
+    def test_workspace_root_rejects_outside_files(self, tmp_path: object) -> None:
+        """Test that files outside workspace_root are skipped."""
+        import pathlib
+        import tempfile
+
+        workspace = pathlib.Path(str(tmp_path)) / "project"
+        workspace.mkdir()
+        inside = workspace / "service.py"
+        inside.write_text("class InsideService:\n    pass\n")
+
+        # Create a file outside the workspace
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
+            f.write("class OutsideService:\n    pass\n")
+            outside_path = f.name
+
+        try:
+            summary = _build_public_api_summary(
+                (str(inside), outside_path),
+                workspace_root=str(workspace),
+            )
+            assert "InsideService" in summary
+            assert "OutsideService" not in summary
+        finally:
+            pathlib.Path(outside_path).unlink(missing_ok=True)
+
+    def test_workspace_root_allows_inside_files(self, tmp_path: object) -> None:
+        """Test that files inside workspace_root are processed normally."""
+        import pathlib
+
+        workspace = pathlib.Path(str(tmp_path)) / "project"
+        workspace.mkdir()
+        f = workspace / "models.py"
+        f.write_text("class User:\n    pass\n")
+
+        summary = _build_public_api_summary(
+            (str(f),),
+            workspace_root=str(workspace),
+        )
+        assert "class User" in summary
+
+    def test_workspace_root_rejects_symlink_escape(self, tmp_path: object) -> None:
+        """Test that symlinks pointing outside workspace are rejected."""
+        import pathlib
+        import tempfile
+
+        workspace = pathlib.Path(str(tmp_path)) / "project"
+        workspace.mkdir()
+
+        # Create a file outside the workspace
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
+            f.write("class EscapedClass:\n    pass\n")
+            outside_path = f.name
+
+        # Symlink inside workspace pointing outside
+        link = workspace / "sneaky.py"
+        link.symlink_to(outside_path)
+
+        try:
+            summary = _build_public_api_summary(
+                (str(link),),
+                workspace_root=str(workspace),
+            )
+            assert "EscapedClass" not in summary
+            assert summary == ""
+        finally:
+            pathlib.Path(outside_path).unlink(missing_ok=True)
+
+    def test_empty_workspace_root_rejects_all_files(self, tmp_path: object) -> None:
+        """Test that an empty workspace_root yields an empty summary.
+
+        Regression guard for the previous ``workspace_root=None`` default
+        which silently disabled path containment. The contract is now: no
+        workspace, no reads — there is no silent bypass.
+        """
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "anywhere.py"
+        p.write_text("class Anywhere:\n    pass\n")
+
+        summary = _build_public_api_summary((str(p),), workspace_root="")
+        assert summary == ""
+
+    def test_workspace_root_is_required_kwarg(self, tmp_path: object) -> None:
+        """Test that workspace_root has no default (callers MUST pass it)."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "x.py"
+        p.write_text("class X:\n    pass\n")
+
+        with pytest.raises(TypeError):
+            # mypy: keep the check narrow — this is a runtime contract guard.
+            _build_public_api_summary((str(p),))  # type: ignore[call-arg]
+
+    def test_file_cap_limits_processed_files(self, tmp_path: object) -> None:
+        """Test that at most _MAX_FILES_FOR_API files are processed."""
+        import pathlib
+
+        workspace = pathlib.Path(str(tmp_path))
+        paths: list[str] = []
+        for i in range(_MAX_FILES_FOR_API + 5):
+            p = workspace / f"mod_{i}.py"
+            p.write_text(f"class Class{i}:\n    pass\n")
+            paths.append(str(p))
+
+        summary = _build_public_api_summary(
+            tuple(paths),
+            workspace_root=str(workspace),
+        )
+        # Count how many distinct "mod_N.py:" entries appear
+        import re as _re
+
+        file_entries = _re.findall(r"mod_\d+\.py:", summary)
+        assert len(file_entries) <= _MAX_FILES_FOR_API
 
 
 class TestPromptTextWithPublicApi:

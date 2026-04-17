@@ -176,11 +176,13 @@ class TestGeneratePrdMarkdown:
         assert "1. **As a** admin" in md
         assert "2. **As a** dev" in md
 
-    def test_omits_empty_created_at(self):
-        """Created At is omitted when empty or None."""
+    def test_fallback_generated_timestamp_when_created_at_empty(self):
+        """Shows Generated timestamp when created_at is empty."""
         seed = PMSeed(pm_id="pm_1", product_name="Test", goal="A goal", created_at="")
         md = generate_pm_markdown(seed)
         assert "Created At" not in md
+        assert "*Generated:" in md
+        assert "UTC*" in md
 
     def test_omits_empty_interview_id(self):
         """Interview ID is omitted when empty or None."""
@@ -198,13 +200,15 @@ class TestGeneratePrdMarkdown:
         assert "*Interview ID: int_abc*" in footer
 
     def test_brownfield_repo_empty_name_falls_back_to_path(self):
-        """Brownfield repo with empty name falls back to path."""
+        """Brownfield repo with empty name falls back to path without duplicate."""
         seed = _make_seed(
             brownfield_repos=({"name": "", "path": "/repo/path", "desc": "desc"},),
         )
         md = generate_pm_markdown(seed)
         assert "**/repo/path**" in md
-        assert "(`/repo/path`)" in md
+        # When name falls back to path, the parenthetical path is NOT shown
+        assert "(`/repo/path`)" not in md
+        assert "/repo/path (/repo/path)" not in md
 
     def test_brownfield_repo_missing_path_renders_cleanly(self):
         """Brownfield repo with missing path renders without empty backticks."""

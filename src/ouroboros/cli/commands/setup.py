@@ -30,6 +30,7 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
+from ouroboros.cli.opencode_config import find_opencode_config
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -469,21 +470,13 @@ def _strip_jsonc(text: str) -> str:
 def _find_opencode_config() -> Path:
     """Locate the existing OpenCode config file, or return a default path.
 
-    OpenCode checks (in order): ``opencode.jsonc``, ``opencode.json``,
-    ``config.json`` — all inside ``~/.config/opencode/``.  On Windows
-    ``Path.home()`` resolves to ``%USERPROFILE%`` which matches the
-    ``xdg-basedir`` fallback that OpenCode uses.
-
-    Returns the first file that exists, or ``opencode.json`` as the
-    default for new installations (plain JSON is the safer default
-    since we write with ``json.dump``).
+    Delegates to :func:`ouroboros.cli.opencode_config.find_opencode_config`
+    with ``allow_default=True`` so that new installations get a sensible
+    default path (``opencode.json``) to write to.
     """
-    config_dir = Path.home() / ".config" / "opencode"
-    for name in ("opencode.jsonc", "opencode.json"):
-        candidate = config_dir / name
-        if candidate.exists():
-            return candidate
-    return config_dir / "opencode.json"
+    result = find_opencode_config(allow_default=True)
+    assert result is not None  # allow_default=True always returns a Path
+    return result
 
 
 def _ensure_opencode_mcp_entry() -> None:
@@ -583,6 +576,17 @@ def _ensure_opencode_mcp_entry() -> None:
         if "timeout" not in existing:
             existing["timeout"] = 300000
         print_info("MCP server already registered — verified config.")
+
+    # Warn if we're about to overwrite a .jsonc file that contained comments.
+    if config_path.suffix == ".jsonc":
+        try:
+            original_text = config_path.read_text(encoding="utf-8")
+        except OSError:
+            original_text = ""
+        if "//" in original_text or "/*" in original_text:
+            print_warning(
+                f"Note: JSONC comments in {config_path} were removed during config update."
+            )
 
     # Write back as plain JSON.  This intentionally discards JSONC
     # comments — the same approach Claude and Codex setup use for their

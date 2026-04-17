@@ -10,6 +10,7 @@ The scoring algorithm evaluates three key components:
 """
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 import json
 import re
 from typing import Any
@@ -52,6 +53,87 @@ SCORING_TEMPERATURE = 0.1
 
 # Maximum token limit (None = no limit, rely on model's context window)
 MAX_TOKEN_LIMIT: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# Ambiguity milestones — semantic labels for score ranges
+# ---------------------------------------------------------------------------
+
+
+class AmbiguityMilestone(StrEnum):
+    """Named milestones for ambiguity score ranges.
+
+    Each milestone represents a qualitative stage in the interview's progress
+    toward Seed-ready clarity.  Milestones are consumed by:
+    * ``format_score_display`` — human-readable progress label
+    * ``_build_ambiguity_snapshot_prompt`` (interview.py) — LLM context so the
+      question generator can adapt its strategy to the current stage
+    * MCP response ``meta`` — structured data for downstream tooling
+    """
+
+    INITIAL = "initial"
+    PROGRESS = "progress"
+    REFINED = "refined"
+    READY = "ready"
+
+
+# (upper_bound, milestone, description) — evaluated top-down; first match wins.
+MILESTONE_DEFINITIONS: tuple[tuple[float, AmbiguityMilestone, str], ...] = (
+    (
+        1.0,
+        AmbiguityMilestone.INITIAL,
+        "Core requirements identified. Major gaps in constraints and success criteria.",
+    ),
+    (
+        0.4,
+        AmbiguityMilestone.PROGRESS,
+        "Most requirements captured. Some details and edge cases missing.",
+    ),
+    (
+        0.3,
+        AmbiguityMilestone.REFINED,
+        "Success criteria partially defined. Edge cases and non-goals remain.",
+    ),
+    (
+        AMBIGUITY_THRESHOLD,
+        AmbiguityMilestone.READY,
+        "All criteria concrete and testable. Ready for Seed generation.",
+    ),
+)
+
+
+def get_milestone(score: float) -> tuple[AmbiguityMilestone, str]:
+    """Return the current milestone and its description for *score*.
+
+    Milestones are evaluated from the lowest threshold upward so the most
+    advanced matching milestone is returned.
+
+    >>> get_milestone(0.55)
+    (<AmbiguityMilestone.INITIAL: 'initial'>, 'Core requirements ...')
+    >>> get_milestone(0.15)
+    (<AmbiguityMilestone.READY: 'ready'>, 'All criteria ...')
+    """
+    # Walk from the most advanced milestone (lowest threshold) upward.
+    for threshold, milestone, description in reversed(MILESTONE_DEFINITIONS):
+        if score <= threshold:
+            return milestone, description
+    # score > 1.0 (shouldn't happen) — fall back to INITIAL.
+    return MILESTONE_DEFINITIONS[0][1], MILESTONE_DEFINITIONS[0][2]
+
+
+def get_next_milestone(
+    score: float,
+) -> tuple[float, AmbiguityMilestone, str] | None:
+    """Return the next milestone to reach, or ``None`` if already READY.
+
+    The "next" milestone is the most advanced one whose threshold is still
+    strictly below the current *score*.  We iterate top-down (highest
+    threshold first) and return the first entry the score hasn't yet reached.
+    """
+    for threshold, milestone, description in MILESTONE_DEFINITIONS:
+        if score > threshold:
+            return threshold, milestone, description
+    return None
 
 
 class ComponentScore(BaseModel):
@@ -658,18 +740,27 @@ def is_ready_for_seed(score: AmbiguityScore) -> bool:
 def format_score_display(score: AmbiguityScore) -> str:
     """Format ambiguity score for display after interview round.
 
+    Includes the current milestone label and, when the interview is not yet
+    Seed-ready, the next milestone target so users understand what remains.
+
     Args:
         score: The ambiguity score to format.
 
     Returns:
         Formatted string for display.
     """
+    milestone, milestone_desc = get_milestone(score.overall_score)
+    next_ms = get_next_milestone(score.overall_score)
+
     lines = [
-        f"Ambiguity Score: {score.overall_score:.2f}",
-        f"Ready for Seed: {'Yes' if score.is_ready_for_seed else 'No'}",
-        "",
-        "Component Breakdown:",
+        f"Ambiguity Score: {score.overall_score:.2f} [{milestone.value.upper()}]",
+        f"  {milestone_desc}",
     ]
+    if next_ms is not None:
+        lines.append(f"  Next: {next_ms[1].value} (<= {next_ms[0]:.1f})")
+    lines.append(f"Ready for Seed: {'Yes' if score.is_ready_for_seed else 'No'}")
+    lines.append("")
+    lines.append("Component Breakdown:")
 
     for component in score.breakdown.components:
         clarity_percent = component.clarity_score * 100
