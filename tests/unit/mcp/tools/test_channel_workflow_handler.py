@@ -742,3 +742,98 @@ async def test_invalid_seed_format_marks_workflow_failed(handler: ChannelWorkflo
     status = await handler.handle({"action": "status", "guild_id": "g1", "channel_id": "badseed"})
     assert status.is_ok
     assert "failed" in status.value.content[0].text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Contract preservation: inner handlers must not return _subagent envelopes
+# when the outer ChannelWorkflowHandler is configured for plugin dispatch.
+# The channel workflow runtime parses inner results as real data; envelopes
+# would break the orchestration.
+# ---------------------------------------------------------------------------
+
+
+def test_channel_workflow_pins_inner_handlers_to_subprocess_mode() -> None:
+    """Outer gets plugin mode → inner handlers must be forced to subprocess.
+
+    Prevents the inner gate from returning ``_subagent`` envelopes that the
+    openclaw runtime cannot parse.
+    """
+    h = ChannelWorkflowHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    # Inner handlers should have opencode_mode forced to "subprocess"
+    # so should_dispatch_via_plugin returns False for them.
+    assert h._interview_handler.opencode_mode == "subprocess"
+    assert h._generate_seed_handler.opencode_mode == "subprocess"
+    assert h._start_execute_seed_handler.opencode_mode == "subprocess"
+
+    # Backend label preserved on inner handlers (for logs / future use)
+    assert h._interview_handler.agent_runtime_backend == "opencode"
+    assert h._generate_seed_handler.agent_runtime_backend == "opencode"
+    assert h._start_execute_seed_handler.agent_runtime_backend == "opencode"
+
+
+def test_channel_workflow_pins_passed_in_handlers_to_subprocess_mode() -> None:
+    """Handlers passed from composition root (adapter.py) must also be pinned.
+
+    The composition root constructs inner handlers with the server-wide
+    opencode_mode (e.g. "plugin"). __post_init__ must override that to
+    "subprocess" even for passed-in handlers — not just the defaults.
+    """
+    # Simulate what adapter.py does: pass handlers with opencode_mode="plugin"
+    interview = InterviewHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+    generate = GenerateSeedHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+    start_exec = StartExecuteSeedHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    h = ChannelWorkflowHandler(
+        interview_handler=interview,
+        generate_seed_handler=generate,
+        start_execute_seed_handler=start_exec,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    # Even though handlers were passed with "plugin", __post_init__ must pin
+    assert h._interview_handler.opencode_mode == "subprocess"
+    assert h._generate_seed_handler.opencode_mode == "subprocess"
+    assert h._start_execute_seed_handler.opencode_mode == "subprocess"
+
+    # Verify gate is False for all inner handlers
+    from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
+
+    for inner in (h._interview_handler, h._generate_seed_handler, h._start_execute_seed_handler):
+        assert should_dispatch_via_plugin(inner.agent_runtime_backend, inner.opencode_mode) is False
+
+
+def test_channel_workflow_inner_gate_returns_false_under_plugin_outer() -> None:
+    """Verify via the actual gate helper that inner handlers will not dispatch."""
+    from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
+
+    h = ChannelWorkflowHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    for inner in (
+        h._interview_handler,
+        h._generate_seed_handler,
+        h._start_execute_seed_handler,
+    ):
+        assert (
+            should_dispatch_via_plugin(
+                inner.agent_runtime_backend,
+                inner.opencode_mode,
+            )
+            is False
+        )

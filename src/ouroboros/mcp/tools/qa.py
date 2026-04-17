@@ -22,6 +22,12 @@ from ouroboros.config import get_qa_model
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.subagent import (
+    build_qa_subagent,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -30,6 +36,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 from ouroboros.providers.base import LLMAdapter
 
@@ -396,6 +403,9 @@ class QAHandler:
 
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    event_store: EventStore | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -514,6 +524,27 @@ class QAHandler:
             iteration=iteration,
             pass_threshold=pass_threshold,
         )
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        payload = build_qa_subagent(
+            artifact=artifact,
+            quality_bar=quality_bar,
+            artifact_type=artifact_type,
+            reference=reference,
+            pass_threshold=pass_threshold,
+            qa_session_id=qa_session_id,
+            iteration_history=iteration_history,
+            seed_content=seed_content,
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self.event_store,
+                session_id=qa_session_id,
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real in-process QA LLM call (subprocess / non-opencode runtimes).
 
         try:
             from ouroboros.providers.base import CompletionConfig, Message, MessageRole

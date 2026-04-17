@@ -7,7 +7,12 @@ doc_metadata:
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
-Ouroboros can use **OpenCode** as a runtime backend. [OpenCode](https://opencode.ai) is an open-source AI coding agent that supports multiple model providers (Anthropic, OpenAI, Google, and others) through its own provider management. In Ouroboros, the OpenCode backend is presented as a **session-oriented runtime** with the same specification-first workflow harness (acceptance criteria, evaluation principles, deterministic exit conditions).
+Ouroboros integrates with **OpenCode** ([opencode.ai](https://opencode.ai)) — an open-source multi-provider AI coding agent — via two complementary paths:
+
+1. **Subagent Bridge Plugin (primary, recommended):** Runs inside an interactive OpenCode session. Ouroboros `ouroboros_*` MCP tools that emit a `_subagent` envelope (e.g. `ouroboros_qa`, `ouroboros_lateral_think persona="all"`) fan out into native OpenCode **Task panes** — one child session per subagent, rendered inline under the tool call. Zero session-picker pollution, parallel multi-persona dispatch, fresh LLM context per child.
+2. **Subprocess Runtime (fallback, headless/CI):** Ouroboros launches `opencode run --format json` as a non-interactive subprocess per task execution. Useful for CLI-driven workflows, batch runs, and environments without an attached OpenCode session.
+
+Both paths share the same specification-first harness (seeds, acceptance criteria, evaluation principles, deterministic exit conditions). Pick the plugin for day-to-day interactive work; pick the subprocess runtime for automation.
 
 No additional Python SDK is required beyond the base `ouroboros-ai` package.
 
@@ -50,65 +55,150 @@ For alternative install methods, see the [OpenCode documentation](https://openco
 
 ## Platform Notes
 
-The OpenCode runtime adapter has been developed and tested on Linux. Other platforms may work but have not been verified with the Ouroboros integration.
+The OpenCode runtime adapter targets Linux, macOS, and Windows via WSL 2. OpenCode itself supports macOS and native Windows; Ouroboros path handling and subprocess dispatch are portable.
 
-| Platform | Status | Notes |
-|----------|--------|-------|
-| Linux (x86_64/ARM64) | Tested | Primary development and testing platform |
-| macOS (ARM/Intel) | Untested | Expected to work — OpenCode supports macOS natively |
-| Windows (WSL 2) | Untested | Expected to work via WSL 2 — not verified with Ouroboros |
-| Windows (native) | Untested | Not recommended — subprocess and path handling may have issues |
-
-> If you test on macOS or Windows and encounter issues, please report them.
+| Platform | Status |
+|----------|--------|
+| Linux (x86_64 / ARM64) | Supported |
+| macOS (Apple Silicon / Intel) | Supported |
+| Windows (WSL 2) | Supported |
+| Windows (native) | Best-effort — run inside WSL 2 for the subprocess fallback path |
 
 ## Configuration
 
-To select OpenCode as the runtime backend, set the following in your Ouroboros configuration:
+`ouroboros setup --runtime opencode` configures OpenCode integration. At setup time, pick one of two **mutually exclusive** modes:
 
-```yaml
-orchestrator:
-  runtime_backend: opencode
-```
+| Mode | What it does | Use when |
+|------|--------------|----------|
+| `plugin` (default) | Install bridge plugin + register MCP in `opencode.jsonc` | You drive work from inside OpenCode — inline Task panes via `_subagents` dispatch |
+| `subprocess` | Write subprocess runtime into `~/.ouroboros/config.yaml` | Headless `ouroboros run`, CI, scripted pipelines, no interactive OpenCode session |
 
-Or pass the backend on the command line:
+Why mutually exclusive: if an Ouroboros MCP tool is called inside a `opencode run` subprocess, the globally registered plugin also fires — duplicate subagent dispatch, wasted tokens. Pick one. To wire both deliberately on the same machine, run `ouroboros setup` twice with different `--opencode-mode` values and accept the token cost.
 
 ```bash
-uv run ouroboros run workflow --runtime opencode ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
+ouroboros setup --runtime opencode                              # interactive picker
+ouroboros setup --runtime opencode --opencode-mode plugin       # inside-OpenCode default
+ouroboros setup --runtime opencode --opencode-mode subprocess   # headless CI
+ouroboros setup --runtime opencode --non-interactive            # accepts default (plugin)
 ```
 
-### Where OpenCode users configure what
+What each mode installs:
 
-Use `~/.ouroboros/config.yaml` for Ouroboros runtime settings (backend selection, permission mode, CLI path).
+**plugin**
+- Bridge plugin at `<opencode_config_dir>/plugins/ouroboros-bridge/ouroboros-bridge.ts` (atomic write, content-hashed — no-op if unchanged)
+- Plugin entry in `~/.config/opencode/opencode.jsonc` or `opencode.json` (dedupes stale entries)
+- Ouroboros MCP server in the same file
+- Claude Code MCP sidecar entry (if `~/.claude/` exists) — MCP is runtime-independent
 
-Use `~/.config/opencode/opencode.jsonc` or `opencode.json` (OpenCode's own config) for provider/model selection, MCP servers, and tool permissions. `ouroboros setup --runtime opencode` writes the Ouroboros MCP server entry into this file automatically.
+**subprocess**
+- `orchestrator.runtime_backend: opencode` in `~/.ouroboros/config.yaml`
+- `orchestrator.opencode_cli_path: <auto-detected path>` in the same file
+- `llm.backend: opencode` in the same file
+
+> The `.jsonc` file is rewritten as plain JSON (comments stripped) for compatibility.
+
+### Where things live
+
+| Concern | File |
+|---------|------|
+| Ouroboros runtime settings (backend, CLI path) | `~/.ouroboros/config.yaml` |
+| OpenCode provider / model / MCP / plugins | `~/.config/opencode/opencode.jsonc` (or `.json`) |
+| Bridge plugin source | `<opencode_config_dir>/plugins/ouroboros-bridge/ouroboros-bridge.ts` |
+
+Model selection for OpenCode-backed workflows is configured in OpenCode itself, not in `config.yaml`.
+
+## Path 1 — Subagent Bridge Plugin [recommended]
+
+The plugin hooks OpenCode's `tool.execute.after` event. When an Ouroboros MCP tool returns a `_subagent` / `_subagents` envelope, the plugin:
+
+1. Spawns one independent **child session** per subagent (`client.session.create` + `client.session.prompt`)
+2. Patches a `subtask` part into the parent message so the child renders as a native **Task pane** inline under the original tool call
+3. Fans out up to `MAX_FANOUT = 10` children concurrently — each with fresh LLM context (no cross-persona anchoring bias)
+
+Multi-persona example:
+
+```
+ouroboros_lateral_think persona="all"
+  → hacker     (child session, Task pane)
+  → researcher (child session, Task pane)
+  → simplifier (child session, Task pane)
+  → architect  (child session, Task pane)
+  → contrarian (child session, Task pane)
+```
+
+### Environment tunables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `OUROBOROS_CHILD_TIMEOUT_MS` | `1200000` (20 min) | Per-child wall clock |
+| `OUROBOROS_SUB_RETRIES` | `2` | Retry count on spawn failure |
+
+See the full plugin guide: **[OpenCode Subagent Bridge](../guides/opencode-subagent-bridge.md)**.
+
+## Path 2 — Subprocess Runtime (fallback)
+
+For headless, CI, or scripted workflows where no interactive OpenCode session is running, select the subprocess runtime explicitly:
 
 ```yaml
 # ~/.ouroboros/config.yaml
 orchestrator:
   runtime_backend: opencode
-  opencode_cli_path: /usr/local/bin/opencode   # omit if opencode is already on PATH
+  opencode_cli_path: /usr/local/bin/opencode   # omit if on PATH
 
 llm:
   backend: opencode
 ```
 
-Model selection for OpenCode-backed workflows is configured in OpenCode itself, not in `config.yaml`. The `orchestrator.opencode_permission_mode` defaults to `bypassPermissions` since OpenCode runs non-interactively via `opencode run --format json`.
-
-### Setup
-
-Run the setup command to auto-configure:
+Or per-invocation:
 
 ```bash
-ouroboros setup --runtime opencode
+uv run ouroboros run workflow --runtime opencode ~/.ouroboros/seeds/seed_abcd1234ef56.yaml
 ```
 
-This:
+The `OpenCodeRuntime` adapter launches `opencode run --format json` as a subprocess, pipes the prompt via stdin, and parses the structured JSON event stream from stdout. `orchestrator.opencode_permission_mode` defaults to `bypassPermissions` since `opencode run` is non-interactive.
 
-- Detects the `opencode` binary on your `PATH` and records it as `orchestrator.opencode_cli_path`
-- Writes `orchestrator.runtime_backend: opencode` and `llm.backend: opencode` to `~/.ouroboros/config.yaml`
-- Registers the Ouroboros MCP server in OpenCode's configuration file (`~/.config/opencode/opencode.jsonc` or `opencode.json`). If an existing `.jsonc` config is found, setup updates it in place instead of creating a separate `.json` file. Note: The setup process rewrites the file as plain JSON and removes comments (the file supports JSONC format initially, but setup normalizes to JSON for compatibility).
+### When to use subprocess over plugin
 
-### `ooo` Skill Availability on OpenCode
+| Scenario | Path |
+|----------|------|
+| Interactive OpenCode session, want Task panes | Plugin |
+| Parallel multi-persona dispatch (`lateral_think`, `qa`) | Plugin |
+| CI / headless automation, no attached session | Subprocess |
+| Scripted `ouroboros run workflow` invocation | Subprocess |
+| Debug / reproduce one-shot from terminal | Subprocess |
+
+### Could subprocess do parallel subagent dispatch without the plugin?
+
+Yes, in theory. The orchestrator could spawn **N parallel `opencode run --format json` subprocesses**, one per subagent envelope entry, pipe each persona prompt via stdin, collect the stdout JSON event streams, and union-merge the results back into a single envelope.
+
+Sketch:
+
+```
+parent = subprocess(opencode run --format json) ← seed prompt
+         └─ hits MCP tool returning _subagents=[hacker, researcher, ...]
+orchestrator
+  ├─ subprocess(opencode run --format json) ← hacker prompt
+  ├─ subprocess(opencode run --format json) ← researcher prompt
+  └─ subprocess(opencode run --format json) ← simplifier prompt
+         ↓ stdout JSON per child
+      merge → parent envelope
+```
+
+Why we do **not** ship this path:
+
+| Concern | Plugin | Subprocess fan-out |
+|---------|--------|--------------------|
+| Inline Task pane rendering under parent message | Yes (PATCH `subtask` part into parent) | No — each child is a top-level session |
+| Session picker pollution | 1 parent session, N hidden children | N+1 visible sessions on every dispatch |
+| Reparenting of child under parent message id | Yes (direct PATCH against `session._client`) | Not possible without plugin hook |
+| Cold-start latency per child | One in-process `client.session.create` | Full CLI boot + TUI init per spawn |
+| Live progress visible during run | Yes (native OpenCode rendering) | No — child output only surfaces after merge |
+| Shared MCP/provider config inheritance | Automatic (same process) | Re-resolved per subprocess |
+| Works headless / no attached session | No (needs running session) | Yes |
+
+The subprocess runtime stays scoped to its strength — single-shot headless execution. Parallel subagent fan-out is a plugin-only feature by design; emulating it via subprocesses is feasible but strictly worse UX in every attached scenario.
+
+## `ooo` Skill Availability on OpenCode
 
 After running `ouroboros setup --runtime opencode`, the Ouroboros MCP server is registered in OpenCode's config. The `ooo` skills are available via MCP tool dispatch within OpenCode sessions.
 
@@ -144,30 +234,6 @@ opencode --version
 ouroboros --help
 ```
 
-## How It Works
-
-```
-+-----------------+     +------------------+     +-----------------+
-|   Seed YAML     | --> |   Orchestrator   | --> |    OpenCode     |
-|  (your task)    |     | (runtime_factory)|     |   (runtime)     |
-+-----------------+     +------------------+     +-----------------+
-                                |
-                                v
-                        +------------------+
-                        |  Tools Available |
-                        |  - Read          |
-                        |  - Write         |
-                        |  - Edit          |
-                        |  - Bash          |
-                        |  - Glob          |
-                        |  - Grep          |
-                        +------------------+
-```
-
-The `OpenCodeRuntime` adapter launches `opencode run --format json` as a subprocess for each task execution. The orchestrator pipes the prompt via stdin and parses the structured JSON event stream from stdout.
-
-> For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
-
 ## OpenCode-Specific Strengths
 
 - **Multi-provider support** -- use Anthropic, OpenAI, Google, or other providers through a single runtime
@@ -175,7 +241,9 @@ The `OpenCodeRuntime` adapter launches `opencode run --format json` as a subproc
 - **Rich tool access** -- full suite of file, shell, and search tools (same surface as Claude Code)
 - **Native MCP integration** -- OpenCode has built-in MCP server support
 - **Open-source** -- fully open-source, allowing inspection and contribution
-- **Session-aware runtime** -- Ouroboros preserves OpenCode session handles and resume state across workflow steps via `--session` flag
+- **Session-aware runtime** -- Ouroboros preserves OpenCode session handles and resume state across workflow steps
+
+> For a side-by-side comparison of all runtime backends, see the [runtime capability matrix](../runtime-capability-matrix.md).
 
 ## Runtime Differences
 
@@ -225,9 +293,9 @@ uv run ouroboros run workflow --runtime opencode --resume <session_id> ~/.ourobo
 
 ## Known Limitations
 
-### Session pollution
+### Session pollution (subprocess runtime only)
 
-Each task execution via `opencode run` creates a visible session in OpenCode's session history. Long-running workflows with many orchestrator steps will accumulate sessions. A future phase will reparent these sessions under the caller to prevent polluting the session picker (see [#331](https://github.com/Q00/ouroboros/issues/331)).
+Each task execution via `opencode run` creates a visible session in OpenCode's session history. Long-running workflows with many orchestrator steps will accumulate sessions. This does **not** affect the plugin path — child sessions created by the bridge are reparented inline as Task panes and do not pollute the picker. See [#331](https://github.com/Q00/ouroboros/issues/331) for subprocess reparenting.
 
 ### No interactive mode
 

@@ -28,7 +28,7 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
-from ouroboros.cli.opencode_config import find_opencode_config
+from ouroboros.cli.opencode_config import find_opencode_config, opencode_config_dir
 
 app = typer.Typer(
     name="uninstall",
@@ -283,6 +283,59 @@ def _remove_data_dir(dry_run: bool) -> bool:
     return True
 
 
+def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
+    """Remove the ouroboros-bridge plugin from OpenCode's plugin directory and config."""
+    plugin_dir = opencode_config_dir() / "plugins" / "ouroboros-bridge"
+    removed_files = False
+
+    if plugin_dir.exists():
+        if dry_run:
+            print_info(f"[dry-run] Would remove {plugin_dir}/")
+            removed_files = True
+        else:
+            try:
+                shutil.rmtree(plugin_dir)
+                print_success(f"Removed OpenCode bridge plugin ({plugin_dir}/)")
+                removed_files = True
+            except OSError:
+                print_warning(f"Could not remove {plugin_dir}/ — skipping.")
+
+    # Also remove from opencode config plugin array.
+    # Use find_opencode_config() for correct precedence (.jsonc before .json)
+    # — avoids drift with the shared helper in opencode_config.py.
+    plugin_path = str(plugin_dir / "ouroboros-bridge.ts")
+    config_path = find_opencode_config(allow_default=False)
+
+    if config_path is not None:
+        try:
+            import json
+
+            raw = config_path.read_text()
+            # Strip JSONC comments (simple — single-line only)
+            lines = []
+            for line in raw.splitlines():
+                stripped = line.lstrip()
+                if not stripped.startswith("//"):
+                    lines.append(line)
+            data = json.loads("\n".join(lines))
+            plugins = data.get("plugin", [])
+            if isinstance(plugins, list) and plugin_path in plugins:
+                if dry_run:
+                    print_info(f"[dry-run] Would remove bridge plugin from {config_path}")
+                    return True
+                plugins.remove(plugin_path)
+                data["plugin"] = plugins
+                with config_path.open("w") as f:
+                    json.dump(data, f, indent=2)
+                    f.write("\n")
+                print_success(f"Removed bridge plugin entry from {config_path}")
+                removed_files = True
+        except (json.JSONDecodeError, OSError, KeyError):
+            pass  # Best effort — don't fail uninstall over config parse
+
+    return removed_files
+
+
 def _remove_project_dir(project_dir: Path, dry_run: bool) -> bool:
     """Remove .ouroboros/ directory in the current project."""
     ooo_dir = project_dir / ".ouroboros"
@@ -388,6 +441,10 @@ def uninstall(
     if ooo_dir.exists():
         targets.append(f"Project config ({ooo_dir}/)")
 
+    bridge_plugin_dir = opencode_config_dir() / "plugins" / "ouroboros-bridge"
+    if bridge_plugin_dir.exists():
+        targets.append(f"OpenCode bridge plugin ({bridge_plugin_dir}/)")
+
     data_dir = Path.home() / ".ouroboros"
     if not keep_data and data_dir.exists():
         targets.append("Data directory (~/.ouroboros/)")
@@ -448,6 +505,10 @@ def uninstall(
     if not _remove_project_dir(cwd, dry_run=False):
         if any("Project config" in t for t in targets):
             failed.append(f"{cwd}/.ouroboros/")
+
+    if not _remove_opencode_bridge_plugin(dry_run=False):
+        if any("OpenCode bridge plugin" in t for t in targets):
+            failed.append("OpenCode bridge plugin")
 
     if not keep_data:
         if not _remove_data_dir(dry_run=False):

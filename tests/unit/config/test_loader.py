@@ -410,6 +410,58 @@ class TestRuntimeHelperLookups:
         ):
             assert get_opencode_cli_path() == "/tmp/opencode"
 
+    def test_get_opencode_mode_returns_config_value(self) -> None:
+        """get_opencode_mode reads orchestrator.opencode_mode from config."""
+        from ouroboros.config.loader import get_opencode_mode
+
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(
+                orchestrator=OrchestratorConfig(opencode_mode="subprocess")
+            ),
+        ):
+            assert get_opencode_mode() == "subprocess"
+
+    def test_get_opencode_mode_plugin(self) -> None:
+        from ouroboros.config.loader import get_opencode_mode
+
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig(opencode_mode="plugin")),
+        ):
+            assert get_opencode_mode() == "plugin"
+
+    def test_get_opencode_mode_none_when_unset(self) -> None:
+        """Unset mode returns None → runtime gate defaults to plugin."""
+        from ouroboros.config.loader import get_opencode_mode
+
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig()),
+        ):
+            assert get_opencode_mode() is None
+
+    def test_get_opencode_mode_returns_none_on_config_error(self) -> None:
+        """Missing config file returns None gracefully."""
+        from ouroboros.config.loader import ConfigError, get_opencode_mode
+
+        with patch(
+            "ouroboros.config.loader.load_config",
+            side_effect=ConfigError("no config"),
+        ):
+            assert get_opencode_mode() is None
+
+    def test_get_opencode_mode_ignores_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Locked decision: no env override — config file is the only source."""
+        from ouroboros.config.loader import get_opencode_mode
+
+        monkeypatch.setenv("OUROBOROS_OPENCODE_MODE", "subprocess")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig(opencode_mode="plugin")),
+        ):
+            assert get_opencode_mode() == "plugin"
+
     def test_get_agent_permission_mode_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for agent permission mode."""
         monkeypatch.setenv("OUROBOROS_AGENT_PERMISSION_MODE", "bypassPermissions")

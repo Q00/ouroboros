@@ -1587,7 +1587,7 @@ class TestOpenCodeSetupConfigYaml:
         ):
             from ouroboros.cli.commands.setup import _setup_opencode
 
-            _setup_opencode("/usr/bin/opencode")
+            _setup_opencode("/usr/bin/opencode", mode="subprocess")
 
         result = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert isinstance(result, dict)
@@ -1612,7 +1612,7 @@ class TestOpenCodeSetupConfigYaml:
         ):
             from ouroboros.cli.commands.setup import _setup_opencode
 
-            _setup_opencode("/usr/bin/opencode")
+            _setup_opencode("/usr/bin/opencode", mode="subprocess")
 
         result = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert isinstance(result["orchestrator"], dict)
@@ -1642,6 +1642,36 @@ class TestOpenCodeSetupConfigYaml:
         assert result["orchestrator"]["runtime_backend"] == "opencode"
         assert isinstance(result["llm"], dict)
         assert result["llm"]["backend"] == "opencode"
+
+
+class TestOpenCodeModePersisted:
+    """_setup_opencode persists orchestrator.opencode_mode in both branches."""
+
+    def _run(self, tmp_path: Path, mode: str) -> dict:
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry"),
+            patch("ouroboros.cli.commands.setup._ensure_claude_mcp_entry"),
+        ):
+            from ouroboros.cli.commands.setup import _setup_opencode
+
+            _setup_opencode("/usr/bin/opencode", mode=mode)
+        return yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    def test_mode_plugin_persisted(self, tmp_path: Path) -> None:
+        result = self._run(tmp_path, "plugin")
+        assert result["orchestrator"]["opencode_mode"] == "plugin"
+        # Plugin branch intentionally does NOT set runtime_backend — plugin
+        # runs in-process inside OpenCode; runtime stays at caller default.
+
+    def test_mode_subprocess_persisted(self, tmp_path: Path) -> None:
+        result = self._run(tmp_path, "subprocess")
+        assert result["orchestrator"]["opencode_mode"] == "subprocess"
+        assert result["orchestrator"]["runtime_backend"] == "opencode"
 
 
 # ── JSONC config file detection tests ────────────────────────────

@@ -37,6 +37,12 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.mcp.tools.subagent import (
+    build_evolve_subagent,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
@@ -103,6 +109,9 @@ class EvolveStepHandler:
     """
 
     evolutionary_loop: Any | None = field(default=None, repr=False)
+    event_store: EventStore | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     TIMEOUT_SECONDS: int = int(
         os.environ.get("OUROBOROS_GENERATION_TIMEOUT", "7200")
@@ -191,6 +200,27 @@ class EvolveStepHandler:
                 )
             )
 
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        # Parity with qa / execute_seed / lateral / evaluate handlers. When
+        # the opencode bridge plugin is active we emit a `_subagent`
+        # envelope instead of running the Python evolutionary_loop inline.
+        payload = build_evolve_subagent(
+            lineage_id=lineage_id,
+            seed_content=arguments.get("seed_content"),
+            execute=arguments.get("execute", True),
+            parallel=arguments.get("parallel", True),
+            skip_qa=arguments.get("skip_qa", False),
+            project_dir=arguments.get("project_dir"),
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self.event_store,
+                session_id=lineage_id,
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real in-process execution (subprocess / non-opencode runtimes).
         if self.evolutionary_loop is None:
             return Result.err(
                 MCPToolError(

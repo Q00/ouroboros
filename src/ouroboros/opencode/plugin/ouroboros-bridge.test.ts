@@ -1,0 +1,455 @@
+// Bun tests for pure helpers in ouroboros-bridge.ts.
+// Run: bun test  (from this directory)
+//
+// Covers: cfg, rand62, id, fnv, build, parse, readText, stamp, notify, dupe,
+//         base, childOutput.
+// I/O + runtime-orchestration (patch/resolveMid/attempt/run/bridge) are
+// covered by Python installer tests and live integration; untested here
+// because they require a live client.
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import {
+  B62,
+  DEDUPE_MS,
+  ID_LEN,
+  MAX_BYTES,
+  MAX_FANOUT,
+  MAX_SEEN,
+  _resetDedupe,
+  base,
+  build,
+  cfg,
+  childOutput,
+  dupe,
+  fnv,
+  id,
+  notify,
+  num,
+  parse,
+  rand62,
+  readText,
+  stamp,
+} from "./ouroboros-bridge.ts"
+
+const ENV_BACKUP = { ...process.env }
+const restoreEnv = () => {
+  for (const k of Object.keys(process.env)) if (!(k in ENV_BACKUP)) delete process.env[k]
+  for (const k of Object.keys(ENV_BACKUP)) process.env[k] = ENV_BACKUP[k]
+}
+
+afterEach(restoreEnv)
+
+describe("cfg — platform config dir", () => {
+  test("linux prefers XDG_CONFIG_HOME", () => {
+    process.env.HOME = "/home/u"
+    process.env.XDG_CONFIG_HOME = "/custom/xdg"
+    delete process.env.APPDATA
+    Object.defineProperty(process, "platform", { value: "linux" })
+    expect(cfg()).toBe("/custom/xdg/opencode")
+  })
+
+  test("linux falls back to $HOME/.config when XDG_CONFIG_HOME unset", () => {
+    process.env.HOME = "/home/u"
+    delete process.env.XDG_CONFIG_HOME
+    Object.defineProperty(process, "platform", { value: "linux" })
+    expect(cfg()).toBe("/home/u/.config/opencode")
+  })
+
+  test("darwin uses Library/Application Support", () => {
+    process.env.HOME = "/Users/u"
+    Object.defineProperty(process, "platform", { value: "darwin" })
+    expect(cfg()).toBe("/Users/u/Library/Application Support/OpenCode")
+  })
+
+  test("win32 uses APPDATA when present", () => {
+    process.env.APPDATA = "C:\\Users\\u\\AppData\\Roaming"
+    process.env.USERPROFILE = "C:\\Users\\u"
+    delete process.env.HOME
+    Object.defineProperty(process, "platform", { value: "win32" })
+    expect(cfg()).toContain("OpenCode")
+    expect(cfg()).toContain("Roaming")
+  })
+
+  test("win32 falls back to USERPROFILE/AppData/Roaming when APPDATA unset", () => {
+    delete process.env.APPDATA
+    process.env.USERPROFILE = "C:\\Users\\u"
+    delete process.env.HOME
+    Object.defineProperty(process, "platform", { value: "win32" })
+    const r = cfg()
+    expect(r).toContain("AppData")
+    expect(r).toContain("Roaming")
+    expect(r).toContain("OpenCode")
+  })
+})
+
+describe("num — env parse guard", () => {
+  test("returns default when undefined", () => {
+    expect(num(undefined, 42)).toBe(42)
+  })
+  test("parses valid integer string", () => {
+    expect(num("1500", 42)).toBe(1500)
+  })
+  test("parses valid float", () => {
+    expect(num("3.14", 0)).toBeCloseTo(3.14)
+  })
+  test("rejects NaN string, returns default", () => {
+    expect(num("abc", 99)).toBe(99)
+  })
+  test("rejects empty string, returns default", () => {
+    expect(num("", 7)).toBe(7)
+  })
+  test("rejects negative, returns default", () => {
+    expect(num("-5", 10)).toBe(10)
+  })
+  test("accepts zero", () => {
+    expect(num("0", 99)).toBe(0)
+  })
+  test("rejects Infinity, returns default", () => {
+    expect(num("Infinity", 5)).toBe(5)
+  })
+})
+
+describe("rand62", () => {
+  test("length matches n", () => {
+    for (const n of [1, 8, 14, 26]) expect(rand62(n).length).toBe(n)
+  })
+
+  test("only uses B62 alphabet", () => {
+    const s = rand62(200)
+    for (const ch of s) expect(B62.includes(ch)).toBe(true)
+  })
+
+  test("distribution is not degenerate (100 samples all different)", () => {
+    const set = new Set<string>()
+    for (let i = 0; i < 100; i++) set.add(rand62(14))
+    expect(set.size).toBeGreaterThan(95) // allow rare collisions
+  })
+})
+
+describe("id", () => {
+  test("prt_ prefix + correct length", () => {
+    const v = id("prt")
+    expect(v.startsWith("prt_")).toBe(true)
+    expect(v.length).toBe(4 + ID_LEN)
+  })
+
+  test("tool_ prefix", () => {
+    expect(id("tool").startsWith("tool_")).toBe(true)
+  })
+
+  test("hex prefix + b62 suffix structure", () => {
+    const v = id("prt").slice(4)
+    expect(v.slice(0, 12)).toMatch(/^[0-9a-f]{12}$/)
+    expect(v.slice(12)).toMatch(/^[0-9A-Za-z]{14}$/)
+  })
+
+  test("monotonically ascending across rapid calls", () => {
+    const a = id("prt")
+    const b = id("prt")
+    const c = id("prt")
+    expect(b > a).toBe(true)
+    expect(c > b).toBe(true)
+  })
+
+  test("1000 calls remain strictly ascending", () => {
+    const ids = Array.from({ length: 1000 }, () => id("tool"))
+    for (let i = 1; i < ids.length; i++) expect(ids[i] > ids[i - 1]).toBe(true)
+  })
+})
+
+describe("fnv", () => {
+  test("deterministic for same input", () => {
+    expect(fnv("hello")).toBe(fnv("hello"))
+  })
+
+  test("distinct inputs → distinct hashes (high probability)", () => {
+    expect(fnv("hello")).not.toBe(fnv("world"))
+  })
+
+  test("empty string", () => {
+    expect(fnv("")).toBe("811c9dc5")
+  })
+
+  test("hex lowercase output", () => {
+    expect(fnv("anything goes here 12345")).toMatch(/^[0-9a-f]+$/)
+  })
+})
+
+describe("build", () => {
+  test("valid minimal payload", () => {
+    const s = build({ tool_name: "hacker", prompt: "think" }, 0)
+    expect(s).not.toBeNull()
+    expect(s!.tool).toBe("hacker")
+    expect(s!.title).toBe("hacker") // defaults to tool_name
+    expect(s!.agent).toBe("general") // default agent
+    expect(s!.prompt).toBe("think")
+    expect(s!.truncated).toBe(false)
+    expect(s!.hash).toBe(fnv("think"))
+  })
+
+  test("uses custom title and agent when provided", () => {
+    const s = build({ tool_name: "t", title: "My Title", agent: "hacker", prompt: "p" }, 0)
+    expect(s!.title).toBe("My Title")
+    expect(s!.agent).toBe("hacker")
+  })
+
+  test("rejects non-object", () => {
+    expect(build(null, 0)).toBeNull()
+    expect(build(42, 0)).toBeNull()
+    expect(build("str", 0)).toBeNull()
+  })
+
+  test("rejects missing tool_name", () => {
+    expect(build({ prompt: "p" }, 0)).toBeNull()
+    expect(build({ tool_name: "", prompt: "p" }, 0)).toBeNull()
+  })
+
+  test("rejects missing prompt", () => {
+    expect(build({ tool_name: "t" }, 0)).toBeNull()
+    expect(build({ tool_name: "t", prompt: "" }, 0)).toBeNull()
+  })
+
+  test("truncates prompt over MAX_BYTES", () => {
+    const big = "x".repeat(MAX_BYTES + 100)
+    const s = build({ tool_name: "t", prompt: big }, 0)
+    expect(s).not.toBeNull()
+    expect(s!.truncated).toBe(true)
+    expect(s!.prompt.length).toBeLessThan(big.length)
+    expect(s!.prompt).toContain("[...truncated")
+  })
+
+  test("does not truncate exactly at MAX_BYTES", () => {
+    const exact = "x".repeat(MAX_BYTES)
+    const s = build({ tool_name: "t", prompt: exact }, 0)
+    expect(s!.truncated).toBe(false)
+    expect(s!.prompt).toBe(exact)
+  })
+})
+
+describe("parse", () => {
+  test("empty / garbage returns []", () => {
+    expect(parse("")).toEqual([])
+    expect(parse("x")).toEqual([])
+    expect(parse("not json")).toEqual([])
+    expect(parse("null")).toEqual([])
+    expect(parse("42")).toEqual([])
+  })
+
+  test("_subagent single object → 1 Sub", () => {
+    const raw = JSON.stringify({ _subagent: { tool_name: "t", prompt: "p" } })
+    const out = parse(raw)
+    expect(out.length).toBe(1)
+    expect(out[0].tool).toBe("t")
+  })
+
+  test("_subagents array → N Subs", () => {
+    const raw = JSON.stringify({
+      _subagents: [
+        { tool_name: "a", prompt: "pa" },
+        { tool_name: "b", prompt: "pb" },
+        { tool_name: "c", prompt: "pc" },
+      ],
+    })
+    const out = parse(raw)
+    expect(out.length).toBe(3)
+    expect(out.map((s) => s.tool)).toEqual(["a", "b", "c"])
+  })
+
+  test("_subagents empty array rejected", () => {
+    expect(parse(JSON.stringify({ _subagents: [] }))).toEqual([])
+  })
+
+  test("_subagents capped at MAX_FANOUT", () => {
+    const many = Array.from({ length: MAX_FANOUT + 5 }, (_, i) => ({ tool_name: `t${i}`, prompt: `p${i}` }))
+    const out = parse(JSON.stringify({ _subagents: many }))
+    expect(out.length).toBe(MAX_FANOUT)
+  })
+
+  test("invalid children skipped in array", () => {
+    const raw = JSON.stringify({
+      _subagents: [
+        { tool_name: "good", prompt: "p" },
+        { prompt: "no tool name" },
+        { tool_name: "also-good", prompt: "p2" },
+      ],
+    })
+    const out = parse(raw)
+    expect(out.length).toBe(2)
+    expect(out.map((s) => s.tool)).toEqual(["good", "also-good"])
+  })
+
+  test("neither _subagent nor _subagents → []", () => {
+    expect(parse(JSON.stringify({ other: "key" }))).toEqual([])
+  })
+})
+
+describe("readText", () => {
+  test("joins text parts from content[]", () => {
+    expect(readText({ content: [{ type: "text", text: "A" }, { type: "text", text: "B" }] })).toBe("A\n\nB")
+  })
+
+  test("skips non-text parts", () => {
+    expect(readText({ content: [{ type: "image" }, { type: "text", text: "only" }] as any })).toBe("only")
+  })
+
+  test("falls back to output string when content empty", () => {
+    expect(readText({ output: "fallback" })).toBe("fallback")
+  })
+
+  test("returns empty when nothing", () => {
+    expect(readText({})).toBe("")
+  })
+
+  test("prefers content over output", () => {
+    expect(readText({ content: [{ type: "text", text: "C" }], output: "O" })).toBe("C")
+  })
+})
+
+describe("stamp", () => {
+  test("replaces existing content array in-place", () => {
+    const r: any = { content: [{ type: "text", text: "old" }] }
+    const ref = r.content
+    stamp(r, "new")
+    expect(ref).toBe(r.content) // same reference — in-place mutation
+    expect(r.content).toEqual([{ type: "text", text: "new" }])
+    expect(r.output).toBe("new")
+  })
+
+  test("creates content when missing", () => {
+    const r: any = {}
+    stamp(r, "hi")
+    expect(r.content).toEqual([{ type: "text", text: "hi" }])
+    expect(r.output).toBe("hi")
+  })
+})
+
+describe("notify", () => {
+  const sub = (title: string, truncated = false) => ({
+    tool: "t", title, agent: "general", prompt: "p", truncated, hash: "h",
+  })
+  const okR = (title: string, output = "child output", childID = "ses_child", truncated = false) => ({
+    sub: sub(title, truncated), childID, output,
+  })
+
+  test("ok-only — plural grammar", () => {
+    const msg = notify([okR("a"), okR("b")], [], [])
+    expect(msg).toContain("Dispatched 2 subagents in parallel")
+    expect(msg).toContain("• a")
+    expect(msg).toContain("• b")
+  })
+
+  test("ok-only singular grammar", () => {
+    expect(notify([okR("only")], [], [])).toContain("1 subagent in")
+  })
+
+  test("failed-only", () => {
+    const msg = notify([], [sub("x"), sub("y")], [])
+    expect(msg).toContain("Failed 2 subagents")
+  })
+
+  test("skipped-only mentions dedupe window", () => {
+    const msg = notify([], [], [sub("dup")])
+    expect(msg).toContain("Skipped 1 duplicate")
+    expect(msg).toContain(`within ${Math.round(DEDUPE_MS / 1000)}s`)
+  })
+
+  test("mixed", () => {
+    const msg = notify([okR("ok")], [sub("bad")], [sub("dup")])
+    expect(msg).toContain("Dispatched 1")
+    expect(msg).toContain("Failed 1")
+    expect(msg).toContain("Skipped 1")
+  })
+
+  test("truncated note appears", () => {
+    expect(notify([okR("big", "o", "ses_big", true)], [], [])).toContain("truncated")
+  })
+
+  test("empty everything → fallback", () => {
+    expect(notify([], [], [])).toContain("Nothing dispatched")
+  })
+
+  test("results section — child output surfaced to parent", () => {
+    const msg = notify([okR("alpha", "ALPHA_RESULT", "ses_aaa"), okR("beta", "BETA_RESULT", "ses_bbb")], [], [])
+    expect(msg).toContain("--- Results ---")
+    expect(msg).toContain("### alpha (ses_aaa)")
+    expect(msg).toContain("ALPHA_RESULT")
+    expect(msg).toContain("### beta (ses_bbb)")
+    expect(msg).toContain("BETA_RESULT")
+  })
+
+  test("results section omitted when no successes", () => {
+    const msg = notify([], [sub("x")], [])
+    expect(msg).not.toContain("--- Results ---")
+  })
+})
+
+describe("dupe", () => {
+  beforeEach(() => _resetDedupe())
+
+  test("first call returns false", () => {
+    expect(dupe("p", "call_1")).toBe(false)
+  })
+
+  test("same pid+callID within window returns true (hook re-fire)", () => {
+    dupe("p", "call_1")
+    expect(dupe("p", "call_1")).toBe(true)
+  })
+
+  test("different callID — legit re-runs pass", () => {
+    dupe("p", "call_1")
+    expect(dupe("p", "call_2")).toBe(false)
+  })
+
+  test("different pid — cross-session isolation", () => {
+    dupe("p1", "call_1")
+    expect(dupe("p2", "call_1")).toBe(false)
+  })
+
+  test("eviction after MAX_SEEN entries", () => {
+    for (let i = 0; i < MAX_SEEN + 5; i++) dupe("p", `call_${i}`)
+    // earliest entries should be evicted → false again on insert
+    expect(dupe("p", "call_0")).toBe(false)
+  })
+})
+
+describe("base", () => {
+  test("returns inner client when session._client.patch present", () => {
+    const fake = { session: { _client: { patch: () => Promise.resolve({}) } } }
+    expect(base(fake)).toBe(fake.session._client)
+  })
+
+  test("null when missing", () => {
+    expect(base(null)).toBeNull()
+    expect(base({})).toBeNull()
+    expect(base({ session: {} })).toBeNull()
+    expect(base({ session: { _client: {} } })).toBeNull()
+    expect(base({ session: { _client: { patch: "not a function" } } })).toBeNull()
+  })
+})
+
+describe("childOutput", () => {
+  test("extracts last text part wrapped in task_result", () => {
+    const data = { parts: [{ type: "text", text: "early" }, { type: "tool" }, { type: "text", text: "final" }] }
+    const out = childOutput("ses_abc", data)
+    expect(out).toContain("task_id: ses_abc")
+    expect(out).toContain("<task_result>")
+    expect(out).toContain("final")
+    expect(out).toContain("</task_result>")
+    expect(out).not.toContain("early")
+  })
+
+  test("empty when no text part", () => {
+    const out = childOutput("ses_abc", { parts: [{ type: "tool" }] })
+    expect(out).toContain("<task_result>\n\n</task_result>")
+  })
+
+  test("empty when parts missing", () => {
+    const out = childOutput("ses_x", {})
+    expect(out).toContain("task_id: ses_x")
+    expect(out).toContain("<task_result>")
+  })
+
+  test("handles null/undefined data", () => {
+    expect(childOutput("ses_y", null)).toContain("task_id: ses_y")
+    expect(childOutput("ses_z", undefined)).toContain("task_id: ses_z")
+  })
+})

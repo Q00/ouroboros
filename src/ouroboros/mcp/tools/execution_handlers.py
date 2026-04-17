@@ -33,6 +33,12 @@ from ouroboros.evaluation.verification_artifacts import build_verification_artif
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
 from ouroboros.mcp.tools.bridge_mixin import BridgeAwareMixin
+from ouroboros.mcp.tools.subagent import (
+    build_execute_subagent,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -110,6 +116,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
     _background_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -274,6 +281,26 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             llm_backend=self.llm_backend,
             cwd=str(resolved_cwd),
         )
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        payload = build_execute_subagent(
+            seed_content=seed_content,
+            session_id=session_id,
+            seed_path=arguments.get("seed_path"),
+            cwd=str(resolved_cwd),
+            max_iterations=max_iterations,
+            skip_qa=arguments.get("skip_qa", False),
+            model_tier=model_tier,
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self.event_store,
+                session_id=session_id,
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real in-process execution (subprocess / non-opencode runtimes).
 
         # Parse seed_content YAML into Seed object
         try:
@@ -729,12 +756,16 @@ class StartExecuteSeedHandler:
     execute_handler: ExecuteSeedHandler | None = field(default=None, repr=False)
     event_store: EventStore | None = field(default=None, repr=False)
     job_manager: JobManager | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._event_store = self.event_store or EventStore()
         self._job_manager = self.job_manager or JobManager(self._event_store)
         self._execute_handler = self.execute_handler or ExecuteSeedHandler(
-            event_store=self._event_store
+            event_store=self._event_store,
+            agent_runtime_backend=self.agent_runtime_backend,
+            opencode_mode=self.opencode_mode,
         )
 
     @property
@@ -806,6 +837,27 @@ class StartExecuteSeedHandler:
                     tool_name="ouroboros_start_execute_seed",
                 )
             )
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        # StartExecuteSeedHandler delegates to ExecuteSeedHandler internally.
+        payload = build_execute_subagent(
+            seed_content=seed_content,
+            session_id=arguments.get("session_id"),
+            seed_path=arguments.get("seed_path"),
+            cwd=arguments.get("cwd"),
+            max_iterations=arguments.get("max_iterations", 10),
+            skip_qa=arguments.get("skip_qa", False),
+            model_tier=arguments.get("model_tier", "medium"),
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self._event_store,
+                session_id=arguments.get("session_id"),
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real background job path (subprocess / non-opencode runtimes).
 
         await self._event_store.initialize()
 

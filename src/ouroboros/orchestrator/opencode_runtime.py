@@ -165,6 +165,7 @@ class OpenCodeRuntime:
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        opencode_mode: str | None = None,
     ) -> None:
         """Initialise the OpenCode runtime.
 
@@ -196,6 +197,7 @@ class OpenCodeRuntime:
         self._skills_dir = self._resolve_skills_dir(skills_dir)
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._opencode_mode = opencode_mode
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
         log.info(
@@ -419,7 +421,14 @@ class OpenCodeRuntime:
             ValueError: If *resume_session_id* contains disallowed
                 characters.
         """
-        command = [self._cli_path, "run", "--format", "json"]
+        # --pure: disable external opencode plugins for this headless run.
+        # Subprocess runtime is an LLM executor, not an interactive session;
+        # the ouroboros-bridge plugin must never fire here. Without --pure, a
+        # stale bridge install (from prior `ouroboros setup --opencode-mode=
+        # plugin`) would load inside the subprocess and double-dispatch any
+        # _subagent envelope that leaked into MCP output. --pure makes the
+        # runtime's isolation explicit regardless of plugin-install state.
+        command = [self._cli_path, "run", "--pure", "--format", "json"]
 
         normalized_model = self._normalize_model(self._model)
         if normalized_model:
@@ -812,6 +821,7 @@ class OpenCodeRuntime:
                 for handler in get_ouroboros_tools(
                     runtime_backend=self._runtime_backend,
                     llm_backend=self._llm_backend,
+                    opencode_mode=self._opencode_mode,
                 )
             }
         return self._builtin_mcp_handlers

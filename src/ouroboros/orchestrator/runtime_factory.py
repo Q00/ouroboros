@@ -11,6 +11,7 @@ from ouroboros.config import (
     get_codex_cli_path,
     get_hermes_cli_path,
     get_llm_backend,
+    get_opencode_mode,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
@@ -82,8 +83,13 @@ def create_agent_runtime(
     if resolved_backend == "opencode":
         from ouroboros.config import get_opencode_cli_path
 
+        try:
+            resolved_opencode_mode = get_opencode_mode()
+        except Exception:
+            resolved_opencode_mode = None
         return OpenCodeRuntime(
             cli_path=cli_path or get_opencode_cli_path(),
+            opencode_mode=resolved_opencode_mode,
             **runtime_kwargs,
         )
 

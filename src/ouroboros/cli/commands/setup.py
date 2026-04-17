@@ -30,7 +30,7 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
-from ouroboros.cli.opencode_config import find_opencode_config
+from ouroboros.cli.opencode_config import find_opencode_config, opencode_config_dir
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -484,10 +484,10 @@ def _find_opencode_config() -> Path:
 
 
 def _ensure_opencode_mcp_entry() -> None:
-    """Ensure the global OpenCode config has a correct ouroboros MCP entry.
+    """Ensure the platform-appropriate OpenCode config has a correct ouroboros MCP entry.
 
-    OpenCode reads config from ``~/.config/opencode/`` — either
-    ``opencode.jsonc`` or ``opencode.json`` (both support JSONC).
+    OpenCode reads config from the platform config dir (see :func:`opencode_config_dir`)
+    — either ``opencode.jsonc`` or ``opencode.json`` (both support JSONC).
     The ``mcp`` key is a record of named MCP server configs.
 
     MCP entry format (local):
@@ -635,46 +635,276 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
     return None
 
 
-def _setup_opencode(opencode_path: str) -> None:
-    """Configure Ouroboros for the OpenCode runtime."""
+# Canonical relative path components for the bridge plugin install — single
+# source of truth so install + config-registry + uninstall all agree.
+_BRIDGE_PLUGIN_SUBDIR = ("plugins", "ouroboros-bridge")
+_BRIDGE_PLUGIN_FILENAME = "ouroboros-bridge.ts"
+
+
+def _bridge_plugin_source_text() -> str | None:
+    """Return the bridge plugin TypeScript source, or ``None`` when missing.
+
+    Tries the packaged wheel resource first (production installs), then falls
+    back to the in-repo development tree.  Any IO or import failure → ``None``
+    so the caller can warn instead of crashing setup.
+    """
+    import importlib.resources
+
+    try:
+        pkg = importlib.resources.files("ouroboros.opencode.plugin")
+        return pkg.joinpath(_BRIDGE_PLUGIN_FILENAME).read_text(encoding="utf-8")
+    except (FileNotFoundError, TypeError, ModuleNotFoundError, OSError):
+        pass
+    dev = Path(__file__).resolve().parents[2] / "opencode" / "plugin" / _BRIDGE_PLUGIN_FILENAME
+    try:
+        return dev.read_text(encoding="utf-8") if dev.exists() else None
+    except OSError:
+        return None
+
+
+def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
+    """Write *content* to *path* atomically — temp file + ``os.replace``.
+
+    Readers always see either the pre-existing file or the final content —
+    never a truncated partial.  Caller is expected to have created
+    ``path.parent`` already.  Raises :class:`OSError` on failure; callers
+    decide how to surface that.
+    """
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_name, path)
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass  # e.g. Windows FAT — not fatal
+    except OSError:
+        try:
+            Path(tmp_name).unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _install_opencode_bridge_plugin() -> None:
+    """Install the ouroboros-bridge plugin into OpenCode's plugin directory.
+
+    Writes to the platform-appropriate OpenCode plugins directory:
+
+    * Linux:   ``~/.config/opencode/plugins/ouroboros-bridge/``
+    * macOS:   ``~/Library/Application Support/OpenCode/plugins/ouroboros-bridge/``
+    * Windows: ``%APPDATA%\\OpenCode\\plugins\\ouroboros-bridge\\``
+
+    Robustness:
+
+    * Content hashed (SHA-256) before write → identical source skips disk IO,
+      avoids bumping mtime (which would re-trigger opencode's plugin watcher).
+    * Atomic write (temp file + ``os.replace``) → crash mid-write never
+      leaves a corrupted ``.ts`` file that would fail the plugin loader.
+    * Missing source (wheel built without package-data, truncated checkout)
+      warns but does not raise — setup continues.
+    """
+    import hashlib
+
+    plugin_dir = opencode_config_dir()
+    for part in _BRIDGE_PLUGIN_SUBDIR:
+        plugin_dir = plugin_dir / part
+    dest = plugin_dir / _BRIDGE_PLUGIN_FILENAME
+
+    content = _bridge_plugin_source_text()
+    if content is None:
+        print_warning(
+            f"Bridge plugin source not found — manually copy {_BRIDGE_PLUGIN_FILENAME} "
+            f"into {plugin_dir}/"
+        )
+        return
+
+    new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    existing_hash: str | None = None
+    if dest.exists():
+        try:
+            existing_hash = hashlib.sha256(dest.read_bytes()).hexdigest()
+        except OSError:
+            existing_hash = None
+
+    if existing_hash == new_hash:
+        print_info(f"Bridge plugin already up to date: {dest}")
+        return
+
+    try:
+        _atomic_write_text(dest, content)
+    except OSError as exc:
+        print_warning(f"Could not install bridge plugin at {dest}: {exc}")
+        return
+
+    print_success(
+        f"{'Updated' if existing_hash is not None else 'Installed'} bridge plugin: {dest}"
+    )
+
+
+def _is_bridge_plugin_entry(entry: object) -> bool:
+    """Return ``True`` when *entry* refers to any bridge-plugin install.
+
+    Matches by directory-tail (``plugins/ouroboros-bridge``) + basename
+    (``ouroboros-bridge.ts``) rather than exact string equality — catches
+    stale entries from XDG reshuffles, Windows mixed separators, legacy
+    install paths, and sudo/root migrations.
+    """
+    if not isinstance(entry, str) or not entry:
+        return False
+    # Normalise path separators so Windows entries (``\``) compare equal.
+    normalised = entry.replace("\\", "/")
+    parts = [p for p in normalised.split("/") if p]
+    if len(parts) < 3:
+        return False
+    return (
+        parts[-1] == _BRIDGE_PLUGIN_FILENAME
+        and parts[-2] == _BRIDGE_PLUGIN_SUBDIR[1]
+        and parts[-3] == _BRIDGE_PLUGIN_SUBDIR[0]
+    )
+
+
+def _ensure_opencode_plugin_entry() -> None:
+    """Ensure the bridge plugin is registered in OpenCode's ``plugin`` array.
+
+    Reads ``opencode.jsonc``/``opencode.json``, deduplicates any stale bridge
+    entries (matching by directory tail, not exact string — handles path
+    changes across XDG shifts and OS migrations), appends the canonical
+    current path, and writes the config back atomically.  No-ops when the
+    canonical entry is already present and no stale siblings exist.
+    """
+    canonical = opencode_config_dir()
+    for part in _BRIDGE_PLUGIN_SUBDIR:
+        canonical = canonical / part
+    canonical_path = str(canonical / _BRIDGE_PLUGIN_FILENAME)
+
+    config_path = _find_opencode_config()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict = {}
+    if config_path.exists():
+        try:
+            data = json.loads(_strip_jsonc(config_path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            print_warning(f"Could not parse {config_path} — skipping plugin registration.")
+            return
+
+    if not isinstance(data, dict):
+        data = {}
+
+    raw_plugins = data.get("plugin")
+    existing = raw_plugins if isinstance(raw_plugins, list) else []
+
+    # Drop every stale bridge entry (including the canonical one — we re-add
+    # it at the end so the list stays deduplicated and the bridge is always
+    # loaded last, matching install order expectations).
+    stale = [e for e in existing if _is_bridge_plugin_entry(e)]
+    kept = [e for e in existing if not _is_bridge_plugin_entry(e)]
+    cleaned = [*kept, canonical_path]
+
+    already_ok = (
+        isinstance(raw_plugins, list)
+        and len(stale) == 1
+        and stale[0] == canonical_path
+        and existing == cleaned
+    )
+    if already_ok:
+        print_info("Bridge plugin already registered in opencode config.")
+        return
+
+    data["plugin"] = cleaned
+
+    try:
+        _atomic_write_text(config_path, json.dumps(data, indent=2) + "\n")
+    except OSError as exc:
+        print_warning(f"Could not write {config_path}: {exc}")
+        return
+
+    if len(stale) > 1:
+        print_info(f"Removed {len(stale) - 1} stale bridge entries from {config_path}.")
+    if stale and stale[0] != canonical_path:
+        print_info(f"Repointed bridge entry to {canonical_path} in {config_path}.")
+    if not stale:
+        print_success(f"Registered bridge plugin in {config_path}")
+    else:
+        print_success(f"Bridge plugin entry verified in {config_path}")
+
+
+def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
+    """Configure Ouroboros for the OpenCode runtime.
+
+    mode (mutually exclusive — pick one, run setup twice if you deliberately want both):
+        ``plugin``     install bridge plugin + register plugin/MCP in opencode.jsonc
+                       (interactive OpenCode sessions; recommended default)
+        ``subprocess`` write ~/.ouroboros/config.yaml runtime_backend=opencode only
+                       (headless / CI / scripted ``ouroboros run``)
+
+    Wiring both at once wastes tokens: an Ouroboros MCP tool called inside a
+    subprocess-driven ``opencode run`` would also trigger the globally
+    registered plugin, causing duplicate subagent dispatch. Choose one.
+    """
+    if mode not in ("plugin", "subprocess"):
+        raise ValueError(f"Invalid opencode mode: {mode!r} (expected 'plugin' or 'subprocess')")
+
     from ouroboros.config.loader import create_default_config, ensure_config_dir
 
+    # Persist mode to config.yaml for both branches so the MCP runtime gate
+    # can read it later. Plugin branch still writes (no runtime_backend/cli
+    # fields — plugin runs in-process inside OpenCode; but mode signal matters).
     config_dir = ensure_config_dir()
     config_path = config_dir / "config.yaml"
-
     if config_path.exists():
         config_dict = yaml.safe_load(config_path.read_text()) or {}
     else:
         create_default_config(config_dir)
         config_dict = yaml.safe_load(config_path.read_text()) or {}
-
-    # Repair non-dict top-level / section shapes
     if not isinstance(config_dict, dict):
         print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
         config_dict = {}
-
-    # Set runtime and LLM backend to opencode
     orch = config_dict.get("orchestrator")
     if not isinstance(orch, dict):
         orch = {}
         config_dict["orchestrator"] = orch
-    orch["runtime_backend"] = "opencode"
-    orch["opencode_cli_path"] = opencode_path
+    orch["opencode_mode"] = mode
 
-    llm = config_dict.get("llm")
-    if not isinstance(llm, dict):
-        llm = {}
-        config_dict["llm"] = llm
-    llm["backend"] = "opencode"
+    if mode == "subprocess":
+        orch["runtime_backend"] = "opencode"
+        orch["opencode_cli_path"] = opencode_path
 
+        llm = config_dict.get("llm")
+        if not isinstance(llm, dict):
+            llm = {}
+            config_dict["llm"] = llm
+        llm["backend"] = "opencode"
+
+        with config_path.open("w") as f:
+            yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+        print_success(f"Configured OpenCode subprocess runtime (CLI: {opencode_path})")
+        print_info(f"Config saved to: {config_path}")
+        return
+
+    # mode == "plugin" — persist mode signal, then install plugin/MCP entries.
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    print_success(f"Configured OpenCode runtime (CLI: {opencode_path})")
-    print_info(f"Config saved to: {config_path}")
-
-    # Register MCP server in OpenCode config
+    _install_opencode_bridge_plugin()
     _ensure_opencode_mcp_entry()
+    _ensure_opencode_plugin_entry()
+    print_success("Installed OpenCode bridge plugin and registered MCP entry")
+
+    # MCP sidecar for Claude Code (runtime-independent, only if Claude present)
+    if (Path.home() / ".claude").is_dir():
+        _ensure_claude_mcp_entry()
 
 
 # ── Brownfield repo helpers ──────────────────────────────────────
@@ -852,6 +1082,13 @@ def setup(
             help="Skip interactive prompts (for scripted installs).",
         ),
     ] = False,
+    opencode_mode: Annotated[
+        str,
+        typer.Option(
+            "--opencode-mode",
+            help="OpenCode integration mode (mutually exclusive): plugin (default) or subprocess.",
+        ),
+    ] = "plugin",
 ) -> None:
     """Set up Ouroboros for your environment.
 
@@ -950,7 +1187,32 @@ def setup(
         if not opencode_path:
             print_error("OpenCode CLI not found in PATH.")
             raise typer.Exit(1)
-        _setup_opencode(opencode_path)
+        mode = opencode_mode
+        if mode not in ("plugin", "subprocess"):
+            print_error(f"Invalid --opencode-mode: {mode!r}. Use 'plugin' or 'subprocess'.")
+            raise typer.Exit(1)
+        if not non_interactive:
+            console.print("\n[bold]OpenCode integration mode (pick one):[/bold]")
+            console.print(
+                "  [1] plugin      — bridge plugin (interactive OpenCode sessions, recommended)"
+            )
+            console.print(
+                "  [2] subprocess  — subprocess runtime (headless ouroboros run, CI, scripted)"
+            )
+            console.print(
+                "[dim]Mutually exclusive — wiring both causes duplicate subagent dispatch.[/dim]"
+            )
+            console.print(
+                "[dim]To wire both deliberately: run setup twice with different --opencode-mode.[/dim]"
+            )
+            console.print()
+            default_pick = "1" if mode == "plugin" else "2"
+            pick = typer.prompt("Select mode", default=default_pick)
+            mode = {"1": "plugin", "2": "subprocess"}.get(pick.strip(), pick.strip())
+            if mode not in ("plugin", "subprocess"):
+                print_error(f"Invalid selection: {pick!r}")
+                raise typer.Exit(1)
+        _setup_opencode(opencode_path, mode=mode)
     elif selected in ("hermes", "hermes_cli"):
         hermes_path = available.get("hermes")
         if not hermes_path:

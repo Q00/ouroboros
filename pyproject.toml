@@ -58,6 +58,7 @@ packages = ["src/ouroboros"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "ouroboros/skills"
+"src/ouroboros/opencode/plugin" = "ouroboros/opencode/plugin"
 
 [dependency-groups]
 dev = [

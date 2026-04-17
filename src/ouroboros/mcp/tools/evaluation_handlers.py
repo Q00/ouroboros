@@ -19,6 +19,12 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.subagent import (
+    build_evaluate_subagent,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -257,6 +263,8 @@ class EvaluateHandler:
 
     event_store: EventStore | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
     TIMEOUT_SECONDS: int = 0  # No server-side timeout; client/runtime decides.
 
     @property
@@ -405,6 +413,26 @@ class EvaluateHandler:
             multi_ac_count=len(acceptance_criteria),
             trigger_consensus=trigger_consensus,
         )
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        payload = build_evaluate_subagent(
+            session_id=session_id,
+            artifact=artifact,
+            artifact_type=artifact_type,
+            seed_content=seed_content,
+            acceptance_criterion=acceptance_criterion,
+            working_dir=arguments.get("working_dir"),
+            trigger_consensus=trigger_consensus,
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self.event_store,
+                session_id=session_id,
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real in-process evaluation pipeline (subprocess / non-opencode runtimes).
 
         store = self.event_store
         owns_event_store = False
@@ -1139,7 +1167,10 @@ class LateralThinkHandler:
                 "Use this tool when stuck on a problem to get fresh perspectives from "
                 "different thinking modes: hacker (unconventional workarounds), "
                 "researcher (seeks information), simplifier (reduces complexity), "
-                "architect (restructures approach), or contrarian (challenges assumptions)."
+                "architect (restructures approach), or contrarian (challenges assumptions). "
+                "Set persona='all' (or pass personas=['hacker','architect',...]) to "
+                "fan out to MULTIPLE personas in parallel — each runs in its own "
+                "Task pane with an independent LLM context (no cross-contamination)."
             ),
             parameters=(
                 MCPToolParameter(
@@ -1157,9 +1188,31 @@ class LateralThinkHandler:
                 MCPToolParameter(
                     name="persona",
                     type=ToolInputType.STRING,
-                    description="Specific persona to use: hacker, researcher, simplifier, architect, or contrarian",
+                    description=(
+                        "Single persona (hacker, researcher, simplifier, architect, "
+                        "contrarian) OR 'all' to dispatch ALL 5 personas in parallel "
+                        "as separate Task panes."
+                    ),
                     required=False,
-                    enum=("hacker", "researcher", "simplifier", "architect", "contrarian"),
+                    enum=(
+                        "hacker",
+                        "researcher",
+                        "simplifier",
+                        "architect",
+                        "contrarian",
+                        "all",
+                    ),
+                ),
+                MCPToolParameter(
+                    name="personas",
+                    type=ToolInputType.ARRAY,
+                    description=(
+                        "Explicit list of personas to dispatch in parallel. "
+                        "Takes precedence over 'persona' arg. Example: "
+                        "['hacker','contrarian','architect']. Each runs in its "
+                        "own parallel Task pane."
+                    ),
+                    required=False,
                 ),
                 MCPToolParameter(
                     name="failed_attempts",
@@ -1176,11 +1229,18 @@ class LateralThinkHandler:
     ) -> Result[MCPToolResult, MCPServerError]:
         """Handle a lateral thinking request.
 
+        Two modes:
+        - Single persona (default): return one prompt directly as text.
+        - Multi-persona parallel: when ``persona='all'`` or ``personas=[...]``
+          is passed, dispatch N subagents in parallel (one per persona) via
+          the ``_subagents`` bridge payload. Each runs in its own Task pane
+          with an independent LLM context.
+
         Args:
             arguments: Tool arguments including problem_context and current_approach.
 
         Returns:
-            Result containing lateral thinking prompt and questions or error.
+            Result containing lateral thinking prompt(s) or error.
         """
         from ouroboros.resilience.lateral import LateralThinker, ThinkingPersona
 
@@ -1202,28 +1262,88 @@ class LateralThinkHandler:
                 )
             )
 
-        persona_str = arguments.get("persona", "contrarian")
         failed_attempts_raw = arguments.get("failed_attempts") or []
+        failed_attempts = tuple(str(a) for a in failed_attempts_raw if a)
 
-        # Convert string to ThinkingPersona enum
+        # --- Parallel multi-persona dispatch path ---
+        explicit_list = arguments.get("personas")
+        persona_arg = arguments.get("persona", "contrarian")
+        dispatch_all = persona_arg == "all"
+
+        if explicit_list or dispatch_all:
+            from ouroboros.mcp.tools.subagent import (
+                build_lateral_multi_subagent,
+                build_multi_subagent_result,
+            )
+
+            if explicit_list:
+                # Coerce each item to str, drop blanks/nulls, dedupe preserving order.
+                seen_p: set[str] = set()
+                personas_list: list[str] = []
+                for item in explicit_list:
+                    s = str(item).strip() if item is not None else ""
+                    if s and s not in seen_p:
+                        seen_p.add(s)
+                        personas_list.append(s)
+                if not personas_list:
+                    return Result.err(
+                        MCPToolError(
+                            "personas list is empty or contains only blank/null items",
+                            tool_name="ouroboros_lateral_think",
+                        )
+                    )
+            else:
+                # persona="all" → use every persona
+                personas_list = [p.value for p in ThinkingPersona]
+
+            try:
+                payloads = build_lateral_multi_subagent(
+                    personas=personas_list,
+                    problem_context=str(problem_context),
+                    current_approach=str(current_approach),
+                    failed_attempts=failed_attempts,
+                )
+            except ValueError as e:
+                return Result.err(
+                    MCPToolError(
+                        str(e),
+                        tool_name="ouroboros_lateral_think",
+                    )
+                )
+            except Exception as e:  # noqa: BLE001
+                log.error("mcp.tool.lateral_think.multi.error", error=str(e))
+                return Result.err(
+                    MCPToolError(
+                        f"Unexpected error building multi-persona dispatch: {e}",
+                        tool_name="ouroboros_lateral_think",
+                    )
+                )
+
+            log.info(
+                "mcp.tool.lateral_think.multi",
+                persona_count=len(payloads),
+                context_length=len(str(problem_context)),
+                failed_count=len(failed_attempts),
+            )
+
+            return build_multi_subagent_result(payloads)
+
+        # --- Single-persona direct-response path (back-compat) ---
         try:
-            persona = ThinkingPersona(persona_str)
+            persona = ThinkingPersona(persona_arg)
         except ValueError:
             return Result.err(
                 MCPToolError(
-                    f"Invalid persona: {persona_str}. Must be one of: "
-                    f"hacker, researcher, simplifier, architect, contrarian",
+                    f"Invalid persona: {persona_arg}. Must be one of: "
+                    f"hacker, researcher, simplifier, architect, contrarian, all",
                     tool_name="ouroboros_lateral_think",
                 )
             )
 
-        # Convert failed_attempts to tuple of strings
-        failed_attempts = tuple(str(a) for a in failed_attempts_raw if a)
-
         log.info(
             "mcp.tool.lateral_think",
             persona=persona.value,
-            context_length=len(problem_context),
+            context_length=len(str(problem_context)),
             failed_count=len(failed_attempts),
         )
 
@@ -1231,8 +1351,8 @@ class LateralThinkHandler:
             thinker = LateralThinker()
             result = thinker.generate_alternative(
                 persona=persona,
-                problem_context=problem_context,
-                current_approach=current_approach,
+                problem_context=str(problem_context),
+                current_approach=str(current_approach),
                 failed_attempts=failed_attempts,
             )
 

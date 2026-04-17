@@ -307,6 +307,9 @@ class OrchestratorConfig(BaseModel, frozen=True):
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = (
         "bypassPermissions"
     )
+    # OpenCode integration mode. Written by `ouroboros setup --opencode-mode`.
+    # None = unset (legacy installs); gate treats None as plugin for safety.
+    opencode_mode: Literal["plugin", "subprocess"] | None = None
     cli_path: str | None = None
     codex_cli_path: str | None = None
     opencode_cli_path: str | None = None

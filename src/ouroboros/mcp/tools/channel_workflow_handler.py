@@ -45,15 +45,43 @@ class ChannelWorkflowHandler:
     job_wait_handler: JobWaitHandler | None = field(default=None, repr=False)
     job_result_handler: JobResultHandler | None = field(default=None, repr=False)
     default_repo: str | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._workflow_manager = self.workflow_manager or ChannelWorkflowManager()
         self._repo_registry = self.repo_registry or ChannelRepoRegistry()
-        self._interview_handler = self.interview_handler or InterviewHandler()
-        self._generate_seed_handler = self.generate_seed_handler or GenerateSeedHandler()
-        self._start_execute_seed_handler = (
-            self.start_execute_seed_handler or StartExecuteSeedHandler()
+        # Contract preservation across plugin boundary:
+        # The channel workflow orchestrator (``ChannelWorkflowRuntime``) invokes
+        # these inner handlers in-process and parses their ``MCPToolResult`` as
+        # real interview / seed / execution data. If the inner gate returned a
+        # ``_subagent`` envelope, the orchestrator would see the dispatch
+        # payload instead of the expected shape and the channel flow would
+        # break. Inner handlers must therefore always execute the real path,
+        # regardless of how the outer ChannelWorkflow tool was configured.
+        #
+        # Force-pin opencode_mode="subprocess" on EVERY inner handler — both
+        # the default-constructed ones AND those passed in by the composition
+        # root (adapter.py). The composition root passes handlers wired with
+        # the server-wide opencode_mode which may be "plugin"; accepting that
+        # value here would break the runtime. The pin is applied *after*
+        # assignment so it works for both code paths.
+        self._interview_handler = self.interview_handler or InterviewHandler(
+            agent_runtime_backend=self.agent_runtime_backend,
         )
+        self._generate_seed_handler = self.generate_seed_handler or GenerateSeedHandler(
+            agent_runtime_backend=self.agent_runtime_backend,
+        )
+        self._start_execute_seed_handler = (
+            self.start_execute_seed_handler
+            or StartExecuteSeedHandler(
+                agent_runtime_backend=self.agent_runtime_backend,
+            )
+        )
+        # Pin after assignment — works for both passed-in and default-created.
+        self._interview_handler.opencode_mode = "subprocess"
+        self._generate_seed_handler.opencode_mode = "subprocess"
+        self._start_execute_seed_handler.opencode_mode = "subprocess"
         self._job_status_handler = self.job_status_handler or JobStatusHandler()
         self._job_wait_handler = self.job_wait_handler or JobWaitHandler()
         self._job_result_handler = self.job_result_handler or JobResultHandler()

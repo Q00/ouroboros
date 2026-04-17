@@ -1,0 +1,14 @@
+{
+  "name": "ouroboros-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode subagent bridge plugin — runtime hook that PATCHes parallel child sessions as inline Task panes.",
+  "scripts": {
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest"
+  }
+}

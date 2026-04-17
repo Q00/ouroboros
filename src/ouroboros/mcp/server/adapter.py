@@ -724,6 +724,7 @@ def create_ouroboros_server(
     state_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    opencode_mode: str | None = None,
     mcp_bridge: Any | None = None,
 ) -> MCPServerAdapter:
     """Create an Ouroboros MCP server with all tools and dependencies wired.
@@ -750,6 +751,11 @@ def create_ouroboros_server(
                    (typically ``~/.ouroboros/data``).
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
+        opencode_mode: Optional OpenCode integration mode (``"plugin"`` or
+            ``"subprocess"``). When None, resolved from
+            ``orchestrator.opencode_mode`` in the config file. Controls
+            whether ``_subagent`` envelopes are emitted (plugin) or handlers
+            run in-process (subprocess / non-opencode runtimes).
 
     Returns:
         Configured MCPServerAdapter with all tools registered.
@@ -811,6 +817,13 @@ def create_ouroboros_server(
     from ouroboros.providers import create_llm_adapter
 
     resolved_runtime_backend = resolve_agent_runtime_backend(runtime_backend)
+
+    # Resolve opencode_mode from config file if caller did not pass one.
+    # Controls _subagent envelope dispatch gate in every handler.
+    if opencode_mode is None:
+        from ouroboros.config import get_opencode_mode
+
+        opencode_mode = get_opencode_mode()
 
     # Resolve a safe working directory once so all consumers agree.
     # When the MCP server is spawned with cwd=/ (OpenClaw gateways), Path.cwd()
@@ -1320,11 +1333,15 @@ def create_ouroboros_server(
     execute_seed = ExecuteSeedHandler(
         event_store=event_store,
         llm_adapter=llm_adapter,
-        agent_runtime_backend=runtime_backend,
+        agent_runtime_backend=resolved_runtime_backend,
+        opencode_mode=opencode_mode,
         llm_backend=llm_backend,
     )
     evolve_step = EvolveStepHandler(
         evolutionary_loop=evolutionary_loop,
+        event_store=event_store,
+        agent_runtime_backend=resolved_runtime_backend,
+        opencode_mode=opencode_mode,
     )
     tool_handlers = [
         execute_seed,
@@ -1332,6 +1349,8 @@ def create_ouroboros_server(
             execute_handler=execute_seed,
             event_store=event_store,
             job_manager=job_manager,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
         ),
         SessionStatusHandler(
             event_store=event_store,
@@ -1360,6 +1379,9 @@ def create_ouroboros_server(
             seed_generator=seed_generator,
             llm_adapter=llm_adapter,
             llm_backend=llm_backend,
+            event_store=event_store,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
         ),
         MeasureDriftHandler(
             event_store=event_store,
@@ -1369,11 +1391,16 @@ def create_ouroboros_server(
             event_store=event_store,
             llm_adapter=llm_adapter,
             llm_backend=llm_backend,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
         ),
         PMInterviewHandler(
             data_dir=state_dir_path,
             llm_adapter=llm_adapter,
             llm_backend=llm_backend,
+            event_store=event_store,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
         ),
         BrownfieldHandler(),
         ChannelWorkflowHandler(
@@ -1385,17 +1412,24 @@ def create_ouroboros_server(
                 event_store=event_store,
                 llm_adapter=llm_adapter,
                 llm_backend=llm_backend,
+                agent_runtime_backend=resolved_runtime_backend,
+                opencode_mode=opencode_mode,
             ),
             generate_seed_handler=GenerateSeedHandler(
                 interview_engine=interview_engine,
                 seed_generator=seed_generator,
                 llm_adapter=llm_adapter,
                 llm_backend=llm_backend,
+                event_store=event_store,
+                agent_runtime_backend=resolved_runtime_backend,
+                opencode_mode=opencode_mode,
             ),
             start_execute_seed_handler=StartExecuteSeedHandler(
                 execute_handler=execute_seed,
                 event_store=event_store,
                 job_manager=job_manager,
+                agent_runtime_backend=resolved_runtime_backend,
+                opencode_mode=opencode_mode,
             ),
             job_status_handler=JobStatusHandler(
                 event_store=event_store,
@@ -1413,6 +1447,8 @@ def create_ouroboros_server(
         EvaluateHandler(
             event_store=event_store,
             llm_backend=llm_backend,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
         ),
         LateralThinkHandler(),
         evolve_step,
@@ -1436,6 +1472,9 @@ def create_ouroboros_server(
         QAHandler(
             llm_adapter=llm_adapter,
             llm_backend=llm_backend,
+            event_store=event_store,
+            agent_runtime_backend=resolved_runtime_backend,
+            opencode_mode=opencode_mode,
         ),
         CancelExecutionHandler(
             event_store=event_store,

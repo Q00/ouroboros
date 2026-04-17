@@ -39,6 +39,12 @@ from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.config import get_clarification_model
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.subagent import (
+    build_pm_interview_subagent,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -48,6 +54,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
+from ouroboros.persistence.event_store import EventStore
 from ouroboros.pm.handoff import build_pm_dev_handoff_next_step
 from ouroboros.providers import create_llm_adapter
 
@@ -251,6 +258,9 @@ class PMInterviewHandler:
     data_dir: Path | None = field(default=None, repr=False)
     llm_adapter: Any | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    event_store: EventStore | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -355,6 +365,25 @@ class PMInterviewHandler:
 
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        payload = build_pm_interview_subagent(
+            session_id=session_id or "new",
+            action=action,
+            initial_context=initial_context,
+            answer=answer,
+            cwd=cwd_arg,
+            selected_repos=selected_repos,
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self.event_store,
+                session_id=session_id,
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real in-process PM interview (subprocess / non-opencode runtimes).
 
         # For resume/generate, prefer persisted session cwd over os.getcwd()
         # so artifacts land in the workspace where the interview started.

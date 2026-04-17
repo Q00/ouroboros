@@ -101,8 +101,20 @@ class TestOpenCodeRuntimeBuildCommand:
     def test_basic_command(self) -> None:
         runtime = OpenCodeRuntime(cli_path="/usr/bin/opencode", cwd="/tmp")
         cmd = runtime._build_command(prompt="Hello world")
-        assert cmd == ["/usr/bin/opencode", "run", "--format", "json"]
+        assert cmd == ["/usr/bin/opencode", "run", "--pure", "--format", "json"]
         assert "Hello world" not in cmd  # prompt piped via stdin, not argv
+
+    def test_command_always_includes_pure(self) -> None:
+        """`--pure` is mandatory: disables opencode plugins inside the
+        subprocess runtime so the bridge plugin cannot double-dispatch a
+        `_subagent` envelope that leaks into this headless execution.
+        Regardless of model/session args, `--pure` must be present.
+        """
+        runtime = OpenCodeRuntime(cli_path="opencode", cwd="/tmp", model="m")
+        cmd = runtime._build_command(resume_session_id="sess_abc", prompt="p")
+        assert "--pure" in cmd
+        # --pure comes immediately after 'run', before everything else
+        assert cmd[:3] == ["opencode", "run", "--pure"]
 
     def test_command_with_model(self) -> None:
         runtime = OpenCodeRuntime(

@@ -203,3 +203,39 @@ class TestCreateAgentRuntime:
         assert runtime._cwd == "/tmp/project"
         assert runtime._skill_dispatcher is mock_dispatcher
         assert runtime._llm_backend == "codex"
+
+    def test_opencode_runtime_threads_opencode_mode_from_config(self) -> None:
+        """OpenCode runtime reads opencode_mode via get_opencode_mode and stores it."""
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=object(),
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_opencode_mode",
+                return_value="plugin",
+            ),
+        ):
+            runtime = create_agent_runtime(backend="opencode")
+
+        assert isinstance(runtime, OpenCodeRuntime)
+        assert runtime._opencode_mode == "plugin"
+
+    def test_opencode_runtime_opencode_mode_none_when_unset(self) -> None:
+        """When config helper raises, opencode_mode falls back to None (safe default)."""
+        from ouroboros.config.loader import ConfigError
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=object(),
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_opencode_mode",
+                side_effect=ConfigError("not set"),
+            ),
+        ):
+            runtime = create_agent_runtime(backend="opencode")
+
+        assert isinstance(runtime, OpenCodeRuntime)
+        assert runtime._opencode_mode is None

@@ -548,6 +548,26 @@ def get_hermes_cli_path() -> str | None:
     return None
 
 
+def get_opencode_mode() -> str | None:
+    """Get configured OpenCode integration mode from config file.
+
+    Priority:
+        1. config.yaml orchestrator.opencode_mode
+        2. None (legacy install — runtime gate defaults to plugin)
+
+    No environment override by design. Users switch by re-running
+    ``ouroboros setup --opencode-mode=<plugin|subprocess>``.
+
+    Returns:
+        "plugin", "subprocess", or None.
+    """
+    try:
+        config = load_config()
+        return config.orchestrator.opencode_mode
+    except ConfigError:
+        return None
+
+
 def get_gemini_cli_path() -> str | None:
     """Get Gemini CLI path from environment variable or config file.
 

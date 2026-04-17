@@ -38,6 +38,13 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.subagent import (
+    build_generate_seed_subagent,
+    build_interview_subagent,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -308,6 +315,9 @@ class GenerateSeedHandler:
     seed_generator: SeedGenerator | None = field(default=None, repr=False)
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    event_store: EventStore | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     def _build_ambiguity_score_from_value(self, ambiguity_score_value: float) -> AmbiguityScore:
         """Build an ambiguity score object from an explicit numeric override."""
@@ -414,6 +424,21 @@ class GenerateSeedHandler:
             session_id=session_id,
             ambiguity_score=ambiguity_score_value,
         )
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        payload = build_generate_seed_subagent(
+            session_id=session_id,
+            ambiguity_score=ambiguity_score_value,
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self.event_store,
+                session_id=session_id,
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real in-process seed generation (subprocess / non-opencode runtimes).
 
         try:
             # Use injected or create services
@@ -560,6 +585,8 @@ class InterviewHandler:
     event_store: EventStore | None = field(default=None, repr=False)
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize event store."""
@@ -794,6 +821,31 @@ class InterviewHandler:
         initial_context = arguments.get("initial_context")
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        # Determine action from arguments
+        if initial_context:
+            action = "start"
+        elif answer:
+            action = "answer"
+        else:
+            action = "resume"
+        payload = build_interview_subagent(
+            session_id=session_id or "new",
+            action=action,
+            initial_context=initial_context,
+            answer=answer,
+            cwd=arguments.get("cwd"),
+        )
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            await emit_subagent_dispatched_event(
+                self.event_store,
+                session_id=session_id,
+                payload=payload,
+            )
+            return build_subagent_result(payload)
+
+        # Fall-through: real in-process interview engine (subprocess / non-opencode runtimes).
 
         # Use injected or create interview engine
         # max_turns=1: MCP is a pure question generator. No tool use needed.

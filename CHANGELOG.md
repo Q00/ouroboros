@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **opencode**: Subagent bridge plugin (`src/ouroboros/opencode/plugin/ouroboros-bridge.ts`) — routes MCP `ouroboros_*` tool calls with a `_subagent` parameter into OpenCode's native Task subagent panes via `session.promptAsync`. Fire-and-forget dispatch returns from the hook in ~10ms, eliminating the blocking 200s+ latency of the previous `session.prompt` approach. Installed automatically by `ouroboros setup`. See [OpenCode Subagent Bridge](docs/guides/opencode-subagent-bridge.md).
+- **lateral_think**: Parallel multi-persona dispatch — `ouroboros_lateral_think` now accepts `persona="all"` or `personas=["hacker","architect",...]` to fan out to multiple lateral-thinking personas in a single call. Each persona runs in its own Task pane with an independent LLM context, eliminating anchoring bias across alternatives. Uses new `_subagents` (plural) JSON contract, implemented server-side via `build_lateral_multi_subagent()` and plugin-side via MAX_FANOUT=10 parallel `promptAsync` with per-payload dedupe and error isolation.
+- **opencode/bridge**: Plugin v23 recognizes `_subagents` array for parallel fan-out. Per-payload validation, truncation, and dedupe. One failed dispatch does not abort the rest. New `ouroboros_subagents` and `ouroboros_dispatch_errors` metadata fields. Backwards compatible with v22 single-payload `_subagent` contract.
+
+### Fixed
+- **mcp/security**: `FREETEXT_FIELDS` allowlist for user-input fields (goals, prompts, descriptions) — shell metacharacters (`;`, `|`, `&`, backticks, `$()`) are no longer rejected in fields where they are legitimate prose. Structural fields remain strictly validated.
+- **opencode/bridge**: Robustness hardening (v22) — no uncaught errors under any input. Adds reject-path logging, frozen-content guards, empty-sessionID guard, client init-order guard, 5-second FNV-1a prompt dedupe, 100 KB prompt byte cap with truncation marker, user-visible `surfaceErr()` for dispatch failures (no more silent "dispatched but never ran"), and an absolute outer try/catch so the plugin cannot throw into the opencode runLoop.
+
 ## [0.14.1] - 2025-02-27
 
 ### Fixed

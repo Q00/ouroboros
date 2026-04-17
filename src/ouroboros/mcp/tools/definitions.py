@@ -66,6 +66,7 @@ def execute_seed_handler(
     llm_backend: str | None = None,
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
+    opencode_mode: str | None = None,
 ) -> ExecuteSeedHandler:
     """Create an ExecuteSeedHandler instance."""
     return ExecuteSeedHandler(
@@ -73,6 +74,7 @@ def execute_seed_handler(
         llm_backend=llm_backend,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
+        opencode_mode=opencode_mode,
     )
 
 
@@ -82,6 +84,7 @@ def start_execute_seed_handler(
     llm_backend: str | None = None,
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
+    opencode_mode: str | None = None,
 ) -> StartExecuteSeedHandler:
     """Create a StartExecuteSeedHandler instance."""
     execute_handler = ExecuteSeedHandler(
@@ -89,8 +92,13 @@ def start_execute_seed_handler(
         llm_backend=llm_backend,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
+        opencode_mode=opencode_mode,
     )
-    return StartExecuteSeedHandler(execute_handler=execute_handler)
+    return StartExecuteSeedHandler(
+        execute_handler=execute_handler,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
 
 def session_status_handler() -> SessionStatusHandler:
@@ -128,9 +136,18 @@ def query_events_handler() -> QueryEventsHandler:
     return QueryEventsHandler()
 
 
-def generate_seed_handler(*, llm_backend: str | None = None) -> GenerateSeedHandler:
+def generate_seed_handler(
+    *,
+    llm_backend: str | None = None,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> GenerateSeedHandler:
     """Create a GenerateSeedHandler instance."""
-    return GenerateSeedHandler(llm_backend=llm_backend)
+    return GenerateSeedHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
 
 def measure_drift_handler() -> MeasureDriftHandler:
@@ -138,9 +155,18 @@ def measure_drift_handler() -> MeasureDriftHandler:
     return MeasureDriftHandler()
 
 
-def interview_handler(*, llm_backend: str | None = None) -> InterviewHandler:
+def interview_handler(
+    *,
+    llm_backend: str | None = None,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> InterviewHandler:
     """Create an InterviewHandler instance."""
-    return InterviewHandler(llm_backend=llm_backend)
+    return InterviewHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
 
 def channel_workflow_handler(
@@ -154,6 +180,7 @@ def channel_workflow_handler(
     job_status_handler: JobStatusHandler | None = None,
     job_result_handler: JobResultHandler | None = None,
     default_repo: str | None = None,
+    opencode_mode: str | None = None,
 ) -> ChannelWorkflowHandler:
     """Create a ChannelWorkflowHandler instance.
 
@@ -164,16 +191,33 @@ def channel_workflow_handler(
         execute_handler = ExecuteSeedHandler(
             agent_runtime_backend=runtime_backend,
             llm_backend=llm_backend,
+            opencode_mode=opencode_mode,
         )
-        start_execute_seed_handler = StartExecuteSeedHandler(execute_handler=execute_handler)
+        start_execute_seed_handler = StartExecuteSeedHandler(
+            execute_handler=execute_handler,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        )
     return ChannelWorkflowHandler(
-        interview_handler=interview_handler or InterviewHandler(llm_backend=llm_backend),
-        generate_seed_handler=generate_seed_handler or GenerateSeedHandler(llm_backend=llm_backend),
+        interview_handler=interview_handler
+        or InterviewHandler(
+            llm_backend=llm_backend,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        generate_seed_handler=generate_seed_handler
+        or GenerateSeedHandler(
+            llm_backend=llm_backend,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
         start_execute_seed_handler=start_execute_seed_handler,
         job_wait_handler=job_wait_handler or JobWaitHandler(),
         job_status_handler=job_status_handler or JobStatusHandler(),
         job_result_handler=job_result_handler or JobResultHandler(),
         default_repo=default_repo,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
     )
 
 
@@ -182,9 +226,18 @@ def lateral_think_handler() -> LateralThinkHandler:
     return LateralThinkHandler()
 
 
-def evaluate_handler(*, llm_backend: str | None = None) -> EvaluateHandler:
+def evaluate_handler(
+    *,
+    llm_backend: str | None = None,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> EvaluateHandler:
     """Create an EvaluateHandler instance."""
-    return EvaluateHandler(llm_backend=llm_backend)
+    return EvaluateHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
 
 def checklist_verify_handler(
@@ -260,26 +313,51 @@ def get_ouroboros_tools(
     llm_backend: str | None = None,
     mcp_manager: object | None = None,
     mcp_tool_prefix: str = "",
+    opencode_mode: str | None = None,
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers.
 
     Shared handler instances are passed to ``channel_workflow_handler``
     so the channel workflow surface uses the same job/event stores as
     the top-level tools.
+
+    ``opencode_mode`` is threaded into every handler that dispatches a
+    ``_subagent`` envelope. When ``runtime_backend`` is an OpenCode variant
+    AND ``opencode_mode`` is ``"plugin"`` (or None, for legacy safety) the
+    handler returns the envelope. In every other combination the handler
+    falls through to its real in-process path. See
+    ``ouroboros.mcp.tools.subagent.should_dispatch_via_plugin``.
     """
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
         mcp_manager=mcp_manager,
         mcp_tool_prefix=mcp_tool_prefix,
+        opencode_mode=opencode_mode,
     )
-    start_execute = StartExecuteSeedHandler(execute_handler=execute_seed)
+    start_execute = StartExecuteSeedHandler(
+        execute_handler=execute_seed,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
     job_status = JobStatusHandler()
     job_wait = JobWaitHandler()
     job_result = JobResultHandler()
-    interview = InterviewHandler(llm_backend=llm_backend)
-    generate_seed = GenerateSeedHandler(llm_backend=llm_backend)
-    evaluate = EvaluateHandler(llm_backend=llm_backend)
+    interview = InterviewHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    generate_seed = GenerateSeedHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+    evaluate = EvaluateHandler(
+        llm_backend=llm_backend,
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
     return (
         execute_seed,
         start_execute,
@@ -302,7 +380,11 @@ def get_ouroboros_tools(
         EvolveRewindHandler(),
         CancelExecutionHandler(),
         BrownfieldHandler(),
-        PMInterviewHandler(llm_backend=llm_backend),
+        PMInterviewHandler(
+            llm_backend=llm_backend,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
         channel_workflow_handler(
             runtime_backend=runtime_backend,
             llm_backend=llm_backend,
@@ -312,8 +394,13 @@ def get_ouroboros_tools(
             job_wait_handler=job_wait,
             job_status_handler=job_status,
             job_result_handler=job_result,
+            opencode_mode=opencode_mode,
         ),
-        QAHandler(llm_backend=llm_backend),
+        QAHandler(
+            llm_backend=llm_backend,
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
     )
 
 

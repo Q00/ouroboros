@@ -439,6 +439,28 @@ class Authorizer:
 class InputValidator:
     """Validates tool input arguments."""
 
+    # Fields that carry freetext content (code, prompts, descriptions).
+    # These are exempt from shell-metacharacter checks because no
+    # Ouroboros tool ever passes them to a shell.
+    FREETEXT_FIELDS: set[str] = {
+        "artifact",
+        "quality_bar",
+        "reference",
+        "seed_content",
+        "current_output",
+        "prompt",
+        "initial_context",
+        "answer",
+        "current_approach",
+        "problem_context",
+        "acceptance_criterion",
+        "message",
+        "content",
+        "desc",
+        "entry",
+        "reason",
+    }
+
     def __init__(self) -> None:
         """Initialize validator."""
         self._validators: dict[str, Callable[[dict[str, Any]], Result[None, str]]] = {}
@@ -517,14 +539,18 @@ class InputValidator:
                             details={"pattern": pattern},
                         )
                     )
-            for char in shell_metacharacters:
-                if char in value:
-                    return Result.err(
-                        MCPServerError(
-                            f"Shell metacharacter detected in {key}",
-                            details={"pattern": char},
+            # Skip shell-metachar check for known freetext fields —
+            # they carry code/prompts, never shell commands.
+            root_field = key.split(".")[0].split("[")[0]
+            if root_field not in self.FREETEXT_FIELDS:
+                for char in shell_metacharacters:
+                    if char in value:
+                        return Result.err(
+                            MCPServerError(
+                                f"Shell metacharacter detected in {key}",
+                                details={"pattern": char},
+                            )
                         )
-                    )
 
         # Run custom validator if registered
         if tool_name in self._validators:
