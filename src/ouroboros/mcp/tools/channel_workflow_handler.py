@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -60,28 +61,44 @@ class ChannelWorkflowHandler:
         # break. Inner handlers must therefore always execute the real path,
         # regardless of how the outer ChannelWorkflow tool was configured.
         #
-        # Force-pin opencode_mode="subprocess" on EVERY inner handler — both
-        # the default-constructed ones AND those passed in by the composition
-        # root (adapter.py). The composition root passes handlers wired with
-        # the server-wide opencode_mode which may be "plugin"; accepting that
-        # value here would break the runtime. The pin is applied *after*
-        # assignment so it works for both code paths.
-        self._interview_handler = self.interview_handler or InterviewHandler(
-            agent_runtime_backend=self.agent_runtime_backend,
-        )
-        self._generate_seed_handler = self.generate_seed_handler or GenerateSeedHandler(
-            agent_runtime_backend=self.agent_runtime_backend,
-        )
-        self._start_execute_seed_handler = (
-            self.start_execute_seed_handler
-            or StartExecuteSeedHandler(
+        # Isolation is non-mutating:
+        #   * Defaults: construct with ``opencode_mode="subprocess"`` kwarg.
+        #   * Passed-in: ``copy.copy(h)`` + ``setattr`` on the clone.
+        #     ``copy.copy`` gives a shallow copy that works for any object
+        #     (real dataclass handlers, test fakes, mocks) — the caller's
+        #     instance is untouched, only the private clone is pinned.
+        # This way a shared handler instance (e.g. one the composition root
+        # also wires to a top-level tool) cannot have its ``opencode_mode``
+        # leaked back to ``"subprocess"`` by channel construction.
+        def _isolate(h: Any) -> Any:
+            clone = copy(h)
+            clone.opencode_mode = "subprocess"
+            return clone
+
+        self._interview_handler = (
+            _isolate(self.interview_handler)
+            if self.interview_handler is not None
+            else InterviewHandler(
                 agent_runtime_backend=self.agent_runtime_backend,
+                opencode_mode="subprocess",
             )
         )
-        # Pin after assignment — works for both passed-in and default-created.
-        self._interview_handler.opencode_mode = "subprocess"
-        self._generate_seed_handler.opencode_mode = "subprocess"
-        self._start_execute_seed_handler.opencode_mode = "subprocess"
+        self._generate_seed_handler = (
+            _isolate(self.generate_seed_handler)
+            if self.generate_seed_handler is not None
+            else GenerateSeedHandler(
+                agent_runtime_backend=self.agent_runtime_backend,
+                opencode_mode="subprocess",
+            )
+        )
+        self._start_execute_seed_handler = (
+            _isolate(self.start_execute_seed_handler)
+            if self.start_execute_seed_handler is not None
+            else StartExecuteSeedHandler(
+                agent_runtime_backend=self.agent_runtime_backend,
+                opencode_mode="subprocess",
+            )
+        )
         self._job_status_handler = self.job_status_handler or JobStatusHandler()
         self._job_wait_handler = self.job_wait_handler or JobWaitHandler()
         self._job_result_handler = self.job_result_handler or JobResultHandler()
