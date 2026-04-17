@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import ipaddress
 import os
+import socket
 from typing import Any
 from urllib.parse import urlparse
 
@@ -24,6 +25,50 @@ _ALLOW_LOCAL_TRANSPORT_ENV = "OUROBOROS_ALLOW_LOCAL_TRANSPORT"
 # ``ipaddress.ip_address()`` check (they raise ``ValueError`` because they are
 # not IP literals), so we must block them explicitly.
 _LOOPBACK_HOSTNAMES = frozenset({"localhost"})
+
+
+def _is_blocked_transport_ip(ip: ipaddress._BaseAddress) -> bool:
+    """Return True when an IP literal should be rejected for MCP transport use."""
+    return (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _resolved_blocked_transport_ips(hostname: str) -> tuple[str, ...]:
+    """Resolve *hostname* and return any blocked IPs it maps to.
+
+    Static hostname validation is not enough because public DNS aliases can
+    legally resolve to private or loopback literals (for example ``nip.io``).
+    This helper resolves the hostname once at validation time and records any
+    IPs that fall inside the blocked transport ranges.
+
+    Resolution failures are treated as inconclusive rather than fatal so the
+    validator does not reject legitimate-but-currently-unresolvable hostnames.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return ()
+
+    blocked: list[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            continue
+        addr = sockaddr[0]
+        try:
+            ip = ipaddress.ip_address(addr.strip("[]"))
+        except ValueError:
+            continue
+        if _is_blocked_transport_ip(ip):
+            blocked.append(str(ip))
+
+    return tuple(dict.fromkeys(blocked))
 
 
 def _validate_transport_url(url: str, transport: str) -> None:
@@ -96,21 +141,24 @@ def _validate_transport_url(url: str, transport: str) -> None:
     try:
         ip = ipaddress.ip_address(host_literal)
     except ValueError:
-        # Not an IP literal -- a DNS name. Static validation ends here.
-        return
+        blocked_ips = _resolved_blocked_transport_ips(host_literal)
+        if not blocked_ips or allow_local:
+            return
+        msg = (
+            "Transport URL hostname resolves to loopback/link-local/private IP(s): "
+            f"{', '.join(blocked_ips)} for {hostname}. "
+            f"Set {_ALLOW_LOCAL_TRANSPORT_ENV}=1 for local dev."
+        )
+        raise ValueError(msg)
 
     if allow_local:
         return
 
-    if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_multicast:
+    if _is_blocked_transport_ip(ip):
         msg = (
             f"Transport URL points to loopback/link-local/private IP: "
             f"{hostname}. Set {_ALLOW_LOCAL_TRANSPORT_ENV}=1 for local dev."
         )
-        raise ValueError(msg)
-
-    if ip.is_reserved or ip.is_unspecified:
-        msg = f"Transport URL points to reserved/unspecified IP: {hostname}"
         raise ValueError(msg)
 
 
