@@ -832,9 +832,7 @@ def test_channel_workflow_does_not_mutate_passed_in_handlers() -> None:
     """
     interview = InterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
     generate = GenerateSeedHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
-    start_exec = StartExecuteSeedHandler(
-        agent_runtime_backend="opencode", opencode_mode="plugin"
-    )
+    start_exec = StartExecuteSeedHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
 
     h = ChannelWorkflowHandler(
         interview_handler=interview,

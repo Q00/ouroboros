@@ -52,6 +52,7 @@ class ChannelWorkflowHandler:
     def __post_init__(self) -> None:
         self._workflow_manager = self.workflow_manager or ChannelWorkflowManager()
         self._repo_registry = self.repo_registry or ChannelRepoRegistry()
+
         # Contract preservation across plugin boundary:
         # The channel workflow orchestrator (``ChannelWorkflowRuntime``) invokes
         # these inner handlers in-process and parses their ``MCPToolResult`` as
