@@ -46,11 +46,17 @@ When the user invokes this skill:
 
 3. Pick the right re-attach path:
 
-   - **Inspect only** (no execution resumes):
+   - **Inspect only** (read-only interactive monitor):
 
      ```
-     ouroboros status execution <exec_id>
+     ouroboros tui monitor
      ```
+
+     Launches the TUI and lets you pick the session to inspect. The
+     `ouroboros status execution <exec_id>` command is *registered* but its
+     handler is still a placeholder in `src/ouroboros/cli/commands/status.py`
+     (it only prints "Would show details for execution: …"), so it is
+     intentionally not surfaced here. Follow-up tracked as a separate issue.
 
    - **Resume execution** (requires the original seed file):
 
@@ -70,10 +76,10 @@ When the user invokes this skill:
 
 If the command reports "No in-flight sessions found", the execution either
 completed, failed, was cancelled, or the EventStore has never been created.
-Check with:
+To browse historical sessions interactively, use the TUI monitor:
 
 ```
-ouroboros status executions
+ouroboros tui monitor
 ```
 
 ## Example
@@ -92,8 +98,8 @@ Enter number to re-attach (1-1), or 'q' to quit: 1
 │ Session ID:   sess-abc123                                                  │
 │ Execution ID: exec-xyz789                                                  │
 │                                                                            │
-│ Inspect (read-only status):                                                │
-│     ouroboros status execution exec-xyz789                                 │
+│ Inspect (read-only interactive monitor):                                   │
+│     ouroboros tui monitor                                                  │
 │                                                                            │
 │ Resume execution (requires the original seed file):                        │
 │     ouroboros run workflow --orchestrator --resume sess-abc123 seed-001    │
@@ -104,7 +110,7 @@ Enter number to re-attach (1-1), or 'q' to quit: 1
 
 After you have the identifiers:
 
-- `ouroboros status execution <exec_id>` — inspect current execution status
+- `ouroboros tui monitor` — launch the TUI and pick the session to inspect
 - `ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>` — resume execution
 - `ooo evaluate` — evaluate results once the execution completes
 - `ooo cancel execution <exec_id>` — cancel if the session is stuck
