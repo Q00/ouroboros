@@ -133,10 +133,16 @@ class EventStore:
             details=details,
         )
 
-    async def initialize(self) -> None:
+    async def initialize(self, *, create_schema: bool = True) -> None:
         """Initialize the database connection and create tables if needed.
 
         This method is idempotent - calling it multiple times is safe.
+
+        Args:
+            create_schema: When True (default) run ``metadata.create_all`` so
+                missing tables are created. Read-only consumers (for example
+                diagnostic CLI commands that must not mutate the store) can
+                pass ``False`` to skip schema creation entirely.
 
         For aiosqlite, uses StaticPool (default) which maintains a single
         connection. This avoids connection accumulation while supporting
@@ -158,9 +164,10 @@ class EventStore:
                 cursor.execute("PRAGMA busy_timeout=30000")
                 cursor.close()
 
-        # Create all tables defined in metadata
-        async with self._engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
+        # Create all tables defined in metadata (skipped for read-only consumers)
+        if create_schema:
+            async with self._engine.begin() as conn:
+                await conn.run_sync(metadata.create_all)
 
     async def append(self, event: BaseEvent) -> None:
         """Append an event to the store.
