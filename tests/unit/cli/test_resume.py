@@ -9,7 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from ouroboros.cli.commands.resume import _get_in_flight_sessions, app
+from ouroboros.cli.commands.resume import (
+    EXIT_CORRUPTED_DB,
+    _format_reattach_guidance,
+    _get_in_flight_sessions,
+    _is_active_snapshot,
+    app,
+)
 
 runner = CliRunner()
 
@@ -24,8 +30,8 @@ _SESSION_REPO_PATH = "ouroboros.orchestrator.session.SessionRepository"
 
 def _make_tracker(
     session_id: str = "sess-abc123",
-    execution_id: str = "exec-xyz789",
-    seed_id: str = "seed-001",
+    execution_id: str | None = "exec-xyz789",
+    seed_id: str | None = "seed-001",
     status_value: str = "running",
 ) -> MagicMock:
     """Return a minimal SessionTracker-like mock."""
@@ -40,10 +46,54 @@ def _make_tracker(
     return tracker
 
 
-def _make_event(aggregate_id: str) -> MagicMock:
-    event = MagicMock()
-    event.aggregate_id = aggregate_id
-    return event
+def _make_snapshot(
+    session_id: str = "sess-abc123",
+    status_event_type: str | None = None,
+    last_activity: str = "2026-04-15T12:00:00+00:00",
+    start_time: str = "2026-04-15T12:00:00+00:00",
+) -> MagicMock:
+    """Return a minimal SessionActivitySnapshot-like mock."""
+    snapshot = MagicMock()
+    snapshot.session_id = session_id
+    snapshot.execution_id = "exec-xyz789"
+    snapshot.seed_id = "seed-001"
+    snapshot.status_event_type = status_event_type
+    snapshot.last_activity = last_activity
+    snapshot.start_time = start_time
+    snapshot.runtime_status = None
+    return snapshot
+
+
+# ---------------------------------------------------------------------------
+# Snapshot filtering
+# ---------------------------------------------------------------------------
+
+
+class TestIsActiveSnapshot:
+    """The terminal short-circuit must match the orchestrator.session.* contract."""
+
+    @pytest.mark.parametrize(
+        "terminal",
+        [
+            "orchestrator.session.completed",
+            "orchestrator.session.failed",
+            "orchestrator.session.cancelled",
+        ],
+    )
+    def test_terminal_status_is_inactive(self, terminal: str) -> None:
+        assert _is_active_snapshot(_make_snapshot(status_event_type=terminal)) is False
+
+    @pytest.mark.parametrize(
+        "active",
+        [
+            None,
+            "orchestrator.session.paused",
+            "orchestrator.session.started",
+            "orchestrator.progress.updated",
+        ],
+    )
+    def test_non_terminal_status_is_active(self, active: str | None) -> None:
+        assert _is_active_snapshot(_make_snapshot(status_event_type=active)) is True
 
 
 # ---------------------------------------------------------------------------
@@ -52,16 +102,16 @@ def _make_event(aggregate_id: str) -> MagicMock:
 
 
 class TestGetInFlightSessions:
-    """Tests for the _get_in_flight_sessions helper."""
+    """Tests for the _get_in_flight_sessions helper (snapshot-first path)."""
 
     @pytest.mark.asyncio
     async def test_returns_running_sessions(self) -> None:
         """Running sessions are returned."""
         tracker = _make_tracker(status_value="running")
-        event = _make_event("sess-abc123")
+        snapshot = _make_snapshot()
 
         event_store = AsyncMock()
-        event_store.get_all_sessions.return_value = [event]
+        event_store.get_session_activity_snapshots.return_value = [snapshot]
 
         ok_result = MagicMock()
         ok_result.is_err = False
@@ -77,10 +127,13 @@ class TestGetInFlightSessions:
     async def test_returns_paused_sessions(self) -> None:
         """Paused sessions are also returned."""
         tracker = _make_tracker(status_value="paused")
-        event = _make_event("sess-paused")
+        snapshot = _make_snapshot(
+            session_id="sess-paused",
+            status_event_type="orchestrator.session.paused",
+        )
 
         event_store = AsyncMock()
-        event_store.get_all_sessions.return_value = [event]
+        event_store.get_session_activity_snapshots.return_value = [snapshot]
 
         ok_result = MagicMock()
         ok_result.is_err = False
@@ -93,14 +146,30 @@ class TestGetInFlightSessions:
         assert result == [tracker]
 
     @pytest.mark.asyncio
+    async def test_short_circuits_terminal_snapshots(self) -> None:
+        """Snapshots with terminal status_event_type skip reconstruct entirely."""
+        snapshot = _make_snapshot(status_event_type="orchestrator.session.completed")
+
+        event_store = AsyncMock()
+        event_store.get_session_activity_snapshots.return_value = [snapshot]
+
+        with patch(_SESSION_REPO_PATH, autospec=True) as MockRepo:
+            mock_repo = MockRepo.return_value
+            mock_repo.reconstruct_session = AsyncMock()
+            result = await _get_in_flight_sessions(event_store)
+
+        mock_repo.reconstruct_session.assert_not_called()
+        assert result == []
+
+    @pytest.mark.asyncio
     async def test_excludes_terminal_sessions(self) -> None:
-        """Completed / failed / cancelled sessions are not returned."""
+        """Even if snapshot lets it through, reconstructed terminal status is dropped."""
         for status in ("completed", "failed", "cancelled"):
             tracker = _make_tracker(status_value=status)
-            event = _make_event(f"sess-{status}")
+            snapshot = _make_snapshot(session_id=f"sess-{status}")
 
             event_store = AsyncMock()
-            event_store.get_all_sessions.return_value = [event]
+            event_store.get_session_activity_snapshots.return_value = [snapshot]
 
             ok_result = MagicMock()
             ok_result.is_err = False
@@ -116,7 +185,7 @@ class TestGetInFlightSessions:
     async def test_empty_event_store_returns_empty_list(self) -> None:
         """No sessions in the DB → empty list."""
         event_store = AsyncMock()
-        event_store.get_all_sessions.return_value = []
+        event_store.get_session_activity_snapshots.return_value = []
 
         with patch(_SESSION_REPO_PATH, autospec=True):
             result = await _get_in_flight_sessions(event_store)
@@ -124,32 +193,73 @@ class TestGetInFlightSessions:
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_deduplicates_session_events(self) -> None:
-        """If the same session_id appears more than once, reconstruct is called once."""
-        tracker = _make_tracker(status_value="running")
-        events = [_make_event("sess-dup"), _make_event("sess-dup")]
+    async def test_sorts_most_recent_first(self) -> None:
+        """Multiple active sessions surface newest-first by last_activity."""
+        tracker_old = _make_tracker(session_id="sess-old")
+        tracker_new = _make_tracker(session_id="sess-new")
+
+        snapshot_old = _make_snapshot(
+            session_id="sess-old",
+            last_activity="2026-04-10T00:00:00+00:00",
+        )
+        snapshot_new = _make_snapshot(
+            session_id="sess-new",
+            last_activity="2026-04-16T00:00:00+00:00",
+        )
 
         event_store = AsyncMock()
-        event_store.get_all_sessions.return_value = events
+        event_store.get_session_activity_snapshots.return_value = [snapshot_old, snapshot_new]
 
-        ok_result = MagicMock()
-        ok_result.is_err = False
-        ok_result.value = tracker
+        by_id = {"sess-old": tracker_old, "sess-new": tracker_new}
+
+        async def _reconstruct(session_id):
+            ok = MagicMock()
+            ok.is_err = False
+            ok.value = by_id[session_id]
+            return ok
 
         with patch(_SESSION_REPO_PATH, autospec=True) as MockRepo:
-            mock_repo = MockRepo.return_value
-            mock_repo.reconstruct_session = AsyncMock(return_value=ok_result)
+            MockRepo.return_value.reconstruct_session = AsyncMock(side_effect=_reconstruct)
             result = await _get_in_flight_sessions(event_store)
 
-        mock_repo.reconstruct_session.assert_called_once_with("sess-dup")
-        assert result == [tracker]
+        assert [t.session_id for t in result] == ["sess-new", "sess-old"]
+
+    @pytest.mark.asyncio
+    async def test_respects_display_limit(self) -> None:
+        """When more than `limit` sessions are active, only the top N are returned."""
+        snapshots = [
+            _make_snapshot(
+                session_id=f"sess-{i:02d}",
+                last_activity=f"2026-04-15T12:{i:02d}:00+00:00",
+            )
+            for i in range(25)
+        ]
+        trackers = {
+            s.session_id: _make_tracker(session_id=s.session_id, status_value="running")
+            for s in snapshots
+        }
+
+        event_store = AsyncMock()
+        event_store.get_session_activity_snapshots.return_value = snapshots
+
+        async def _reconstruct(session_id):
+            ok = MagicMock()
+            ok.is_err = False
+            ok.value = trackers[session_id]
+            return ok
+
+        with patch(_SESSION_REPO_PATH, autospec=True) as MockRepo:
+            MockRepo.return_value.reconstruct_session = AsyncMock(side_effect=_reconstruct)
+            result = await _get_in_flight_sessions(event_store, limit=5)
+
+        assert len(result) == 5
 
     @pytest.mark.asyncio
     async def test_skips_sessions_that_fail_to_reconstruct(self) -> None:
         """If a session cannot be reconstructed, it is silently skipped."""
-        event = _make_event("sess-broken")
+        snapshot = _make_snapshot(session_id="sess-broken")
         event_store = AsyncMock()
-        event_store.get_all_sessions.return_value = [event]
+        event_store.get_session_activity_snapshots.return_value = [snapshot]
 
         err_result = MagicMock()
         err_result.is_err = True
@@ -162,6 +272,94 @@ class TestGetInFlightSessions:
 
 
 # ---------------------------------------------------------------------------
+# Re-attach output contract
+# ---------------------------------------------------------------------------
+
+
+class TestFormatReattachGuidance:
+    """The printed guidance must match the real CLI contracts."""
+
+    def test_resume_command_points_at_run_workflow(self) -> None:
+        tracker = _make_tracker()
+        output = _format_reattach_guidance(tracker)
+        assert "ouroboros run workflow --orchestrator --resume sess-abc123 seed-001" in output
+
+    def test_inspect_command_uses_execution_id(self) -> None:
+        tracker = _make_tracker()
+        output = _format_reattach_guidance(tracker)
+        assert "ouroboros status execution exec-xyz789" in output
+
+    def test_surfaces_both_identifiers(self) -> None:
+        tracker = _make_tracker()
+        output = _format_reattach_guidance(tracker)
+        assert "sess-abc123" in output
+        assert "exec-xyz789" in output
+
+    def test_missing_execution_id_falls_back_safely(self) -> None:
+        tracker = _make_tracker(execution_id=None)
+        output = _format_reattach_guidance(tracker)
+        assert "<unknown>" in output
+        assert "ouroboros run workflow --orchestrator --resume sess-abc123" in output
+
+    def test_missing_seed_id_surfaces_placeholder(self) -> None:
+        tracker = _make_tracker(seed_id=None)
+        output = _format_reattach_guidance(tracker)
+        assert "<seed.yaml>" in output
+        assert "Seed ID was not recorded" in output
+
+
+# ---------------------------------------------------------------------------
+# Read-only guarantee — missing DB must NOT create anything
+# ---------------------------------------------------------------------------
+
+
+class TestResumeReadOnly:
+    """Verify the command never mutates the filesystem when the DB is absent."""
+
+    def test_missing_db_does_not_create_directory(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """With HOME pointed at a fresh tmp_path, no ~/.ouroboros/ must appear."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        # Sanity: directory does not exist beforehand.
+        ouroboros_dir = fake_home / ".ouroboros"
+        assert not ouroboros_dir.exists()
+
+        result = runner.invoke(app, [], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "No in-flight sessions" in result.output
+        assert not ouroboros_dir.exists(), (
+            f"resume must not create {ouroboros_dir}; found: "
+            f"{list(ouroboros_dir.iterdir()) if ouroboros_dir.exists() else 'n/a'}"
+        )
+
+    def test_missing_db_does_not_create_schema(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Even if the dir exists, the DB file must not be created."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".ouroboros").mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        db_file = fake_home / ".ouroboros" / "ouroboros.db"
+        assert not db_file.exists()
+
+        result = runner.invoke(app, [], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert not db_file.exists(), "resume must not create the SQLite file"
+
+
+# ---------------------------------------------------------------------------
 # CLI integration — empty state
 # ---------------------------------------------------------------------------
 
@@ -169,12 +367,12 @@ class TestGetInFlightSessions:
 class TestResumeCLIEmpty:
     """Tests for the `ouroboros resume` command with no sessions."""
 
-    def _invoke_with_empty_store(self, tmp_path: Path) -> object:
+    def _invoke_with_empty_store(self) -> object:
         event_store = AsyncMock()
-        event_store.get_all_sessions.return_value = []
+        event_store.get_session_activity_snapshots.return_value = []
         event_store.close = AsyncMock()
 
-        async def _fake_get_event_store():
+        async def _fake_get_event_store(db_path=None):
             return event_store
 
         with (
@@ -186,14 +384,13 @@ class TestResumeCLIEmpty:
         ):
             return runner.invoke(app, [], catch_exceptions=False)
 
-    def test_exit_code_zero_when_no_sessions(self, tmp_path: Path) -> None:
-        result = self._invoke_with_empty_store(tmp_path)
+    def test_exit_code_zero_when_no_sessions(self) -> None:
+        result = self._invoke_with_empty_store()
         assert result.exit_code == 0
 
-    def test_no_crash_when_no_sessions(self, tmp_path: Path) -> None:
-        """Command must not raise or crash when the DB is empty."""
-        result = self._invoke_with_empty_store(tmp_path)
-        assert "No in-flight sessions" in result.output or result.exit_code == 0
+    def test_message_printed_when_no_sessions(self) -> None:
+        result = self._invoke_with_empty_store()
+        assert "No in-flight sessions" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -204,10 +401,10 @@ class TestResumeCLIEmpty:
 class TestResumeCLICorrupted:
     """Tests for graceful handling of a bad or missing EventStore."""
 
-    def test_handles_corrupted_db_gracefully(self) -> None:
-        """If the EventStore raises during initialization, the command handles it."""
+    def test_corrupted_db_returns_pinned_exit_code(self) -> None:
+        """If the EventStore raises during initialization, exit with EXIT_CORRUPTED_DB."""
 
-        async def _raise():
+        async def _raise(db_path=None):
             raise Exception("database disk image is malformed")
 
         with patch(
@@ -216,15 +413,17 @@ class TestResumeCLICorrupted:
         ):
             result = runner.invoke(app, [], catch_exceptions=False)
 
-        assert result.exit_code in (0, 1)
+        assert result.exit_code == EXIT_CORRUPTED_DB
+        assert "Failed to open EventStore" in result.output
+        assert "database disk image is malformed" in result.output
 
-    def test_handles_get_all_sessions_exception(self) -> None:
-        """If get_all_sessions raises mid-flight, error is surfaced without crash."""
+    def test_get_all_sessions_exception_returns_pinned_exit_code(self) -> None:
+        """If snapshot query raises mid-flight, exit with EXIT_CORRUPTED_DB."""
         event_store = AsyncMock()
-        event_store.get_all_sessions.side_effect = Exception("DB locked")
+        event_store.get_session_activity_snapshots.side_effect = Exception("DB locked")
         event_store.close = AsyncMock()
 
-        async def _fake_get_event_store():
+        async def _fake_get_event_store(db_path=None):
             return event_store
 
         with patch(
@@ -233,7 +432,8 @@ class TestResumeCLICorrupted:
         ):
             result = runner.invoke(app, [], catch_exceptions=False)
 
-        assert result.exit_code in (0, 1)
+        assert result.exit_code == EXIT_CORRUPTED_DB
+        assert "Failed to read EventStore" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -246,10 +446,10 @@ class TestResumeCLIWithSessions:
 
     def _build_mocks(self) -> tuple:
         tracker = _make_tracker()
-        event = _make_event("sess-abc123")
+        snapshot = _make_snapshot()
 
         event_store = AsyncMock()
-        event_store.get_all_sessions.return_value = [event]
+        event_store.get_session_activity_snapshots.return_value = [snapshot]
         event_store.close = AsyncMock()
 
         ok_result = MagicMock()
@@ -261,7 +461,7 @@ class TestResumeCLIWithSessions:
     def _invoke_with_sessions(self, input_text: str) -> object:
         tracker, event_store, ok_result = self._build_mocks()
 
-        async def _fake_get_event_store():
+        async def _fake_get_event_store(db_path=None):
             return event_store
 
         with (
@@ -291,6 +491,11 @@ class TestResumeCLIWithSessions:
         assert result.exit_code == 1
 
     def test_status_hint_included_in_output(self) -> None:
-        """The output suggests `ouroboros status execution <exec_id>` for re-attachment."""
+        """The output suggests `ouroboros status execution <exec_id>` for inspection."""
         result = self._invoke_with_sessions("1\n")
         assert "ouroboros status execution" in result.output
+
+    def test_resume_hint_matches_run_workflow_contract(self) -> None:
+        """The output surfaces `ouroboros run workflow --orchestrator --resume <session_id>`."""
+        result = self._invoke_with_sessions("1\n")
+        assert "ouroboros run workflow --orchestrator --resume sess-abc123" in result.output

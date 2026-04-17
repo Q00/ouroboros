@@ -1,6 +1,6 @@
 ---
 name: resume
-description: "List in-flight sessions and re-attach after MCP disconnect"
+description: "List in-flight sessions and show the commands needed to re-attach after MCP disconnect"
 ---
 
 # /ouroboros:resume
@@ -11,6 +11,7 @@ Recover in-flight sessions after an unexpected MCP server disconnect.
 
 ```
 ooo resume
+ooo resume --all
 ```
 
 **Trigger keywords:** "resume session", "re-attach", "mcp disconnected", "lost session", "in-flight"
@@ -18,8 +19,13 @@ ooo resume
 ## How It Works
 
 `ooo resume` reads the EventStore directly (no MCP server required) and lists
-every session that is still in a `running` or `paused` state. You can then
-pick one from the interactive prompt to receive re-attach instructions.
+every session that is still in a `running` or `paused` state. The command is
+strictly read-only — it never creates the data directory, never writes
+schema, and never appends events. Its job is to surface the identifiers you
+need to re-attach.
+
+- `ooo resume` shows the 20 most recent active sessions.
+- `ooo resume --all` shows every active session.
 
 ## Instructions
 
@@ -34,19 +40,37 @@ When the user invokes this skill:
    This reads `~/.ouroboros/ouroboros.db` directly — the MCP server does **not**
    need to be running.
 
-2. If sessions are listed, enter the number corresponding to the session you
-   want to re-attach to. The command will print the `exec_id`.
+2. If sessions are listed, enter the number of the session you want to work
+   with. The command prints both the `session_id` and the `exec_id`, along
+   with the two re-attach paths.
 
-3. Re-attach using:
+3. Pick the right re-attach path:
 
-   ```
-   ouroboros status execution <exec_id>
-   ```
+   - **Inspect only** (no execution resumes):
+
+     ```
+     ouroboros status execution <exec_id>
+     ```
+
+   - **Resume execution** (requires the original seed file):
+
+     ```
+     ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>
+     ```
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Success — sessions listed, or no sessions found |
+| `1`  | Invalid user selection (non-numeric or out-of-range) |
+| `2`  | EventStore exists but could not be opened or read |
 
 ## Fallback (No sessions found)
 
 If the command reports "No in-flight sessions found", the execution either
-completed, failed, or was already cancelled. Check with:
+completed, failed, was cancelled, or the EventStore has never been created.
+Check with:
 
 ```
 ouroboros status executions
@@ -64,19 +88,23 @@ User: ooo resume
 
 Enter number to re-attach (1-1), or 'q' to quit: 1
 
-╭─ Re-attach ──────────────────────────────────────────╮
-│ Session selected: sess-abc123                        │
-│ Execution ID:     exec-xyz789                        │
-│                                                      │
-│ Re-attach by running:                                │
-│                                                      │
-│     ouroboros status execution exec-xyz789             │
-╰──────────────────────────────────────────────────────╯
+╭─ Re-attach ────────────────────────────────────────────────────────────────╮
+│ Session ID:   sess-abc123                                                  │
+│ Execution ID: exec-xyz789                                                  │
+│                                                                            │
+│ Inspect (read-only status):                                                │
+│     ouroboros status execution exec-xyz789                                 │
+│                                                                            │
+│ Resume execution (requires the original seed file):                        │
+│     ouroboros run workflow --orchestrator --resume sess-abc123 seed-001    │
+╰────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Next Steps
 
-After re-attaching:
-- `ouroboros status execution <exec_id>` — Check current execution status and drift
-- `ooo evaluate` — Evaluate results once execution completes
-- `ooo cancel execution <exec_id>` — Cancel if the session is stuck
+After you have the identifiers:
+
+- `ouroboros status execution <exec_id>` — inspect current execution status
+- `ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>` — resume execution
+- `ooo evaluate` — evaluate results once the execution completes
+- `ooo cancel execution <exec_id>` — cancel if the session is stuck
