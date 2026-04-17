@@ -125,11 +125,18 @@ def _validate_transport_url(url: str, transport: str) -> None:
     # Strip IPv6 brackets (urlparse already does, but be defensive).
     host_literal = hostname.strip("[]")
 
+    # Normalize canonical DNS form before matching known loopback names: DNS is
+    # case-insensitive and a single trailing dot marks an absolute FQDN, so
+    # ``LOCALHOST.`` and ``localhost`` denote the same host.  ``urlparse``
+    # already lowercases, but it does not strip the trailing dot, which let
+    # variants like ``http://localhost./`` slip past the well-known check.
+    host_literal = host_literal.rstrip(".") or host_literal
+
     # Check for well-known loopback hostnames before attempting IP parsing.
     # These bypass the IP-literal checks because they are DNS names, but
     # they resolve to loopback addresses and must be blocked unless the
     # dev escape hatch is enabled.
-    if host_literal in _LOOPBACK_HOSTNAMES:
+    if host_literal.lower() in _LOOPBACK_HOSTNAMES:
         if allow_local:
             return
         msg = (

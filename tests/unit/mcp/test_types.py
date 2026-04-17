@@ -297,6 +297,13 @@ class TestMCPServerConfigSSRFHardening:
             "http://localhost:3000/",
             "http://localhost:8080/sse",
             "https://localhost/",
+            # Canonical FQDN form: a trailing dot marks an absolute DNS name
+            # and must be treated as identical to "localhost".  Without
+            # normalization these slipped past the well-known loopback check
+            # and fell through to DNS resolution.
+            "http://localhost./",
+            "http://localhost.:3000/",
+            "https://LOCALHOST./",
         ],
     )
     def test_rejects_localhost(self, url: str, monkeypatch: pytest.MonkeyPatch) -> None:
