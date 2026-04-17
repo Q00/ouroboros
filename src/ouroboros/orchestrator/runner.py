@@ -42,6 +42,7 @@ from ouroboros.orchestrator.adapter import (
     RuntimeHandle,
 )
 from ouroboros.orchestrator.capabilities import (
+    CapabilityGraph,
     build_capability_graph,
     serialize_capability_graph,
 )
@@ -53,6 +54,7 @@ from ouroboros.orchestrator.events import (
     create_drift_measured_event,
     create_execution_terminal_event,
     create_mcp_tools_loaded_event,
+    create_policy_capability_evaluated_event,
     create_progress_event,
     create_session_completed_event,
     create_session_failed_event,
@@ -70,9 +72,9 @@ from ouroboros.orchestrator.mcp_tools import (
 from ouroboros.orchestrator.parallel_executor import DEFAULT_MAX_DECOMPOSITION_DEPTH
 from ouroboros.orchestrator.policy import (
     PolicyContext,
+    PolicyDecision,
     PolicyExecutionPhase,
     PolicySessionRole,
-    allowed_capability_names,
     evaluate_capability_policy,
 )
 from ouroboros.orchestrator.runtime_message_projection import (
@@ -488,6 +490,57 @@ class OrchestratorRunner:
 
         return None
 
+    def _implementation_policy_context(
+        self,
+        *,
+        runtime_backend: str | None = None,
+    ) -> PolicyContext:
+        """Return the policy context used for implementation tool catalogs."""
+        return PolicyContext(
+            runtime_backend=runtime_backend or self._adapter.runtime_backend,
+            session_role=PolicySessionRole.IMPLEMENTATION,
+            execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
+        )
+
+    def _evaluate_tool_catalog_policy(
+        self,
+        tool_catalog: SessionToolCatalog,
+        *,
+        runtime_backend: str | None = None,
+    ) -> tuple[list[str], CapabilityGraph, tuple[PolicyDecision, ...], PolicyContext]:
+        """Evaluate the implementation policy for a normalized tool catalog."""
+        capability_graph = build_capability_graph(tool_catalog)
+        policy_context = self._implementation_policy_context(runtime_backend=runtime_backend)
+        policy_decisions = evaluate_capability_policy(capability_graph, policy_context)
+        allowed_tools = [
+            decision.name
+            for decision in policy_decisions
+            if decision.visible and decision.executable
+        ]
+        return allowed_tools, capability_graph, policy_decisions, policy_context
+
+    async def _emit_policy_capability_evaluated_events(
+        self,
+        session_id: str,
+        capability_graph: CapabilityGraph,
+        policy_decisions: tuple[PolicyDecision, ...],
+        policy_context: PolicyContext,
+    ) -> None:
+        """Persist per-capability policy decisions for audit/debuggability."""
+        decisions_by_id = {decision.stable_id: decision for decision in policy_decisions}
+        for descriptor in capability_graph.capabilities:
+            decision = decisions_by_id.get(descriptor.stable_id)
+            if decision is None:
+                continue
+            await self._event_store.append(
+                create_policy_capability_evaluated_event(
+                    session_id=session_id,
+                    descriptor=descriptor,
+                    decision=decision,
+                    context=policy_context,
+                )
+            )
+
     def _seed_runtime_handle(
         self,
         runtime_handle: RuntimeHandle | None,
@@ -504,13 +557,10 @@ class OrchestratorRunner:
         metadata = dict(runtime_handle.metadata) if runtime_handle is not None else {}
         if tool_catalog is not None:
             metadata["tool_catalog"] = serialize_tool_catalog(tool_catalog)
-            capability_graph = build_capability_graph(tool_catalog)
-            policy_context = PolicyContext(
+            _, capability_graph, policy_decisions, _ = self._evaluate_tool_catalog_policy(
+                tool_catalog,
                 runtime_backend=backend,
-                session_role=PolicySessionRole.IMPLEMENTATION,
-                execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
             )
-            policy_decisions = evaluate_capability_policy(capability_graph, policy_context)
             metadata["capability_graph"] = serialize_capability_graph(capability_graph)
             metadata["control_plane"] = serialize_control_plane_state(
                 build_control_plane_state(capability_graph, policy_decisions)
@@ -1111,18 +1161,29 @@ class OrchestratorRunner:
                 session_catalog,
                 inherited_capabilities=frozenset(inherited_mcp),
             )
-        capability_graph = build_capability_graph(session_catalog)
-        merged_tools = allowed_capability_names(
+        (
+            merged_tools,
             capability_graph,
-            PolicyContext(
-                runtime_backend=self._adapter.runtime_backend,
-                session_role=PolicySessionRole.IMPLEMENTATION,
-                execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
-            ),
-        )
+            policy_decisions,
+            policy_context,
+        ) = self._evaluate_tool_catalog_policy(session_catalog)
 
         if self._mcp_manager is None:
+            await self._emit_policy_capability_evaluated_events(
+                session_id,
+                capability_graph,
+                policy_decisions,
+                policy_context,
+            )
             return merged_tools, None, session_catalog
+
+        async def _emit_current_policy_decisions() -> None:
+            await self._emit_policy_capability_evaluated_events(
+                session_id,
+                capability_graph,
+                policy_decisions,
+                policy_context,
+            )
 
         # Create provider and get MCP tools
         provider = MCPToolProvider(
@@ -1138,6 +1199,7 @@ class OrchestratorRunner:
                 session_id=session_id,
                 error=str(e),
             )
+            await _emit_current_policy_decisions()
             return merged_tools, None, session_catalog
 
         if not mcp_tools:
@@ -1145,6 +1207,7 @@ class OrchestratorRunner:
                 "orchestrator.runner.no_mcp_tools_available",
                 session_id=session_id,
             )
+            await _emit_current_policy_decisions()
             return merged_tools, provider, session_catalog
 
         session_catalog = provider.session_catalog
@@ -1156,14 +1219,17 @@ class OrchestratorRunner:
                 session_catalog,
                 inherited_capabilities=frozenset(inherited_mcp),
             )
-        capability_graph = build_capability_graph(session_catalog)
-        merged_tools = allowed_capability_names(
+        (
+            merged_tools,
             capability_graph,
-            PolicyContext(
-                runtime_backend=self._adapter.runtime_backend,
-                session_role=PolicySessionRole.IMPLEMENTATION,
-                execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
-            ),
+            policy_decisions,
+            policy_context,
+        ) = self._evaluate_tool_catalog_policy(session_catalog)
+        await self._emit_policy_capability_evaluated_events(
+            session_id,
+            capability_graph,
+            policy_decisions,
+            policy_context,
         )
         mcp_tool_names = [t.name for t in mcp_tools]
 

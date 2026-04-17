@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.capabilities import (
     CapabilityMutationClass,
@@ -45,3 +47,23 @@ def test_capability_graph_serialization_round_trips() -> None:
     assert restored is not None
     assert [descriptor.name for descriptor in restored.capabilities] == ["Read", "Edit"]
     assert restored.capabilities[0].semantics.mutation_class is CapabilityMutationClass.READ_ONLY
+
+
+def test_build_capability_graph_records_inherited_capabilities_without_entries() -> None:
+    catalog = replace(
+        assemble_session_tool_catalog(["Read"]),
+        inherited_capabilities=frozenset({"mcp__chrome-devtools__click"}),
+    )
+
+    graph = build_capability_graph(catalog)
+
+    descriptors = {descriptor.name: descriptor for descriptor in graph.capabilities}
+    inherited = descriptors["mcp__chrome-devtools__click"]
+    assert [descriptor.name for descriptor in graph.capabilities] == [
+        "Read",
+        "mcp__chrome-devtools__click",
+    ]
+    assert inherited.stable_id == "inherited:mcp__chrome-devtools__click"
+    assert inherited.source_kind == "inherited_capability"
+    assert inherited.semantics.origin is CapabilityOrigin.ATTACHED_MCP
+    assert inherited.semantics.scope is CapabilityScope.ATTACHMENT

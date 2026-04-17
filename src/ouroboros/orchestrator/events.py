@@ -21,6 +21,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.capabilities import CapabilityDescriptor
+from ouroboros.orchestrator.policy import PolicyContext, PolicyDecision
 
 
 def create_session_started_event(
@@ -357,6 +359,45 @@ def create_mcp_tools_loaded_event(
     )
 
 
+def create_policy_capability_evaluated_event(
+    session_id: str,
+    descriptor: CapabilityDescriptor,
+    decision: PolicyDecision,
+    context: PolicyContext,
+) -> BaseEvent:
+    """Create a persisted audit event for one capability-policy decision."""
+    return BaseEvent(
+        type="policy.capability.evaluated",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "capability": {
+                "stable_id": descriptor.stable_id,
+                "name": descriptor.name,
+                "source_kind": descriptor.source_kind,
+                "source_name": descriptor.source_name,
+                "origin": descriptor.semantics.origin.value,
+                "scope": descriptor.semantics.scope.value,
+                "mutation_class": descriptor.semantics.mutation_class.value,
+                "parallel_safety": descriptor.semantics.parallel_safety.value,
+                "approval_class": descriptor.semantics.approval_class.value,
+            },
+            "decision": {
+                "visible": decision.visible,
+                "executable": decision.executable,
+                "approval_class": decision.approval_class.value,
+                "reasons": list(decision.reasons),
+            },
+            "context": {
+                "runtime_backend": context.runtime_backend,
+                "session_role": context.session_role.value,
+                "execution_phase": context.execution_phase.value,
+            },
+            "evaluated_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 def create_workflow_progress_event(
     execution_id: str,
     session_id: str,
@@ -589,6 +630,7 @@ __all__ = [
     "create_execution_terminal_event",
     "create_heartbeat_event",
     "create_mcp_tools_loaded_event",
+    "create_policy_capability_evaluated_event",
     "create_progress_event",
     "create_session_cancelled_event",
     "create_session_completed_event",

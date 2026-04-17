@@ -178,6 +178,15 @@ _BUILTIN_SEMANTICS: dict[str, CapabilitySemantics] = {
     ),
 }
 
+_INHERITED_CAPABILITY_SEMANTICS = CapabilitySemantics(
+    mutation_class=CapabilityMutationClass.EXTERNAL_SIDE_EFFECT,
+    parallel_safety=CapabilityParallelSafety.SERIALIZED,
+    interruptibility=CapabilityInterruptibility.SOFT,
+    approval_class=CapabilityApprovalClass.ELEVATED,
+    origin=CapabilityOrigin.ATTACHED_MCP,
+    scope=CapabilityScope.ATTACHMENT,
+)
+
 
 def _fallback_source_metadata(tool: MCPToolDefinition) -> ToolCatalogSourceMetadata:
     source_kind = "attached_mcp" if tool.server_name else "builtin"
@@ -268,6 +277,20 @@ def _descriptor_from_tool(
     )
 
 
+def _descriptor_from_inherited_capability(name: str) -> CapabilityDescriptor:
+    """Represent a delegated MCP grant without making it executable."""
+    return CapabilityDescriptor(
+        stable_id=f"inherited:{name}",
+        name=name,
+        original_name=name,
+        description="Inherited delegated capability pending live MCP discovery",
+        server_name=None,
+        source_kind="inherited_capability",
+        source_name="delegated_parent",
+        semantics=_INHERITED_CAPABILITY_SEMANTICS,
+    )
+
+
 def build_capability_graph(
     tool_catalog: SessionToolCatalog
     | Sequence[MCPToolDefinition]
@@ -276,8 +299,10 @@ def build_capability_graph(
     """Build a deterministic capability graph from the current tool surface."""
     descriptors: list[CapabilityDescriptor] = []
 
+    inherited_capabilities: frozenset[str] = frozenset()
     if isinstance(tool_catalog, SessionToolCatalog):
         entries = tool_catalog.entries
+        inherited_capabilities = tool_catalog.inherited_capabilities
     else:
         entries = tool_catalog
 
@@ -292,6 +317,9 @@ def build_capability_graph(
             )
         else:
             descriptors.append(_descriptor_from_tool(entry))
+
+    for capability_name in sorted(inherited_capabilities):
+        descriptors.append(_descriptor_from_inherited_capability(capability_name))
 
     return CapabilityGraph(capabilities=tuple(descriptors))
 

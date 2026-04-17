@@ -87,6 +87,8 @@ _ROLE_PROFILES = {
     ),
 }
 
+_NON_EXECUTABLE_SOURCE_KINDS = frozenset({"inherited_capability"})
+
 
 def _is_mutation_allowed(
     descriptor: CapabilityDescriptor,
@@ -122,6 +124,12 @@ def evaluate_capability_policy(
             reasons.append(
                 f"mutation_class {descriptor.semantics.mutation_class.value} exceeds "
                 f"{context.session_role.value} policy"
+            )
+
+        if descriptor.source_kind in _NON_EXECUTABLE_SOURCE_KINDS:
+            executable = False
+            reasons.append(
+                f"{descriptor.source_kind} requires live provider discovery before execution"
             )
 
         decisions.append(

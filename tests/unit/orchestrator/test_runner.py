@@ -2323,6 +2323,44 @@ class TestOrchestratorRunnerWithMCP:
         assert provider is None
 
     @pytest.mark.asyncio
+    async def test_get_merged_tools_emits_policy_events_for_inherited_capabilities(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """Policy decisions are persisted, including non-executable inherited grants."""
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            inherited_tools=["Read", "mcp__chrome-devtools__click"],
+        )
+
+        merged_tools, provider, _tool_catalog = await runner._get_merged_tools("session_123")
+
+        assert provider is None
+        assert "mcp__chrome-devtools__click" not in merged_tools
+        policy_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "policy.capability.evaluated"
+        ]
+        events_by_name = {event.data["capability"]["name"]: event for event in policy_events}
+
+        read_event = events_by_name["Read"]
+        assert read_event.data["decision"]["visible"] is True
+        assert read_event.data["decision"]["executable"] is True
+
+        inherited_event = events_by_name["mcp__chrome-devtools__click"]
+        assert inherited_event.data["capability"]["source_kind"] == "inherited_capability"
+        assert inherited_event.data["decision"]["visible"] is True
+        assert inherited_event.data["decision"]["executable"] is False
+        assert inherited_event.data["decision"]["reasons"] == [
+            "inherited_capability requires live provider discovery before execution"
+        ]
+
+    @pytest.mark.asyncio
     async def test_get_merged_tools_preserves_inherited_capabilities_after_discovery(
         self,
         mock_adapter: MagicMock,
