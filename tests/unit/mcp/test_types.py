@@ -326,9 +326,7 @@ class TestMCPServerConfigSSRFHardening:
         )
         assert config.url == "http://localhost:3000/"
 
-    def test_rejects_hostname_resolving_to_loopback(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rejects_hostname_resolving_to_loopback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Public-looking hostnames that resolve to loopback are rejected."""
         monkeypatch.delenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", raising=False)
 
@@ -415,6 +413,69 @@ class TestMCPServerConfigSSRFHardening:
             url="http://127.0.0.1.nip.io/",
         )
         assert config.url == "http://127.0.0.1.nip.io/"
+
+    def test_dns_lookup_uses_unnormalized_host_for_trailing_dot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: DNS resolution must use the exact host the client dials.
+
+        Canonical matching against ``_LOOPBACK_HOSTNAMES`` collapses the
+        trailing-dot/case variants of ``localhost`` into a single form for
+        identity matching. But for hosts that *don't* hit the canonical
+        loopback set and fall through to DNS, the resolver must see the
+        original host (trailing dot preserved) because an absolute FQDN
+        (``example.com.``) and a relative name (``example.com``) can give
+        different answers under some resolver configurations.
+        """
+        monkeypatch.delenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", raising=False)
+
+        seen_hosts: list[str] = []
+
+        def _fake_getaddrinfo(host: str, *_args, **_kwargs):
+            seen_hosts.append(host)
+            return [(2, 1, 6, "", ("127.0.0.1", 0))]
+
+        monkeypatch.setattr("ouroboros.mcp.types.socket.getaddrinfo", _fake_getaddrinfo)
+
+        with pytest.raises(ValueError, match="hostname resolves to loopback/link-local/private"):
+            MCPServerConfig(
+                name="test",
+                transport=TransportType.HTTP,
+                url="http://127.0.0.1.nip.io./",
+            )
+
+        # The resolver must have been handed the trailing-dot form, not the
+        # canonicalized (stripped) form, so the lookup matches exactly what
+        # the HTTP client will connect to.
+        assert seen_hosts == ["127.0.0.1.nip.io."]
+
+    def test_canonical_match_does_not_short_circuit_non_loopback_aliases(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A host whose canonical form is not ``localhost`` still gets DNS-checked.
+
+        Guards against a regression where the canonical/lookup split is
+        collapsed back into a single normalized string and DNS is skipped
+        when the canonical form does not equal a well-known loopback name.
+        """
+        monkeypatch.delenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", raising=False)
+
+        seen_hosts: list[str] = []
+
+        def _fake_getaddrinfo(host: str, *_args, **_kwargs):
+            seen_hosts.append(host)
+            return [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+        monkeypatch.setattr("ouroboros.mcp.types.socket.getaddrinfo", _fake_getaddrinfo)
+
+        with pytest.raises(ValueError, match="hostname resolves to loopback/link-local/private"):
+            MCPServerConfig(
+                name="test",
+                transport=TransportType.HTTP,
+                url="http://internal.example.test./",
+            )
+
+        assert seen_hosts == ["internal.example.test."]
 
 
 class TestMCPToolParameter:

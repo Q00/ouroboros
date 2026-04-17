@@ -86,12 +86,25 @@ def _validate_transport_url(url: str, transport: str) -> None:
         * URLs carrying userinfo (``user:pass@host``) used for credential
           smuggling / host confusion.
         * URLs with an empty hostname (e.g. bare ``http://``).
-        * Literal IPs resolving to loopback, link-local, or private ranges,
-          unless the ``OUROBOROS_ALLOW_LOCAL_TRANSPORT=1`` dev escape is set.
+        * Well-known canonical loopback hostnames (``localhost`` and its
+          trailing-dot / mixed-case variants).
+        * Literal IPs inside loopback, link-local, private, multicast,
+          reserved, or unspecified ranges.
+        * DNS hostnames whose ``getaddrinfo()`` result resolves to any
+          address in those same blocked ranges (e.g. ``*.nip.io`` aliases,
+          DNS rebinding targets, metadata-IP aliases).
 
-    DNS resolution is intentionally out of scope for this static validation;
-    runtime code that follows redirects should be hardened separately (the
-    adapter sets ``follow_redirects=False``).
+    The ``OUROBOROS_ALLOW_LOCAL_TRANSPORT=1`` dev escape re-enables every
+    range above for local development only.
+
+    Boundary note: two distinct normalizations are used here. Canonical
+    matching against ``_LOOPBACK_HOSTNAMES`` uses a ``rstrip('.').lower()``
+    form so that ``LOCALHOST.``/``localhost.``/``localhost`` are recognized
+    as the same name. The DNS / IP-literal checks, however, resolve the
+    exact host the MCP client will connect to (the unmodified value
+    returned by ``urllib.parse``, minus IPv6 brackets), because a stripped
+    trailing dot can change how some resolvers answer. Canonicalization is
+    for identity matching, not for picking the lookup target.
 
     Args:
         url: The transport URL to validate.
@@ -122,21 +135,27 @@ def _validate_transport_url(url: str, transport: str) -> None:
 
     allow_local = os.environ.get(_ALLOW_LOCAL_TRANSPORT_ENV, "0") == "1"
 
-    # Strip IPv6 brackets (urlparse already does, but be defensive).
-    host_literal = hostname.strip("[]")
+    # ``lookup_host`` is the exact host the HTTP client will dial. ``urlparse``
+    # has already stripped IPv6 brackets and lowercased the hostname, but we
+    # defensively re-strip brackets in case a future parser change preserves
+    # them. This value is passed verbatim to ``ipaddress.ip_address()`` and to
+    # ``getaddrinfo()`` so DNS resolution sees exactly what the client will.
+    lookup_host = hostname.strip("[]")
 
-    # Normalize canonical DNS form before matching known loopback names: DNS is
-    # case-insensitive and a single trailing dot marks an absolute FQDN, so
-    # ``LOCALHOST.`` and ``localhost`` denote the same host.  ``urlparse``
-    # already lowercases, but it does not strip the trailing dot, which let
-    # variants like ``http://localhost./`` slip past the well-known check.
-    host_literal = host_literal.rstrip(".") or host_literal
+    # ``canonical_host`` collapses DNS-equivalent spellings (trailing dot,
+    # case) into a single form used *only* for well-known-name matching. DNS
+    # is case-insensitive, and a single trailing dot marks an absolute FQDN,
+    # so ``LOCALHOST.``/``localhost.``/``localhost`` must all hit the
+    # loopback guard. ``urlparse`` already lowercases, but it does not strip
+    # the trailing dot, which let variants like ``http://localhost./`` slip
+    # past the well-known check in earlier versions.
+    canonical_host = (lookup_host.rstrip(".") or lookup_host).lower()
 
     # Check for well-known loopback hostnames before attempting IP parsing.
     # These bypass the IP-literal checks because they are DNS names, but
     # they resolve to loopback addresses and must be blocked unless the
     # dev escape hatch is enabled.
-    if host_literal.lower() in _LOOPBACK_HOSTNAMES:
+    if canonical_host in _LOOPBACK_HOSTNAMES:
         if allow_local:
             return
         msg = (
@@ -145,10 +164,15 @@ def _validate_transport_url(url: str, transport: str) -> None:
         )
         raise ValueError(msg)
 
+    # Use the un-normalized ``lookup_host`` for IP parsing and DNS resolution
+    # so the check matches exactly what the HTTP client will connect to. A
+    # resolver may answer differently for ``localhost.`` (absolute) vs
+    # ``localhost`` (search-list), so stripping the trailing dot here would
+    # break the boundary with the runtime connect path.
     try:
-        ip = ipaddress.ip_address(host_literal)
+        ip = ipaddress.ip_address(lookup_host)
     except ValueError:
-        blocked_ips = _resolved_blocked_transport_ips(host_literal)
+        blocked_ips = _resolved_blocked_transport_ips(lookup_host)
         if not blocked_ips or allow_local:
             return
         msg = (
