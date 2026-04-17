@@ -29,24 +29,48 @@ Tools that dispatch via the plugin when `runtime_backend=opencode` and
 | `ouroboros_start_evolve_step` | `_subagent` | evolution (background job) |
 | `ouroboros_evaluate` | `_subagent` | evaluator |
 
-For each payload the bridge:
+For each payload the bridge **fire-and-forget** dispatches:
 
 1. Parses the envelope in the `tool.execute.after` hook.
-2. For each payload, spawns a **new child session** (`client.session.create`).
-3. Prompts the child with the subagent prompt (`client.session.prompt`, sync).
-4. Patches the original tool's assistant-message part with a `subtask` part
-   via direct HTTP PATCH to `/session/{parent}/message/{mid}/part/{pid}` so
-   the Task pane renders **inline** under the tool call, not in the main
-   message stream.
-5. Rewrites the tool output to a short `[Ouroboros] Dispatched ...` line.
+2. For each payload, AWAITS a **new child session** (`client.session.create`).
+3. AWAITS PATCH of the original tool's assistant-message part with a
+   `subtask` part (state `running`) via direct HTTP PATCH to
+   `/session/{parent}/message/{mid}/part/{pid}` so the Task pane renders
+   **inline** under the tool call with a spinner.
+4. FIRES `client.session.prompt(...)` **without awaiting** — the child
+   runs in the background.
+5. Attaches `.then` / `.catch` handlers that PATCH the widget to
+   `completed` (with `<task_result>` output) or `error` on failure.
+6. Stamps the tool output with a human-readable dispatch banner +
+   structured envelope in `metadata.ouroboros_dispatch`.
 
 End result:
 
-- Main LLM sees a short dispatch notification.
+- Hook returns in ~100ms — main LLM is NOT blocked on child execution.
 - Each subagent runs in its own child session — independent context, no
   cross-contamination.
-- Task panes appear inline in the parent session's UI.
-- Subagent results stay in their panes.
+- Task panes appear inline with live state: running → completed/error.
+- Widget state is the source of truth for completion; OpenCode natively
+  re-injects child output into the parent session when the widget
+  transitions to `completed`.
+
+### Dispatch envelope
+
+`out.metadata.ouroboros_dispatch` carries a structured record:
+
+```json
+{
+  "status": "dispatched" | "dispatch_failed" | "skipped" | "nothing",
+  "mode": "plugin_subagent",
+  "dispatched_at": "2026-04-17T…Z",
+  "children": [{"title","childID","agent","tool","truncated"}],
+  "failed":   [{"title","tool","reason?"}],
+  "skipped":  [{"title","tool"}]
+}
+```
+
+Downstream tooling can distinguish plugin-dispatched runs from
+subprocess runs via `mode === "plugin_subagent"`.
 
 ## Why a bridge
 
@@ -67,19 +91,24 @@ subtask parts.
 +--------------------+     +----------------------+     +----------+----------+
                                                                    |
                        +-------------------------------------------+
-                       |  for each payload:                        |
+                       |  for each payload (fire-and-forget):      |
                        v                                           |
           +-----------------------------+       +------------------+-------+
-          | client.session.create       |       | PATCH session/{parent}/  |
+          | AWAIT session.create        |       | PATCH session/{parent}/  |
           | -> new childID              |       | message/{mid}/part/{pid} |
-          | client.session.prompt       | ----> | body { type:"subtask",   |
-          | -> waits for child result   |       |        sessionID:child } |
-          +-----------------------------+       +--------------------------+
-                       |
-                       v
+          | AWAIT patch: state=running  | ----> | body { type:"subtask",   |
+          | FIRE session.prompt (no     |       |        sessionID:child,  |
+          |   await) + .then/.catch     |       |        state:"running" } |
+          +--------------+--------------+       +--------------------------+
+                         |                                  ^
+                         |  on child finish (bg):           |
+                         +----------------------------------+
+                            PATCH state=completed|error
+                         |
+                         v
           +-----------------------------+
-          | Inline Task pane renders    |
-          | under the tool call         |
+          | Hook returns ~100ms         |
+          | Task pane spins → completes |
           +-----------------------------+
 ```
 
