@@ -1,5 +1,7 @@
 """Tests for MCP types."""
 
+import socket
+
 import pytest
 
 from ouroboros.mcp.types import (
@@ -316,6 +318,96 @@ class TestMCPServerConfigSSRFHardening:
             url="http://localhost:3000/",
         )
         assert config.url == "http://localhost:3000/"
+
+    def test_rejects_hostname_resolving_to_loopback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Public-looking hostnames that resolve to loopback are rejected."""
+        monkeypatch.delenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", raising=False)
+
+        def _fake_getaddrinfo(host: str, *_args, **_kwargs):
+            assert host == "127.0.0.1.nip.io"
+            return [
+                (
+                    2,
+                    1,
+                    6,
+                    "",
+                    ("127.0.0.1", 0),
+                )
+            ]
+
+        monkeypatch.setattr("ouroboros.mcp.types.socket.getaddrinfo", _fake_getaddrinfo)
+
+        with pytest.raises(ValueError, match="hostname resolves to loopback/link-local/private"):
+            MCPServerConfig(
+                name="test",
+                transport=TransportType.HTTP,
+                url="http://127.0.0.1.nip.io/",
+            )
+
+    def test_rejects_hostname_resolving_to_metadata_ip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hostnames resolving to link-local metadata IPs are rejected."""
+        monkeypatch.delenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", raising=False)
+
+        def _fake_getaddrinfo(host: str, *_args, **_kwargs):
+            assert host == "metadata.example.test"
+            return [
+                (
+                    2,
+                    1,
+                    6,
+                    "",
+                    ("169.254.169.254", 0),
+                )
+            ]
+
+        monkeypatch.setattr("ouroboros.mcp.types.socket.getaddrinfo", _fake_getaddrinfo)
+
+        with pytest.raises(ValueError, match="169.254.169.254"):
+            MCPServerConfig(
+                name="test",
+                transport=TransportType.HTTP,
+                url="http://metadata.example.test/latest/meta-data/",
+            )
+
+    def test_hostname_resolution_failure_is_inconclusive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Resolution failures stay non-fatal to preserve existing DNS behavior."""
+        monkeypatch.delenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", raising=False)
+
+        def _fake_getaddrinfo(_host: str, *_args, **_kwargs):
+            raise socket.gaierror("unresolvable")
+
+        monkeypatch.setattr("ouroboros.mcp.types.socket.getaddrinfo", _fake_getaddrinfo)
+
+        config = MCPServerConfig(
+            name="test",
+            transport=TransportType.HTTP,
+            url="http://future-host.example.test/",
+        )
+        assert config.url == "http://future-host.example.test/"
+
+    def test_hostname_resolution_escape_hatch_allows_local_alias(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The dev escape hatch still permits aliases that resolve locally."""
+        monkeypatch.setenv("OUROBOROS_ALLOW_LOCAL_TRANSPORT", "1")
+
+        def _fake_getaddrinfo(_host: str, *_args, **_kwargs):
+            return [(2, 1, 6, "", ("127.0.0.1", 0))]
+
+        monkeypatch.setattr("ouroboros.mcp.types.socket.getaddrinfo", _fake_getaddrinfo)
+
+        config = MCPServerConfig(
+            name="test",
+            transport=TransportType.HTTP,
+            url="http://127.0.0.1.nip.io/",
+        )
+        assert config.url == "http://127.0.0.1.nip.io/"
 
 
 class TestMCPToolParameter:
