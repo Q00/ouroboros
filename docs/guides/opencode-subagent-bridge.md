@@ -186,7 +186,11 @@ What setup guarantees:
   untouched (mtime preserved).
 
 Restart OpenCode after setup. Verify by checking
-`<plugin-dir>/bridge.log` — you should see an `INIT` line.
+`<plugin-dir>/bridge.log` — you should see an `INIT` line. If the log is
+empty or OpenCode logs `Plugin export is not a function`, confirm the
+plugin source still ends with a V1 default export
+(`export default { id, server }`) — OpenCode's legacy loader scans every
+named export and rejects non-function values like `MAX_BYTES`.
 
 ### Manual install (advanced)
 
