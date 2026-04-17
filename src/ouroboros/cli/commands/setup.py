@@ -30,7 +30,19 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
-from ouroboros.cli.opencode_config import find_opencode_config, opencode_config_dir
+from ouroboros.cli.opencode_config import (
+    BRIDGE_PLUGIN_FILENAME as _BRIDGE_PLUGIN_FILENAME,
+)
+from ouroboros.cli.opencode_config import (
+    BRIDGE_PLUGIN_SUBDIR as _BRIDGE_PLUGIN_SUBDIR,
+)
+from ouroboros.cli.opencode_config import (
+    find_opencode_config,
+    opencode_config_dir,
+)
+from ouroboros.cli.opencode_config import (
+    is_bridge_plugin_entry as _is_bridge_plugin_entry,
+)
 from ouroboros.persistence.brownfield import BrownfieldStore
 
 
@@ -637,8 +649,8 @@ def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
 
 # Canonical relative path components for the bridge plugin install — single
 # source of truth so install + config-registry + uninstall all agree.
-_BRIDGE_PLUGIN_SUBDIR = ("plugins", "ouroboros-bridge")
-_BRIDGE_PLUGIN_FILENAME = "ouroboros-bridge.ts"
+# Re-exported from opencode_config as module-private aliases so the rest of
+# this file keeps its historic `_BRIDGE_PLUGIN_*` naming.
 
 
 def _bridge_plugin_source_text() -> str | None:
@@ -748,28 +760,6 @@ def _install_opencode_bridge_plugin() -> None:
 
     print_success(
         f"{'Updated' if existing_hash is not None else 'Installed'} bridge plugin: {dest}"
-    )
-
-
-def _is_bridge_plugin_entry(entry: object) -> bool:
-    """Return ``True`` when *entry* refers to any bridge-plugin install.
-
-    Matches by directory-tail (``plugins/ouroboros-bridge``) + basename
-    (``ouroboros-bridge.ts``) rather than exact string equality — catches
-    stale entries from XDG reshuffles, Windows mixed separators, legacy
-    install paths, and sudo/root migrations.
-    """
-    if not isinstance(entry, str) or not entry:
-        return False
-    # Normalise path separators so Windows entries (``\``) compare equal.
-    normalised = entry.replace("\\", "/")
-    parts = [p for p in normalised.split("/") if p]
-    if len(parts) < 3:
-        return False
-    return (
-        parts[-1] == _BRIDGE_PLUGIN_FILENAME
-        and parts[-2] == _BRIDGE_PLUGIN_SUBDIR[1]
-        and parts[-3] == _BRIDGE_PLUGIN_SUBDIR[0]
     )
 
 
