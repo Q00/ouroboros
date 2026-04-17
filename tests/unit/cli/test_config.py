@@ -166,6 +166,17 @@ class TestConfigBackend:
         assert result.exit_code == 0
         mock_setup.assert_called_once_with("/usr/bin/claude")
 
+    def test_switch_to_hermes_delegates_to_setup(self, config_dir: Path) -> None:
+        """config backend hermes should delegate to _setup_hermes."""
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("shutil.which", return_value="/usr/bin/hermes"),
+            patch("ouroboros.cli.commands.setup._setup_hermes") as mock_setup,
+        ):
+            result = runner.invoke(app, ["backend", "hermes"])
+        assert result.exit_code == 0
+        mock_setup.assert_called_once_with("/usr/bin/hermes")
+
     def test_switch_warns_on_setup_print_error(self, config_dir: Path) -> None:
         """config backend should warn when setup emits print_error (non-exception failure)."""
         from ouroboros.cli.commands import setup as setup_mod
@@ -240,6 +251,18 @@ class TestConfigValidate:
     def test_opencode_backend_is_valid(self, tmp_path: Path) -> None:
         """validate should accept opencode as a valid runtime backend."""
         config = {"orchestrator": {"runtime_backend": "opencode"}, "llm": {"backend": "opencode"}}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=tmp_path),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 0
+
+    def test_hermes_runtime_backend_is_valid(self, tmp_path: Path) -> None:
+        """validate should accept hermes as a valid runtime backend."""
+        config = {"orchestrator": {"runtime_backend": "hermes"}, "llm": {"backend": "claude"}}
         (tmp_path / "config.yaml").write_text(yaml.dump(config))
 
         with (

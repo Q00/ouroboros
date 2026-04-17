@@ -80,6 +80,7 @@ class TestRunCommands:
         assert result.exit_code == 0
         assert "seed" in result.output.lower()
         assert "runtime" in result.output.lower()
+        assert "hermes" in result.output.lower()
 
     def test_run_resume_help(self) -> None:
         """Test run resume command help."""
@@ -237,6 +238,19 @@ class TestShorthandCommands:
         seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
 
         result = runner.invoke(app, ["run", "workflow", str(seed_file), "--no-orchestrator"])
+
+        assert result.exit_code == 0
+        assert "Would execute" in result.output
+
+    def test_run_workflow_accepts_hermes_runtime_override(self, tmp_path: Path) -> None:
+        """Hermes should be accepted as a CLI runtime choice."""
+        seed_file = tmp_path / "seed.yaml"
+        seed_file.write_text("goal: test\nacceptance_criteria:\n  - criterion: test\n")
+
+        result = runner.invoke(
+            app,
+            ["run", "workflow", str(seed_file), "--runtime", "hermes", "--no-orchestrator"],
+        )
 
         assert result.exit_code == 0
         assert "Would execute" in result.output

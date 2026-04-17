@@ -32,17 +32,13 @@ from ouroboros.cli.formatters.panels import (
 )
 from ouroboros.persistence.brownfield import BrownfieldStore
 
-# Canonical MCP args for Claude Code uvx installs — single source of truth.
-_CLAUDE_UVX_ARGS: list[str] = [
-    "--from",
-    "ouroboros-ai[mcp,claude]",
-    "ouroboros",
-    "mcp",
-    "serve",
-]
+
+def _build_uvx_mcp_args(package_spec: str) -> list[str]:
+    """Return the canonical uvx args for the requested Ouroboros package spec."""
+    return ["--from", package_spec, "ouroboros", "mcp", "serve"]
 
 
-def _detect_mcp_entry() -> dict[str, object] | None:
+def _detect_mcp_entry(*, package_spec: str = "ouroboros-ai[mcp]") -> dict[str, object] | None:
     """Build the correct MCP entry based on how ouroboros is installed.
 
     Priority: uvx > ouroboros binary > python3 -m ouroboros (verified).
@@ -50,7 +46,7 @@ def _detect_mcp_entry() -> dict[str, object] | None:
     Matches the contract in install.sh and skills/setup/SKILL.md.
     """
     if shutil.which("uvx"):
-        return {"command": "uvx", "args": list(_CLAUDE_UVX_ARGS)}
+        return {"command": "uvx", "args": _build_uvx_mcp_args(package_spec)}
     if shutil.which("ouroboros"):
         return {"command": "ouroboros", "args": ["mcp", "serve"]}
     # Only use python3 fallback if ouroboros is actually importable
@@ -85,7 +81,7 @@ def _ensure_claude_mcp_entry() -> None:
     mcp_data.setdefault("mcpServers", {})
 
     existing = mcp_data["mcpServers"].get("ouroboros")
-    detected = _detect_mcp_entry()
+    detected = _detect_mcp_entry(package_spec="ouroboros-ai[mcp,claude]")
     needs_write = False
 
     if existing is None:
@@ -152,7 +148,7 @@ def _get_current_backend() -> str | None:
 def _detect_runtimes() -> dict[str, str | None]:
     """Detect available runtime CLIs in PATH."""
     runtimes: dict[str, str | None] = {}
-    for name in ("claude", "codex", "opencode"):
+    for name in ("claude", "codex", "opencode", "hermes"):
         path = shutil.which(name)
         runtimes[name] = path
     return runtimes
@@ -308,10 +304,10 @@ def _setup_codex(codex_path: str) -> None:
     config_path = config_dir / "config.yaml"
 
     if config_path.exists():
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
         create_default_config(config_dir)
-        config_dict = yaml.safe_load(config_path.read_text()) or {}
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
 
     # Set runtime and LLM backend to codex
     config_dict.setdefault("orchestrator", {})
@@ -321,7 +317,7 @@ def _setup_codex(codex_path: str) -> None:
     config_dict.setdefault("llm", {})
     config_dict["llm"]["backend"] = "codex"
 
-    with config_path.open("w") as f:
+    with config_path.open("w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success(f"Configured Codex runtime (CLI: {codex_path})")
@@ -334,9 +330,97 @@ def _setup_codex(codex_path: str) -> None:
     _register_codex_mcp_server()
     _print_codex_config_guidance(config_path)
 
-    # Also register/fix MCP server for Codex users who also have Claude Code
-    if (Path.home() / ".claude").is_dir():
-        _ensure_claude_mcp_entry()
+
+def _install_hermes_artifacts() -> None:
+    """Install packaged Ouroboros skills into ~/.hermes/."""
+    from ouroboros.hermes.artifacts import install_hermes_skills
+
+    hermes_dir = Path.home() / ".hermes"
+
+    try:
+        skill_path = install_hermes_skills(hermes_dir=hermes_dir, prune=True)
+        print_success(f"Installed Hermes skills → {skill_path}")
+    except FileNotFoundError:
+        print_error("Could not locate packaged skills for Hermes.")
+
+
+def _register_hermes_mcp_server() -> None:
+    """Register the Ouroboros MCP hookup in ~/.hermes/config.yaml."""
+    hermes_config = Path.home() / ".hermes" / "config.yaml"
+    hermes_config.parent.mkdir(parents=True, exist_ok=True)
+
+    config_data: dict = {}
+    if hermes_config.exists():
+        try:
+            loaded_config = yaml.safe_load(hermes_config.read_text(encoding="utf-8"))
+        except Exception:
+            print_error(f"Could not parse {hermes_config} — skipping MCP registration.")
+            return
+        if loaded_config is None:
+            config_data = {}
+        elif isinstance(loaded_config, dict):
+            config_data = loaded_config
+        else:
+            print_warning(f"{hermes_config} top-level is not a mapping — resetting.")
+            config_data = {}
+
+    config_data.setdefault("mcp_servers", {})
+
+    # Use UVX install by default for robustness
+    detected = _detect_mcp_entry()
+    if detected is None:
+        print_warning("Cannot register Hermes MCP server: no working Ouroboros installation found.")
+        return
+
+    config_data["mcp_servers"]["ouroboros"] = {
+        "command": detected["command"],
+        "args": detected["args"],
+        "enabled": True,
+    }
+
+    with hermes_config.open("w", encoding="utf-8") as f:
+        yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Registered Ouroboros MCP server in {hermes_config}")
+
+
+def _setup_hermes(hermes_path: str) -> None:
+    """Configure Ouroboros for the Hermes runtime."""
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(config_dict, dict):
+        print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
+        config_dict = {}
+
+    # Set runtime to Hermes. Do not rewrite llm.backend until Hermes also
+    # supports the LLM-only adapter contract used elsewhere in Ouroboros.
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "hermes"
+    orch["hermes_cli_path"] = hermes_path
+
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured Hermes runtime (CLI: {hermes_path})")
+    print_info(f"Config saved to: {config_path}")
+
+    # Install Ouroboros skills for Hermes
+    _install_hermes_artifacts()
+
+    # Register MCP server
+    _register_hermes_mcp_server()
 
 
 def _setup_claude(claude_path: str) -> None:
@@ -584,10 +668,6 @@ def _setup_opencode(opencode_path: str) -> None:
     # Register MCP server in OpenCode config
     _ensure_opencode_mcp_entry()
 
-    # Also register for Claude Code if present
-    if (Path.home() / ".claude").is_dir():
-        _ensure_claude_mcp_entry()
-
 
 # ── Brownfield repo helpers ──────────────────────────────────────
 
@@ -754,7 +834,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode).",
+            help="Runtime backend to configure (claude, codex, opencode, hermes).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -839,7 +919,8 @@ def setup(
                 "Install one of:\n"
                 "  • Claude Code: https://claude.ai/download\n"
                 "  • Codex CLI:   npm install -g @openai/codex\n"
-                "  • OpenCode:    npm install -g opencode-ai"
+                "  • OpenCode:    npm install -g opencode-ai\n"
+                "  • Hermes CLI:  https://hermes.ai/cli"
             )
             raise typer.Exit(1)
 
@@ -862,6 +943,12 @@ def setup(
             print_error("OpenCode CLI not found in PATH.")
             raise typer.Exit(1)
         _setup_opencode(opencode_path)
+    elif selected in ("hermes", "hermes_cli"):
+        hermes_path = available.get("hermes")
+        if not hermes_path:
+            print_error("Hermes CLI not found in PATH.")
+            raise typer.Exit(1)
+        _setup_hermes(hermes_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

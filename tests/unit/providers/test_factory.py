@@ -50,6 +50,11 @@ class TestResolveLLMBackend:
         with pytest.raises(ValueError, match="Unsupported LLM backend"):
             resolve_llm_backend("invalid")
 
+    def test_rejects_hermes_backend(self) -> None:
+        """Hermes is runtime-only until an LLM adapter exists."""
+        with pytest.raises(ValueError, match="Unsupported LLM backend"):
+            resolve_llm_backend("hermes")
+
 
 class TestCreateLLMAdapter:
     """Tests for adapter construction."""

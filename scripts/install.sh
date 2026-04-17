@@ -5,13 +5,23 @@ set -euo pipefail
 
 PACKAGE_NAME="ouroboros-ai"
 MIN_PYTHON="3.12"
+IS_LOCAL=false
+
+# Override PACKAGE_NAME if running inside the repository clone
+if [ -f "pyproject.toml" ] && grep -q "name = \"ouroboros-ai\"" pyproject.toml; then
+  PACKAGE_NAME="."
+  IS_LOCAL=true
+elif [ -f "$(dirname "$0")/../pyproject.toml" ] && grep -q "name = \"ouroboros-ai\"" "$(dirname "$0")/../pyproject.toml"; then
+  PACKAGE_NAME="$(dirname "$0")/.."
+  IS_LOCAL=true
+fi
 
 # Auto-detect: if a stable release exists on PyPI, use it. Otherwise allow pre-release.
 # PyPI /json info.version returns latest stable only.
 # If python3 is unavailable for JSON parsing, PRE_FLAG stays "yes" which is safe:
 # --pre/--prerelease=allow still installs stable versions when they're the latest.
 PRE_FLAG="yes"
-if command -v curl &>/dev/null; then
+if [ "$IS_LOCAL" = false ] && command -v curl &>/dev/null; then
   STABLE=$(curl -fsSL "https://pypi.org/pypi/${PACKAGE_NAME}/json" 2>/dev/null \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || true)
   if [ -n "$STABLE" ]; then
@@ -67,6 +77,7 @@ EXTRAS=""
 RUNTIME=""
 HAS_CODEX=false
 HAS_CLAUDE=false
+HAS_HERMES=false
 if command -v codex &>/dev/null; then
   echo "  Codex:  $(which codex)"
   HAS_CODEX=true
@@ -75,22 +86,33 @@ if command -v claude &>/dev/null; then
   echo "  Claude: $(which claude)"
   HAS_CLAUDE=true
 fi
+if command -v hermes &>/dev/null; then
+  echo "  Hermes: $(which hermes)"
+  HAS_HERMES=true
+fi
 
-if [ "$HAS_CODEX" = true ] && [ "$HAS_CLAUDE" = true ]; then
+RUNTIME_COUNT=0
+[ "$HAS_CLAUDE" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+[ "$HAS_CODEX" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+[ "$HAS_HERMES" = true ] && RUNTIME_COUNT=$((RUNTIME_COUNT + 1))
+
+if [ "$RUNTIME_COUNT" -gt 1 ]; then
   if [ -t 0 ]; then
     echo
-    echo "Both Codex and Claude detected. Which runtime do you want to use?"
-    echo "  [1] Claude  (pip install ${PACKAGE_NAME}[mcp,claude])  ← recommended"
+    echo "Multiple runtimes detected. Which runtime do you want to use?"
+    echo "  [1] Claude  (pip install ${PACKAGE_NAME}[mcp,claude])"
     echo "  [2] Codex   (pip install ${PACKAGE_NAME})"
-    echo "  [3] All     (pip install ${PACKAGE_NAME}[all])"
+    echo "  [3] Hermes  (pip install ${PACKAGE_NAME}[mcp])"
+    echo "  [4] All     (pip install ${PACKAGE_NAME}[all])"
     read -rp "Select [1]: " choice
     case "${choice:-1}" in
       2) EXTRAS=""; RUNTIME="codex" ;;
-      3) EXTRAS="[all]"; RUNTIME="" ;;
+      3) EXTRAS="[mcp]"; RUNTIME="hermes" ;;
+      4) EXTRAS="[all]"; RUNTIME="" ;;
       *) EXTRAS="[claude]"; RUNTIME="claude" ;;
     esac
   else
-    # Pipe mode: default to claude when both exist
+    # Pipe mode: default to claude when multiple runtimes exist
     EXTRAS="[claude]"
     RUNTIME="claude"
   fi
@@ -100,6 +122,9 @@ elif [ "$HAS_CLAUDE" = true ]; then
 elif [ "$HAS_CODEX" = true ]; then
   EXTRAS=""
   RUNTIME="codex"
+elif [ "$HAS_HERMES" = true ]; then
+  EXTRAS="[mcp]"
+  RUNTIME="hermes"
 else
   if [ -t 0 ]; then
     # Interactive mode: ask the user
@@ -107,7 +132,8 @@ else
     echo "No runtime CLI detected. Which runtime will you use?"
     echo "  [1] Claude  (pip install ${PACKAGE_NAME}[claude])  ← recommended"
     echo "  [2] Codex   (pip install ${PACKAGE_NAME})"
-    echo "  [3] All     (pip install ${PACKAGE_NAME}[all])"
+    echo "  [3] Hermes  (pip install ${PACKAGE_NAME}[mcp])"
+    echo "  [4] All     (pip install ${PACKAGE_NAME}[all])"
     read -rp "Select [1]: " choice
   else
     # Pipe mode (curl | bash): install base package, skip runtime-specific setup
@@ -118,7 +144,8 @@ else
   case "${choice:-1}" in
     0) EXTRAS=""; RUNTIME="" ;;
     2) EXTRAS="[mcp]"; RUNTIME="codex" ;;
-    3) EXTRAS="[all]"; RUNTIME="" ;;
+    3) EXTRAS="[mcp]"; RUNTIME="hermes" ;;
+    4) EXTRAS="[all]"; RUNTIME="" ;;
     *) EXTRAS="[mcp,claude]"; RUNTIME="claude" ;;
   esac
 fi
@@ -141,6 +168,9 @@ if [ "$HAS_UV" = true ]; then
   case "$EXTRAS" in
     "[claude]")
       UV_ARGS+=(--with "claude-agent-sdk>=0.1.0" --with "anthropic>=0.52.0")
+      ;;
+    "[mcp]")
+      UV_ARGS+=(--with "mcp>=1.26.0,<2.0.0")
       ;;
     "[all]")
       UV_ARGS+=(--with "claude-agent-sdk>=0.1.0" --with "anthropic>=0.52.0" --with "litellm>=1.80.0,<=1.82.6")
@@ -181,7 +211,9 @@ if [ -n "$RUNTIME" ] && command -v ouroboros &>/dev/null; then
 fi
 
 # 5. Claude Code integration (MCP + skills)
-if command -v claude &>/dev/null; then
+# Only apply Claude-specific integration when Claude was the selected runtime,
+# or when the user explicitly asked for the all-runtimes install.
+if command -v claude &>/dev/null && { [ "$RUNTIME" = "claude" ] || [ "$EXTRAS" = "[all]" ]; }; then
   echo
   echo "Setting up Claude Code integration..."
 

@@ -10,9 +10,14 @@ from pathlib import Path
 import shutil
 from typing import Literal
 
+from ouroboros.skills.artifacts import (
+    SKILL_ENTRYPOINT,
+    collect_skill_bundle_dirs,
+    resolve_packaged_skills_dir,
+)
+
 CODEX_RULE_FILENAME = "ouroboros.md"
 CODEX_SKILL_NAMESPACE = "ouroboros-"
-_SKILL_ENTRYPOINT = "SKILL.md"
 _RULE_NAMESPACE = Path(CODEX_RULE_FILENAME).stem
 _RULE_SUFFIX = Path(CODEX_RULE_FILENAME).suffix
 
@@ -28,7 +33,7 @@ class CodexPackagedSkill:
     @property
     def skill_md_path(self) -> Path:
         """Return the packaged `SKILL.md` entrypoint for this skill."""
-        return self.source_dir / _SKILL_ENTRYPOINT
+        return self.source_dir / SKILL_ENTRYPOINT
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,14 +87,7 @@ class CodexPackagedAssets:
 
 def _collect_packaged_codex_skills(source_root: Path) -> tuple[CodexPackagedSkill, ...]:
     """Enumerate packaged skill directories in a deterministic order."""
-    skill_dirs = sorted(
-        (
-            source_dir
-            for source_dir in source_root.iterdir()
-            if source_dir.is_dir() and (source_dir / _SKILL_ENTRYPOINT).is_file()
-        ),
-        key=lambda source_dir: source_dir.name,
-    )
+    skill_dirs = collect_skill_bundle_dirs(source_root)
     return tuple(
         CodexPackagedSkill(
             skill_name=source_dir.name,
@@ -141,32 +139,18 @@ def _load_packaged_codex_skills(source_root: Path) -> tuple[CodexPackagedSkill, 
     if skills:
         return skills
 
-    msg = f"Packaged Ouroboros skills directory did not contain any `{_SKILL_ENTRYPOINT}` files"
+    msg = f"Packaged Ouroboros skills directory did not contain any `{SKILL_ENTRYPOINT}` files"
     raise FileNotFoundError(msg)
 
 
 @contextmanager
 def _packaged_codex_skills_dir(*, skills_dir: str | Path | None = None) -> Iterator[Path]:
     """Resolve the packaged skills source directory for Codex skill installs."""
-    if skills_dir is not None:
-        yield Path(skills_dir).expanduser()
-        return
-
-    package_root = importlib.resources.files("ouroboros.codex")
-    packaged_skills = package_root.joinpath("skills")
-    if packaged_skills.is_dir():
-        with importlib.resources.as_file(packaged_skills) as resolved_dir:
-            yield resolved_dir
-            return
-
-    for parent in Path(__file__).resolve().parents:
-        candidate = parent / "skills"
-        if candidate.is_dir():
-            yield candidate
-            return
-
-    msg = "Packaged Ouroboros skills directory could not be located"
-    raise FileNotFoundError(msg)
+    with resolve_packaged_skills_dir(
+        skills_dir=skills_dir,
+        anchor_file=__file__,
+    ) as resolved_dir:
+        yield resolved_dir
 
 
 @contextmanager
@@ -182,7 +166,7 @@ def resolve_packaged_codex_skill_path(
         raise ValueError(msg)
 
     with _packaged_codex_skills_dir(skills_dir=skills_dir) as source_root:
-        skill_md_path = source_root / normalized_skill_name / _SKILL_ENTRYPOINT
+        skill_md_path = source_root / normalized_skill_name / SKILL_ENTRYPOINT
         if not skill_md_path.is_file():
             msg = f"Packaged Ouroboros skill could not be located: {normalized_skill_name}"
             raise FileNotFoundError(msg)

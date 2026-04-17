@@ -9,6 +9,7 @@ from ouroboros.config import (
     get_agent_runtime_backend,
     get_cli_path,
     get_codex_cli_path,
+    get_hermes_cli_path,
     get_llm_backend,
 )
 from ouroboros.orchestrator.adapter import AgentRuntime, ClaudeAgentAdapter
@@ -19,6 +20,7 @@ from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 _CLAUDE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
+_HERMES_BACKENDS = {"hermes", "hermes_cli"}
 
 
 def resolve_agent_runtime_backend(backend: str | None = None) -> str:
@@ -30,6 +32,8 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
         return "codex"
     if candidate in _OPENCODE_BACKENDS:
         return "opencode"
+    if candidate in _HERMES_BACKENDS:
+        return "hermes"
 
     msg = f"Unsupported orchestrator runtime backend: {candidate}"
     raise ValueError(msg)
@@ -80,6 +84,14 @@ def create_agent_runtime(
 
         return OpenCodeRuntime(
             cli_path=cli_path or get_opencode_cli_path(),
+            **runtime_kwargs,
+        )
+
+    if resolved_backend == "hermes":
+        from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
+
+        return HermesCliRuntime(
+            cli_path=cli_path or get_hermes_cli_path(),
             **runtime_kwargs,
         )
 

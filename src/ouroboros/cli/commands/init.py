@@ -51,6 +51,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     CLAUDE = "claude"
     CODEX = "codex"
     OPENCODE = "opencode"
+    HERMES = "hermes"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -671,7 +672,7 @@ def start(
             "--runtime",
             help=(
                 "Agent runtime backend for the workflow execution step after seed generation "
-                "(claude, codex, or opencode)."
+                "(claude, codex, opencode, or hermes)."
             ),
             case_sensitive=False,
         ),

@@ -56,7 +56,7 @@ exclude = [
 packages = ["src/ouroboros"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"skills" = "ouroboros/codex/skills"
+"skills" = "ouroboros/skills"
 
 [dependency-groups]
 dev = [

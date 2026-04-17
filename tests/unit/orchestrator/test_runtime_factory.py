@@ -8,6 +8,7 @@ import pytest
 
 from ouroboros.orchestrator.adapter import ClaudeAgentAdapter
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime
 from ouroboros.orchestrator.opencode_runtime import OpenCodeRuntime
 from ouroboros.orchestrator.runtime_factory import (
     create_agent_runtime,
@@ -34,6 +35,11 @@ class TestResolveAgentRuntimeBackend:
         """OpenCode aliases normalize to opencode."""
         assert resolve_agent_runtime_backend("opencode") == "opencode"
         assert resolve_agent_runtime_backend("opencode_cli") == "opencode"
+
+    def test_resolve_hermes_aliases(self) -> None:
+        """Hermes aliases normalize to hermes."""
+        assert resolve_agent_runtime_backend("hermes") == "hermes"
+        assert resolve_agent_runtime_backend("hermes_cli") == "hermes"
 
     def test_resolve_rejects_unknown_backend(self) -> None:
         """Raises for unsupported backends."""
@@ -170,3 +176,30 @@ class TestCreateAgentRuntime:
 
         assert isinstance(runtime, CodexCliRuntime)
         assert runtime._llm_backend == "opencode"
+
+    def test_create_hermes_runtime_uses_configured_cli_path(self) -> None:
+        """Creates Hermes runtime with the configured CLI path and dispatcher context."""
+        mock_dispatcher = object()
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.get_hermes_cli_path",
+                return_value="/tmp/hermes",
+            ),
+            patch(
+                "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
+                return_value=mock_dispatcher,
+            ),
+        ):
+            runtime = create_agent_runtime(
+                backend="hermes",
+                permission_mode="acceptEdits",
+                cwd="/tmp/project",
+                llm_backend="codex",
+            )
+
+        assert isinstance(runtime, HermesCliRuntime)
+        assert runtime._cli_path == "/tmp/hermes"
+        assert runtime._cwd == "/tmp/project"
+        assert runtime._skill_dispatcher is mock_dispatcher
+        assert runtime._llm_backend == "codex"

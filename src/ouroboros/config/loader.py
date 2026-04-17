@@ -31,6 +31,7 @@ Functions:
     get_cli_path: Get Claude CLI path from env var or config
     get_codex_cli_path: Get Codex CLI path from env var or config
     get_opencode_cli_path: Get OpenCode CLI path from env var or config
+    get_hermes_cli_path: Get Hermes CLI path from env var or config
 """
 
 import ast
@@ -515,6 +516,32 @@ def get_opencode_cli_path() -> str | None:
         config = load_config()
         if config.orchestrator.opencode_cli_path:
             return config.orchestrator.opencode_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_hermes_cli_path() -> str | None:
+    """Get Hermes CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_HERMES_CLI_PATH environment variable
+        2. config.yaml orchestrator.hermes_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to Hermes CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_HERMES_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        hermes_path = getattr(config.orchestrator, "hermes_cli_path", None)
+        if hermes_path:
+            return hermes_path
     except ConfigError:
         pass
 

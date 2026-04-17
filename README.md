@@ -50,7 +50,7 @@
 
 **Turn a vague idea into a verified, working codebase -- with any AI coding agent.**
 
-Ouroboros sits between you and your AI runtime (Claude Code, Codex CLI, or others). It replaces ad-hoc prompting with a structured specification-first workflow: interview, crystallize, execute, evaluate, evolve.
+Ouroboros sits between you and your AI runtime (Claude Code, Codex CLI, Hermes, or others). It replaces ad-hoc prompting with a structured specification-first workflow: interview, crystallize, execute, evaluate, evolve.
 
 ---
 
@@ -58,11 +58,11 @@ Ouroboros sits between you and your AI runtime (Claude Code, Codex CLI, or other
 
 Most AI coding fails at the **input**, not the output. The bottleneck is not AI capability -- it is human clarity.
 
-| Problem | What Happens | Ouroboros Fix |
-|:--------|:-------------|:--------------|
-| Vague prompts | AI guesses, you rework | Socratic interview exposes hidden assumptions |
-| No spec | Architecture drifts mid-build | Immutable seed spec locks intent before code |
-| Manual QA | "Looks good" is not verification | 3-stage automated evaluation gate |
+| Problem       | What Happens                     | Ouroboros Fix                                 |
+| :------------ | :------------------------------- | :-------------------------------------------- |
+| Vague prompts | AI guesses, you rework           | Socratic interview exposes hidden assumptions |
+| No spec       | Architecture drifts mid-build    | Immutable seed spec locks intent before code  |
+| Manual QA     | "Looks good" is not verification | 3-stage automated evaluation gate             |
 
 ---
 
@@ -80,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code, Codex CLI, and OpenCode. The installer detects Claude Code and Codex CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
+> Works with Claude Code, Codex CLI, Hermes, and OpenCode. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
 
 <details>
 <summary><strong>Other install methods</strong></summary>
@@ -104,9 +104,9 @@ ouroboros setup                         # configure runtime
 
 Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias while extras migrate.
 
-See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [OpenCode](./docs/runtime-guides/opencode.md)
+See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [Hermes](./docs/runtime-guides/hermes.md) · [OpenCode](./docs/runtime-guides/opencode.md)
 
-Chat platform integration (OpenClaw / Slack / Discord):
+Chat platform integration (OpenClaw / Slack / Discord / WhatsApp):
 ```bash
 clawhub install ouroboros                    # install OpenClaw skill
 openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
@@ -136,11 +136,11 @@ Removes all configuration, MCP registration, and data. See [UNINSTALL.md](./UNIN
 
 After one loop of the Ouroboros cycle, a vague idea becomes a verified codebase:
 
-| Step | Before | After |
-|:-----|:-------|:------|
-| **Interview** | *"Build me a task CLI"* | 12 hidden assumptions exposed, ambiguity scored to 0.19 |
-| **Seed** | No spec | Immutable specification with acceptance criteria, ontology, constraints |
-| **Evaluate** | Manual review | 3-stage gate: Mechanical (free) -> Semantic -> Multi-Model Consensus |
+| Step          | Before                  | After                                                                   |
+| :------------ | :---------------------- | :---------------------------------------------------------------------- |
+| **Interview** | *"Build me a task CLI"* | 12 hidden assumptions exposed, ambiguity scored to 0.19                 |
+| **Seed**      | No spec                 | Immutable specification with acceptance criteria, ontology, constraints |
+| **Evaluate**  | Manual review           | 3-stage gate: Mechanical (free) -> Semantic -> Multi-Model Consensus    |
 
 <details>
 <summary><strong>What just happened?</strong></summary>
@@ -164,12 +164,12 @@ The serpent completed one loop. Each loop, it knows more than the last.
 
 AI coding tools are powerful -- but they solve the **wrong problem** when the input is unclear.
 
-| | Vanilla AI Coding | Ouroboros |
-|:--|:------------------|:---------|
-| **Vague prompt** | AI guesses intent, builds on assumptions | Socratic interview forces clarity *before* code |
+|                     | Vanilla AI Coding                        | Ouroboros                                                                       |
+| :------------------ | :--------------------------------------- | :------------------------------------------------------------------------------ |
+| **Vague prompt**    | AI guesses intent, builds on assumptions | Socratic interview forces clarity *before* code                                 |
 | **Spec validation** | No spec -- architecture drifts mid-build | Immutable seed spec locks intent; Ambiguity gate (<= 0.2) blocks premature code |
-| **Evaluation** | "Looks good" / manual QA | 3-stage automated gate: Mechanical -> Semantic -> Multi-Model Consensus |
-| **Rework rate** | High -- wrong assumptions surface late | Low -- assumptions surface in the interview, not in the PR review |
+| **Evaluation**      | "Looks good" / manual QA                 | 3-stage automated gate: Mechanical -> Semantic -> Multi-Model Consensus         |
+| **Rework rate**     | High -- wrong assumptions surface late   | Low -- assumptions surface in the interview, not in the PR review               |
 
 ---
 
@@ -185,13 +185,13 @@ The ouroboros -- a serpent devouring its own tail -- is not decoration. It IS th
 
 Each cycle does not repeat -- it **evolves**. The output of evaluation feeds back as input for the next generation, until the system truly knows what it is building.
 
-| Phase | What Happens |
-|:------|:-------------|
-| **Interview** | Socratic questioning exposes hidden assumptions |
-| **Seed** | Answers crystallize into an immutable specification |
-| **Execute** | Double Diamond: Discover -> Define -> Design -> Deliver |
-| **Evaluate** | 3-stage gate: Mechanical ($0) -> Semantic -> Multi-Model Consensus |
-| **Evolve** | Wonder *("What do we still not know?")* -> Reflect -> next generation |
+| Phase         | What Happens                                                          |
+| :------------ | :-------------------------------------------------------------------- |
+| **Interview** | Socratic questioning exposes hidden assumptions                       |
+| **Seed**      | Answers crystallize into an immutable specification                   |
+| **Execute**   | Double Diamond: Discover -> Define -> Design -> Deliver               |
+| **Evaluate**  | 3-stage gate: Mechanical ($0) -> Semantic -> Multi-Model Consensus    |
+| **Evolve**    | Wonder *("What do we still not know?")* -> Reflect -> next generation |
 
 > *"This is where the Ouroboros eats its tail: the output of evaluation*
 > *becomes the input for the next generation's seed specification."*
@@ -217,25 +217,25 @@ Ralph Cycle 3: evolve_step(lineage)       -> Gen 3 -> action=CONVERGED
 
 Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use the `ouroboros` CLI.
 
-| Skill (`ooo`) | CLI equivalent | What It Does |
-|:---------------|:---------------|:-------------|
-| `ooo setup` | `ouroboros setup` | Register runtime and configure project (one-time) |
-| `ooo interview` | `ouroboros init start` | Socratic questioning -- expose hidden assumptions |
-| `ooo seed` | *(generated by interview)* | Crystallize into immutable spec |
-| `ooo run` | `ouroboros run seed.yaml` | Execute via Double Diamond decomposition |
-| `ooo evaluate` | *(via MCP)* | 3-stage verification gate |
-| `ooo evolve` | *(via MCP)* | Evolutionary loop until ontology converges |
-| `ooo unstuck` | *(via MCP)* | 5 lateral thinking personas when you are stuck |
-| `ooo status` | `ouroboros status executions` / `ouroboros status execution <id>` | Session tracking + (MCP-only) drift detection |
-| `ooo cancel` | `ouroboros cancel execution [<id>\|--all]` | Cancel stuck or orphaned executions |
-| `ooo ralph` | *(via MCP)* | Persistent loop until verified |
-| `ooo tutorial` | *(interactive)* | Interactive hands-on learning |
-| `ooo help` | `ouroboros --help` | Full reference |
-| `ooo pm` | *(via MCP)* | PM-focused interview + PRD generation |
-| `ooo qa` | *(via skill)* | General-purpose QA verdict for any artifact |
-| `ooo update` | `ouroboros update` | Check for updates + upgrade to latest |
-| `ooo brownfield` | *(via skill)* | Scan and manage brownfield repo defaults |
-| `ooo publish` | *(skill/runtime surface; uses `gh` CLI)* | Publish a Seed as GitHub Epic/Task issues for team workflows |
+| Skill (`ooo`)    | CLI equivalent                                                    | What It Does                                                 |
+| :--------------- | :---------------------------------------------------------------- | :----------------------------------------------------------- |
+| `ooo setup`      | `ouroboros setup`                                                 | Register runtime and configure project (one-time)            |
+| `ooo interview`  | `ouroboros init start`                                            | Socratic questioning -- expose hidden assumptions            |
+| `ooo seed`       | *(generated by interview)*                                        | Crystallize into immutable spec                              |
+| `ooo run`        | `ouroboros run seed.yaml`                                         | Execute via Double Diamond decomposition                     |
+| `ooo evaluate`   | *(via MCP)*                                                       | 3-stage verification gate                                    |
+| `ooo evolve`     | *(via MCP)*                                                       | Evolutionary loop until ontology converges                   |
+| `ooo unstuck`    | *(via MCP)*                                                       | 5 lateral thinking personas when you are stuck               |
+| `ooo status`     | `ouroboros status executions` / `ouroboros status execution <id>` | Session tracking + (MCP-only) drift detection                |
+| `ooo cancel`     | `ouroboros cancel execution [<id>\|--all]`                        | Cancel stuck or orphaned executions                          |
+| `ooo ralph`      | *(via MCP)*                                                       | Persistent loop until verified                               |
+| `ooo tutorial`   | *(interactive)*                                                   | Interactive hands-on learning                                |
+| `ooo help`       | `ouroboros --help`                                                | Full reference                                               |
+| `ooo pm`         | *(via MCP)*                                                       | PM-focused interview + PRD generation                        |
+| `ooo qa`         | *(via skill)*                                                     | General-purpose QA verdict for any artifact                  |
+| `ooo update`     | `ouroboros update`                                                | Check for updates + upgrade to latest                        |
+| `ooo brownfield` | *(via skill)*                                                     | Scan and manage brownfield repo defaults                     |
+| `ooo publish`    | *(skill/runtime surface; uses `gh` CLI)*                          | Publish a Seed as GitHub Epic/Task issues for team workflows |
 
 > Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`, `publish`) are available through agent skills, runtime rules, or MCP tools rather than a direct `ouroboros <subcommand>` shell command.
 
@@ -247,17 +247,17 @@ See the [CLI reference](./docs/cli-reference.md) for full details.
 
 Nine agents, each a different mode of thinking. Loaded on-demand, never preloaded:
 
-| Agent | Role | Core Question |
-|:------|:-----|:--------------|
-| **Socratic Interviewer** | Questions-only. Never builds. | *"What are you assuming?"* |
-| **Ontologist** | Finds essence, not symptoms | *"What IS this, really?"* |
-| **Seed Architect** | Crystallizes specs from dialogue | *"Is this complete and unambiguous?"* |
-| **Evaluator** | 3-stage verification | *"Did we build the right thing?"* |
-| **Contrarian** | Challenges every assumption | *"What if the opposite were true?"* |
-| **Hacker** | Finds unconventional paths | *"What constraints are actually real?"* |
-| **Simplifier** | Removes complexity | *"What's the simplest thing that could work?"* |
-| **Researcher** | Stops coding, starts investigating | *"What evidence do we actually have?"* |
-| **Architect** | Identifies structural causes | *"If we started over, would we build it this way?"* |
+| Agent                    | Role                               | Core Question                                       |
+| :----------------------- | :--------------------------------- | :-------------------------------------------------- |
+| **Socratic Interviewer** | Questions-only. Never builds.      | *"What are you assuming?"*                          |
+| **Ontologist**           | Finds essence, not symptoms        | *"What IS this, really?"*                           |
+| **Seed Architect**       | Crystallizes specs from dialogue   | *"Is this complete and unambiguous?"*               |
+| **Evaluator**            | 3-stage verification               | *"Did we build the right thing?"*                   |
+| **Contrarian**           | Challenges every assumption        | *"What if the opposite were true?"*                 |
+| **Hacker**               | Finds unconventional paths         | *"What constraints are actually real?"*             |
+| **Simplifier**           | Removes complexity                 | *"What's the simplest thing that could work?"*      |
+| **Researcher**           | Stops coding, starts investigating | *"What evidence do we actually have?"*              |
+| **Architect**            | Identifies structural causes       | *"If we started over, would we build it this way?"* |
 
 ---
 
@@ -291,7 +291,7 @@ src/ouroboros/
 - **Brownfield** -- Auto-detects config files across multiple language ecosystems
 - **Evolution** -- Up to 30 generations, convergence at ontology similarity >= 0.95
 - **Stagnation** -- Detects spinning, oscillation, no-drift, and diminishing returns patterns
-- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code and Codex CLI; same workflow spec, different execution engines
+- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code, Codex CLI, and Hermes; same workflow spec, different execution engines
 
 See [Architecture](./docs/architecture.md) for the full design document.
 
@@ -347,12 +347,12 @@ Ambiguity = 1 - Sum(clarity_i * weight_i)
 
 Each dimension is scored 0.0-1.0 by the LLM (temperature 0.1 for reproducibility), then weighted:
 
-| Dimension | Greenfield | Brownfield |
-|:----------|:----------:|:----------:|
-| **Goal Clarity** -- *Is the goal specific?* | 40% | 35% |
-| **Constraint Clarity** -- *Are limitations defined?* | 30% | 25% |
-| **Success Criteria** -- *Are outcomes measurable?* | 30% | 25% |
-| **Context Clarity** -- *Is the existing codebase understood?* | -- | 15% |
+| Dimension                                                     | Greenfield | Brownfield |
+| :------------------------------------------------------------ | :--------: | :--------: |
+| **Goal Clarity** -- *Is the goal specific?*                   |    40%     |    35%     |
+| **Constraint Clarity** -- *Are limitations defined?*          |    30%     |    25%     |
+| **Success Criteria** -- *Are outcomes measurable?*            |    30%     |    25%     |
+| **Context Clarity** -- *Is the existing codebase understood?* |     --     |    15%     |
 
 **Threshold: Ambiguity <= 0.2** -- only then can a Seed be generated.
 
@@ -380,22 +380,22 @@ The evolutionary loop does not run forever. It stops when consecutive generation
 Similarity = 0.5 * name_overlap + 0.3 * type_match + 0.2 * exact_match
 ```
 
-| Component | Weight | What It Measures |
-|:----------|:------:|:-----------------|
-| **Name overlap** | 50% | Do the same field names exist in both generations? |
-| **Type match** | 30% | Do shared fields have the same types? |
-| **Exact match** | 20% | Are name, type, AND description all identical? |
+| Component        | Weight | What It Measures                                   |
+| :--------------- | :----: | :------------------------------------------------- |
+| **Name overlap** |  50%   | Do the same field names exist in both generations? |
+| **Type match**   |  30%   | Do shared fields have the same types?              |
+| **Exact match**  |  20%   | Are name, type, AND description all identical?     |
 
 **Threshold: Similarity >= 0.95** -- the loop converges and stops evolving.
 
 But raw similarity is not the only signal. The system also detects pathological patterns:
 
-| Signal | Condition | What It Means |
-|:-------|:----------|:--------------|
-| **Stagnation** | Similarity >= 0.95 for 3 consecutive generations | Ontology has stabilized |
-| **Oscillation** | Gen N ~ Gen N-2 (period-2 cycle) | Stuck bouncing between two designs |
-| **Repetitive feedback** | >= 70% question overlap across 3 generations | Wonder is asking the same things |
-| **Hard cap** | 30 generations reached | Safety valve |
+| Signal                  | Condition                                        | What It Means                      |
+| :---------------------- | :----------------------------------------------- | :--------------------------------- |
+| **Stagnation**          | Similarity >= 0.95 for 3 consecutive generations | Ontology has stabilized            |
+| **Oscillation**         | Gen N ~ Gen N-2 (period-2 cycle)                 | Stuck bouncing between two designs |
+| **Repetitive feedback** | >= 70% question overlap across 3 generations     | Wonder is asking the same things   |
+| **Hard cap**            | 30 generations reached                           | Safety valve                       |
 
 ```
 Gen 1: {Task, Priority, Status}
