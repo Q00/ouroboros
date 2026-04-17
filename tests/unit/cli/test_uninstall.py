@@ -435,3 +435,118 @@ class TestRemoveOpencodeBridgePlugin:
         assert result is True
         data = json.loads(jsonc.read_text())  # rewritten without comments
         assert plugin_path not in data.get("plugin", [])
+
+
+# ── Tail-match removal (PR #442 round-3 follow-up) ───────────────
+
+
+class TestBridgeTailMatchRemoval:
+    """Uninstall must remove bridge entries by tail-match, not exact path.
+
+    Mirrors setup's dedupe logic so uninstall actually cleans stale entries
+    from XDG reshuffles, root/sudo migrations, or path drift across installs.
+    """
+
+    def test_removes_stale_bridge_entry_from_legacy_path(self, tmp_path: Path) -> None:
+        """Config holds a bridge entry from a *different* install path.
+
+        Current-machine canonical path is `<tmp>/opencode/plugins/ouroboros-bridge/ouroboros-bridge.ts`
+        but config lists a stale `/root/.config/opencode/plugins/ouroboros-bridge/ouroboros-bridge.ts`.
+        Pre-fix: entry stays. Post-fix: tail match sweeps it.
+        """
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir(parents=True)
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "ouroboros-bridge.ts").write_text("// bridge")
+
+        stale = "/root/.config/opencode/plugins/ouroboros-bridge/ouroboros-bridge.ts"
+        json_file = config_dir / "opencode.json"
+        json_file.write_text(json.dumps({"plugin": [stale, "other-plugin"]}))
+
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = _remove_opencode_bridge_plugin(dry_run=False)
+
+        assert result is True
+        data = json.loads(json_file.read_text())
+        assert data["plugin"] == ["other-plugin"]
+
+    def test_removes_multiple_stale_entries(self, tmp_path: Path) -> None:
+        """Several bridge entries across XDG/root paths all get swept."""
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir(parents=True)
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "ouroboros-bridge.ts").write_text("// bridge")
+
+        entries = [
+            str(plugin_dir / "ouroboros-bridge.ts"),  # canonical
+            "/home/x/.config/opencode/plugins/ouroboros-bridge/ouroboros-bridge.ts",
+            "/root/.config/opencode/plugins/ouroboros-bridge/ouroboros-bridge.ts",
+            "keep-me",
+        ]
+        json_file = config_dir / "opencode.json"
+        json_file.write_text(json.dumps({"plugin": entries}))
+
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = _remove_opencode_bridge_plugin(dry_run=False)
+
+        assert result is True
+        data = json.loads(json_file.read_text())
+        assert data["plugin"] == ["keep-me"]
+
+    def test_removes_windows_separator_entry(self, tmp_path: Path) -> None:
+        """Windows-style backslash path also tail-matches."""
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir(parents=True)
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "ouroboros-bridge.ts").write_text("// bridge")
+
+        win_entry = (
+            r"C:\Users\x\AppData\Roaming\OpenCode\plugins\ouroboros-bridge\ouroboros-bridge.ts"
+        )
+        json_file = config_dir / "opencode.json"
+        json_file.write_text(json.dumps({"plugin": [win_entry]}))
+
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            result = _remove_opencode_bridge_plugin(dry_run=False)
+
+        assert result is True
+        data = json.loads(json_file.read_text())
+        assert data["plugin"] == []
+
+    def test_preserves_unrelated_plugins(self, tmp_path: Path) -> None:
+        """Non-bridge entries must not be touched."""
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir(parents=True)
+        plugin_dir = config_dir / "plugins" / "ouroboros-bridge"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "ouroboros-bridge.ts").write_text("// bridge")
+
+        json_file = config_dir / "opencode.json"
+        unrelated = [
+            "plugins/other-thing/index.ts",
+            "plugins/ouroboros-bridge/something-else.ts",  # wrong filename
+            "plugins/not-bridge/ouroboros-bridge.ts",  # wrong subdir
+        ]
+        json_file.write_text(json.dumps({"plugin": unrelated}))
+
+        with (
+            patch("ouroboros.cli.commands.uninstall.opencode_config_dir", return_value=config_dir),
+            patch("ouroboros.cli.opencode_config.opencode_config_dir", return_value=config_dir),
+        ):
+            # Dir removal still returns True even if config unchanged.
+            _remove_opencode_bridge_plugin(dry_run=False)
+
+        data = json.loads(json_file.read_text())
+        assert data["plugin"] == unrelated

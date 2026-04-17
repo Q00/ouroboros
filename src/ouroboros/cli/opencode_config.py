@@ -61,3 +61,35 @@ def find_opencode_config(*, allow_default: bool = True) -> Path | None:
         except OSError:
             continue
     return (config_dir / "opencode.json") if allow_default else None
+
+
+# ── Bridge-plugin identity ───────────────────────────────────────
+# Canonical subdirectory + filename of the OpenCode bridge plugin.
+# Shared by setup (install + dedupe) and uninstall (tail-match removal)
+# so both paths agree on what counts as "a bridge-plugin entry".
+BRIDGE_PLUGIN_SUBDIR: tuple[str, str] = ("plugins", "ouroboros-bridge")
+BRIDGE_PLUGIN_FILENAME: str = "ouroboros-bridge.ts"
+
+
+def is_bridge_plugin_entry(entry: object) -> bool:
+    """Return ``True`` when *entry* refers to any bridge-plugin install.
+
+    Matches by directory-tail (``plugins/ouroboros-bridge``) + basename
+    (``ouroboros-bridge.ts``) rather than exact string equality — catches
+    stale entries from XDG reshuffles, Windows mixed separators, legacy
+    install paths, and sudo/root migrations. Setup uses this for dedupe;
+    uninstall uses it to remove stale entries, not just the exact
+    canonical path for this machine's current config layout.
+    """
+    if not isinstance(entry, str) or not entry:
+        return False
+    # Normalise path separators so Windows entries (``\``) compare equal.
+    normalised = entry.replace("\\", "/")
+    parts = [p for p in normalised.split("/") if p]
+    if len(parts) < 3:
+        return False
+    return (
+        parts[-1] == BRIDGE_PLUGIN_FILENAME
+        and parts[-2] == BRIDGE_PLUGIN_SUBDIR[1]
+        and parts[-3] == BRIDGE_PLUGIN_SUBDIR[0]
+    )
