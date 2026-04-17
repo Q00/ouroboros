@@ -12,8 +12,24 @@ doc_metadata:
 ## What it does
 
 When the main LLM invokes an Ouroboros MCP tool that emits a `_subagent` /
-`_subagents` envelope (e.g. `ouroboros_qa`, `ouroboros_lateral_think`,
-`ouroboros_interview`), the bridge:
+`_subagents` envelope, the bridge dispatches the work into a child session.
+Tools that dispatch via the plugin when `runtime_backend=opencode` and
+`opencode_mode=plugin` (default):
+
+| Tool | Envelope | Child role |
+|------|----------|-----------|
+| `ouroboros_qa` | `_subagent` | QA judge |
+| `ouroboros_lateral_think` (`persona=all`) | `_subagents` | one child per persona |
+| `ouroboros_interview` | `_subagent` | Socratic interviewer |
+| `ouroboros_pm_interview` | `_subagent` | PM interviewer |
+| `ouroboros_generate_seed` | `_subagent` | seed architect |
+| `ouroboros_execute_seed` | `_subagent` | executor |
+| `ouroboros_start_execute_seed` | `_subagent` | executor (background job) |
+| `ouroboros_evolve_step` | `_subagent` | evolution generation |
+| `ouroboros_start_evolve_step` | `_subagent` | evolution (background job) |
+| `ouroboros_evaluate` | `_subagent` | evaluator |
+
+For each payload the bridge:
 
 1. Parses the envelope in the `tool.execute.after` hook.
 2. For each payload, spawns a **new child session** (`client.session.create`).

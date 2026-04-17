@@ -29,6 +29,12 @@ from ouroboros.core.worktree import (
 from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.tools.subagent import (
+    build_evolve_subagent,
+    build_subagent_result,
+    emit_subagent_dispatched_event,
+    should_dispatch_via_plugin,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -36,12 +42,6 @@ from ouroboros.mcp.types import (
     MCPToolParameter,
     MCPToolResult,
     ToolInputType,
-)
-from ouroboros.mcp.tools.subagent import (
-    build_evolve_subagent,
-    build_subagent_result,
-    emit_subagent_dispatched_event,
-    should_dispatch_via_plugin,
 )
 from ouroboros.persistence.event_store import EventStore
 
