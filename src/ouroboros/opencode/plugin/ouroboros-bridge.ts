@@ -510,3 +510,11 @@ export const OuroborosBridge: Plugin = async (ctx) => {
   }
 }
 
+// V1 default export: opencode plugin loader's legacy path iterates
+// Object.values(mod) and throws on non-function exports (MAX_BYTES etc).
+// V1 path uses mod.default {id, server} and skips the scan.
+export default {
+  id: "ouroboros-bridge",
+  server: OuroborosBridge,
+}
+
