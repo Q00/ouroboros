@@ -182,9 +182,9 @@ def handler(tmp_path: Path) -> ChannelWorkflowHandler:
         job_wait_handler=job_wait,
         job_result_handler=job_result,
     )
-    tool._fake_interview = interview  # type: ignore[attr-defined]
-    tool._fake_generate = generate  # type: ignore[attr-defined]
-    tool._fake_execute = execute  # type: ignore[attr-defined]
+    tool._fake_interview = tool._interview_handler  # type: ignore[attr-defined]
+    tool._fake_generate = tool._generate_seed_handler  # type: ignore[attr-defined]
+    tool._fake_execute = tool._start_execute_seed_handler  # type: ignore[attr-defined]
     tool._fake_job_status = job_status  # type: ignore[attr-defined]
     tool._fake_job_wait = job_wait  # type: ignore[attr-defined]
     tool._fake_job_result = job_result  # type: ignore[attr-defined]
@@ -814,6 +814,50 @@ def test_channel_workflow_pins_passed_in_handlers_to_subprocess_mode() -> None:
 
     for inner in (h._interview_handler, h._generate_seed_handler, h._start_execute_seed_handler):
         assert should_dispatch_via_plugin(inner.agent_runtime_backend, inner.opencode_mode) is False
+
+
+def test_channel_workflow_does_not_mutate_passed_in_handlers() -> None:
+    """Passed-in handlers must NOT be mutated by ChannelWorkflowHandler.
+
+    Regression: previously ``__post_init__`` wrote
+    ``self._interview_handler.opencode_mode = "subprocess"`` which mutated
+    the caller's handler. If the composition root (adapter.py) ever shared
+    a handler instance across the top-level ``ouroboros_interview`` tool
+    and the channel workflow, that mutation would leak back and silently
+    break top-level plugin dispatch.
+
+    The fix uses ``copy.copy()`` + ``setattr`` to clone the passed-in
+    handler and pin the copy's ``opencode_mode`` — the caller's instance
+    stays untouched.
+    """
+    interview = InterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+    generate = GenerateSeedHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+    start_exec = StartExecuteSeedHandler(
+        agent_runtime_backend="opencode", opencode_mode="plugin"
+    )
+
+    h = ChannelWorkflowHandler(
+        interview_handler=interview,
+        generate_seed_handler=generate,
+        start_execute_seed_handler=start_exec,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    # 1. Caller's instances must be untouched — still "plugin".
+    assert interview.opencode_mode == "plugin"
+    assert generate.opencode_mode == "plugin"
+    assert start_exec.opencode_mode == "plugin"
+
+    # 2. Channel's internal copies must be fresh instances (not the same object).
+    assert h._interview_handler is not interview
+    assert h._generate_seed_handler is not generate
+    assert h._start_execute_seed_handler is not start_exec
+
+    # 3. Those fresh copies must be pinned to "subprocess".
+    assert h._interview_handler.opencode_mode == "subprocess"
+    assert h._generate_seed_handler.opencode_mode == "subprocess"
+    assert h._start_execute_seed_handler.opencode_mode == "subprocess"
 
 
 def test_channel_workflow_inner_gate_returns_false_under_plugin_outer() -> None:
