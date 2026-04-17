@@ -163,9 +163,13 @@ export function stamp(r: Output, msg: string): void {
 export interface OkResult {
   sub: Sub
   childID: string
-  output: string
 }
 
+// Build human-readable dispatch banner.
+// Fire-and-forget model: children run in background; Task widgets drive
+// completion. No child output is available at hook return time — the
+// widget state (running → completed/error) is the source of truth.
+// A structured envelope is attached separately in out.metadata.ouroboros_dispatch.
 export function notify(
   ok: OkResult[],
   failed: Sub[],
@@ -174,32 +178,54 @@ export function notify(
   const sec = Math.round(DEDUPE_MS / 1000)
   const lines: string[] = []
   if (ok.length > 0) {
-    lines.push(`[Ouroboros] Dispatched ${ok.length} subagent${ok.length === 1 ? "" : "s"} in parallel.`)
+    const s = ok.length === 1 ? "" : "s"
+    lines.push(`[Ouroboros] Dispatched ${ok.length} subagent${s}. Task widget${s} will update as ${ok.length === 1 ? "it completes" : "they complete"}.`)
     for (const r of ok) {
       const note = r.sub.truncated ? ` (truncated to ${Math.round(MAX_BYTES / 1024)}KB)` : ""
-      lines.push(`  • ${r.sub.title} → agent='${r.sub.agent}'${note}`)
+      lines.push(`  • ${r.sub.title} → agent='${r.sub.agent}'${note} [child=${r.childID}]`)
     }
   }
   if (failed.length > 0) {
-    lines.push(`Failed ${failed.length} subagent${failed.length === 1 ? "" : "s"}:`)
+    lines.push(`Failed ${failed.length} subagent${failed.length === 1 ? "" : "s"} before dispatch:`)
     for (const s of failed) lines.push(`  • ${s.title}`)
   }
   if (skipped.length > 0) {
     lines.push(`Skipped ${skipped.length} duplicate${skipped.length === 1 ? "" : "s"} (within ${sec}s window):`)
     for (const s of skipped) lines.push(`  • ${s.title}`)
   }
-  if (ok.length > 0) {
-    // Contract-preserving result propagation: parent LLM needs the actual
-    // child output to continue reasoning. Banner alone is not enough.
-    lines.push("")
-    lines.push("--- Results ---")
-    for (const r of ok) {
-      lines.push(`### ${r.sub.title} (${r.childID})`)
-      lines.push(r.output)
-      lines.push("")
-    }
-  }
   return lines.length > 0 ? lines.join("\n") : "[Ouroboros] Nothing dispatched."
+}
+
+// Standardized dispatch envelope for MCP caller / downstream tooling.
+// Attached to out.metadata.ouroboros_dispatch — structured counterpart of notify().
+export interface DispatchEnvelope {
+  status: "dispatched" | "dispatch_failed" | "skipped" | "nothing"
+  mode: "plugin_subagent"
+  dispatched_at: string
+  children: Array<{ title: string; childID: string; agent: string; tool: string; truncated: boolean }>
+  failed: Array<{ title: string; tool: string; reason?: string }>
+  skipped: Array<{ title: string; tool: string }>
+}
+
+export function buildEnvelope(
+  ok: OkResult[],
+  failed: Array<{ sub: Sub; reason?: string }>,
+  skipped: Sub[],
+): DispatchEnvelope {
+  let status: DispatchEnvelope["status"] = "nothing"
+  if (ok.length > 0) status = "dispatched"
+  else if (failed.length > 0) status = "dispatch_failed"
+  else if (skipped.length > 0) status = "skipped"
+  return {
+    status,
+    mode: "plugin_subagent",
+    dispatched_at: new Date().toISOString(),
+    children: ok.map((r) => ({
+      title: r.sub.title, childID: r.childID, agent: r.sub.agent, tool: r.sub.tool, truncated: r.sub.truncated,
+    })),
+    failed: failed.map((f) => ({ title: f.sub.title, tool: f.sub.tool, reason: f.reason })),
+    skipped: skipped.map((s) => ({ title: s.title, tool: s.tool })),
+  }
 }
 
 function fail(r: Output, label: string, err: unknown): void {
@@ -304,13 +330,34 @@ async function resolveMid(cli: Cli, pid: string, callID: string): Promise<string
   return null
 }
 
-// Single subagent attempt: child session → PATCH running → prompt (timeout) → PATCH completed.
-// Returns {childID, output} on success; throws on failure (caller decides retry).
-async function attempt(cli: Cli, b: Base, pid: string, mid: string, partID: string, callID: string, start: number, s: Sub, input: Record<string, unknown>, n: number): Promise<{ childID: string; output: string }> {
+// Single subagent dispatch: create child session + PATCH running — both awaited
+// (fast: ~10-100ms each). Then fires session.prompt WITHOUT await (fire-and-forget).
+// Background completion handler attaches .then/.catch to PATCH the widget to
+// completed/error state when the child finishes.
+//
+// Why fire-and-forget: opencode's MCP hook must return fast. Awaiting
+// session.prompt blocks the main LLM for the full child execution
+// (potentially minutes). The Task widget created by patch-running is the
+// source of truth — opencode natively tracks widget state transitions and
+// injects child output back into parent context on completion. The plugin
+// does NOT need to await the child to preserve the contract.
+//
+// Trade-off: we lose in-plugin retry on prompt failure. Retries still
+// cover the awaited create+patch-running failures (pre-dispatch).
+// Post-dispatch failures get PATCHed to error state — widget reflects it,
+// no silent loss. If the user wants retry-on-prompt-failure, that would
+// need a new dispatch call (same shape as a fresh invocation).
+async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Promise<{ childID: string }> {
+  const partID = id("prt")
+  const callID = id("tool")
+  const start = Date.now()
+  const input = { description: s.title, prompt: s.prompt, subagent_type: s.agent }
+
+  // --- Awaited phase (fast) ---
   const created = await cli.session.create({ body: { parentID: pid, title: s.title } })
   const childID = created?.data?.id
   if (!childID) throw new Error("child session create returned no id")
-  log(`CHILD_CREATED pid=${pid} child=${childID} title=${s.title} attempt=${n}`)
+  log(`CHILD_CREATED pid=${pid} child=${childID} title=${s.title}`)
 
   await patch(b, pid, mid, partID, {
     id: partID,
@@ -323,87 +370,68 @@ async function attempt(cli: Cli, b: Base, pid: string, mid: string, partID: stri
       status: "running",
       input,
       title: s.title,
-      metadata: { sessionId: childID, attempt: n },
+      metadata: { sessionId: childID },
       time: { start },
     },
-  }, `running:${partID}:a${n}`)
-  log(`PATCH_RUNNING part=${partID} child=${childID} attempt=${n}`)
+  }, `running:${partID}`)
+  log(`PATCH_RUNNING part=${partID} child=${childID}`)
 
+  // --- Fire-and-forget phase ---
+  // Hook returns to opencode before the child finishes. Completion is
+  // handled by the promise chain below, which PATCHes the widget when
+  // the child resolves/rejects/times out.
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), CHILD_TIMEOUT_MS)
 
-  const res = await cli.session.prompt({
+  cli.session.prompt({
     path: { id: childID },
     body: { agent: s.agent, parts: [{ type: "text", text: s.prompt }] },
     signal: ctrl.signal,
-  }).catch((e) => ({ error: e instanceof Error ? e : new Error(String(e)) } as const))
-  clearTimeout(timer)
+  }).then(async (res) => {
+    clearTimeout(timer)
+    const data = (res as { data?: unknown })?.data
+    const out = childOutput(childID, data)
+    await patch(b, pid, mid, partID, {
+      id: partID,
+      messageID: mid,
+      sessionID: pid,
+      type: "tool",
+      tool: "task",
+      callID,
+      state: {
+        status: "completed",
+        input,
+        output: out,
+        title: s.title,
+        metadata: { sessionId: childID },
+        time: { start, end: Date.now() },
+      },
+    }, `done:${partID}`).catch((e) => log(`PATCH_DONE_FAIL part=${partID} err=${e instanceof Error ? e.message : String(e)}`))
+    log(`PROMPT_DONE part=${partID} child=${childID} bytes=${out.length}`)
+  }).catch(async (e: unknown) => {
+    clearTimeout(timer)
+    const err = e instanceof Error ? e : new Error(String(e))
+    const msg = ctrl.signal.aborted ? `child timed out after ${CHILD_TIMEOUT_MS}ms` : err.message
+    await cli.session.abort({ path: { id: childID } }).catch((ae) => log(`ABORT_FAIL child=${childID} err=${ae instanceof Error ? ae.message : String(ae)}`))
+    await patch(b, pid, mid, partID, {
+      id: partID,
+      messageID: mid,
+      sessionID: pid,
+      type: "tool",
+      tool: "task",
+      callID,
+      state: {
+        status: "error",
+        input,
+        error: `${msg} (child=${childID})`,
+        metadata: { sessionId: childID },
+        time: { start, end: Date.now() },
+      },
+    }, `error:${partID}`).catch((pe) => log(`PATCH_ERR_FAIL part=${partID} err=${pe instanceof Error ? pe.message : String(pe)}`))
+    log(`PROMPT_ERR part=${partID} child=${childID} err=${msg}`)
+  })
 
-  if ("error" in res) {
-    const msg = ctrl.signal.aborted ? `child timed out after ${CHILD_TIMEOUT_MS}ms` : res.error.message
-    await cli.session.abort({ path: { id: childID } }).catch((e) => log(`ABORT_FAIL child=${childID} err=${e instanceof Error ? e.message : String(e)}`))
-    throw new Error(`${msg} (child=${childID})`)
-  }
-
-  const out = childOutput(childID, res.data)
-  await patch(b, pid, mid, partID, {
-    id: partID,
-    messageID: mid,
-    sessionID: pid,
-    type: "tool",
-    tool: "task",
-    callID,
-    state: {
-      status: "completed",
-      input,
-      output: out,
-      title: s.title,
-      metadata: { sessionId: childID, attempt: n },
-      time: { start, end: Date.now() },
-    },
-  }, `done:${partID}`)
-  log(`PATCH_DONE part=${partID} child=${childID} bytes=${out.length} attempt=${n}`)
-  return { childID, output: out }
-}
-
-// Subagent lifecycle with respawn: retries up to SUB_RETRIES times with NEW child session each time.
-// Same function spawns 1 or N — caller fans out via Promise.allSettled.
-// Returns {childID, output} on success so caller can propagate child result
-// back to the parent MCP caller (contract preservation).
-async function run(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Promise<{ childID: string; output: string }> {
-  const partID = id("prt")
-  const callID = id("tool")
-  const start = Date.now()
-  const input = { description: s.title, prompt: s.prompt, subagent_type: s.agent }
-  let lastErr: Error | undefined
-
-  for (let n = 1; n <= SUB_RETRIES + 1; n++) {
-    const r = await attempt(cli, b, pid, mid, partID, callID, start, s, input, n)
-      .then((v) => ({ ok: true as const, v }), (e) => ({ ok: false as const, e: e instanceof Error ? e : new Error(String(e)) }))
-    if (r.ok) return r.v
-    lastErr = r.e
-    log(`SUB_RETRY part=${partID} title=${s.title} attempt=${n}/${SUB_RETRIES + 1} err=${r.e.message}`)
-    if (n <= SUB_RETRIES) await sleep(BACKOFF_MS * n)
-  }
-
-  const finalErr = lastErr ?? new Error("unknown failure")
-  await patch(b, pid, mid, partID, {
-    id: partID,
-    messageID: mid,
-    sessionID: pid,
-    type: "tool",
-    tool: "task",
-    callID,
-    state: {
-      status: "error",
-      input,
-      error: `${finalErr.message} (exhausted ${SUB_RETRIES + 1} attempts)`,
-      metadata: { attempts: SUB_RETRIES + 1 },
-      time: { start, end: Date.now() },
-    },
-  }, `error:${partID}`).catch((e) => log(`PATCH_ERR_FAIL part=${partID} err=${e instanceof Error ? e.message : String(e)}`))
-  log(`PATCH_ERR part=${partID} title=${s.title} err=${finalErr.message}`)
-  throw finalErr
+  return { childID }
 }
 
 export const OuroborosBridge: Plugin = async (ctx) => {
@@ -435,6 +463,9 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         if (dupe(pid, callID)) {
           log(`DEDUPE pid=${pid} callID=${callID} tool=${subs[0].tool} count=${subs.length}`)
           stamp(out, notify([], [], subs))
+          const meta = (out.metadata ?? {}) as Record<string, unknown>
+          meta.ouroboros_dispatch = buildEnvelope([], [], subs)
+          out.metadata = meta
           return
         }
 
@@ -447,23 +478,30 @@ export const OuroborosBridge: Plugin = async (ctx) => {
 
         log(`DISPATCH_START pid=${pid} mid=${mid} tool=${subs[0].tool} count=${subs.length}`)
 
-        const results = await Promise.allSettled(subs.map((s) => run(cli, b, pid, mid, s)))
+        // dispatch() awaits create+patch_running (fast) then fires prompt
+        // fire-and-forget. Promise.allSettled here resolves when each child
+        // is registered (widget running), NOT when each child finishes.
+        // Hook returns to opencode in ~100ms regardless of child runtime.
+        const results = await Promise.allSettled(subs.map((s) => dispatch(cli, b, pid, mid, s)))
         const ok: OkResult[] = results.flatMap((r, i) => r.status === "fulfilled"
-          ? [{ sub: subs[i], childID: r.value.childID, output: r.value.output }]
+          ? [{ sub: subs[i], childID: r.value.childID }]
           : [])
-        const failed = results.flatMap((r, i) => {
+        const failed: Array<{ sub: Sub; reason?: string }> = results.flatMap((r, i) => {
           if (r.status !== "rejected") return []
-          log(`DISPATCH_REJECT idx=${i} title=${subs[i].title} reason=${r.reason instanceof Error ? r.reason.message : String(r.reason)}`)
-          return [subs[i]]
+          const reason = r.reason instanceof Error ? r.reason.message : String(r.reason)
+          log(`DISPATCH_REJECT idx=${i} title=${subs[i].title} reason=${reason}`)
+          return [{ sub: subs[i], reason }]
         })
 
         log(`DISPATCH_DONE pid=${pid} ok=${ok.length} failed=${failed.length}`)
-        stamp(out, notify(ok, failed, []))
+        stamp(out, notify(ok, failed.map((f) => f.sub), []))
 
+        const envelope = buildEnvelope(ok, failed, [])
         const meta = (out.metadata ?? {}) as Record<string, unknown>
+        meta.ouroboros_dispatch = envelope
         meta.ouroboros_subagents = subs.map((s) => ({ tool: s.tool, agent: s.agent, title: s.title, hash: s.hash, truncated: s.truncated }))
         meta.ouroboros_children = ok.map((r) => ({ title: r.sub.title, childID: r.childID }))
-        if (failed.length > 0) meta.ouroboros_dispatch_failed = failed.map((s) => s.title)
+        if (failed.length > 0) meta.ouroboros_dispatch_failed = failed.map((f) => ({ title: f.sub.title, reason: f.reason }))
         out.metadata = meta
       } catch (e) {
         log(`HOOK_CRASH err=${e instanceof Error ? e.stack ?? e.message : String(e)}`)

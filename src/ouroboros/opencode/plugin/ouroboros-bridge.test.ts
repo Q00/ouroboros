@@ -17,6 +17,7 @@ import {
   _resetDedupe,
   base,
   build,
+  buildEnvelope,
   cfg,
   childOutput,
   dupe,
@@ -326,19 +327,22 @@ describe("notify", () => {
   const sub = (title: string, truncated = false) => ({
     tool: "t", title, agent: "general", prompt: "p", truncated, hash: "h",
   })
-  const okR = (title: string, output = "child output", childID = "ses_child", truncated = false) => ({
-    sub: sub(title, truncated), childID, output,
+  const okR = (title: string, childID = "ses_child", truncated = false) => ({
+    sub: sub(title, truncated), childID,
   })
 
-  test("ok-only — plural grammar", () => {
+  test("ok-only — plural grammar + fire-and-forget phrasing", () => {
     const msg = notify([okR("a"), okR("b")], [], [])
-    expect(msg).toContain("Dispatched 2 subagents in parallel")
+    expect(msg).toContain("Dispatched 2 subagents")
+    expect(msg).toContain("Task widgets will update as they complete")
     expect(msg).toContain("• a")
     expect(msg).toContain("• b")
   })
 
   test("ok-only singular grammar", () => {
-    expect(notify([okR("only")], [], [])).toContain("1 subagent in")
+    const msg = notify([okR("only")], [], [])
+    expect(msg).toContain("Dispatched 1 subagent.")
+    expect(msg).toContain("Task widget will update as it completes")
   })
 
   test("failed-only", () => {
@@ -360,24 +364,23 @@ describe("notify", () => {
   })
 
   test("truncated note appears", () => {
-    expect(notify([okR("big", "o", "ses_big", true)], [], [])).toContain("truncated")
+    expect(notify([okR("big", "ses_big", true)], [], [])).toContain("truncated")
   })
 
   test("empty everything → fallback", () => {
     expect(notify([], [], [])).toContain("Nothing dispatched")
   })
 
-  test("results section — child output surfaced to parent", () => {
-    const msg = notify([okR("alpha", "ALPHA_RESULT", "ses_aaa"), okR("beta", "BETA_RESULT", "ses_bbb")], [], [])
-    expect(msg).toContain("--- Results ---")
-    expect(msg).toContain("### alpha (ses_aaa)")
-    expect(msg).toContain("ALPHA_RESULT")
-    expect(msg).toContain("### beta (ses_bbb)")
-    expect(msg).toContain("BETA_RESULT")
+  test("child session id appears in banner (for UI correlation)", () => {
+    const msg = notify([okR("alpha", "ses_aaa"), okR("beta", "ses_bbb")], [], [])
+    expect(msg).toContain("ses_aaa")
+    expect(msg).toContain("ses_bbb")
   })
 
-  test("results section omitted when no successes", () => {
-    const msg = notify([], [sub("x")], [])
+  test("no Results section in fire-and-forget model", () => {
+    // Post-FF model: plugin doesn't await child output. Widget drives
+    // completion. Banner must NOT promise results.
+    const msg = notify([okR("x")], [], [])
     expect(msg).not.toContain("--- Results ---")
   })
 })
@@ -451,5 +454,70 @@ describe("childOutput", () => {
   test("handles null/undefined data", () => {
     expect(childOutput("ses_y", null)).toContain("task_id: ses_y")
     expect(childOutput("ses_z", undefined)).toContain("task_id: ses_z")
+  })
+})
+
+describe("buildEnvelope — dispatch schema", () => {
+  const mkSub = (tool: string, title = tool) =>
+    ({ tool, title, agent: "general", prompt: "p", truncated: false, hash: "h" }) as unknown as Parameters<
+      typeof buildEnvelope
+    >[0][0]["sub"]
+  const okR = (tool: string, childID = "ses_" + tool) => ({ sub: mkSub(tool), childID })
+
+  test("status=dispatched when any ok", () => {
+    const env = buildEnvelope([okR("a")], [], [])
+    expect(env.status).toBe("dispatched")
+  })
+
+  test("status=dispatch_failed when only failures", () => {
+    const env = buildEnvelope([], [{ sub: mkSub("a"), reason: "boom" }], [])
+    expect(env.status).toBe("dispatch_failed")
+  })
+
+  test("status=skipped when only skipped", () => {
+    const env = buildEnvelope([], [], [mkSub("a")])
+    expect(env.status).toBe("skipped")
+  })
+
+  test("status=nothing when empty", () => {
+    const env = buildEnvelope([], [], [])
+    expect(env.status).toBe("nothing")
+  })
+
+  test("status=dispatched wins over failed + skipped", () => {
+    const env = buildEnvelope([okR("a")], [{ sub: mkSub("b") }], [mkSub("c")])
+    expect(env.status).toBe("dispatched")
+  })
+
+  test("mode always plugin_subagent", () => {
+    expect(buildEnvelope([], [], []).mode).toBe("plugin_subagent")
+  })
+
+  test("dispatched_at is ISO 8601 UTC", () => {
+    const env = buildEnvelope([], [], [])
+    expect(env.dispatched_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/)
+  })
+
+  test("children carry title + childID + agent + tool + truncated", () => {
+    const env = buildEnvelope([okR("explore", "ses_42")], [], [])
+    expect(env.children).toEqual([
+      { title: "explore", childID: "ses_42", agent: "general", tool: "explore", truncated: false },
+    ])
+  })
+
+  test("failed carries reason when provided", () => {
+    const env = buildEnvelope([], [{ sub: mkSub("x"), reason: "create_failed" }], [])
+    expect(env.failed[0]).toEqual({ title: "x", tool: "x", reason: "create_failed" })
+  })
+
+  test("skipped is shape {title,tool} only", () => {
+    const env = buildEnvelope([], [], [mkSub("y", "Y-Title")])
+    expect(env.skipped).toEqual([{ title: "Y-Title", tool: "y" }])
+  })
+
+  test("arrays default to [] when nothing of that kind", () => {
+    const env = buildEnvelope([okR("a")], [], [])
+    expect(env.failed).toEqual([])
+    expect(env.skipped).toEqual([])
   })
 })
