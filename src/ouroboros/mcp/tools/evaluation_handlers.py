@@ -1155,7 +1155,23 @@ class LateralThinkHandler:
 
     Generates alternative thinking approaches using lateral thinking personas
     to break through stagnation in problem-solving.
+
+    The multi-persona fan-out path emits a ``_subagents`` envelope that is
+    consumed by the OpenCode bridge plugin. It is gated on
+    ``should_dispatch_via_plugin(agent_runtime_backend, opencode_mode)`` —
+    identical to the other subagent-emitting handlers — so that subprocess
+    mode (or non-OpenCode runtimes) falls back to an inline multi-persona
+    text response instead of emitting an envelope nobody will consume.
+
+    Attributes:
+        agent_runtime_backend: Configured runtime (e.g. ``"opencode"``).
+        opencode_mode: Configured ``orchestrator.opencode_mode`` value
+            (``"plugin"`` or ``"subprocess"``). ``None`` means plugin by default
+            when the runtime is OpenCode (see ``should_dispatch_via_plugin``).
     """
+
+    agent_runtime_backend: str | None = field(default=None, repr=False)
+    opencode_mode: str | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -1274,6 +1290,7 @@ class LateralThinkHandler:
             from ouroboros.mcp.tools.subagent import (
                 build_lateral_multi_subagent,
                 build_multi_subagent_result,
+                should_dispatch_via_plugin,
             )
 
             if explicit_list:
@@ -1326,7 +1343,52 @@ class LateralThinkHandler:
                 failed_count=len(failed_attempts),
             )
 
-            return build_multi_subagent_result(payloads)
+            # Gate on runtime + opencode_mode — identical contract to the
+            # other subagent-emitting handlers. Subprocess mode (or a
+            # non-OpenCode runtime) falls back to synthesising a combined
+            # persona-prompt text inline, because no bridge plugin will
+            # consume the ``_subagents`` envelope.
+            if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+                return build_multi_subagent_result(payloads)
+
+            # --- Inline fallback: concatenate persona prompts ---
+            thinker = LateralThinker()
+            sections: list[str] = []
+            for p_str in personas_list:
+                try:
+                    p_enum = ThinkingPersona(p_str)
+                except ValueError:
+                    continue
+                lateral_res = thinker.generate_alternative(
+                    persona=p_enum,
+                    problem_context=str(problem_context),
+                    current_approach=str(current_approach),
+                    failed_attempts=failed_attempts,
+                )
+                if lateral_res.is_err:
+                    continue
+                lr = lateral_res.unwrap()
+                sections.append(f"# Lateral Thinking: {lr.approach_summary}\n\n{lr.prompt}")
+
+            if not sections:
+                return Result.err(
+                    MCPToolError(
+                        "No valid personas produced output for inline fallback",
+                        tool_name="ouroboros_lateral_think",
+                    )
+                )
+
+            combined = "\n\n---\n\n".join(sections)
+            return Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=combined),),
+                    is_error=False,
+                    meta={
+                        "persona_count": len(sections),
+                        "dispatch_mode": "inline_fallback",
+                    },
+                )
+            )
 
         # --- Single-persona direct-response path (back-compat) ---
         try:

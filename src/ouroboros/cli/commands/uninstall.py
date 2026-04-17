@@ -308,16 +308,12 @@ def _remove_opencode_bridge_plugin(dry_run: bool) -> bool:
 
     if config_path is not None:
         try:
-            import json
-
             raw = config_path.read_text()
-            # Strip JSONC comments (simple — single-line only)
-            lines = []
-            for line in raw.splitlines():
-                stripped = line.lstrip()
-                if not stripped.startswith("//"):
-                    lines.append(line)
-            data = json.loads("\n".join(lines))
+            # Use the shared JSONC stripper — consistent with the other
+            # uninstall paths (lines ~200, ~421) and handles block comments
+            # + trailing commas that the previous inline single-line
+            # stripper missed.
+            data = json.loads(_strip_jsonc(raw))
             plugins = data.get("plugin", [])
             if isinstance(plugins, list) and plugin_path in plugins:
                 if dry_run:
