@@ -436,7 +436,14 @@ class GenerateSeedHandler:
                 session_id=session_id,
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "session_id": session_id,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                },
+            )
 
         # Fall-through: real in-process seed generation (subprocess / non-opencode runtimes).
 
@@ -843,7 +850,15 @@ class InterviewHandler:
                 session_id=session_id,
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "session_id": session_id or "new",
+                    "action": action,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                },
+            )
 
         # Fall-through: real in-process interview engine (subprocess / non-opencode runtimes).
 

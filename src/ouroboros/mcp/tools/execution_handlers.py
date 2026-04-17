@@ -298,7 +298,18 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 session_id=session_id,
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            # Preserve public response shape (#442): consumers expect
+            # session_id / status keys even in plugin-dispatch mode.
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "session_id": session_id,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                    "runtime_backend": self.agent_runtime_backend,
+                    "model_tier": model_tier,
+                },
+            )
 
         # Fall-through: real in-process execution (subprocess / non-opencode runtimes).
 
@@ -855,7 +866,20 @@ class StartExecuteSeedHandler:
                 session_id=arguments.get("session_id"),
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            # Preserve public response shape (#442): callers chain on job_id /
+            # session_id. Background-job API contract keys present even though
+            # actual job is delegated to the subagent.
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "job_id": None,
+                    "session_id": arguments.get("session_id"),
+                    "execution_id": None,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                    "runtime_backend": self.agent_runtime_backend,
+                },
+            )
 
         # Fall-through: real background job path (subprocess / non-opencode runtimes).
 

@@ -542,7 +542,15 @@ class QAHandler:
                 session_id=qa_session_id,
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "qa_session_id": qa_session_id,
+                    "artifact_type": artifact_type,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                },
+            )
 
         # Fall-through: real in-process QA LLM call (subprocess / non-opencode runtimes).
 

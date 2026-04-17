@@ -218,7 +218,14 @@ class EvolveStepHandler:
                 session_id=lineage_id,
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "lineage_id": lineage_id,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                },
+            )
 
         # Fall-through: real in-process execution (subprocess / non-opencode runtimes).
         if self.evolutionary_loop is None:
@@ -831,7 +838,15 @@ class StartEvolveStepHandler:
                 session_id=lineage_id,
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "job_id": None,
+                    "lineage_id": lineage_id,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                },
+            )
 
         # Fall-through: real background job path.
         async def _runner() -> MCPToolResult:

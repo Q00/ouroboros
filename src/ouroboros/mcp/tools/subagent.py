@@ -126,6 +126,8 @@ def build_subagent_payload(
 
 def build_subagent_result(
     payload: SubagentPayload,
+    *,
+    response_shape: dict[str, Any] | None = None,
 ) -> Result:
     """Wrap a SubagentPayload into an MCPToolResult for MCP transport.
 
@@ -134,23 +136,34 @@ def build_subagent_result(
     ``meta`` dict is lost. The bridge plugin parses JSON from the text to
     detect the ``_subagent`` key.
 
-    We also store it in ``meta["_subagent"]`` for non-FastMCP transports
-    that preserve metadata.
+    Public-contract preservation (#442): when ``response_shape`` is provided,
+    the natural tool response fields (e.g. ``session_id``, ``job_id``,
+    ``status``) are merged into the JSON body ALONGSIDE ``_subagent``. Plugin
+    still finds ``_subagent`` via ``JSON.parse``; consumers still find the
+    contract fields at top level. When ``response_shape`` is ``None`` the
+    legacy ``{"_subagent": {...}}`` shape is emitted unchanged.
 
     Args:
         payload: The subagent dispatch payload.
+        response_shape: Optional mapping of public-contract keys to merge into
+            the response body (content JSON + meta). Must NOT contain the
+            reserved key ``_subagent``; it is always overwritten by the
+            dispatch payload.
 
     Returns:
-        Result.ok(MCPToolResult) with _subagent as JSON text and in meta.
+        Result.ok(MCPToolResult) with ``_subagent`` present in both content
+        JSON and meta, alongside any caller-supplied ``response_shape`` keys.
     """
-    # JSON text — this is what actually reaches the bridge plugin
-    dispatch_json = json.dumps({"_subagent": payload.to_dict()})
+    body: dict[str, Any] = {}
+    if response_shape:
+        body.update(response_shape)
+    body["_subagent"] = payload.to_dict()
 
     return Result.ok(
         MCPToolResult(
-            content=(MCPContentItem(type=ContentType.TEXT, text=dispatch_json),),
+            content=(MCPContentItem(type=ContentType.TEXT, text=json.dumps(body)),),
             is_error=False,
-            meta={"_subagent": payload.to_dict()},
+            meta=dict(body),
         )
     )
 
@@ -719,6 +732,8 @@ Continue the PM interview."""
 
 def build_multi_subagent_result(
     payloads: list[SubagentPayload],
+    *,
+    response_shape: dict[str, Any] | None = None,
 ) -> Result:
     """Wrap a list of SubagentPayloads into a single MCPToolResult for parallel dispatch.
 
@@ -729,11 +744,20 @@ def build_multi_subagent_result(
     Dedupe happens at the plugin layer per-payload via prompt hash, so identical
     payloads in the same call are handled safely.
 
+    Public-contract preservation (#442): when ``response_shape`` is provided,
+    the natural tool response fields are merged into the JSON body ALONGSIDE
+    ``_subagents``. Plugin still finds ``_subagents`` via ``JSON.parse``;
+    consumers still find the contract fields at top level.
+
     Args:
         payloads: Non-empty list of SubagentPayload. Empty list is rejected.
+        response_shape: Optional mapping of public-contract keys to merge into
+            the response body. Must NOT contain the reserved key ``_subagents``;
+            it is always overwritten by the dispatch list.
 
     Returns:
-        Result.ok(MCPToolResult) with _subagents as JSON array in text + meta.
+        Result.ok(MCPToolResult) with ``_subagents`` present in both content
+        JSON and meta, alongside any caller-supplied ``response_shape`` keys.
 
     Raises:
         ValueError: If payloads list is empty.
@@ -742,13 +766,16 @@ def build_multi_subagent_result(
         raise ValueError("payloads must not be empty")
 
     dispatch_list = [p.to_dict() for p in payloads]
-    dispatch_json = json.dumps({"_subagents": dispatch_list})
+    body: dict[str, Any] = {}
+    if response_shape:
+        body.update(response_shape)
+    body["_subagents"] = dispatch_list
 
     return Result.ok(
         MCPToolResult(
-            content=(MCPContentItem(type=ContentType.TEXT, text=dispatch_json),),
+            content=(MCPContentItem(type=ContentType.TEXT, text=json.dumps(body)),),
             is_error=False,
-            meta={"_subagents": dispatch_list},
+            meta=dict(body),
         )
     )
 

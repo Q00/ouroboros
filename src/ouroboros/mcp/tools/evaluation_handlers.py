@@ -430,7 +430,18 @@ class EvaluateHandler:
                 session_id=session_id,
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            # Preserve public response shape (#442): session_id + status are
+            # part of the documented contract for ouroboros_evaluate.
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "session_id": session_id,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                    "artifact_type": artifact_type,
+                    "trigger_consensus": trigger_consensus,
+                },
+            )
 
         # Fall-through: real in-process evaluation pipeline (subprocess / non-opencode runtimes).
 
@@ -1349,7 +1360,18 @@ class LateralThinkHandler:
             # persona-prompt text inline, because no bridge plugin will
             # consume the ``_subagents`` envelope.
             if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-                return build_multi_subagent_result(payloads)
+                # Preserve public response shape (#442): ouroboros_lateral_think
+                # natural response documents alternative-thinking metadata.
+                # Expose persona_count + dispatch status at top level so callers
+                # can branch on delegation without parsing the envelope.
+                return build_multi_subagent_result(
+                    payloads,
+                    response_shape={
+                        "status": "delegated_to_subagent",
+                        "dispatch_mode": "plugin",
+                        "persona_count": len(payloads),
+                    },
+                )
 
             # --- Inline fallback: concatenate persona prompts ---
             thinker = LateralThinker()

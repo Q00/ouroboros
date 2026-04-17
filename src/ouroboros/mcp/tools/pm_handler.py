@@ -381,7 +381,15 @@ class PMInterviewHandler:
                 session_id=session_id,
                 payload=payload,
             )
-            return build_subagent_result(payload)
+            return build_subagent_result(
+                payload,
+                response_shape={
+                    "session_id": session_id or "new",
+                    "action": action,
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                },
+            )
 
         # Fall-through: real in-process PM interview (subprocess / non-opencode runtimes).
 

@@ -231,6 +231,67 @@ class TestBuildSubagentResult:
         assert result.value.meta["_subagent"] == p.to_dict()
 
 
+class TestBuildSubagentResultResponseShape:
+    """response_shape kwarg merges natural tool response keys alongside _subagent.
+
+    Round-3 reviewer fix: plugin dispatch must preserve each tool's public
+    response shape. Passing response_shape={'job_id': ..., 'status': ...}
+    yields JSON body = {job_id, status, _subagent: {...}} — plugin still
+    finds its key, consumers still find documented fields.
+    """
+
+    def test_legacy_path_unchanged_when_shape_none(self) -> None:
+        """No response_shape kwarg = legacy sole-key envelope."""
+        import json
+
+        p = build_subagent_payload(tool_name="ouroboros_qa", title="QA", prompt="x")
+        result = build_subagent_result(p)
+        parsed = json.loads(result.value.content[0].text)
+        assert set(parsed.keys()) == {"_subagent"}
+
+    def test_shape_keys_merged_into_content_json(self) -> None:
+        import json
+
+        p = build_subagent_payload(
+            tool_name="ouroboros_start_execute_seed", title="exec", prompt="x"
+        )
+        shape = {
+            "job_id": None,
+            "session_id": "s-1",
+            "status": "delegated_to_subagent",
+            "dispatch_mode": "plugin",
+        }
+        result = build_subagent_result(p, response_shape=shape)
+        parsed = json.loads(result.value.content[0].text)
+        # Both natural keys AND _subagent present
+        assert parsed["job_id"] is None
+        assert parsed["session_id"] == "s-1"
+        assert parsed["status"] == "delegated_to_subagent"
+        assert parsed["dispatch_mode"] == "plugin"
+        assert "_subagent" in parsed
+        assert parsed["_subagent"]["tool_name"] == "ouroboros_start_execute_seed"
+
+    def test_shape_keys_merged_into_meta(self) -> None:
+        p = build_subagent_payload(tool_name="ouroboros_qa", title="QA", prompt="x")
+        shape = {"qa_session_id": "q-1", "status": "delegated_to_subagent"}
+        result = build_subagent_result(p, response_shape=shape)
+        meta = result.value.meta
+        assert meta["qa_session_id"] == "q-1"
+        assert meta["status"] == "delegated_to_subagent"
+        assert "_subagent" in meta
+
+    def test_subagent_key_not_overwritten_by_shape(self) -> None:
+        """If caller passes _subagent in shape, real payload wins."""
+        import json
+
+        p = build_subagent_payload(tool_name="ouroboros_qa", title="QA", prompt="x")
+        shape = {"_subagent": "bogus", "status": "delegated_to_subagent"}
+        result = build_subagent_result(p, response_shape=shape)
+        parsed = json.loads(result.value.content[0].text)
+        assert parsed["_subagent"] != "bogus"
+        assert parsed["_subagent"]["tool_name"] == "ouroboros_qa"
+
+
 # ---------------------------------------------------------------------------
 # Tool-specific builders: QA
 # ---------------------------------------------------------------------------
