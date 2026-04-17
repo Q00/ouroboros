@@ -90,20 +90,63 @@ class EventStore:
         await store.close()
     """
 
-    def __init__(self, database_url: str | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str | None = None,
+        *,
+        read_only: bool = False,
+    ) -> None:
         """Initialize EventStore with database URL.
 
         Args:
             database_url: SQLAlchemy database URL.
                          For async SQLite: "sqlite+aiosqlite:///path/to/db.sqlite"
                          If not provided, defaults to ~/.ouroboros/ouroboros.db
+            read_only: When True, open the underlying SQLite database in true
+                read-only mode by rewriting the URL into the ``file:<path>?mode=ro&uri=true``
+                form and passing ``connect_args={"uri": True}`` to aiosqlite.
+                This enforces the read-only contract at the connection layer
+                so *any* accidental write path (including library/future code
+                paths we don't control) fails fast with
+                ``sqlite3.OperationalError: attempt to write a readonly database``.
+                Callers that opt in should also skip schema creation by calling
+                ``initialize(create_schema=False)`` — this is the default when
+                ``read_only=True``. ``read_only`` is a no-op for non-SQLite URLs.
         """
         if database_url is None:
             db_path = Path.home() / ".ouroboros" / "ouroboros.db"
-            db_path.parent.mkdir(parents=True, exist_ok=True)
+            if not read_only:
+                db_path.parent.mkdir(parents=True, exist_ok=True)
             database_url = f"sqlite+aiosqlite:///{db_path}"
+
+        self._read_only = read_only
+        if read_only:
+            database_url = self._coerce_to_readonly_url(database_url)
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
+
+    @staticmethod
+    def _coerce_to_readonly_url(database_url: str) -> str:
+        """Rewrite a plain aiosqlite URL into a ``mode=ro`` URI form.
+
+        Leaves non-SQLite URLs untouched. Already-URI forms (starting with
+        ``file:``) are returned as-is so explicit callers keep full control.
+        """
+        prefix = "sqlite+aiosqlite:///"
+        if not database_url.startswith(prefix):
+            return database_url
+
+        path_part = database_url[len(prefix) :]
+        if path_part.startswith("file:"):
+            # Caller already provided a URI form — respect it verbatim.
+            return database_url
+
+        # ``:memory:`` has no filesystem and cannot be opened read-only
+        # meaningfully; leave it alone.
+        if path_part in (":memory:", ""):
+            return database_url
+
+        return f"{prefix}file:{path_part}?mode=ro&uri=true"
 
     def _raise_invalid_append_input(
         self,
@@ -133,36 +176,60 @@ class EventStore:
             details=details,
         )
 
-    async def initialize(self, *, create_schema: bool = True) -> None:
+    async def initialize(self, *, create_schema: bool | None = None) -> None:
         """Initialize the database connection and create tables if needed.
 
         This method is idempotent - calling it multiple times is safe.
 
         Args:
-            create_schema: When True (default) run ``metadata.create_all`` so
-                missing tables are created. Read-only consumers (for example
-                diagnostic CLI commands that must not mutate the store) can
-                pass ``False`` to skip schema creation entirely.
+            create_schema: When True run ``metadata.create_all`` so missing
+                tables are created. Read-only consumers (for example diagnostic
+                CLI commands that must not mutate the store) can pass ``False``
+                to skip schema creation entirely. When ``None`` (default), the
+                value follows ``read_only``: stores constructed with
+                ``read_only=True`` skip schema creation and all others create
+                it, preserving the prior default behaviour.
 
         For aiosqlite, uses StaticPool (default) which maintains a single
         connection. This avoids connection accumulation while supporting
         :memory: databases in tests.
         """
+        if create_schema is None:
+            create_schema = not self._read_only
+
+        if self._read_only and create_schema:
+            raise PersistenceError(
+                "Cannot create schema on a read-only EventStore.",
+                operation="initialize",
+                details={"read_only": True},
+            )
+
         if self._engine is None:
+            connect_args: dict[str, object] = {"timeout": 30}
+            if self._read_only:
+                # aiosqlite forwards unknown kwargs to sqlite3.connect — the
+                # ``uri=True`` flag is what turns the ``file:...?mode=ro`` form
+                # into a real read-only connection.
+                connect_args["uri"] = True
+
             self._engine = create_async_engine(
                 self._database_url,
                 echo=False,
-                connect_args={"timeout": 30},
+                connect_args=connect_args,
             )
 
-            # Enable WAL mode and set busy timeout on every new connection
-            @event.listens_for(self._engine.sync_engine, "connect")
-            def _set_sqlite_pragmas(dbapi_conn, _connection_record):
-                cursor = dbapi_conn.cursor()
-                cursor.execute("PRAGMA journal_mode=WAL")
-                cursor.execute("PRAGMA synchronous=NORMAL")
-                cursor.execute("PRAGMA busy_timeout=30000")
-                cursor.close()
+            # Enable WAL mode and set busy timeout on every new connection.
+            # Skipped for read-only consumers: ``PRAGMA journal_mode=WAL`` is
+            # itself a write and would trip SQLite's read-only guard.
+            if not self._read_only:
+
+                @event.listens_for(self._engine.sync_engine, "connect")
+                def _set_sqlite_pragmas(dbapi_conn, _connection_record):
+                    cursor = dbapi_conn.cursor()
+                    cursor.execute("PRAGMA journal_mode=WAL")
+                    cursor.execute("PRAGMA synchronous=NORMAL")
+                    cursor.execute("PRAGMA busy_timeout=30000")
+                    cursor.close()
 
         # Create all tables defined in metadata (skipped for read-only consumers)
         if create_schema:

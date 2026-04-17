@@ -2,9 +2,11 @@
 
 List in-flight sessions directly from the EventStore (no MCP dependency).
 The command is intentionally read-only: it never creates the data directory,
-never writes schema, and never appends events. Its only job is to surface the
-identifiers a user needs to re-attach (inspect with ``ouroboros status
-execution <exec_id>`` or resume execution with
+never writes schema, and never appends events. Read-only is enforced at the
+SQLite connection layer via ``EventStore(..., read_only=True)`` so even
+unexpected write paths fail fast with ``attempt to write a readonly
+database``. Its only job is to surface the identifiers a user needs to
+re-attach (inspect with ``ouroboros tui monitor`` or resume execution with
 ``ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>``).
 """
 
@@ -48,7 +50,10 @@ async def _get_event_store(db_path: str | None = None):
 
     Returns ``None`` if the database file does not exist. Intentionally does
     not create ``~/.ouroboros/`` or run ``metadata.create_all`` — this command
-    is a recovery tool and must not mutate user state.
+    is a recovery tool and must not mutate user state. Read-only is enforced
+    at the SQLite connection layer via ``EventStore(..., read_only=True)``
+    so any accidental write path raises
+    ``sqlite3.OperationalError: attempt to write a readonly database``.
     """
     from ouroboros.persistence.event_store import EventStore
 
@@ -56,9 +61,12 @@ async def _get_event_store(db_path: str | None = None):
     if not Path(resolved).exists():
         return None
 
-    event_store = EventStore(f"sqlite+aiosqlite:///{resolved}")
+    event_store = EventStore(
+        f"sqlite+aiosqlite:///{resolved}",
+        read_only=True,
+    )
     try:
-        await event_store.initialize(create_schema=False)
+        await event_store.initialize()
     except Exception:
         # Ensure the partially constructed engine is disposed before we bail
         # out — otherwise the outer ``finally`` cannot close it (the variable
@@ -178,23 +186,28 @@ def _format_reattach_guidance(tracker) -> str:
 
     Prints two commands, matching the real CLI contracts:
 
-    - Inspect:   ``ouroboros status execution <exec_id>``
+    - Inspect:   ``ouroboros tui monitor`` (functional TUI; select the session)
     - Resume:    ``ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>``
 
     ``run workflow --resume`` takes a *session_id* (not an execution_id) and
     also requires the seed file, so both identifiers are surfaced explicitly.
+
+    Note: ``ouroboros status execution <exec_id>`` is *registered* but its
+    implementation is still a placeholder (see src/ouroboros/cli/commands/status.py),
+    so we deliberately do not surface it as an inspection path — it would
+    print misleading "Would show details" output.
     """
     exec_id = tracker.execution_id or "<unknown>"
     seed_hint = tracker.seed_id or "<seed.yaml>"
 
-    inspect_line = f"ouroboros status execution {exec_id}"
+    inspect_line = "ouroboros tui monitor"
     resume_line = f"ouroboros run workflow --orchestrator --resume {tracker.session_id} {seed_hint}"
 
     lines = [
         f"Session ID:   [bold cyan]{tracker.session_id}[/]",
         f"Execution ID: [bold cyan]{exec_id}[/]",
         "",
-        "[bold]Inspect[/] (read-only status):",
+        "[bold]Inspect[/] (read-only interactive monitor):",
         f"    {inspect_line}",
         "",
         "[bold]Resume execution[/] (requires the original seed file):",
@@ -295,8 +308,9 @@ def resume(
 
     Re-attach paths surfaced after selection:
 
-        # Inspect
-        ouroboros status execution <exec_id>
+        # Inspect (interactive monitor — the `status execution` placeholder is
+        # not wired up yet)
+        ouroboros tui monitor
 
         # Resume execution (requires the original seed file)
         ouroboros run workflow --orchestrator --resume <session_id> <seed.yaml>
