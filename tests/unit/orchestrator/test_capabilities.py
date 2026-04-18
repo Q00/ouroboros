@@ -105,13 +105,21 @@ tools:
 
 
 def test_partial_override_merges_onto_inferred_semantics(tmp_path, monkeypatch) -> None:
-    """Partial overrides should retain inferred fields the user did not set."""
+    """Partial overrides should retain inferred fields the user did not set.
+
+    The user's YAML only declares ``approval_class``.  Every other
+    dimension must keep the value inferred from the tool's
+    name/description fingerprint — the override must not silently
+    reset unspecified fields back to conservative defaults.
+    """
+    from ouroboros.orchestrator.capabilities import CapabilityInterruptibility
+
     override_path = tmp_path / "tool_capabilities.yaml"
     override_path.write_text(
         """
 tools:
-  browser:chrome_screenshot:
-    mutation_class: read_only
+  docs:search_docs:
+    approval_class: elevated
 """,
         encoding="utf-8",
     )
@@ -119,9 +127,9 @@ tools:
     catalog = assemble_session_tool_catalog(
         attached_tools=(
             MCPToolDefinition(
-                name="chrome_screenshot",
-                description="Capture a screenshot",
-                server_name="browser",
+                name="search_docs",
+                description="Search indexed project docs",
+                server_name="docs",
             ),
         ),
     )
@@ -129,12 +137,17 @@ tools:
     graph = build_capability_graph(catalog)
 
     descriptor = graph.capabilities[0]
-    # User only reclassified the mutation_class; remaining dimensions come
-    # from the conservative inferred defaults for an attached MCP tool.
+    # The only dimension the YAML declared:
+    assert descriptor.semantics.approval_class is CapabilityApprovalClass.ELEVATED
+    # Everything else is inherited from the read-leaning fingerprint
+    # ("search" keyword → READ_ONLY / SAFE / NONE).  These assertions
+    # would fail if the override layer were wholesale-replacing
+    # semantics instead of merging per-field.
     assert descriptor.semantics.mutation_class is CapabilityMutationClass.READ_ONLY
+    assert descriptor.semantics.parallel_safety is CapabilityParallelSafety.SAFE
+    assert descriptor.semantics.interruptibility is CapabilityInterruptibility.NONE
     assert descriptor.semantics.origin is CapabilityOrigin.ATTACHED_MCP
     assert descriptor.semantics.scope is CapabilityScope.ATTACHMENT
-    assert descriptor.semantics.approval_class is not None
 
 
 def test_invalid_override_enum_value_is_logged_and_skipped(tmp_path, monkeypatch) -> None:
