@@ -77,7 +77,6 @@ class RoleCapabilityProfile:
     preferred_tool_names: tuple[str, ...] = ()
     allowed_origins: tuple[CapabilityOrigin, ...] = ()
     allowed_scopes: tuple[CapabilityScope, ...] = ()
-    allowed_stable_id_prefixes: tuple[str, ...] = ()
     allow_destructive: bool = False
 
 
@@ -136,15 +135,12 @@ def _matches_role_selector(
 ) -> bool:
     """Does ``descriptor`` satisfy the profile's admission selectors?
 
-    Selectors are combined as OR of three independent clauses, by
-    design:
+    Selectors are combined as OR of two independent clauses, by design:
 
     1. ``preferred_tool_names`` — explicit name allowlist for the
        baseline built-in envelope (e.g., ``Read`` always admitted for
        INTERVIEW even though its origin is BUILTIN, not PROVIDER_NATIVE).
-    2. ``allowed_stable_id_prefixes`` — namespaced admit rule for whole
-       provider/attachment families.
-    3. ``allowed_origins`` AND ``allowed_scopes`` — semantic-class
+    2. ``allowed_origins`` AND ``allowed_scopes`` — semantic-class
        admission, used by read-only roles to accept provider-native
        capabilities without enumerating every tool name.
 
@@ -154,20 +150,10 @@ def _matches_role_selector(
     origin/scope, remove the name from ``preferred_tool_names`` and
     rely on the semantic clause instead.
     """
-    if not (
-        profile.preferred_tool_names
-        or profile.allowed_origins
-        or profile.allowed_scopes
-        or profile.allowed_stable_id_prefixes
-    ):
+    if not (profile.preferred_tool_names or profile.allowed_origins or profile.allowed_scopes):
         return True
 
     if descriptor.name in profile.preferred_tool_names:
-        return True
-
-    if any(
-        descriptor.stable_id.startswith(prefix) for prefix in profile.allowed_stable_id_prefixes
-    ):
         return True
 
     origin_matches = (
