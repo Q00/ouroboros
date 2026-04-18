@@ -60,6 +60,7 @@ class TestStartPathScoringFlow:
     @pytest.mark.asyncio
     async def test_start_skips_scoring(self) -> None:
         handler = _build_handler()
+        captured_adapter_kwargs: dict = {}
 
         mock_engine = MagicMock()
         mock_engine.start_interview = AsyncMock(
@@ -72,11 +73,15 @@ class TestStartPathScoringFlow:
 
         score_mock = AsyncMock(return_value=None)
 
+        def _capture_adapter(**kwargs):
+            captured_adapter_kwargs.update(kwargs)
+            return MagicMock()
+
         with (
             patch.object(handler, "_score_interview_state", score_mock),
             patch(
                 "ouroboros.mcp.tools.authoring_handlers.create_llm_adapter",
-                return_value=MagicMock(),
+                side_effect=_capture_adapter,
             ),
             patch(
                 "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
@@ -91,6 +96,13 @@ class TestStartPathScoringFlow:
 
         score_mock.assert_not_called()
         mock_engine.ask_next_question.assert_called_once()
+        assert captured_adapter_kwargs["allowed_tools"] == [
+            "Read",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+        ]
 
 
 class TestAnswerPathScoringFlow:

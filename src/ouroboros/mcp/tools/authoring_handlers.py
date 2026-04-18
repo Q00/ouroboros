@@ -46,6 +46,12 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.orchestrator.policy import (
+    PolicyContext,
+    PolicyExecutionPhase,
+    PolicySessionRole,
+    allowed_runtime_builtin_tool_names,
+)
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 from ouroboros.providers.base import LLMAdapter
@@ -79,6 +85,18 @@ _INTERVIEW_COMPLETION_PHRASES = (
     "no ambiguity remains",
     "no ambiguity left",
 )
+
+
+def _interview_allowed_tools(runtime_backend: str | None) -> list[str]:
+    """Return the policy-derived read-only tool envelope for interviews."""
+    return allowed_runtime_builtin_tool_names(
+        PolicyContext(
+            runtime_backend=runtime_backend,
+            session_role=PolicySessionRole.INTERVIEW,
+            execution_phase=PolicyExecutionPhase.INTERVIEW,
+        )
+    )
+
 
 _INTERVIEW_COMPLETION_NEGATIONS = (
     "not done",
@@ -784,7 +802,7 @@ class InterviewHandler:
             backend=self.llm_backend,
             max_turns=1,
             use_case="interview",
-            allowed_tools=[],
+            allowed_tools=_interview_allowed_tools(self.llm_backend),
         )
         engine = self.interview_engine or InterviewEngine(
             llm_adapter=llm_adapter,

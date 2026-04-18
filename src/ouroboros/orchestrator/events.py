@@ -21,6 +21,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.capabilities import CapabilityDescriptor, CapabilityGraph
+from ouroboros.orchestrator.policy import PolicyContext, PolicyDecision
 
 
 def create_session_started_event(
@@ -357,6 +359,87 @@ def create_mcp_tools_loaded_event(
     )
 
 
+def create_policy_capability_evaluated_event(
+    session_id: str,
+    descriptor: CapabilityDescriptor,
+    decision: PolicyDecision,
+    context: PolicyContext,
+) -> BaseEvent:
+    """Create a persisted audit event for one capability-policy decision."""
+    payload = _serialize_policy_capability_evaluation(descriptor, decision)
+    return BaseEvent(
+        type="policy.capability.evaluated",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "capability": payload["capability"],
+            "decision": payload["decision"],
+            "context": {
+                "runtime_backend": context.runtime_backend,
+                "session_role": context.session_role.value,
+                "execution_phase": context.execution_phase.value,
+            },
+            "evaluated_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def _serialize_policy_capability_evaluation(
+    descriptor: CapabilityDescriptor,
+    decision: PolicyDecision,
+) -> dict[str, Any]:
+    """Serialize one capability-policy decision for audit events."""
+    return {
+        "capability": {
+            "stable_id": descriptor.stable_id,
+            "name": descriptor.name,
+            "source_kind": descriptor.source_kind,
+            "source_name": descriptor.source_name,
+            "origin": descriptor.semantics.origin.value,
+            "scope": descriptor.semantics.scope.value,
+            "mutation_class": descriptor.semantics.mutation_class.value,
+            "parallel_safety": descriptor.semantics.parallel_safety.value,
+            "approval_class": descriptor.semantics.approval_class.value,
+        },
+        "decision": {
+            "visible": decision.visible,
+            "executable": decision.executable,
+            "approval_class": decision.approval_class.value,
+            "reasons": list(decision.reasons),
+        },
+    }
+
+
+def create_policy_capabilities_evaluated_event(
+    session_id: str,
+    graph: CapabilityGraph,
+    decisions: tuple[PolicyDecision, ...],
+    context: PolicyContext,
+) -> BaseEvent:
+    """Create one batched audit event for all capability-policy decisions."""
+    decisions_by_id = {decision.stable_id: decision for decision in decisions}
+    evaluations = [
+        _serialize_policy_capability_evaluation(descriptor, decision)
+        for descriptor in graph.capabilities
+        if (decision := decisions_by_id.get(descriptor.stable_id)) is not None
+    ]
+    return BaseEvent(
+        type="policy.capabilities.evaluated",
+        aggregate_type="session",
+        aggregate_id=session_id,
+        data={
+            "evaluations": evaluations,
+            "capability_count": len(evaluations),
+            "context": {
+                "runtime_backend": context.runtime_backend,
+                "session_role": context.session_role.value,
+                "execution_phase": context.execution_phase.value,
+            },
+            "evaluated_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 def create_workflow_progress_event(
     execution_id: str,
     session_id: str,
@@ -588,7 +671,9 @@ __all__ = [
     "create_drift_measured_event",
     "create_execution_terminal_event",
     "create_heartbeat_event",
+    "create_policy_capabilities_evaluated_event",
     "create_mcp_tools_loaded_event",
+    "create_policy_capability_evaluated_event",
     "create_progress_event",
     "create_session_cancelled_event",
     "create_session_completed_event",

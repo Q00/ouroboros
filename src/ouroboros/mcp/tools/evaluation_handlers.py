@@ -31,11 +31,28 @@ from ouroboros.observability.drift import (
     DRIFT_THRESHOLD,
     DriftMeasurement,
 )
+from ouroboros.orchestrator.policy import (
+    PolicyContext,
+    PolicyExecutionPhase,
+    PolicySessionRole,
+    allowed_runtime_builtin_tool_names,
+)
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers import create_llm_adapter
 
 log = structlog.get_logger(__name__)
+
+
+def _evaluation_allowed_tools(runtime_backend: str | None) -> list[str]:
+    """Return the policy-derived read-only tool envelope for evaluation."""
+    return allowed_runtime_builtin_tool_names(
+        PolicyContext(
+            runtime_backend=runtime_backend,
+            session_role=PolicySessionRole.EVALUATION,
+            execution_phase=PolicyExecutionPhase.EVALUATION,
+        )
+    )
 
 
 @dataclass
@@ -438,6 +455,7 @@ class EvaluateHandler:
             # MCP adapter is max_turns=1 (tuned for interview/seed single-shot).
             llm_adapter = create_llm_adapter(
                 backend=self.llm_backend,
+                allowed_tools=_evaluation_allowed_tools(self.llm_backend),
                 max_turns=20,
             )
             working_dir_str = arguments.get("working_dir")

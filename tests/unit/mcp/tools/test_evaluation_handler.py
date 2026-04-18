@@ -134,6 +134,13 @@ class TestEvaluateHandlerAdapterCreation:
             f"max_turns={captured['max_turns']} is too low — the evaluator needs "
             "at least one turn per AC file read. Use max_turns >= 10."
         )
+        assert captured["allowed_tools"] == [
+            "Read",
+            "Glob",
+            "Grep",
+            "WebFetch",
+            "WebSearch",
+        ]
 
     async def test_always_creates_fresh_adapter(self):
         """Evaluation always creates its own adapter via create_llm_adapter.

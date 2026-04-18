@@ -52,6 +52,8 @@ from ouroboros.orchestrator.capabilities import (
     serialize_capability_graph,
 )
 from ouroboros.orchestrator.control_plane import (
+    ControlPlaneExecutionMode,
+    ControlPlaneState,
     build_control_plane_state,
     serialize_control_plane_state,
 )
@@ -1393,6 +1395,39 @@ class ParallelACExecutor:
                 ordered_indices.append(ac_index)
         return tuple(ordered_indices)
 
+    def _build_tool_control_plane(
+        self,
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+    ) -> ControlPlaneState | None:
+        """Build control-plane hints for the current executable tool surface."""
+        if not tool_catalog:
+            return None
+        capability_graph = build_capability_graph(tool_catalog)
+        policy_context = PolicyContext(
+            runtime_backend=self._adapter.runtime_backend,
+            session_role=PolicySessionRole.IMPLEMENTATION,
+            execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
+        )
+        decisions = evaluate_capability_policy(capability_graph, policy_context)
+        return build_control_plane_state(capability_graph, decisions)
+
+    def _control_plane_requires_serial_batch(
+        self,
+        tool_catalog: tuple[MCPToolDefinition, ...] | None,
+    ) -> bool:
+        """Return True when hints require single-AC batch execution."""
+        control_plane = self._build_tool_control_plane(tool_catalog)
+        if control_plane is None:
+            return False
+        blocking_modes = {
+            ControlPlaneExecutionMode.SERIALIZED,
+            ControlPlaneExecutionMode.ISOLATED,
+        }
+        return any(
+            hint.visible and hint.executable and hint.execution_mode in blocking_modes
+            for hint in control_plane.hints
+        )
+
     async def _execute_ac_batch(
         self,
         *,
@@ -1438,6 +1473,17 @@ class ParallelACExecutor:
                     if isinstance(e, anyio.get_cancelled_exc_class()):
                         raise
                     batch_results[idx] = e
+
+        if len(batch_indices) > 1 and self._control_plane_requires_serial_batch(tool_catalog):
+            log.info(
+                "parallel_executor.control_plane.serializing_batch",
+                session_id=session_id,
+                execution_id=execution_id,
+                batch_indices=batch_indices,
+            )
+            for idx, ac_idx in enumerate(batch_indices):
+                await _run_ac(idx, ac_idx)
+            return batch_results
 
         async with anyio.create_task_group() as tg:
             for idx, ac_idx in enumerate(batch_indices):
