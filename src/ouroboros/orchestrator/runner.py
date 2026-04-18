@@ -519,7 +519,7 @@ class OrchestratorRunner:
         ]
         return allowed_tools, capability_graph, policy_decisions, policy_context
 
-    async def _emit_policy_capability_evaluated_events(
+    async def _emit_policy_capabilities_evaluated_event(
         self,
         session_id: str,
         capability_graph: CapabilityGraph,
@@ -1164,7 +1164,7 @@ class OrchestratorRunner:
         ) = self._evaluate_tool_catalog_policy(session_catalog)
 
         if self._mcp_manager is None:
-            await self._emit_policy_capability_evaluated_events(
+            await self._emit_policy_capabilities_evaluated_event(
                 session_id,
                 capability_graph,
                 policy_decisions,
@@ -1173,7 +1173,7 @@ class OrchestratorRunner:
             return merged_tools, None, session_catalog
 
         async def _emit_current_policy_decisions() -> None:
-            await self._emit_policy_capability_evaluated_events(
+            await self._emit_policy_capabilities_evaluated_event(
                 session_id,
                 capability_graph,
                 policy_decisions,
@@ -1220,7 +1220,7 @@ class OrchestratorRunner:
             policy_decisions,
             policy_context,
         ) = self._evaluate_tool_catalog_policy(session_catalog)
-        await self._emit_policy_capability_evaluated_events(
+        await self._emit_policy_capabilities_evaluated_event(
             session_id,
             capability_graph,
             policy_decisions,

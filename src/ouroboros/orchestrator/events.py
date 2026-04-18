@@ -359,31 +359,6 @@ def create_mcp_tools_loaded_event(
     )
 
 
-def create_policy_capability_evaluated_event(
-    session_id: str,
-    descriptor: CapabilityDescriptor,
-    decision: PolicyDecision,
-    context: PolicyContext,
-) -> BaseEvent:
-    """Create a persisted audit event for one capability-policy decision."""
-    payload = _serialize_policy_capability_evaluation(descriptor, decision)
-    return BaseEvent(
-        type="policy.capability.evaluated",
-        aggregate_type="session",
-        aggregate_id=session_id,
-        data={
-            "capability": payload["capability"],
-            "decision": payload["decision"],
-            "context": {
-                "runtime_backend": context.runtime_backend,
-                "session_role": context.session_role.value,
-                "execution_phase": context.execution_phase.value,
-            },
-            "evaluated_at": datetime.now(UTC).isoformat(),
-        },
-    )
-
-
 def _serialize_policy_capability_evaluation(
     descriptor: CapabilityDescriptor,
     decision: PolicyDecision,
@@ -671,9 +646,8 @@ __all__ = [
     "create_drift_measured_event",
     "create_execution_terminal_event",
     "create_heartbeat_event",
-    "create_policy_capabilities_evaluated_event",
     "create_mcp_tools_loaded_event",
-    "create_policy_capability_evaluated_event",
+    "create_policy_capabilities_evaluated_event",
     "create_progress_event",
     "create_session_cancelled_event",
     "create_session_completed_event",

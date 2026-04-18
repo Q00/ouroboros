@@ -5,7 +5,6 @@ from __future__ import annotations
 from ouroboros.orchestrator.capabilities import build_capability_graph
 from ouroboros.orchestrator.events import (
     create_policy_capabilities_evaluated_event,
-    create_policy_capability_evaluated_event,
     create_progress_event,
     create_session_cancelled_event,
     create_session_completed_event,
@@ -44,33 +43,6 @@ class TestSessionEvents:
         assert event.data["seed_id"] == "seed_789"
         assert event.data["seed_goal"] == "Build a CLI tool"
         assert "start_time" in event.data
-
-    def test_create_policy_capability_evaluated_event(self) -> None:
-        """Policy events should persist capability, decision, and context."""
-        graph = build_capability_graph(assemble_session_tool_catalog(["Read"]))
-        context = PolicyContext(
-            runtime_backend="opencode",
-            session_role=PolicySessionRole.IMPLEMENTATION,
-            execution_phase=PolicyExecutionPhase.IMPLEMENTATION,
-        )
-        decision = evaluate_capability_policy(graph, context)[0]
-
-        event = create_policy_capability_evaluated_event(
-            session_id="sess_123",
-            descriptor=graph.capabilities[0],
-            decision=decision,
-            context=context,
-        )
-
-        assert event.type == "policy.capability.evaluated"
-        assert event.aggregate_type == "session"
-        assert event.aggregate_id == "sess_123"
-        assert event.data["capability"]["name"] == "Read"
-        assert event.data["capability"]["origin"] == "builtin"
-        assert event.data["decision"]["visible"] is True
-        assert event.data["decision"]["executable"] is True
-        assert event.data["context"]["runtime_backend"] == "opencode"
-        assert "evaluated_at" in event.data
 
     def test_create_policy_capabilities_evaluated_event_batches_decisions(self) -> None:
         """Batched policy events should preserve per-capability decisions."""
