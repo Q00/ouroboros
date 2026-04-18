@@ -207,14 +207,11 @@ def test_malformed_yaml_does_not_break_capability_graph(tmp_path, monkeypatch) -
     assert len(graph.capabilities) == 1
     # The failure must still be visible to operators.
     assert any(
-        event.get("event") == "capability_override.yaml_parse_failed"
-        for event in captured_events
+        event.get("event") == "capability_override.yaml_parse_failed" for event in captured_events
     )
 
 
-def test_unreadable_override_path_does_not_break_capability_graph(
-    tmp_path, monkeypatch
-) -> None:
+def test_unreadable_override_path_does_not_break_capability_graph(tmp_path, monkeypatch) -> None:
     """A directory (or other non-regular path) at the override location
     must be handled gracefully rather than raising ``IsADirectoryError``.
     """
