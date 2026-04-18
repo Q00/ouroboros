@@ -12,7 +12,6 @@ from ouroboros.orchestrator.capabilities import (
     CapabilityParallelSafety,
     CapabilityScope,
     build_capability_graph,
-    load_tool_capability_overrides,
     normalize_serialized_capability_graph,
     serialize_capability_graph,
 )
@@ -72,7 +71,8 @@ def test_build_capability_graph_records_inherited_capabilities_without_entries()
     assert inherited.semantics.scope is CapabilityScope.ATTACHMENT
 
 
-def test_build_capability_graph_applies_attached_tool_override(tmp_path) -> None:
+def test_full_override_replaces_every_classified_dimension(tmp_path, monkeypatch) -> None:
+    """A fully-specified override sets every dimension explicitly."""
     override_path = tmp_path / "tool_capabilities.yaml"
     override_path.write_text(
         """
@@ -85,7 +85,7 @@ tools:
 """,
         encoding="utf-8",
     )
-    overrides = load_tool_capability_overrides(override_path)
+    monkeypatch.setenv("OUROBOROS_TOOL_CAPABILITIES", str(override_path))
     catalog = assemble_session_tool_catalog(
         attached_tools=(
             MCPToolDefinition(
@@ -96,7 +96,7 @@ tools:
         ),
     )
 
-    graph = build_capability_graph(catalog, capability_overrides=overrides)
+    graph = build_capability_graph(catalog)
 
     descriptor = graph.capabilities[0]
     assert descriptor.semantics.mutation_class is CapabilityMutationClass.READ_ONLY
