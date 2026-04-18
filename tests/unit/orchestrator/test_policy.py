@@ -167,3 +167,90 @@ def test_read_only_roles_derive_runtime_builtin_envelope_from_policy() -> None:
     assert "Edit" not in allowed
     assert "Write" not in allowed
     assert "Bash" not in allowed
+
+
+def test_coordinator_hides_unknown_side_effecting_provider_native() -> None:
+    """Regression guard: unknown side-effecting provider-native tools must
+    stay hidden from COORDINATOR even when they satisfy the origin filter.
+
+    COORDINATOR permits PROVIDER_NATIVE by origin (for future runtime
+    integrations) but must not admit a tool that the engine cannot
+    classify below ``EXTERNAL_SIDE_EFFECT``.  Without this guard a
+    downstream regression that accidentally relaxed the mutation
+    clamp would silently expand the coordinator envelope.
+    """
+    graph = CapabilityGraph(
+        capabilities=(
+            CapabilityDescriptor(
+                stable_id="provider:opencode:unrestricted_shell",
+                name="unrestricted_shell",
+                original_name="unrestricted_shell",
+                description="Provider-native destructive shell surface",
+                server_name=None,
+                source_kind="provider_native",
+                source_name="opencode",
+                semantics=CapabilitySemantics(
+                    mutation_class=CapabilityMutationClass.DESTRUCTIVE,
+                    parallel_safety=CapabilityParallelSafety.ISOLATED_SESSION_REQUIRED,
+                    interruptibility=CapabilityInterruptibility.HARD,
+                    approval_class=CapabilityApprovalClass.BYPASS_FORBIDDEN,
+                    origin=CapabilityOrigin.PROVIDER_NATIVE,
+                    scope=CapabilityScope.SHELL_ONLY,
+                ),
+            ),
+        )
+    )
+
+    decisions = evaluate_capability_policy(
+        graph,
+        PolicyContext(
+            runtime_backend="opencode",
+            session_role=PolicySessionRole.COORDINATOR,
+            execution_phase=PolicyExecutionPhase.COORDINATOR_REVIEW,
+        ),
+    )
+
+    assert decisions[0].visible is False
+    assert decisions[0].executable is False
+
+
+def test_coordinator_admits_provider_native_write_but_not_destructive() -> None:
+    """Scope + origin admission works for mid-severity provider-native tools
+    while still rejecting destructive ones.
+
+    This pins the two failure modes that the new selector can regress
+    into: either admitting everything by origin (too loose) or
+    admitting nothing at all (too tight).
+    """
+    graph = CapabilityGraph(
+        capabilities=(
+            CapabilityDescriptor(
+                stable_id="provider:opencode:workspace_write",
+                name="workspace_write",
+                original_name="workspace_write",
+                description="Provider-native workspace writer",
+                server_name=None,
+                source_kind="provider_native",
+                source_name="opencode",
+                semantics=CapabilitySemantics(
+                    mutation_class=CapabilityMutationClass.WORKSPACE_WRITE,
+                    parallel_safety=CapabilityParallelSafety.SERIALIZED,
+                    interruptibility=CapabilityInterruptibility.SOFT,
+                    approval_class=CapabilityApprovalClass.DEFAULT,
+                    origin=CapabilityOrigin.PROVIDER_NATIVE,
+                    scope=CapabilityScope.KERNEL,
+                ),
+            ),
+        )
+    )
+
+    allowed = allowed_capability_names(
+        graph,
+        PolicyContext(
+            runtime_backend="opencode",
+            session_role=PolicySessionRole.COORDINATOR,
+            execution_phase=PolicyExecutionPhase.COORDINATOR_REVIEW,
+        ),
+    )
+
+    assert allowed == ["workspace_write"]
