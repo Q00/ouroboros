@@ -217,6 +217,7 @@ class _StubCoordinatorRuntime:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        model: str | None = None,
     ):
         self.calls.append(
             {

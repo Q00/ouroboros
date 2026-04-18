@@ -23,11 +23,11 @@ async def test_recursive_decomposition_reaches_depth_limit_before_forcing_atomic
     executor._emit_subtask_event = AsyncMock()
     executor._try_decompose_ac = AsyncMock(
         side_effect=[
-            ["Composite depth 1", "Atomic depth 1"],
-            ["Composite depth 2", "Atomic depth 2"],
-            ["Forced atomic depth 3 A", "Forced atomic depth 3 B"],
-            None,
-            None,
+            (["Composite depth 1", "Atomic depth 1"], "complex"),
+            (["Composite depth 2", "Atomic depth 2"], "complex"),
+            (["Forced atomic depth 3 A", "Forced atomic depth 3 B"], "complex"),
+            (None, "normal"),
+            (None, "normal"),
         ]
     )
 

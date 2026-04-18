@@ -197,10 +197,10 @@ class TestLLMConfig:
         assert config.backend == "claude_code"
         assert config.permission_mode == "default"
         assert config.opencode_permission_mode == "acceptEdits"
-        assert config.qa_model == "claude-sonnet-4-20250514"
-        assert config.dependency_analysis_model == "claude-opus-4-6"
-        assert config.ontology_analysis_model == "claude-opus-4-6"
-        assert config.context_compression_model == "gpt-4"
+        assert config.qa_model == "claude-sonnet-4-6"
+        assert config.dependency_analysis_model == "claude-sonnet-4-6"
+        assert config.ontology_analysis_model == "claude-sonnet-4-6"
+        assert config.context_compression_model == "claude-haiku-4-5-20251001"
 
     def test_llm_config_accepts_claude_shorthand(self) -> None:
         """LLMConfig accepts 'claude' as a backend alias."""
@@ -230,9 +230,9 @@ class TestExecutionConfig:
         config = ExecutionConfig()
         assert config.max_iterations_per_ac == 10
         assert config.retrospective_interval == 3
-        assert config.atomicity_model == "claude-opus-4-6"
-        assert config.decomposition_model == "claude-opus-4-6"
-        assert config.double_diamond_model == "claude-opus-4-6"
+        assert config.atomicity_model == "claude-haiku-4-5-20251001"
+        assert config.decomposition_model == "claude-sonnet-4-6"
+        assert config.double_diamond_model == "claude-sonnet-4-6"
 
 
 class TestResilienceConfig:
@@ -297,8 +297,8 @@ class TestEvaluationConfig:
         assert config.stage3_enabled is True
         assert config.satisfaction_threshold == 0.8
         assert config.uncertainty_threshold == 0.3
-        assert config.semantic_model == "claude-opus-4-6"
-        assert config.assertion_extraction_model == "claude-sonnet-4-6"
+        assert config.semantic_model == "claude-sonnet-4-6"
+        assert config.assertion_extraction_model == "claude-haiku-4-5-20251001"
 
 
 class TestConsensusConfig:

@@ -90,6 +90,11 @@ from ouroboros.orchestrator.policy import (
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
+from ouroboros.routing.tiers import (
+    Complexity,
+    ExecutorRouting,
+    resolve_executor_model,
+)
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -2153,11 +2158,14 @@ class ParallelACExecutor:
             depth=depth,
         )
 
+        # Default complexity for paths that skip the decomposition analysis.
+        atomic_complexity: Complexity = "normal"
+
         # Try decomposition if enabled and not too deep
         if self._enable_decomposition and depth < self._max_decomposition_depth:
             self._console.print(f"  [dim]AC {ac_index + 1}: Analyzing complexity...[/dim]")
             self._flush_console()
-            sub_acs = await self._try_decompose_ac(
+            sub_acs, atomic_complexity = await self._try_decompose_ac(
                 ac_content=ac_content,
                 ac_index=ac_index,
                 seed_goal=seed_goal,
@@ -2330,6 +2338,7 @@ class ParallelACExecutor:
                 is_sub_ac=is_sub_ac,
                 parent_ac_index=parent_ac_index,
                 sub_ac_index=sub_ac_index,
+                complexity=atomic_complexity,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if decomposition_depth_warning:
@@ -2382,11 +2391,16 @@ class ParallelACExecutor:
         seed_goal: str,
         tools: list[str],
         system_prompt: str,
-    ) -> list[str] | None:
+    ) -> tuple[list[str] | None, Complexity]:
         """Ask Claude to decompose AC into Sub-ACs if complex.
 
         Returns:
-            List of Sub-AC descriptions, or None if AC is atomic.
+            A tuple of (sub_ac_list, complexity_label).
+            ``sub_ac_list`` is ``None`` when the AC is atomic (no decomposition)
+            and a list of Sub-AC descriptions otherwise. ``complexity_label``
+            is the AC's complexity as reported by the analyser ("simple",
+            "normal", or "complex") — it defaults to "normal" when unknown and
+            feeds adaptive executor model routing downstream.
         """
         decompose_prompt = f"""Analyze this acceptance criterion and determine if it should be decomposed.
 
@@ -2400,18 +2414,32 @@ class ParallelACExecutor:
 If this AC is complex (requires multiple distinct steps that could run independently),
 decompose it into {MIN_SUB_ACS}-{MAX_SUB_ACS} smaller Sub-ACs.
 
-If the AC is simple/atomic (can be done in one focused task), respond with: ATOMIC
+If the AC is simple/atomic (can be done in one focused task), do not decompose.
 
-If decomposing, respond with ONLY a JSON array of Sub-AC descriptions:
-["Sub-AC 1: description", "Sub-AC 2: description", ...]
+Respond with ONLY a JSON object of the form:
 
-Each Sub-AC should be:
+  When atomic:
+    {{"atomic": true, "complexity": "simple" | "normal" | "complex"}}
+
+  When decomposing:
+    {{
+      "atomic": false,
+      "complexity": "simple" | "normal" | "complex",
+      "sub_acs": ["Sub-AC 1: description", "Sub-AC 2: description", ...]
+    }}
+
+Complexity rubric (for the atomic implementation itself, NOT the decomposition):
+- "simple": trivial edit, rename, glue, one small function, one-liner
+- "normal": standard application code, a handful of cases, one or two helpers
+- "complex": subtle logic, tricky edge cases, concurrency, or heavy refactoring
+
+Each Sub-AC (when present) should be:
 - Independently executable
 - Specific and focused
 - Part of achieving the parent AC
 - Targeting distinct files or distinct sections within shared files (avoid overlap)
 
-Respond with either "ATOMIC" or the JSON array only, nothing else.
+Respond with ONLY the JSON object, nothing else.
 """
 
         try:
@@ -2433,33 +2461,79 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
 
             # Parse response
             response_text = response_text.strip()
+            complexity: Complexity = "normal"
 
+            # Preferred shape: structured JSON object.
+            obj_match = re.search(r"\{.*\}", response_text, re.DOTALL)
+            if obj_match:
+                try:
+                    obj = json.loads(obj_match.group())
+                except json.JSONDecodeError:
+                    obj = None
+                if isinstance(obj, dict):
+                    raw_complexity = obj.get("complexity")
+                    if isinstance(raw_complexity, str):
+                        normalized = raw_complexity.strip().lower()
+                        if normalized in {"simple", "normal", "complex"}:
+                            complexity = normalized  # type: ignore[assignment]
+
+                    if bool(obj.get("atomic")):
+                        log.info(
+                            "parallel_executor.decomposition.atomic",
+                            ac_index=ac_index,
+                            complexity=complexity,
+                        )
+                        return None, complexity
+
+                    sub_acs_raw = obj.get("sub_acs")
+                    if (
+                        isinstance(sub_acs_raw, list)
+                        and all(isinstance(s, str) for s in sub_acs_raw)
+                        and MIN_SUB_ACS <= len(sub_acs_raw) <= MAX_SUB_ACS
+                    ):
+                        log.info(
+                            "parallel_executor.decomposition.success",
+                            ac_index=ac_index,
+                            sub_ac_count=len(sub_acs_raw),
+                            complexity=complexity,
+                        )
+                        return sub_acs_raw, complexity
+
+            # Legacy shape: plain "ATOMIC" keyword (complexity unknown).
             if "ATOMIC" in response_text.upper():
                 log.info(
                     "parallel_executor.decomposition.atomic",
                     ac_index=ac_index,
+                    complexity=complexity,
                 )
-                return None
+                return None, complexity
 
-            # Try to extract JSON array
-            json_match = re.search(r"\[.*\]", response_text, re.DOTALL)
-            if json_match:
-                sub_acs = json.loads(json_match.group())
-                if isinstance(sub_acs, list) and all(isinstance(s, str) for s in sub_acs):
-                    if MIN_SUB_ACS <= len(sub_acs) <= MAX_SUB_ACS:
-                        log.info(
-                            "parallel_executor.decomposition.success",
-                            ac_index=ac_index,
-                            sub_ac_count=len(sub_acs),
-                        )
-                        return sub_acs
+            # Legacy shape: bare JSON array of Sub-AC strings.
+            array_match = re.search(r"\[.*\]", response_text, re.DOTALL)
+            if array_match:
+                try:
+                    sub_acs = json.loads(array_match.group())
+                except json.JSONDecodeError:
+                    sub_acs = None
+                if (
+                    isinstance(sub_acs, list)
+                    and all(isinstance(s, str) for s in sub_acs)
+                    and MIN_SUB_ACS <= len(sub_acs) <= MAX_SUB_ACS
+                ):
+                    log.info(
+                        "parallel_executor.decomposition.success",
+                        ac_index=ac_index,
+                        sub_ac_count=len(sub_acs),
+                        complexity=complexity,
+                    )
+                    return sub_acs, complexity
 
             log.warning(
                 "parallel_executor.decomposition.parse_failed",
                 ac_index=ac_index,
                 response_preview=response_text[:100],
             )
-            return None
+            return None, complexity
 
         except TimeoutError:
             log.warning(
@@ -2467,14 +2541,65 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 ac_index=ac_index,
                 timeout_seconds=DECOMPOSITION_TIMEOUT_SECONDS,
             )
-            return None
+            return None, "normal"
         except Exception as e:
             log.warning(
                 "parallel_executor.decomposition.error",
                 ac_index=ac_index,
                 error=str(e),
             )
+            return None, "normal"
+
+    def _resolve_executor_routing(
+        self,
+        *,
+        complexity: Complexity,
+        ac_index: int,
+        is_sub_ac: bool,
+        parent_ac_index: int | None,
+        sub_ac_index: int | None,
+    ) -> ExecutorRouting | None:
+        """Pick the executor model for a single AC.
+
+        Delegates to :func:`resolve_executor_model` and swallows config errors
+        so the adapter falls back to its default model (by leaving ``model`` unset
+        on the ``execute_task`` call). Emits a structured log entry so operators
+        can audit which model ran each AC.
+        """
+        try:
+            # Lazy import to avoid a circular import at module load.
+            from ouroboros.config import load_config
+            from ouroboros.core.errors import ConfigError
+
+            try:
+                config = load_config()
+            except ConfigError:
+                from ouroboros.config import get_default_config
+
+                config = get_default_config()
+
+            routing = resolve_executor_model(complexity, config)
+        except Exception as exc:  # noqa: BLE001 — routing is best-effort; never block execution
+            log.warning(
+                "parallel_executor.executor_routing.error",
+                error=str(exc),
+                complexity=complexity,
+                ac_index=ac_index,
+            )
             return None
+
+        log.info(
+            "parallel_executor.executor_routing.selected",
+            ac_index=ac_index,
+            is_sub_ac=is_sub_ac,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
+            complexity=complexity,
+            tier=routing.tier.value if routing.tier else None,
+            model=routing.model,
+            reason=routing.reason,
+        )
+        return routing
 
     @staticmethod
     def _format_tool_detail(tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -2788,13 +2913,26 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         retry_attempt: int = 0,
         tool_catalog: tuple[MCPToolDefinition, ...] | None = None,
         execution_counters: dict[str, int] | None = None,
+        complexity: Complexity = "normal",
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
+
+        Args:
+            complexity: Per-AC complexity label from the decomposition analyser.
+                Feeds adaptive executor-model routing via
+                :func:`~ouroboros.routing.tiers.resolve_executor_model`.
 
         Returns:
             ACExecutionResult for this AC.
         """
         ac_session_id: str | None = None
+        executor_routing: ExecutorRouting | None = self._resolve_executor_routing(
+            complexity=complexity,
+            ac_index=ac_index,
+            is_sub_ac=is_sub_ac,
+            parent_ac_index=parent_ac_index,
+            sub_ac_index=sub_ac_index,
+        )
 
         # Build prompt
         if is_sub_ac:
@@ -2926,6 +3064,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                     tools=tools,
                     system_prompt=system_prompt,
                     resume_handle=runtime_handle,
+                    model=executor_routing.model if executor_routing else None,
                 ):
                     # Reset stall deadline on every message (RC6 core)
                     stall_scope.deadline = anyio.current_time() + STALL_TIMEOUT_SECONDS

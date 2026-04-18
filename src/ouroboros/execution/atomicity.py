@@ -40,6 +40,9 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.providers.base import LLMAdapter
 from ouroboros.routing.complexity import TaskContext, estimate_complexity
+from ouroboros.routing.tiers import Complexity
+
+_VALID_COMPLEXITY: frozenset[str] = frozenset({"simple", "normal", "complex"})
 
 log = get_logger(__name__)
 
@@ -108,6 +111,9 @@ class AtomicityResult:
         estimated_duration: Estimated duration in seconds.
         reasoning: Human-readable explanation of the decision.
         method: Detection method used ("llm" or "heuristic").
+        complexity: Discrete complexity label feeding adaptive executor routing
+            (simple | normal | complex). Defaults to "normal" for backward
+            compatibility when the LLM omits the field.
     """
 
     is_atomic: bool
@@ -116,6 +122,7 @@ class AtomicityResult:
     estimated_duration: int
     reasoning: str
     method: str = "llm"
+    complexity: Complexity = "normal"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for logging/serialization."""
@@ -126,7 +133,27 @@ class AtomicityResult:
             "estimated_duration": self.estimated_duration,
             "reasoning": self.reasoning,
             "method": self.method,
+            "complexity": self.complexity,
         }
+
+
+def _complexity_from_score(score: float) -> Complexity:
+    """Derive a discrete complexity label from the numeric complexity_score."""
+    if score < 0.35:
+        return "simple"
+    if score >= 0.7:
+        return "complex"
+    return "normal"
+
+
+def _normalize_complexity(raw: Any) -> Complexity | None:
+    """Coerce an LLM-provided complexity value to the allowed label set."""
+    if not isinstance(raw, str):
+        return None
+    candidate = raw.strip().lower()
+    if candidate in _VALID_COMPLEXITY:
+        return candidate  # type: ignore[return-value]
+    return None
 
 
 # LLM prompts for atomicity detection
@@ -155,10 +182,15 @@ Answer these questions:
 2. Can it be done WITHOUT doing other tasks first? (yes/no)
 3. Will it touch only 1-2 files? (yes/no/unsure)
 4. Is the scope clear and bounded? (yes/no)
+5. How complex is the implementation itself, assuming the task IS atomic?
+   - "simple": trivial edit, rename, glue, single small function, one-liner
+   - "normal": standard application code, a handful of cases, one or two helpers
+   - "complex": subtle logic, tricky edge cases, concurrency, or heavy refactoring
 
 Based on your answers, respond with JSON:
 {{
     "is_atomic": true or false,
+    "complexity": "simple" | "normal" | "complex",
     "reasoning": "One sentence explaining why",
     "if_not_atomic": ["suggested subtask 1", "suggested subtask 2"] or null
 }}
@@ -302,6 +334,7 @@ def _heuristic_atomicity_check(
         estimated_duration=estimated_duration,
         reasoning=f"[Heuristic] {'; '.join(reasons)}",
         method="heuristic",
+        complexity=_complexity_from_score(complexity_score),
     )
 
 
@@ -426,6 +459,13 @@ async def check_atomicity(
         tool_count = 1 if is_atomic else 4
         estimated_duration = 60 if is_atomic else 600
 
+        llm_complexity = _normalize_complexity(parsed.get("complexity"))
+        complexity_label: Complexity = (
+            llm_complexity
+            if llm_complexity is not None
+            else "normal"
+        )
+
         result = AtomicityResult(
             is_atomic=is_atomic,
             complexity_score=complexity_score,
@@ -433,6 +473,7 @@ async def check_atomicity(
             estimated_duration=estimated_duration,
             reasoning=reasoning,
             method="llm",
+            complexity=complexity_label,
         )
 
         log.info(

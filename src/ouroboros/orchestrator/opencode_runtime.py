@@ -1017,6 +1017,7 @@ class OpenCodeRuntime:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        model: str | None = None,  # noqa: ARG002 — OpenCode picks model via CLI config
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task via the OpenCode CLI and stream messages.
 

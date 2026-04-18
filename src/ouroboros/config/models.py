@@ -119,10 +119,10 @@ class LLMConfig(BaseModel, frozen=True):
     )
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "default"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
-    qa_model: str = "claude-sonnet-4-20250514"
-    dependency_analysis_model: str = "claude-opus-4-6"
-    ontology_analysis_model: str = "claude-opus-4-6"
-    context_compression_model: str = "gpt-4"
+    qa_model: str = "claude-sonnet-4-6"
+    dependency_analysis_model: str = "claude-sonnet-4-6"
+    ontology_analysis_model: str = "claude-sonnet-4-6"
+    context_compression_model: str = "claude-haiku-4-5-20251001"
 
 
 class ClarificationConfig(BaseModel, frozen=True):
@@ -154,9 +154,9 @@ class ExecutionConfig(BaseModel, frozen=True):
 
     max_iterations_per_ac: int = Field(default=10, ge=1)
     retrospective_interval: int = Field(default=3, ge=1)
-    atomicity_model: str = "claude-opus-4-6"
-    decomposition_model: str = "claude-opus-4-6"
-    double_diamond_model: str = "claude-opus-4-6"
+    atomicity_model: str = "claude-haiku-4-5-20251001"
+    decomposition_model: str = "claude-sonnet-4-6"
+    double_diamond_model: str = "claude-sonnet-4-6"
 
 
 class ResilienceConfig(BaseModel, frozen=True):
@@ -197,8 +197,8 @@ class EvaluationConfig(BaseModel, frozen=True):
     stage3_enabled: bool = True
     satisfaction_threshold: float = Field(default=0.8, ge=0.0, le=1.0)
     uncertainty_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
-    semantic_model: str = "claude-opus-4-6"
-    assertion_extraction_model: str = "claude-sonnet-4-6"
+    semantic_model: str = "claude-sonnet-4-6"
+    assertion_extraction_model: str = "claude-haiku-4-5-20251001"
 
 
 class ConsensusConfig(BaseModel, frozen=True):

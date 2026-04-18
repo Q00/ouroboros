@@ -42,6 +42,7 @@ async def test_restarted_executor_starts_fresh_handle_for_next_retry_attempt() -
             system_prompt: str | None = None,
             resume_handle: RuntimeHandle | None = None,
             resume_session_id: str | None = None,
+            model: str | None = None,
         ):
             self.calls.append(
                 {

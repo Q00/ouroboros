@@ -741,11 +741,11 @@ def get_qa_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.qa_model,
-            default_model="claude-sonnet-4-20250514",
+            default_model="claude-sonnet-4-6",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-sonnet-4-20250514", backend=backend)
+        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
 def get_dependency_analysis_model(backend: str | None = None) -> str:
@@ -758,11 +758,11 @@ def get_dependency_analysis_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.dependency_analysis_model,
-            default_model="claude-opus-4-6",
+            default_model="claude-sonnet-4-6",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
 def get_ontology_analysis_model(backend: str | None = None) -> str:
@@ -775,11 +775,11 @@ def get_ontology_analysis_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.ontology_analysis_model,
-            default_model="claude-opus-4-6",
+            default_model="claude-sonnet-4-6",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
 def get_context_compression_model(backend: str | None = None) -> str:
@@ -792,11 +792,11 @@ def get_context_compression_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.llm.context_compression_model,
-            default_model="gpt-4",
+            default_model="claude-haiku-4-5-20251001",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("gpt-4", backend=backend)
+        return _default_model_for_backend("claude-haiku-4-5-20251001", backend=backend)
 
 
 def get_atomicity_model(backend: str | None = None) -> str:
@@ -809,11 +809,11 @@ def get_atomicity_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.execution.atomicity_model,
-            default_model="claude-opus-4-6",
+            default_model="claude-haiku-4-5-20251001",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend("claude-haiku-4-5-20251001", backend=backend)
 
 
 def get_decomposition_model(backend: str | None = None) -> str:
@@ -826,11 +826,11 @@ def get_decomposition_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.execution.decomposition_model,
-            default_model="claude-opus-4-6",
+            default_model="claude-sonnet-4-6",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
 def get_double_diamond_model(backend: str | None = None) -> str:
@@ -843,11 +843,11 @@ def get_double_diamond_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.execution.double_diamond_model,
-            default_model="claude-opus-4-6",
+            default_model="claude-sonnet-4-6",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
 def get_wonder_model(backend: str | None = None) -> str:
@@ -894,11 +894,11 @@ def get_semantic_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.evaluation.semantic_model,
-            default_model="claude-opus-4-6",
+            default_model="claude-sonnet-4-6",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-opus-4-6", backend=backend)
+        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
 def get_assertion_extraction_model(backend: str | None = None) -> str:
@@ -911,11 +911,11 @@ def get_assertion_extraction_model(backend: str | None = None) -> str:
         config = load_config()
         return _normalize_configured_model_for_backend(
             config.evaluation.assertion_extraction_model,
-            default_model="claude-sonnet-4-6",
+            default_model="claude-haiku-4-5-20251001",
             backend=backend,
         )
     except ConfigError:
-        return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
+        return _default_model_for_backend("claude-haiku-4-5-20251001", backend=backend)
 
 
 def get_consensus_models(backend: str | None = None) -> tuple[str, ...]:
@@ -989,3 +989,86 @@ def get_consensus_judge_model(backend: str | None = None) -> str:
         )
     except ConfigError:
         return _default_model_for_backend(_DEFAULT_CONSENSUS_JUDGE_MODEL, backend=backend)
+
+
+def _parse_bool_env(raw: str, *, default: bool) -> bool:
+    """Parse a common truthy/falsy env-var string."""
+    candidate = raw.strip().lower()
+    if not candidate:
+        return default
+    if candidate in {"1", "true", "yes", "on"}:
+        return True
+    if candidate in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _parse_int_env(raw: str, *, default: int, min_value: int | None = None) -> int:
+    """Parse an integer env-var string, falling back to default on any error."""
+    candidate = raw.strip()
+    if not candidate:
+        return default
+    try:
+        value = int(candidate)
+    except ValueError:
+        return default
+    if min_value is not None and value < min_value:
+        return default
+    return value
+
+
+def get_executor_model() -> str | None:
+    """Exact executor model override from OUROBOROS_EXECUTOR_MODEL.
+
+    Returns the model string if set, else None (fall through to tier/adaptive).
+    """
+    env_model = os.environ.get("OUROBOROS_EXECUTOR_MODEL", "").strip()
+    return env_model or None
+
+
+def get_executor_tier() -> str | None:
+    """Executor tier pin from OUROBOROS_EXECUTOR_TIER (frugal|standard|frontier).
+
+    Returns the normalized tier string if set, else None (fall through to adaptive).
+    Invalid values are treated as unset.
+    """
+    env_tier = os.environ.get("OUROBOROS_EXECUTOR_TIER", "").strip().lower()
+    if env_tier in {"frugal", "standard", "frontier"}:
+        return env_tier
+    return None
+
+
+def get_parallel_default() -> bool:
+    """Default for the orchestrator `parallel` flag. Env: OUROBOROS_PARALLEL."""
+    return _parse_bool_env(os.environ.get("OUROBOROS_PARALLEL", ""), default=True)
+
+
+def get_skip_qa_default() -> bool:
+    """Default for the auto-QA skip flag. Env: OUROBOROS_SKIP_QA."""
+    return _parse_bool_env(os.environ.get("OUROBOROS_SKIP_QA", ""), default=False)
+
+
+def get_ralph_max_iterations() -> int:
+    """Default ralph iteration cap. Env: OUROBOROS_RALPH_MAX_ITERATIONS."""
+    return _parse_int_env(
+        os.environ.get("OUROBOROS_RALPH_MAX_ITERATIONS", ""),
+        default=10,
+        min_value=1,
+    )
+
+
+def get_enable_decomposition_default() -> bool:
+    """Default for AC decomposition. Env: OUROBOROS_ENABLE_DECOMPOSITION."""
+    return _parse_bool_env(
+        os.environ.get("OUROBOROS_ENABLE_DECOMPOSITION", ""),
+        default=True,
+    )
+
+
+def get_max_decomposition_depth_default() -> int:
+    """Default maximum AC decomposition depth. Env: OUROBOROS_MAX_DECOMPOSITION_DEPTH."""
+    return _parse_int_env(
+        os.environ.get("OUROBOROS_MAX_DECOMPOSITION_DEPTH", ""),
+        default=2,
+        min_value=0,
+    )

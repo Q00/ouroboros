@@ -17,6 +17,12 @@ from rich.console import Console
 import structlog
 import yaml
 
+from ouroboros.config import (
+    get_enable_decomposition_default,
+    get_max_decomposition_depth_default,
+    get_parallel_default,
+    get_skip_qa_default,
+)
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
@@ -445,14 +451,40 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     mcp_manager=self.mcp_manager,
                     mcp_tool_prefix=self.mcp_tool_prefix,
                     debug=False,
-                    enable_decomposition=True,
+                    enable_decomposition=get_enable_decomposition_default(),
+                    max_decomposition_depth=get_max_decomposition_depth_default(),
                     inherited_runtime_handle=inherited_runtime_handle,
                     inherited_tools=inherited_effective_tools,
                     task_workspace=workspace,
                     checkpoint_store=checkpoint_store,
                 )
 
-                skip_qa = arguments.get("skip_qa", False)
+                # Parse skip_qa with strict validation to avoid truthy string inversion
+                raw_skip_qa = arguments.get("skip_qa", get_skip_qa_default())
+                if isinstance(raw_skip_qa, bool):
+                    skip_qa = raw_skip_qa
+                elif raw_skip_qa is None:
+                    skip_qa = get_skip_qa_default()
+                elif isinstance(raw_skip_qa, str):
+                    normalized = raw_skip_qa.strip().lower()
+                    if normalized in {"true", "1"}:
+                        skip_qa = True
+                    elif normalized in {"false", "0"}:
+                        skip_qa = False
+                    else:
+                        return Result.err(
+                            MCPToolError(
+                                f"Invalid skip_qa value: {raw_skip_qa!r}. Expected boolean, 'true'/'false', or '1'/'0'.",
+                                tool_name="ouroboros_execute_seed",
+                            )
+                        )
+                else:
+                    return Result.err(
+                        MCPToolError(
+                            f"Invalid skip_qa type: {type(raw_skip_qa).__name__}. Expected boolean.",
+                            tool_name="ouroboros_execute_seed",
+                        )
+                    )
                 if not is_resume:
                     prepared = await runner.prepare_session(
                         seed,
@@ -489,7 +521,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                             result = await _runner.execute_precreated_session(
                                 seed=_seed,
                                 tracker=_tracker,
-                                parallel=True,
+                                parallel=get_parallel_default(),
                             )
                         if result.is_err:
                             log.error(

@@ -24,8 +24,10 @@ Usage:
         print(f"Cost factor: {tier_config.cost_factor}x")
 """
 
+from dataclasses import dataclass
 from enum import StrEnum
 import random
+from typing import Literal
 
 from ouroboros.config.models import ModelConfig, OuroborosConfig, TierConfig
 from ouroboros.core.errors import ConfigError
@@ -33,6 +35,9 @@ from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 
 log = get_logger(__name__)
+
+Complexity = Literal["simple", "normal", "complex"]
+RoutingReason = Literal["override_model", "override_tier", "adaptive"]
 
 
 class Tier(StrEnum):
@@ -245,3 +250,97 @@ def validate_tier_configuration(
 
     log.info("tier.validation.passed", tier_count=len(Tier))
     return Result.ok(None)
+
+
+@dataclass(frozen=True)
+class ExecutorRouting:
+    """Resolution of the executor model for a single AC.
+
+    Attributes:
+        model: The model string to pass to the adapter.
+        tier: The tier that produced the model (None when OUROBOROS_EXECUTOR_MODEL
+            bypassed tier mapping entirely).
+        reason: Why this model was chosen (override_model / override_tier / adaptive).
+    """
+
+    model: str
+    tier: Tier | None
+    reason: RoutingReason
+
+
+# Deterministic tier -> Anthropic model mapping used by the executor adapter.
+# Kept separate from ``economics.tiers`` (which is a load-balancing roster that
+# may span providers) so the Claude-backed executor never receives a non-Claude
+# model string. Align with defaults declared in ``config/models.py``.
+_EXECUTOR_TIER_MODELS: dict[Tier, str] = {
+    Tier.FRUGAL: "claude-haiku-4-5-20251001",
+    Tier.STANDARD: "claude-sonnet-4-6",
+    Tier.FRONTIER: "claude-opus-4-6",
+}
+
+
+def tier_for_ac(complexity: Complexity | str) -> Tier:
+    """Map a complexity label from the atomicity check to an executor tier.
+
+    Policy:
+        simple  -> FRUGAL   (Haiku — trivial edits, rename, glue)
+        normal  -> STANDARD (Sonnet — most application code)
+        complex -> STANDARD (Sonnet; FRONTIER is reserved for explicit override
+                             via OUROBOROS_EXECUTOR_TIER or OUROBOROS_EXECUTOR_MODEL)
+
+    Unknown labels fall back to STANDARD to stay on the safe side.
+    """
+    normalized = str(complexity).strip().lower()
+    if normalized == "simple":
+        return Tier.FRUGAL
+    if normalized == "complex":
+        return Tier.STANDARD
+    return Tier.STANDARD
+
+
+def executor_model_for_tier(tier: Tier) -> str:
+    """Return the Anthropic model string mapped to an executor tier."""
+    return _EXECUTOR_TIER_MODELS.get(tier, _EXECUTOR_TIER_MODELS[Tier.STANDARD])
+
+
+def resolve_executor_model(
+    complexity: Complexity | str,
+    config: OuroborosConfig,  # noqa: ARG001 — reserved for future per-config overrides
+) -> ExecutorRouting:
+    """Resolve which model the executor should use for a given AC.
+
+    Resolution order:
+        1. OUROBOROS_EXECUTOR_MODEL — exact model bypass, tier is None.
+        2. OUROBOROS_EXECUTOR_TIER — tier pin, model picked via
+           ``executor_model_for_tier``.
+        3. Adaptive — ``tier_for_ac(complexity)`` then
+           ``executor_model_for_tier``.
+
+    We bypass ``get_model_for_tier`` (which rotates across a mixed provider
+    roster for stage-3 consensus) and use a deterministic Anthropic-only mapping
+    so the Claude Code adapter never receives a non-Claude model identifier.
+    """
+    # Import here to avoid a circular import at module load.
+    from ouroboros.config.loader import get_executor_model, get_executor_tier
+
+    override_model = get_executor_model()
+    if override_model:
+        log.debug("executor.routing.override_model", model=override_model)
+        return ExecutorRouting(model=override_model, tier=None, reason="override_model")
+
+    override_tier = get_executor_tier()
+    if override_tier:
+        pinned = Tier(override_tier)
+        model = executor_model_for_tier(pinned)
+        log.debug("executor.routing.override_tier", tier=pinned.value, model=model)
+        return ExecutorRouting(model=model, tier=pinned, reason="override_tier")
+
+    adaptive_tier = tier_for_ac(complexity)
+    model = executor_model_for_tier(adaptive_tier)
+    log.debug(
+        "executor.routing.adaptive",
+        complexity=str(complexity),
+        tier=adaptive_tier.value,
+        model=model,
+    )
+    return ExecutorRouting(model=model, tier=adaptive_tier, reason="adaptive")

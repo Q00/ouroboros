@@ -705,12 +705,17 @@ class AgentRuntime(Protocol):
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,  # Deprecated: use resume_handle instead
+        model: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task and stream normalized messages.
 
         Implementations are async generators (``async def`` with ``yield``).
         The Protocol signature omits ``async`` so that structural subtyping
         correctly matches async-generator methods returning ``AsyncIterator``.
+
+        ``model`` is an optional per-call override — when set, the adapter should
+        route the call to that model instead of its configured default. Backends
+        that cannot switch model per-call may ignore the hint.
         """
         ...
 
@@ -1096,6 +1101,7 @@ class ClaudeAgentAdapter:
         system_prompt: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        model: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Execute a task and yield progress messages.
 
@@ -1108,6 +1114,8 @@ class ClaudeAgentAdapter:
             system_prompt: Optional custom system prompt.
             resume_handle: Backend-neutral handle to resume from.
             resume_session_id: Legacy Claude session ID to resume from.
+            model: Optional per-call model override. When set, takes precedence
+                over the adapter's configured default model for this call only.
 
         Yields:
             AgentMessage for each SDK message (assistant reasoning, tool calls, results).
@@ -1195,8 +1203,9 @@ class ClaudeAgentAdapter:
                     ]
                 }
 
-                if self._model:
-                    options_kwargs["model"] = self._model
+                effective_model = model or self._model
+                if effective_model:
+                    options_kwargs["model"] = effective_model
 
                 if self._cli_path:
                     options_kwargs["cli_path"] = self._cli_path

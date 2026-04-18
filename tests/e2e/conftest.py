@@ -339,6 +339,7 @@ class MockClaudeAgentAdapter:
         cwd: str | None = None,
         resume_handle: RuntimeHandle | None = None,
         resume_session_id: str | None = None,
+        model: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
         """Simulate Claude Agent execution."""
         self._execution_history.append(

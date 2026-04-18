@@ -22,6 +22,7 @@ class _AtomicDecompositionRuntime:
         system_prompt: str | None = None,
         resume_handle: object | None = None,
         resume_session_id: str | None = None,
+        model: str | None = None,
     ):
         del prompt, tools, system_prompt, resume_handle, resume_session_id
         yield AgentMessage(type="result", content="ATOMIC")
@@ -37,7 +38,7 @@ async def test_try_decompose_ac_treats_atomic_response_as_terminal() -> None:
         enable_decomposition=True,
     )
 
-    result = await executor._try_decompose_ac(
+    sub_acs, complexity = await executor._try_decompose_ac(
         ac_content="Implement one focused leaf task.",
         ac_index=0,
         seed_goal="Preserve ATOMIC termination",
@@ -45,7 +46,8 @@ async def test_try_decompose_ac_treats_atomic_response_as_terminal() -> None:
         system_prompt="system",
     )
 
-    assert result is None
+    assert sub_acs is None
+    assert complexity == "normal"
 
 
 @pytest.mark.asyncio
@@ -65,7 +67,7 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
         enable_decomposition=True,
     )
     executor._emit_subtask_event = AsyncMock()
-    executor._try_decompose_ac = AsyncMock(return_value=None)
+    executor._try_decompose_ac = AsyncMock(return_value=(None, "normal"))
     executor._execute_atomic_ac = AsyncMock(
         return_value=ACExecutionResult(
             ac_index=depth + 1,
