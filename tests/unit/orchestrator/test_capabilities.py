@@ -104,9 +104,7 @@ tools:
     assert descriptor.semantics.approval_class is CapabilityApprovalClass.DEFAULT
 
 
-def test_partial_override_merges_onto_inferred_semantics(
-    tmp_path, monkeypatch
-) -> None:
+def test_partial_override_merges_onto_inferred_semantics(tmp_path, monkeypatch) -> None:
     """Partial overrides should retain inferred fields the user did not set."""
     override_path = tmp_path / "tool_capabilities.yaml"
     override_path.write_text(
@@ -139,9 +137,7 @@ tools:
     assert descriptor.semantics.approval_class is not None
 
 
-def test_invalid_override_enum_value_is_logged_and_skipped(
-    tmp_path, monkeypatch, capsys
-) -> None:
+def test_invalid_override_enum_value_is_logged_and_skipped(tmp_path, monkeypatch, capsys) -> None:
     """Malformed overrides should log a warning instead of being silenced."""
     override_path = tmp_path / "tool_capabilities.yaml"
     override_path.write_text(
