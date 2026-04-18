@@ -137,8 +137,10 @@ tools:
     assert descriptor.semantics.approval_class is not None
 
 
-def test_invalid_override_enum_value_is_logged_and_skipped(tmp_path, monkeypatch, capsys) -> None:
+def test_invalid_override_enum_value_is_logged_and_skipped(tmp_path, monkeypatch) -> None:
     """Malformed overrides should log a warning instead of being silenced."""
+    import structlog
+
     override_path = tmp_path / "tool_capabilities.yaml"
     override_path.write_text(
         """
@@ -159,11 +161,68 @@ tools:
         ),
     )
 
-    graph = build_capability_graph(catalog)
+    with structlog.testing.capture_logs() as captured_events:
+        graph = build_capability_graph(catalog)
 
     # Graph still produced with inferred semantics (fail-open classification
     # rather than silent discard of the tool itself).
     assert len(graph.capabilities) == 1
     # A structlog warning was emitted so user typos do not go unnoticed.
-    captured = capsys.readouterr()
-    assert "capability_override.invalid_enum" in captured.err
+    assert any(
+        event.get("event") == "capability_override.invalid_enum" for event in captured_events
+    )
+
+
+def test_malformed_yaml_does_not_break_capability_graph(tmp_path, monkeypatch) -> None:
+    """YAML parse failures in the user override file must not propagate.
+
+    Regression guard for the design note that a single bad user config
+    line would otherwise take down unrelated orchestration paths
+    (interview, evaluation, execution) because they all build a
+    capability graph on the default path.
+    """
+    import structlog
+
+    override_path = tmp_path / "tool_capabilities.yaml"
+    # Invalid YAML: unmatched indentation + stray tabs.
+    override_path.write_text(
+        "tools:\n  browser:\n\tchrome_navigate:\n  mutation_class: [unclosed\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUROBOROS_TOOL_CAPABILITIES", str(override_path))
+    catalog = assemble_session_tool_catalog(
+        attached_tools=(
+            MCPToolDefinition(
+                name="chrome_navigate",
+                description="Navigate the browser",
+                server_name="browser",
+            ),
+        ),
+    )
+
+    with structlog.testing.capture_logs() as captured_events:
+        # Must not raise — override layer is optional enhancement.
+        graph = build_capability_graph(catalog)
+
+    assert len(graph.capabilities) == 1
+    # The failure must still be visible to operators.
+    assert any(
+        event.get("event") == "capability_override.yaml_parse_failed"
+        for event in captured_events
+    )
+
+
+def test_unreadable_override_path_does_not_break_capability_graph(
+    tmp_path, monkeypatch
+) -> None:
+    """A directory (or other non-regular path) at the override location
+    must be handled gracefully rather than raising ``IsADirectoryError``.
+    """
+    # Point the override env var at a directory instead of a file.
+    monkeypatch.setenv("OUROBOROS_TOOL_CAPABILITIES", str(tmp_path))
+    catalog = assemble_session_tool_catalog(["Read"])
+
+    # Must not raise.
+    graph = build_capability_graph(catalog)
+
+    assert [descriptor.name for descriptor in graph.capabilities] == ["Read"]
