@@ -363,6 +363,8 @@ class EvaluateHandler:
             PipelineConfig,
             SemanticConfig,
             build_mechanical_config,
+            ensure_mechanical_toml,
+            has_mechanical_toml,
         )
 
         session_id = arguments.get("session_id")
@@ -533,6 +535,20 @@ class EvaluateHandler:
                 )
                 artifact_bundle = None
 
+            # Stage 1 trusts .ouroboros/mechanical.toml only. When the file is
+            # absent we run the AI detector once to author it — silent
+            # best-effort, so a failed detect simply leaves Stage 1 empty and
+            # the pipeline falls through to Stage 2 instead of phantom-failing
+            # on hardcoded preset guesses.
+            if not has_mechanical_toml(working_dir):
+                try:
+                    await ensure_mechanical_toml(working_dir, llm_adapter)
+                except Exception as exc:  # noqa: BLE001 — detector must never break eval
+                    log.warning(
+                        "mcp.tool.evaluate.detect_failed",
+                        working_dir=str(working_dir),
+                        error=str(exc),
+                    )
             mechanical_config = build_mechanical_config(working_dir)
             config = PipelineConfig(
                 mechanical=mechanical_config,
