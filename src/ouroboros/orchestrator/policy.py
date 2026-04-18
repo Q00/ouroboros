@@ -40,7 +40,17 @@ class PolicyExecutionPhase(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PolicyContext:
-    """Inputs for engine capability-policy evaluation."""
+    """Inputs for engine capability-policy evaluation.
+
+    Only ``session_role`` drives the decision today; ``runtime_backend``
+    and ``execution_phase`` are persisted in the
+    ``policy.capabilities.evaluated`` audit event so replay and
+    debugging can attribute a decision to a specific backend/phase.
+    These fields exist as forward-compatibility hooks for
+    provider-specific or phase-specific policy branching; they are
+    deliberately part of the contract now so downstream consumers do
+    not have to migrate schemas when that branching lands.
+    """
 
     runtime_backend: str | None
     session_role: PolicySessionRole
@@ -124,6 +134,26 @@ def _matches_role_selector(
     descriptor: CapabilityDescriptor,
     profile: RoleCapabilityProfile,
 ) -> bool:
+    """Does ``descriptor`` satisfy the profile's admission selectors?
+
+    Selectors are combined as OR of three independent clauses, by
+    design:
+
+    1. ``preferred_tool_names`` — explicit name allowlist for the
+       baseline built-in envelope (e.g., ``Read`` always admitted for
+       INTERVIEW even though its origin is BUILTIN, not PROVIDER_NATIVE).
+    2. ``allowed_stable_id_prefixes`` — namespaced admit rule for whole
+       provider/attachment families.
+    3. ``allowed_origins`` AND ``allowed_scopes`` — semantic-class
+       admission, used by read-only roles to accept provider-native
+       capabilities without enumerating every tool name.
+
+    The OR is intentional: an explicit name whitelist is a stronger
+    signal of "this is definitely in the envelope" than origin/scope
+    alignment.  If you want to restrict a named tool to a specific
+    origin/scope, remove the name from ``preferred_tool_names`` and
+    rely on the semantic clause instead.
+    """
     if not (
         profile.preferred_tool_names
         or profile.allowed_origins
