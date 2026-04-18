@@ -303,11 +303,39 @@ _RAW_OVERRIDES_CACHE: dict[Path, tuple[float, dict[str, Mapping[str, Any]]]] = {
 
 
 def _read_raw_tool_capability_overrides(path: Path) -> dict[str, Mapping[str, Any]]:
-    """Read and parse the override YAML, returning raw per-tool mappings."""
+    """Read and parse the override YAML, returning raw per-tool mappings.
+
+    Every failure mode — missing file, unreadable file, malformed YAML,
+    unexpected top-level shape — is handled locally.  A broken user
+    config must never propagate out of this function, because the override
+    loader sits on the default capability-graph construction path and is
+    therefore reached from interview, evaluation, and execution sessions
+    alike.  A single malformed YAML line in ``~/.ouroboros/`` would
+    otherwise take down unrelated orchestration paths.
+    """
     if not path.exists():
         return {}
 
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        log.warning(
+            "capability_override.read_failed",
+            path=str(path),
+            error=str(exc),
+        )
+        return {}
+
+    try:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        log.warning(
+            "capability_override.yaml_parse_failed",
+            path=str(path),
+            error=str(exc),
+        )
+        return {}
+
     if not isinstance(raw, Mapping):
         return {}
 
@@ -326,10 +354,27 @@ def _read_raw_tool_capability_overrides(path: Path) -> dict[str, Mapping[str, An
 def _load_raw_tool_capability_overrides(
     path: str | Path | None = None,
 ) -> dict[str, Mapping[str, Any]]:
-    """Load raw override mappings with mtime-based caching."""
-    config_path = (
-        Path(path).expanduser() if path is not None else _default_tool_capability_override_path()
-    )
+    """Load raw override mappings with mtime-based caching.
+
+    Fault-tolerant by design: any failure (missing file, permission error,
+    non-regular path, filesystem glitch) returns an empty mapping so that
+    downstream graph construction always succeeds.  The override layer is
+    an optional enhancement, not a prerequisite for orchestration.
+    """
+    try:
+        config_path = (
+            Path(path).expanduser()
+            if path is not None
+            else _default_tool_capability_override_path()
+        )
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "capability_override.path_resolution_failed",
+            path=str(path),
+            error=str(exc),
+        )
+        return {}
+
     try:
         mtime = config_path.stat().st_mtime
     except FileNotFoundError:
