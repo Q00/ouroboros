@@ -2344,7 +2344,7 @@ class TestOrchestratorRunnerWithMCP:
         policy_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
-            if getattr(call.args[0], "type", None) == "policy.capabilities.evaluated"
+            if getattr(call.args[0], "type", None) == "orchestrator.policy.capabilities.evaluated"
         ]
         assert len(policy_events) == 1
         events_by_name = {

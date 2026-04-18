@@ -13,6 +13,8 @@ Event Types:
     - orchestrator.task.started: Individual task started
     - orchestrator.task.completed: Individual task completed
     - orchestrator.tool.called: Tool was invoked by agent
+    - orchestrator.policy.capabilities.evaluated: Batched per-capability
+      policy decisions for a session-scoped policy evaluation
 """
 
 from __future__ import annotations
@@ -399,7 +401,7 @@ def create_policy_capabilities_evaluated_event(
         if (decision := decisions_by_id.get(descriptor.stable_id)) is not None
     ]
     return BaseEvent(
-        type="policy.capabilities.evaluated",
+        type="orchestrator.policy.capabilities.evaluated",
         aggregate_type="session",
         aggregate_id=session_id,
         data={

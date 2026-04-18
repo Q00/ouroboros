@@ -61,7 +61,7 @@ class TestSessionEvents:
             context=context,
         )
 
-        assert event.type == "policy.capabilities.evaluated"
+        assert event.type == "orchestrator.policy.capabilities.evaluated"
         assert event.aggregate_type == "session"
         assert event.aggregate_id == "sess_123"
         assert event.data["capability_count"] == 2
