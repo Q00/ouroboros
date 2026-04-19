@@ -338,16 +338,24 @@ def _verify_entry_point(
         return (working_dir / "justfile").is_file() or (working_dir / "Justfile").is_file()
 
     if head == "uv":
-        return (working_dir / "pyproject.toml").is_file() or (working_dir / "uv.lock").is_file()
+        if not ((working_dir / "pyproject.toml").is_file() or (working_dir / "uv.lock").is_file()):
+            return False
+        return _uv_subcommand_is_available(working_dir, parts)
 
     if head == "cargo":
-        return (working_dir / "Cargo.toml").is_file()
+        if not (working_dir / "Cargo.toml").is_file():
+            return False
+        return _cargo_subcommand_is_available(parts)
 
     if head == "go":
-        return (working_dir / "go.mod").is_file()
+        if not (working_dir / "go.mod").is_file():
+            return False
+        return _go_subcommand_is_builtin(parts)
 
     if head == "zig":
-        return (working_dir / "build.zig").is_file()
+        if not (working_dir / "build.zig").is_file():
+            return False
+        return _zig_subcommand_is_builtin(parts)
 
     if head == "mvn":
         return (working_dir / "pom.xml").is_file()
@@ -371,6 +379,198 @@ def _verify_entry_point(
     # Generic binary — require it on PATH. We do NOT require a manifest,
     # because standalone tools like pytest / ruff / mypy run from any repo.
     return shutil.which(head) is not None
+
+
+_CARGO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "build",
+        "check",
+        "clean",
+        "clippy",
+        "doc",
+        "fetch",
+        "fix",
+        "fmt",
+        "generate-lockfile",
+        "install",
+        "locate-project",
+        "metadata",
+        "package",
+        "pkgid",
+        "publish",
+        "read-manifest",
+        "run",
+        "rustc",
+        "rustdoc",
+        "search",
+        "test",
+        "tree",
+        "update",
+        "vendor",
+        "verify-project",
+        "version",
+        "yank",
+        "bench",
+    }
+)
+
+_GO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "bug",
+        "build",
+        "clean",
+        "doc",
+        "env",
+        "fix",
+        "fmt",
+        "generate",
+        "get",
+        "install",
+        "list",
+        "mod",
+        "run",
+        "test",
+        "tool",
+        "version",
+        "vet",
+        "work",
+    }
+)
+
+_ZIG_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "build",
+        "build-exe",
+        "build-lib",
+        "build-obj",
+        "cc",
+        "c++",
+        "env",
+        "fetch",
+        "fmt",
+        "init",
+        "run",
+        "test",
+        "translate-c",
+        "version",
+        "zen",
+    }
+)
+
+
+def _first_positional(parts: list[str]) -> str | None:
+    """Return the first non-flag token after the head, or None."""
+    for token in parts[1:]:
+        if not token.startswith("-"):
+            return token
+    return None
+
+
+def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
+    """Validate ``uv`` invocations by inspecting the sub-tool they invoke.
+
+    ``uv run <tool>`` is the common pattern; we require ``<tool>`` to exist in
+    a venv entry (``.venv/bin/<tool>``), on PATH, or to be declared in
+    ``pyproject.toml`` dependencies so the repo can actually install it. Other
+    ``uv`` subcommands (``uv sync``, ``uv build``, ``uv pip install`` …) are
+    accepted by presence of the manifest alone — they do not invoke a
+    user-controlled tool name.
+    """
+    sub = _first_positional(parts)
+    if sub is None:
+        return False
+    if sub != "run":
+        return True
+    tool: str | None = None
+    for token in parts[parts.index("run") + 1 :]:
+        if token.startswith("-"):
+            continue
+        tool = token
+        break
+    if tool is None:
+        return False
+    if (working_dir / ".venv" / "bin" / tool).exists():
+        return True
+    if (working_dir / ".venv" / "Scripts" / f"{tool}.exe").exists():
+        return True
+    if shutil.which(tool) is not None:
+        return True
+    return _pyproject_declares_dependency(working_dir, tool)
+
+
+def _pyproject_declares_dependency(working_dir: Path, name: str) -> bool:
+    """Return True iff ``name`` appears as a top-level dependency in pyproject.toml.
+
+    Handles the PEP 621 ``[project.dependencies]`` table plus
+    ``[project.optional-dependencies]`` and the conventional
+    ``[dependency-groups.*]`` / ``[tool.uv.dev-dependencies]`` sections so
+    ``uv run ruff`` resolves cleanly for the common dev-dependency layouts.
+    """
+    path = working_dir / "pyproject.toml"
+    if not path.is_file():
+        return False
+    try:
+        import tomllib
+
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, ValueError):
+        return False
+    haystacks: list[object] = []
+    project = data.get("project") if isinstance(data, dict) else None
+    if isinstance(project, dict):
+        haystacks.append(project.get("dependencies"))
+        optional = project.get("optional-dependencies")
+        if isinstance(optional, dict):
+            haystacks.extend(optional.values())
+    dep_groups = data.get("dependency-groups") if isinstance(data, dict) else None
+    if isinstance(dep_groups, dict):
+        haystacks.extend(dep_groups.values())
+    tool = data.get("tool") if isinstance(data, dict) else None
+    if isinstance(tool, dict):
+        uv_section = tool.get("uv")
+        if isinstance(uv_section, dict):
+            haystacks.append(uv_section.get("dev-dependencies"))
+    lowered = name.lower()
+    for bucket in haystacks:
+        if not isinstance(bucket, list):
+            continue
+        for raw in bucket:
+            if not isinstance(raw, str):
+                continue
+            token = raw.strip().split(";", 1)[0]
+            for sep in "[<>=!~ ":
+                idx = token.find(sep)
+                if idx != -1:
+                    token = token[:idx]
+                    break
+            if token.strip().lower() == lowered:
+                return True
+    return False
+
+
+def _cargo_subcommand_is_available(parts: list[str]) -> bool:
+    """True when the cargo subcommand is builtin or a ``cargo-<name>`` extension."""
+    sub = _first_positional(parts)
+    if sub is None:
+        return False
+    if sub in _CARGO_BUILTIN_SUBCOMMANDS:
+        return True
+    return shutil.which(f"cargo-{sub}") is not None
+
+
+def _go_subcommand_is_builtin(parts: list[str]) -> bool:
+    sub = _first_positional(parts)
+    if sub is None:
+        return False
+    return sub in _GO_BUILTIN_SUBCOMMANDS
+
+
+def _zig_subcommand_is_builtin(parts: list[str]) -> bool:
+    sub = _first_positional(parts)
+    if sub is None:
+        return False
+    return sub in _ZIG_BUILTIN_SUBCOMMANDS
 
 
 def _npx_package(parts: list[str]) -> str | None:

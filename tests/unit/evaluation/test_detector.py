@@ -334,6 +334,136 @@ class TestNodePackageManagerValidation:
         assert ok is False
 
 
+class TestToolchainSubcommandValidation:
+    """`uv run <tool>` / `cargo <sub>` / `go <sub>` must prove the tool exists."""
+
+    def test_uv_run_dropped_when_tool_missing(self, tmp_path: Path) -> None:
+        """`uv run pyright` with no pyright dependency or binary is dropped."""
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["requests"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv run pyright ."}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value=None):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+        assert not has_mechanical_toml(tmp_path)
+
+    def test_uv_run_accepted_when_dependency_declared(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pyright>=1.0"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv run pyright ."}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value=None):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        assert build_mechanical_config(tmp_path).static_command == ("uv", "run", "pyright", ".")
+
+    def test_uv_run_accepted_when_dep_group_declares_tool(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\n[dependency-groups]\ndev = ["pyright==1.1", "pytest"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv run pyright"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value=None):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_uv_run_accepted_when_tool_in_venv(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        (tmp_path / ".venv" / "bin").mkdir(parents=True)
+        (tmp_path / ".venv" / "bin" / "pyright").write_text("")
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv run pyright"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value=None):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_cargo_unknown_subcommand_dropped(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "cargo nextest run"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value=None):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_cargo_extension_accepted_when_binary_on_path(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "cargo nextest run"}))
+
+        def fake_which(name: str) -> str | None:
+            return "/usr/local/bin/cargo-nextest" if name == "cargo-nextest" else None
+
+        with patch("ouroboros.evaluation.detector.shutil.which", side_effect=fake_which):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_cargo_builtin_subcommand_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "cargo test --workspace"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_go_non_builtin_subcommand_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "go.mod").write_text("module demo\n")
+        adapter = _FakeAdapter(response=json.dumps({"lint": "go lint ./..."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_go_builtin_subcommand_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "go.mod").write_text("module demo\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "go test ./..."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_zig_non_builtin_subcommand_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "build.zig").write_text("")
+        adapter = _FakeAdapter(response=json.dumps({"lint": "zig lint"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
+class TestAutoDetectBackendPropagation:
+    """_auto_detect_mechanical_toml must thread backend into adapter construction."""
+
+    def test_default_adapter_inherits_backend(self, tmp_path: Path) -> None:
+        """When no adapter is supplied, the default adapter is built for ``llm_backend``."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from ouroboros.evaluation.verification_artifacts import (
+            _auto_detect_mechanical_toml,
+        )
+
+        calls: list[dict[str, object]] = []
+
+        def fake_factory(**kwargs: object) -> object:
+            calls.append(kwargs)
+            return object()
+
+        ensure_mock = AsyncMock(return_value=True)
+        with (
+            patch(
+                "ouroboros.providers.factory.create_llm_adapter",
+                side_effect=fake_factory,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.ensure_mechanical_toml",
+                new=ensure_mock,
+            ),
+        ):
+            asyncio.run(_auto_detect_mechanical_toml(tmp_path, None, "codex"))
+        assert calls and calls[0].get("backend") == "codex"
+
+
 class TestTomlSerialization:
     def test_commands_with_quotes_roundtrip(self, tmp_path: Path) -> None:
         """Commands containing ``"`` must survive the toml round-trip.
