@@ -833,15 +833,47 @@ class StartEvolveStepHandler:
             project_dir=arguments.get("project_dir"),
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Initialize event store first so the audit event persists.
+            await self._event_store.initialize()
             await emit_subagent_dispatched_event(
                 self._event_store,
                 session_id=lineage_id,
                 payload=payload,
             )
+
+            # Register a real JobManager record so job_id is valid for polling.
+            # Instant-completing coroutine — job transitions to COMPLETED with
+            # the dispatch receipt.  See StartExecuteSeedHandler for rationale.
+            dispatch_text = (
+                f"Delegated evolve_step to plugin subagent.\n\n"
+                f"Lineage ID: {lineage_id}\n"
+                f"Runtime: {self.agent_runtime_backend}\n\n"
+                "Task widget in OpenCode TUI shows live progress."
+            )
+            dispatch_meta = {
+                "_subagent": payload.to_dict(),
+                "dispatch_mode": "plugin",
+                "runtime_backend": self.agent_runtime_backend,
+            }
+
+            async def _plugin_receipt() -> MCPToolResult:
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=dispatch_text),),
+                    is_error=False,
+                    meta=dispatch_meta,
+                )
+
+            snapshot = await self._job_manager.start_job(
+                job_type="evolve_step",
+                initial_message="Delegated to plugin subagent",
+                runner=_plugin_receipt(),
+                links=JobLinks(lineage_id=lineage_id),
+            )
+
             return build_subagent_result(
                 payload,
                 response_shape={
-                    "job_id": None,
+                    "job_id": snapshot.job_id,
                     "lineage_id": lineage_id,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",

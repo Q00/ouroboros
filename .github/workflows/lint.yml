@@ -62,3 +62,28 @@ jobs:
       - name: Run mypy
         run: |
           uv run mypy src/ouroboros
+
+  bridge-ts:
+    name: Bridge TypeScript
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: src/ouroboros/opencode/plugin
+
+      - name: Type check
+        run: bunx tsc --noEmit
+        working-directory: src/ouroboros/opencode/plugin
+
+      - name: Run tests
+        run: bun test
+        working-directory: src/ouroboros/opencode/plugin

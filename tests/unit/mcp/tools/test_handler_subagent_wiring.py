@@ -255,18 +255,23 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
     """StartExecuteSeedHandler.handle() returns _subagent payload."""
 
     @pytest.fixture
-    def handler(self):
+    async def handler(self):
+        from ouroboros.mcp.job_manager import JobManager
         from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
         from ouroboros.persistence.event_store import EventStore
 
-        store = MagicMock(spec=EventStore)
-        return StartExecuteSeedHandler(
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        jm = JobManager(store)
+        handler = StartExecuteSeedHandler(
             execute_handler=MagicMock(),
             event_store=store,
-            job_manager=MagicMock(),
+            job_manager=jm,
             agent_runtime_backend="opencode",
             opencode_mode="plugin",
         )
+        yield handler
+        await store.close()
 
     async def test_returns_subagent_for_valid_args(self, handler) -> None:
         result = await handler.handle(
@@ -281,6 +286,12 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
     async def test_still_validates_missing_seed(self, handler) -> None:
         result = await handler.handle({})
         assert result.is_err
+
+    async def test_returns_real_job_id(self, handler) -> None:
+        result = await handler.handle({"seed_content": "goal: test"})
+        assert result.is_ok
+        assert result.value.meta["job_id"] is not None
+        assert result.value.meta["job_id"].startswith("job_")
 
 
 # ---------------------------------------------------------------------------

@@ -861,18 +861,51 @@ class StartExecuteSeedHandler:
             model_tier=arguments.get("model_tier", "medium"),
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Initialize event store first so the audit event persists.
+            await self._event_store.initialize()
             await emit_subagent_dispatched_event(
                 self._event_store,
                 session_id=arguments.get("session_id"),
                 payload=payload,
             )
-            # Preserve public response shape (#442): callers chain on job_id /
-            # session_id. Background-job API contract keys present even though
-            # actual job is delegated to the subagent.
+
+            # Register a real JobManager record so job_id is valid for polling.
+            # The coroutine completes instantly — job transitions to COMPLETED
+            # with the dispatch receipt as result.  Callers who chain
+            # job_status(job_id) / job_result(job_id) get the dispatch metadata
+            # instead of an unusable None handle.
+            dispatch_text = (
+                f"Delegated to plugin subagent.\n\n"
+                f"Session ID: {arguments.get('session_id') or 'new'}\n"
+                f"Runtime: {self.agent_runtime_backend}\n\n"
+                "Task widget in OpenCode TUI shows live progress."
+            )
+            dispatch_meta = {
+                "_subagent": payload.to_dict(),
+                "dispatch_mode": "plugin",
+                "runtime_backend": self.agent_runtime_backend,
+            }
+
+            async def _plugin_receipt() -> MCPToolResult:
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text=dispatch_text),),
+                    is_error=False,
+                    meta=dispatch_meta,
+                )
+
+            snapshot = await self._job_manager.start_job(
+                job_type="execute_seed",
+                initial_message="Delegated to plugin subagent",
+                runner=_plugin_receipt(),
+                links=JobLinks(
+                    session_id=arguments.get("session_id"),
+                ),
+            )
+
             return build_subagent_result(
                 payload,
                 response_shape={
-                    "job_id": None,
+                    "job_id": snapshot.job_id,
                     "session_id": arguments.get("session_id"),
                     "execution_id": None,
                     "status": "delegated_to_subagent",
