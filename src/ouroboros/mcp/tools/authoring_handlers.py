@@ -500,12 +500,12 @@ class GenerateSeedHandler:
                         tool_name="ouroboros_generate_seed",
                     )
                 )
-            state: InterviewState = load_result.value
+            interview_state = load_result.value
 
             # Gate: require either completion or low persisted ambiguity.
             _THRESHOLD = 0.2
-            persisted_score = state.ambiguity_score
-            if not state.is_complete:
+            persisted_score = interview_state.ambiguity_score
+            if not interview_state.is_complete:
                 if persisted_score is None:
                     return Result.err(
                         MCPToolError(
@@ -525,7 +525,7 @@ class GenerateSeedHandler:
                         )
                     )
 
-            transcript = _format_interview_transcript(state)
+            transcript = _format_interview_transcript(interview_state)
 
             payload = build_generate_seed_subagent(
                 session_id=session_id,
