@@ -88,6 +88,7 @@ class TestBuildMechanicalConfigFromToml:
         assert config.test_command is None
 
     def test_toml_populates_commands(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
         self._write_toml(
             tmp_path,
             'lint = "cargo clippy"\nbuild = "cargo build"\ntest = "cargo test"\n',
@@ -99,6 +100,9 @@ class TestBuildMechanicalConfigFromToml:
 
     def test_toml_empty_string_skips_check(self, tmp_path: Path) -> None:
         """Explicit empty string means "this check is intentionally off"."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
         self._write_toml(tmp_path, 'test = "pytest -q"\nlint = ""\n')
         config = build_mechanical_config(tmp_path)
         assert config.test_command == ("pytest", "-q")
@@ -142,6 +146,39 @@ class TestBuildMechanicalConfigFromToml:
         assert config.build_command == ("make",)
         assert config.test_command == ("make", "test")
         assert config.lint_command is None
+
+    def test_malformed_command_string_is_tolerated(self, tmp_path: Path) -> None:
+        """Unterminated quotes in a command must not crash Stage 1 setup."""
+        self._write_toml(tmp_path, "test = '\"'\n")
+        # Reaches ``build_mechanical_config`` without raising.
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command is None
+
+    def test_state_mutating_toml_commands_are_blocked(self, tmp_path: Path) -> None:
+        """Hand-authored toml cannot smuggle mutating commands past Stage 1."""
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        self._write_toml(tmp_path, 'build = "cargo publish"\n')
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command is None
+
+    def test_absolute_path_executable_blocked(self, tmp_path: Path) -> None:
+        """Authored toml cannot point at host-absolute binaries."""
+        self._write_toml(tmp_path, 'test = "/tmp/mvnw test"\n')
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command is None
+
+    def test_shell_operator_in_toml_is_blocked(self, tmp_path: Path) -> None:
+        """Shell operators never survive the toml reader."""
+        self._write_toml(tmp_path, 'test = "npm test && rm -rf /"\n')
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command is None
+
+    def test_toml_npm_install_is_blocked(self, tmp_path: Path) -> None:
+        """npm install mutates state → must not become a Stage 1 command."""
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        self._write_toml(tmp_path, 'build = "npm install"\n')
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command is None
 
     def test_malformed_toml_is_ignored(self, tmp_path: Path) -> None:
         self._write_toml(tmp_path, 'lint = "ruff check ."\nbroken')

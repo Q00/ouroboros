@@ -149,20 +149,49 @@ def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
         return None
 
 
-def _parse_command(value: str) -> tuple[str, ...] | None:
+def _parse_command(
+    value: str,
+    *,
+    working_dir: Path | None = None,
+) -> tuple[str, ...] | None:
     """Parse a command string into a tuple, or ``None`` if empty/blocked.
 
-    Empty / whitespace-only inputs mean "skip this check". Commands whose
-    leading executable is not on ``_ALLOWED_EXECUTABLES`` are dropped with a
-    warning rather than silently executed.
+    Guarantees:
+
+    * Empty / whitespace-only inputs mean "skip this check".
+    * Malformed quoting (unterminated string literals etc.) is swallowed
+      rather than raised — Stage 1 must never crash on repo-authored toml.
+    * Shell operators (``&&``, pipes, redirects, command substitution) are
+      refused so ``mechanical.toml`` cannot smuggle shell constructs past
+      ``create_subprocess_exec``.
+    * The leading executable is checked against the curated allowlist.
+    * When ``working_dir`` is provided, the command is additionally fed
+      through the detector's on-disk entry-point validator so hand-authored
+      toml cannot bypass the same repo-coupling contract the AI path
+      enforces (``npm install`` / ``cargo publish`` / ``/tmp/mvnw`` etc.
+      are rejected).
     """
     value = value.strip()
     if not value:
         return None
-    parts = tuple(shlex.split(value, posix=(os.name != "nt")))
+    if any(token in value for token in ("&&", "||", "|", ";", ">", "<", "`", "$(")):
+        log.warning("mechanical.toml_shell_operator_blocked", command=value)
+        return None
+    try:
+        parts = tuple(shlex.split(value, posix=(os.name != "nt")))
+    except ValueError as exc:
+        log.warning("mechanical.toml_parse_error", command=value, error=str(exc))
+        return None
     if not parts:
         return None
-    executable = Path(parts[0]).name
+    head = parts[0]
+    # Reject absolute paths and other non-allowlisted forms. Basename-only
+    # allowlisting still accepts project-local wrappers like ``./mvnw``
+    # because ``Path("./mvnw").name == "mvnw"`` matches the allowlist.
+    if head.startswith("/") or head.startswith("~"):
+        log.warning("mechanical.toml_absolute_path_blocked", command=value)
+        return None
+    executable = Path(head).name
     if executable not in _ALLOWED_EXECUTABLES:
         log.warning(
             "mechanical.blocked_executable",
@@ -171,14 +200,38 @@ def _parse_command(value: str) -> tuple[str, ...] | None:
             hint="Add to _ALLOWED_EXECUTABLES or revise mechanical.toml",
         )
         return None
+    if working_dir is not None:
+        # Lazy import to avoid a circular dep: detector imports
+        # ``_ALLOWED_EXECUTABLES`` from this module.
+        from ouroboros.evaluation.detector import _command_is_valid
+
+        if not _command_is_valid(working_dir, value):
+            log.warning(
+                "mechanical.toml_entry_point_invalid",
+                command=value,
+                working_dir=str(working_dir),
+            )
+            return None
     return parts
 
 
-def _apply_overrides(current: dict[str, Any], source: dict[str, Any]) -> None:
-    """Merge ``source`` command/threshold entries into ``current``."""
+def _apply_overrides(
+    current: dict[str, Any],
+    source: dict[str, Any],
+    *,
+    working_dir: Path | None = None,
+) -> None:
+    """Merge ``source`` command/threshold entries into ``current``.
+
+    ``working_dir`` is forwarded to :func:`_parse_command` so file-loaded
+    overrides (``.ouroboros/mechanical.toml``) get the same entry-point
+    validation the detector applies; explicit caller-provided overrides
+    pass ``None`` because they are trusted MCP inputs that have already
+    been vetted upstream.
+    """
     for key in ("lint", "build", "test", "static", "coverage"):
         if key in source:
-            current[key] = _parse_command(str(source[key]))
+            current[key] = _parse_command(str(source[key]), working_dir=working_dir)
     if "timeout" in source:
         try:
             current["timeout"] = int(source["timeout"])
@@ -224,7 +277,7 @@ def build_mechanical_config(
 
     file_overrides = _load_project_overrides(working_dir)
     if file_overrides:
-        _apply_overrides(current, file_overrides)
+        _apply_overrides(current, file_overrides, working_dir=working_dir)
 
     if overrides:
         _apply_overrides(current, overrides)
