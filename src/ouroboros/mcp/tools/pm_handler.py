@@ -404,9 +404,13 @@ class PMInterviewHandler:
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            # Plugin mode: persist state server-side WITHOUT creating an LLM adapter.
-            # Only state I/O needed — subagent handles all LLM work.
-            # Avoids importing litellm (optional dep) on plugin-only installs.
+            # Plugin mode: persist BOTH generic InterviewState AND PM-specific
+            # metadata (pm_meta) server-side WITHOUT creating an LLM adapter.
+            # Subagent handles all LLM work. This preserves the 2-step PM flow:
+            #   step 1 (start): writes InterviewState + pm_meta(initial_context, cwd)
+            #   step 2 (select_repos): loads pm_meta, updates brownfield_repos, re-saves
+            #   resume/answer: loads state + pm_meta, records answer, builds transcript
+            #   generate: delegates seed generation to subagent (state on disk)
             from ouroboros.mcp.tools.authoring_handlers import (
                 _plugin_load_state,
                 _plugin_save_state,
@@ -425,7 +429,6 @@ class PMInterviewHandler:
                     return Result.err(
                         MCPToolError(str(resolved.error), tool_name="ouroboros_pm_interview")
                     )
-                # Pure state creation — no LLM needed
                 from ouroboros.core.security import InputValidator
 
                 is_valid, error_msg = InputValidator.validate_initial_context(resolved.value)
@@ -450,9 +453,63 @@ class PMInterviewHandler:
                     return Result.err(
                         MCPToolError(str(save_result.error), tool_name="ouroboros_pm_interview")
                     )
+                # Persist PM-specific metadata (no engine needed for initial save)
+                _save_pm_meta(
+                    interview_id,
+                    engine=None,
+                    cwd=cwd,
+                    data_dir=self.data_dir,
+                    extra={
+                        "initial_context": resolved.value,
+                        "brownfield_repos": (
+                            [p["path"] for p in state.codebase_paths]
+                            if state.codebase_paths
+                            else []
+                        ),
+                    },
+                )
                 real_session_id = state.interview_id
 
+            elif action == "select_repos" and selected_repos is not None:
+                # 2-step PM flow step 2: recover initial_context from pm_meta,
+                # persist selected repos, then dispatch to subagent.
+                if not session_id:
+                    return Result.err(
+                        MCPToolError(
+                            "select_repos requires session_id (from step 1) "
+                            "or initial_context for 1-step start",
+                            tool_name="ouroboros_pm_interview",
+                        )
+                    )
+                meta = _load_pm_meta(session_id, data_dir=self.data_dir)
+                if meta is None:
+                    return Result.err(
+                        MCPToolError(
+                            f"No pm_meta found for session {session_id}. "
+                            "The session may have expired or never been created.",
+                            tool_name="ouroboros_pm_interview",
+                        )
+                    )
+                # Update pm_meta with selected repos and mark interview_started
+                meta["brownfield_repos"] = selected_repos
+                meta["status"] = "interview_started"
+                _save_pm_meta(
+                    session_id,
+                    engine=None,
+                    cwd=meta.get("cwd", cwd_arg or os.getcwd()),
+                    data_dir=self.data_dir,
+                    status="interview_started",
+                    extra={
+                        "initial_context": meta.get("initial_context", ""),
+                        "brownfield_repos": selected_repos,
+                    },
+                )
+                # Use initial_context from pm_meta for subagent prompt
+                initial_context = meta.get("initial_context", initial_context)
+                real_session_id = session_id
+
             elif session_id:
+                # resume / answer / generate — load state + build transcript
                 load_result = await _plugin_load_state(state_dir, session_id)
                 if load_result.is_err:
                     return Result.err(

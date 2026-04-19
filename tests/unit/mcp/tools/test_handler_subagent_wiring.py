@@ -330,7 +330,7 @@ class TestPMInterviewHandlerSubagentDispatch:
 
     @pytest.fixture(autouse=True)
     def mock_plugin_io(self, monkeypatch):
-        """Mock _plugin_load/save so plugin path doesn't need real state files."""
+        """Mock _plugin_load/save and pm_meta so plugin path doesn't need real state files."""
 
         async def _fake_load(state_dir, session_id):
             state = InterviewState(
@@ -346,9 +346,22 @@ class TestPMInterviewHandlerSubagentDispatch:
             return Result.ok(Path("/tmp/fake"))
 
         import ouroboros.mcp.tools.authoring_handlers as ah
+        import ouroboros.mcp.tools.pm_handler as pmh
 
         monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
         monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
+        # PM plugin path now calls _save_pm_meta on start and select_repos
+        monkeypatch.setattr(pmh, "_save_pm_meta", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            pmh,
+            "_load_pm_meta",
+            lambda *_a, **_kw: {
+                "initial_context": "test context",
+                "brownfield_repos": [],
+                "cwd": "/tmp",
+                "status": "pending_repo_selection",
+            },
+        )
 
     @pytest.fixture
     def handler(self):
@@ -397,3 +410,38 @@ class TestPMInterviewHandlerSubagentDispatch:
         )
         ctx = result.value.meta["_subagent"]["context"]
         assert ctx["selected_repos"] == ["/repo1", "/repo2"]
+
+    async def test_select_repos_returns_subagent(self, handler) -> None:
+        """select_repos with session_id dispatches subagent (2-step flow step 2)."""
+        result = await handler.handle(
+            {
+                "session_id": "sess-abc",
+                "selected_repos": ["/repo1"],
+            }
+        )
+        assert result.is_ok
+        payload = result.value.meta["_subagent"]
+        assert payload["tool_name"] == "ouroboros_pm_interview"
+        assert payload["context"]["selected_repos"] == ["/repo1"]
+        # initial_context recovered from pm_meta and passed in context dict
+        assert payload["context"]["initial_context"] == "test context"
+
+    async def test_select_repos_without_session_id_errors(self, handler) -> None:
+        """select_repos without session_id returns validation error."""
+        import ouroboros.mcp.tools.pm_handler as pmh
+        from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+
+        # Override _load_pm_meta to return None (no session found)
+        original = pmh._load_pm_meta
+        pmh._load_pm_meta = lambda *_a, **_kw: None
+        try:
+            h = PMInterviewHandler(agent_runtime_backend="opencode", opencode_mode="plugin")
+            result = await h.handle(
+                {
+                    "selected_repos": ["/repo1"],
+                }
+            )
+            assert result.is_err
+            assert "session_id" in str(result.error).lower() or "select_repos" in str(result.error)
+        finally:
+            pmh._load_pm_meta = original

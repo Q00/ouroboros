@@ -379,7 +379,7 @@ class TestPMInterviewHandlerValidationBeforeDispatch:
 
     @pytest.fixture(autouse=True)
     def mock_plugin_io(self, monkeypatch):
-        """Mock _plugin_load/save so plugin path doesn't need real state files."""
+        """Mock plugin I/O + pm_meta so plugin path doesn't need real state files."""
 
         async def _fake_load(state_dir, session_id):
             state = InterviewState(
@@ -395,9 +395,15 @@ class TestPMInterviewHandlerValidationBeforeDispatch:
             return Result.ok(Path("/tmp/fake"))
 
         import ouroboros.mcp.tools.authoring_handlers as ah
+        import ouroboros.mcp.tools.pm_handler as pmh
 
         monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
         monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
+        # Mock pm_meta persistence (no disk needed in tests)
+        monkeypatch.setattr(pmh, "_save_pm_meta", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            pmh, "_load_pm_meta", lambda *_a, **_kw: {"initial_context": "test", "cwd": "/tmp"}
+        )
 
     @pytest.fixture
     async def event_store(self):
