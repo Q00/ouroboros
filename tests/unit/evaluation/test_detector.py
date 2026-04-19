@@ -1579,6 +1579,47 @@ class TestEvaluationPublicSurface:
         assert deprecations, "detect_language must emit a DeprecationWarning on call"
         assert "ensure_mechanical_toml" in str(deprecations[0].message)
 
+    def test_detect_language_returns_preset_from_mechanical_toml(self, tmp_path: Path) -> None:
+        """Legacy callers still receive runnable commands when the toml exists."""
+        import warnings
+
+        from ouroboros.evaluation import LanguagePreset, detect_language
+
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        (tmp_path / ".ouroboros").mkdir()
+        (tmp_path / ".ouroboros" / "mechanical.toml").write_text('test = "cargo test"\n')
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            preset = detect_language(tmp_path)
+
+        assert isinstance(preset, LanguagePreset)
+        assert preset.test_command == ("cargo", "test")
+
+
+class TestMonorepoManifestDiscovery:
+    """Subdirectory manifests must seed the detect call, not just the root."""
+
+    def test_backend_pyproject_detected(self, tmp_path: Path) -> None:
+        (tmp_path / "backend").mkdir()
+        (tmp_path / "backend" / "pyproject.toml").write_text(
+            '[project]\nname = "svc"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv run --directory backend pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_packages_glob_detected(self, tmp_path: Path) -> None:
+        ws = tmp_path / "packages" / "web"
+        ws.mkdir(parents=True)
+        (ws / "package.json").write_text(json.dumps({"name": "web", "scripts": {"test": "jest"}}))
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "root", "workspaces": ["packages/*"]})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "pnpm --filter web test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
 
 class TestAutoDetectBackendPropagation:
     """_auto_detect_mechanical_toml must thread backend into adapter construction."""

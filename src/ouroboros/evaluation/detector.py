@@ -216,9 +216,45 @@ _MANIFEST_GLOB_PATTERNS: tuple[str, ...] = (
     "*.vbproj",
 )
 
+# Subdirectory patterns where monorepo projects commonly live. Both literal
+# names and glob patterns are walked so ``backend/pyproject.toml`` and
+# ``packages/web/package.json`` can seed the detect call even when the
+# root has no manifest of its own.
+_MONOREPO_SUBDIR_NAMES: tuple[str, ...] = (
+    "backend",
+    "frontend",
+    "api",
+    "app",
+    "client",
+    "server",
+    "web",
+    "core",
+    "service",
+)
+_MONOREPO_SUBDIR_GLOBS: tuple[str, ...] = (
+    "packages/*",
+    "apps/*",
+    "services/*",
+    "crates/*",
+)
+# Cap on the number of subpath manifest entries forwarded to the LLM so a
+# wide monorepo cannot blow the prompt budget. Root manifests always land
+# first; subdirectory extras are appended until the cap is hit.
+_MAX_SUBDIR_MANIFESTS = 12
+
 
 def _collect_manifests(working_dir: Path) -> dict[str, str]:
-    """Read top-level manifest files into a name → text-excerpt mapping."""
+    """Collect root and monorepo-subdir manifests for the detect prompt.
+
+    Root manifests (by exact name or glob) are always included. Well-known
+    monorepo subdirectories (``backend/``, ``packages/*``, ``apps/*`` …)
+    are also scanned so subproject manifests like
+    ``backend/pyproject.toml`` or ``packages/web/package.json`` can seed
+    the LLM call. The return dict preserves relative paths in its keys
+    (``"backend/pyproject.toml"``) so the prompt renders them verbatim,
+    and the subdir sweep is capped at ``_MAX_SUBDIR_MANIFESTS`` entries
+    to keep the prompt bounded.
+    """
     collected: dict[str, str] = {}
     for name in _MANIFEST_CANDIDATES:
         candidate = working_dir / name
@@ -241,7 +277,70 @@ def _collect_manifests(working_dir: Path) -> dict[str, str]:
                 collected[path.name] = raw.decode("utf-8", errors="replace")
         except OSError:
             continue
+    remaining = _MAX_SUBDIR_MANIFESTS
+    for subdir in _iter_monorepo_subdirs(working_dir):
+        if remaining <= 0:
+            break
+        remaining = _append_subdir_manifests(working_dir, subdir, collected, remaining)
     return collected
+
+
+def _append_subdir_manifests(
+    root: Path,
+    subdir: Path,
+    collected: dict[str, str],
+    remaining: int,
+) -> int:
+    for manifest_name in _MANIFEST_CANDIDATES:
+        if remaining <= 0:
+            return remaining
+        candidate = subdir / manifest_name
+        if not candidate.is_file():
+            continue
+        key = candidate.relative_to(root).as_posix()
+        if key in collected:
+            continue
+        try:
+            raw = candidate.read_bytes()[:_MANIFEST_EXCERPT_BYTES]
+        except OSError:
+            continue
+        collected[key] = raw.decode("utf-8", errors="replace")
+        remaining -= 1
+    for pattern in _MANIFEST_GLOB_PATTERNS:
+        if remaining <= 0:
+            return remaining
+        try:
+            for path in subdir.glob(pattern):
+                if remaining <= 0:
+                    return remaining
+                if not path.is_file():
+                    continue
+                key = path.relative_to(root).as_posix()
+                if key in collected:
+                    continue
+                try:
+                    raw = path.read_bytes()[:_MANIFEST_EXCERPT_BYTES]
+                except OSError:
+                    continue
+                collected[key] = raw.decode("utf-8", errors="replace")
+                remaining -= 1
+        except OSError:
+            continue
+    return remaining
+
+
+def _iter_monorepo_subdirs(working_dir: Path):
+    for name in _MONOREPO_SUBDIR_NAMES:
+        candidate = working_dir / name
+        if candidate.is_dir():
+            yield candidate
+    for glob in _MONOREPO_SUBDIR_GLOBS:
+        try:
+            for candidate in working_dir.glob(glob):
+                if candidate.is_dir():
+                    yield candidate
+        except OSError:
+            continue
 
 
 _SYSTEM_PROMPT = """You are inspecting a software repository to propose the commands Ouroboros should run as zero-cost Stage 1 verification (lint, build, test, static analysis, coverage).

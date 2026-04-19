@@ -314,24 +314,50 @@ class LanguagePreset:
     coverage_command: tuple[str, ...] | None = None
 
 
-def detect_language(working_dir: Path) -> LanguagePreset | None:  # noqa: ARG001
-    """Deprecated compatibility shim — always returns ``None``.
+def detect_language(working_dir: Path) -> LanguagePreset | None:
+    """Deprecated compatibility shim that bridges callers to mechanical.toml.
 
-    Emits a ``DeprecationWarning`` on every call so third-party callers
-    notice the semantic change. Migrate to
-    :func:`ouroboros.evaluation.detector.ensure_mechanical_toml` followed
-    by :func:`build_mechanical_config`, which reads the authored toml.
+    Preserves the old preset-shaped return: if a
+    ``.ouroboros/mechanical.toml`` already exists, the shim reads it via
+    :func:`build_mechanical_config` and packages the resolved commands into
+    a :class:`LanguagePreset` so legacy callers still receive runnable
+    Stage 1 commands. When the toml is absent, returns ``None`` — the
+    ambiguity marker the old preset detector used.
+
+    Emits a :class:`DeprecationWarning` on every call so third-party
+    callers migrate to
+    :func:`ouroboros.evaluation.detector.ensure_mechanical_toml` plus
+    :func:`build_mechanical_config` for the full contract.
     """
     import warnings
 
     warnings.warn(
-        "ouroboros.evaluation.detect_language() was removed in 0.29. "
-        "Call ensure_mechanical_toml() + build_mechanical_config() instead. "
-        "This shim always returns None.",
+        "ouroboros.evaluation.detect_language() is deprecated; call "
+        "ensure_mechanical_toml() + build_mechanical_config() instead. "
+        "This shim now reads .ouroboros/mechanical.toml when present and "
+        "returns None when no commands are configured.",
         DeprecationWarning,
         stacklevel=2,
     )
-    return None
+    config = build_mechanical_config(working_dir)
+    if not any(
+        (
+            config.lint_command,
+            config.build_command,
+            config.test_command,
+            config.static_command,
+            config.coverage_command,
+        )
+    ):
+        return None
+    return LanguagePreset(
+        name="mechanical-toml",
+        lint_command=config.lint_command,
+        build_command=config.build_command,
+        test_command=config.test_command,
+        static_command=config.static_command,
+        coverage_command=config.coverage_command,
+    )
 
 
 __all__ = [
