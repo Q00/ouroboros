@@ -374,6 +374,7 @@ class GenerateSeedHandler:
     llm_adapter: LLMAdapter | None = field(default=None, repr=False)
     llm_backend: str | None = field(default=None, repr=False)
     event_store: EventStore | None = field(default=None, repr=False)
+    data_dir: Path | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
 
@@ -484,11 +485,53 @@ class GenerateSeedHandler:
         )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
-        payload = build_generate_seed_subagent(
-            session_id=session_id,
-            ambiguity_score=ambiguity_score_value,
-        )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Plugin mode: validate interview readiness server-side before
+            # delegating.  The subprocess path loads state + computes/checks
+            # ambiguity via litellm.  Plugin can't compute ambiguity (no
+            # litellm), but CAN enforce the persisted gate: the interview
+            # must be either complete or have a stored score <= threshold.
+            state_dir = self.data_dir or _DATA_DIR
+            load_result = await _plugin_load_state(state_dir, session_id)
+            if load_result.is_err:
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to load interview state: {load_result.error}",
+                        tool_name="ouroboros_generate_seed",
+                    )
+                )
+            state: InterviewState = load_result.value
+
+            # Gate: require either completion or low persisted ambiguity.
+            _THRESHOLD = 0.2
+            persisted_score = state.ambiguity_score
+            if not state.is_complete:
+                if persisted_score is None:
+                    return Result.err(
+                        MCPToolError(
+                            "Interview has no persisted ambiguity score and is "
+                            "not marked complete. Complete the interview before "
+                            "generating a seed.",
+                            tool_name="ouroboros_generate_seed",
+                        )
+                    )
+                if persisted_score > _THRESHOLD:
+                    return Result.err(
+                        MCPToolError(
+                            f"Ambiguity score {persisted_score:.2f} exceeds "
+                            f"threshold {_THRESHOLD}. Continue interviewing "
+                            f"to reduce ambiguity before seed generation.",
+                            tool_name="ouroboros_generate_seed",
+                        )
+                    )
+
+            transcript = _format_interview_transcript(state)
+
+            payload = build_generate_seed_subagent(
+                session_id=session_id,
+                ambiguity_score=persisted_score,
+                transcript=transcript,
+            )
             await emit_subagent_dispatched_event(
                 self.event_store,
                 session_id=session_id,

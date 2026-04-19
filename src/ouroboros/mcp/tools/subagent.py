@@ -457,6 +457,7 @@ def build_generate_seed_subagent(
     *,
     session_id: str,
     ambiguity_score: float | None = None,
+    transcript: str = "",
 ) -> SubagentPayload:
     """Build subagent payload for seed generation from interview."""
     from ouroboros.agents.loader import load_agent_prompt
@@ -466,6 +467,10 @@ def build_generate_seed_subagent(
     ambiguity_note = ""
     if ambiguity_score is not None:
         ambiguity_note = f"\n## Current Ambiguity Score\n{ambiguity_score}\n"
+
+    transcript_section = ""
+    if transcript:
+        transcript_section = f"\n## Interview Transcript\n{transcript}\n"
 
     prompt = f"""{system_prompt}
 
@@ -479,7 +484,7 @@ criteria, ontology schema, evaluation principles, and exit conditions.
 
 ## Session ID
 {session_id}
-{ambiguity_note}
+{ambiguity_note}{transcript_section}
 Extract all requirements from the interview conversation and produce a
 complete YAML seed specification. The seed should be precise enough for
 autonomous execution."""

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
 
 # ---------------------------------------------------------------------------
@@ -85,6 +85,28 @@ class TestQAHandlerSubagentDispatch:
 class TestGenerateSeedHandlerSubagentDispatch:
     """GenerateSeedHandler.handle() returns _subagent payload."""
 
+    @pytest.fixture(autouse=True)
+    def mock_plugin_state(self):
+        """Mock _plugin_load_state so plugin path can load interview state."""
+        from unittest.mock import AsyncMock, patch
+
+        from ouroboros.bigbang.interview import InterviewState, InterviewStatus
+        from ouroboros.core.types import Result
+
+        state = InterviewState(
+            interview_id="sess-123",
+            initial_context="test project",
+            status=InterviewStatus.COMPLETED,
+            ambiguity_score=0.1,
+        )
+        mock_load = AsyncMock(return_value=Result.ok(state))
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers._plugin_load_state",
+            mock_load,
+        ):
+            self._mock_load = mock_load
+            yield
+
     @pytest.fixture
     def handler(self):
         from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler
@@ -110,7 +132,8 @@ class TestGenerateSeedHandlerSubagentDispatch:
         )
         ctx = result.value.meta["_subagent"]["context"]
         assert ctx["session_id"] == "sess-456"
-        assert ctx["ambiguity_score"] == 0.15
+        # Plugin path uses persisted score from state (0.1), not caller-supplied
+        assert ctx["ambiguity_score"] == 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +359,7 @@ class TestPMInterviewHandlerSubagentDispatch:
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test context",
+                status=InterviewStatus.COMPLETED,
                 rounds=[InterviewRound(round_number=1, question="Q?", user_response=None)],
             )
             return Result.ok(state)

@@ -74,6 +74,15 @@ class ChannelWorkflowHandler:
         def _isolate(h: Any) -> Any:
             clone = copy(h)
             clone.opencode_mode = "subprocess"
+            # StartExecuteSeedHandler keeps a nested _execute_handler built at
+            # __post_init__ with the *original* opencode_mode.  A shallow copy
+            # shares that reference, so the inner gate still sees "plugin" and
+            # returns a subagent envelope instead of a real execution result.
+            # Pin the nested handler as well.
+            nested = getattr(clone, "_execute_handler", None)
+            if nested is not None and hasattr(nested, "opencode_mode"):
+                clone._execute_handler = copy(nested)
+                clone._execute_handler.opencode_mode = "subprocess"
             return clone
 
         self._interview_handler = (

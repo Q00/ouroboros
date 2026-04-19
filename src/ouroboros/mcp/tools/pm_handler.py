@@ -519,6 +519,18 @@ class PMInterviewHandler:
                         MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
                     )
                 state = load_result.value
+
+                # Gate: generate requires completed interview — matches
+                # the subprocess path's _handle_generate guard.
+                if action == "generate" and not state.is_complete:
+                    return Result.err(
+                        MCPToolError(
+                            "Interview is not complete. Continue the interview "
+                            "before generating a PM seed.",
+                            tool_name="ouroboros_pm_interview",
+                        )
+                    )
+
                 # Record answer into persisted state.
                 # In plugin mode each dispatch = new child session. The child
                 # generates questions but can't write back to server-side state.

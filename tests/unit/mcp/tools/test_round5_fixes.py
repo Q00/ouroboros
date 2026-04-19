@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
 from ouroboros.persistence.event_store import EventStore
 
@@ -385,6 +385,7 @@ class TestPMInterviewHandlerValidationBeforeDispatch:
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test context",
+                status=InterviewStatus.COMPLETED,
                 rounds=[InterviewRound(round_number=1, question="Q?", user_response=None)],
             )
             return Result.ok(state)

@@ -131,7 +131,7 @@ receives only its own prompt, so the five lateral-thinking personas produce
 | Dispatch model       | One child session per subagent payload |
 | Parallelism          | All children spawn concurrently; patches serialized by API |
 | Max fan-out          | `MAX_FANOUT = 10` per tool call |
-| Dedupe               | FNV-1a hash of sorted payloads, 5 s window |
+| Dedupe               | `(parentSessionID, callID)` identity, `DEDUPE_MS` window |
 | Child context        | Fresh session — no inherited main-LLM context |
 | Result surfacing     | Parent patched with `subtask` part pointing at child |
 
@@ -139,14 +139,17 @@ receives only its own prompt, so the five lateral-thinking personas produce
 
 ### Retries and respawn
 
-Every child dispatch wraps `create → prompt → PATCH` in a retry ladder:
+Every child dispatch wraps `create → PATCH-running` in a retry ladder.
+The `session.prompt` call is fire-and-forget (non-blocking); prompt
+failures are PATCHed to error state on the widget, not retried in-plugin:
 
 | Layer           | Retries                                | Behaviour on failure |
 |-----------------|----------------------------------------|----------------------|
-| Child prompt    | `SUB_RETRIES` (default 2, total 3)     | New child session per retry (no stale state) |
+| Child create    | Awaited; failure aborts dispatch       | Error surfaces as tool result |
 | Part PATCH      | `PATCH_RETRIES = 3`                    | Exponential backoff (`BACKOFF_MS = 100`) |
 | Part resolve    | `RESOLVE_RETRIES = 5`                  | Poll parent message for the tool part |
-| Child timeout   | `CHILD_TIMEOUT_MS` (default 20 min)    | Abort child, retry or fall through to error |
+| Child prompt    | Fire-and-forget (no in-plugin retry)   | Widget PATCHed to error state |
+| Child timeout   | `CHILD_TIMEOUT_MS` (default 20 min)    | Abort child, PATCH error state |
 
 ### Canonical output
 

@@ -858,6 +858,46 @@ def test_channel_workflow_does_not_mutate_passed_in_handlers() -> None:
     assert h._start_execute_seed_handler.opencode_mode == "subprocess"
 
 
+def test_channel_workflow_pins_nested_execute_handler_to_subprocess() -> None:
+    """StartExecuteSeedHandler nests an _execute_handler that also gates on opencode_mode.
+
+    _isolate() must pin BOTH the outer handler and the nested _execute_handler
+    to subprocess. Otherwise the background job path runs the nested handler
+    which still sees "plugin" and returns a subagent envelope instead of a real
+    execution result — breaking channel workflow contract.
+    """
+    from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
+
+    # Simulate composition root passing plugin-mode handlers
+    start_exec = StartExecuteSeedHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+    # Confirm the nested handler inherited plugin mode at construction
+    assert start_exec._execute_handler.opencode_mode == "plugin"
+
+    h = ChannelWorkflowHandler(
+        start_execute_seed_handler=start_exec,
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    # Outer must be pinned
+    assert h._start_execute_seed_handler.opencode_mode == "subprocess"
+    # Nested must also be pinned — the critical regression guard
+    assert h._start_execute_seed_handler._execute_handler.opencode_mode == "subprocess"
+    # Gate must return False for nested handler
+    assert (
+        should_dispatch_via_plugin(
+            h._start_execute_seed_handler._execute_handler.agent_runtime_backend,
+            h._start_execute_seed_handler._execute_handler.opencode_mode,
+        )
+        is False
+    )
+    # Original must be untouched
+    assert start_exec._execute_handler.opencode_mode == "plugin"
+
+
 def test_channel_workflow_inner_gate_returns_false_under_plugin_outer() -> None:
     """Verify via the actual gate helper that inner handlers will not dispatch."""
     from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
