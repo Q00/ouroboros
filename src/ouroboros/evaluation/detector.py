@@ -348,9 +348,12 @@ def _verify_entry_point(
     declared script or target.
     """
     if head == "bun":
-        # Require some evidence that this is a Bun project before accepting
-        # any Bun command. Otherwise a hallucinated ``bun test`` could ride
-        # on an unrelated (e.g. Python) repo that has no Bun runtime.
+        # ``bun`` is self-contained: require Bun project evidence, then
+        # dispatch to either the runtime-builtin, ``bun x`` (npx-like), or
+        # script-lookup path. The function returns unconditionally from this
+        # branch so the shared Node script-lookup below is not revisited and
+        # a valid ``bun test`` cannot be rejected for missing a
+        # ``scripts.test`` entry.
         if not _is_bun_project(working_dir):
             return False
         if len(parts) >= 2 and parts[1] == "x":
@@ -363,7 +366,14 @@ def _verify_entry_point(
             return _npx_package_available(working_dir, package)
         if _bun_builtin_runner(parts):
             return True
-    if head in {"npm", "pnpm", "yarn", "bun"}:
+        # Custom Bun script like ``bun myscript`` → falls back to the
+        # ``package.json.scripts`` contract.
+        script_name = _node_script_name("bun", parts)
+        if script_name is None:
+            return False
+        return _package_json_has_script(working_dir, script_name)
+
+    if head in {"npm", "pnpm", "yarn"}:
         script_name = _node_script_name(head, parts)
         if script_name is None:
             return False

@@ -608,6 +608,35 @@ class TestBunProjectMarker:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
+    def test_bun_test_accepted_without_scripts_entry(self, tmp_path: Path) -> None:
+        """Regression: builtin ``bun test`` must not fall through to script lookup.
+
+        Earlier structure returned ``True`` from ``_bun_builtin_runner`` but
+        the function continued into the shared Node ``scripts`` check and
+        silently rejected the command when ``package.json.scripts.test`` was
+        absent. The branch is now self-contained.
+        """
+        (tmp_path / "package.json").write_text(
+            '{"name": "demo", "devDependencies": {"bun-types": "^1"}}'
+        )
+        # Note: no ``scripts`` field at all.
+        adapter = _FakeAdapter(response=json.dumps({"test": "bun test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        assert build_mechanical_config(tmp_path).test_command == ("bun", "test")
+
+    def test_bun_custom_script_still_requires_declaration(self, tmp_path: Path) -> None:
+        """Non-builtin bun subcommands must still prove the script exists."""
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "demo", "scripts": {"lint": "eslint ."}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"lint": "bun lint"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        adapter_missing = _FakeAdapter(response=json.dumps({"test": "bun typecheck"}))
+        ok_missing = _run(ensure_mechanical_toml(tmp_path, adapter_missing, force=True))
+        assert ok_missing is False
+
 
 class TestBunXValidation:
     """`bun x` must not be treated as a self-contained builtin."""
