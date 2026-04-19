@@ -866,9 +866,20 @@ class StartExecuteSeedHandler:
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             # Initialize event store first so the audit event persists.
             await self._event_store.initialize()
+
+            # Generate session_id for fresh runs so the caller always gets a
+            # resumable identifier — matching the subprocess background path
+            # contract. Without this, fresh plugin dispatches return None and
+            # downstream tooling/UI that relies on session_id breaks.
+            plugin_session_id = arguments.get("session_id")
+            if not plugin_session_id:
+                from uuid import uuid4
+
+                plugin_session_id = f"orch_{uuid4().hex[:12]}"
+
             await emit_subagent_dispatched_event(
                 self._event_store,
-                session_id=arguments.get("session_id"),
+                session_id=plugin_session_id,
                 payload=payload,
             )
 
@@ -882,7 +893,7 @@ class StartExecuteSeedHandler:
                 payload,
                 response_shape={
                     "job_id": None,
-                    "session_id": arguments.get("session_id"),
+                    "session_id": plugin_session_id,
                     "execution_id": None,
                     "status": "delegated_to_plugin",
                     "dispatch_mode": "plugin",
