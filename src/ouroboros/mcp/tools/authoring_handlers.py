@@ -829,7 +829,7 @@ class InterviewHandler:
         session_id = arguments.get("session_id")
         answer = arguments.get("answer")
 
-        # --- Subagent dispatch: gate on runtime + opencode_mode ---
+        # --- Argument validation (before any dispatch) ---
         # Determine action from arguments
         if initial_context:
             action = "start"
@@ -837,6 +837,17 @@ class InterviewHandler:
             action = "answer"
         else:
             action = "resume"
+
+        # Reject invalid combos early — applies to both plugin and subprocess paths.
+        if action != "start" and not session_id:
+            return Result.err(
+                MCPToolError(
+                    "Must provide initial_context to start or session_id to resume",
+                    tool_name="ouroboros_interview",
+                )
+            )
+
+        # --- Subagent dispatch: gate on runtime + opencode_mode ---
         payload = build_interview_subagent(
             session_id=session_id or "new",
             action=action,
