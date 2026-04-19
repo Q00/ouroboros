@@ -283,6 +283,42 @@ class TestDotnetSubcommandAllowlist:
         assert ok is True
 
 
+class TestExecutablePathEscapes:
+    """Relative-path escapes must be refused even when the basename is allowlisted."""
+
+    def test_parent_directory_escape_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "../../tmp/pytest -q"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_absolute_path_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "/usr/bin/pytest -q"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_home_relative_path_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "~/bin/pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_parent_escape_with_mvnw_basename_dropped(self, tmp_path: Path) -> None:
+        """Even with pom.xml and mvnw in place, ../ escapes must not slip through."""
+        (tmp_path / "pom.xml").write_text("<project/>")
+        (tmp_path / "mvnw").write_text("#!/bin/sh\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "../../tmp/mvnw test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestGmakeValidation:
     """`gmake` must enforce the same explicit-target contract as ``make``."""
 

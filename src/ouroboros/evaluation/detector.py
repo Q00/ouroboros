@@ -309,14 +309,20 @@ _FORBIDDEN_TOKENS: tuple[str, ...] = ("&&", "||", "|", ";", ">", "<", "`", "$(")
 
 
 def _command_is_valid(working_dir: Path, command: str) -> bool:
-    """Return True iff ``command`` looks safely executable in ``working_dir``.
+    """Return True iff ``command`` is safely runnable from ``working_dir``.
 
     Checks:
     1. No shell chaining / redirects (Stage 1 runs via ``create_subprocess_exec``).
-    2. Leading token is on the allowlist.
-    3. Script-style invocations (``npm run <name>``, ``make <target>``, etc.)
-       reference a target that actually exists in the project's manifest.
-    4. Bare binaries are on PATH.
+    2. The executable is not a path that escapes ``working_dir``: absolute
+       paths (``/tmp/...``), home-relative paths (``~/...``), and
+       parent-directory escapes (``../..``) are refused. Only bare names
+       and ``./``-prefixed project-local wrappers survive.
+    3. The executable basename is on the curated allowlist.
+    4. Script-style invocations (``npm run <name>``, ``make <target>``,
+       ``just <recipe>`` …) reference a target declared in the project's
+       manifest, and bare tools (``pytest``, ``eslint`` …) must be
+       declared by the repo itself. Host ``PATH`` lookup is intentionally
+       not consulted.
     """
     if any(token in command for token in _FORBIDDEN_TOKENS):
         return False
@@ -330,7 +336,13 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
     if not parts:
         return False
 
-    head = Path(parts[0]).name
+    raw_head = parts[0]
+    if raw_head.startswith(("/", "~")) or ".." in Path(raw_head).parts:
+        return False
+    # ``./mvnw`` is fine, but any other path that points outside the cwd
+    # component (e.g. ``bin/foo`` pointing at a committed shim) would still
+    # need its basename to match the allowlist.
+    head = Path(raw_head).name
     if head not in _ALLOWED_EXECUTABLES:
         return False
 
