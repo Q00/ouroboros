@@ -869,46 +869,19 @@ class StartExecuteSeedHandler:
                 payload=payload,
             )
 
-            # Register a real JobManager record so job_id is valid for polling.
-            # The coroutine completes instantly — job transitions to COMPLETED
-            # with the dispatch receipt as result.  Callers who chain
-            # job_status(job_id) / job_result(job_id) get the dispatch metadata
-            # instead of an unusable None handle.
-            dispatch_text = (
-                f"Delegated to plugin subagent.\n\n"
-                f"Session ID: {arguments.get('session_id') or 'new'}\n"
-                f"Runtime: {self.agent_runtime_backend}\n\n"
-                "Task widget in OpenCode TUI shows live progress."
-            )
-            dispatch_meta = {
-                "_subagent": payload.to_dict(),
-                "dispatch_mode": "plugin",
-                "runtime_backend": self.agent_runtime_backend,
-            }
-
-            async def _plugin_receipt() -> MCPToolResult:
-                return MCPToolResult(
-                    content=(MCPContentItem(type=ContentType.TEXT, text=dispatch_text),),
-                    is_error=False,
-                    meta=dispatch_meta,
-                )
-
-            snapshot = await self._job_manager.start_job(
-                job_type="execute_seed",
-                initial_message="Delegated to plugin subagent",
-                runner=_plugin_receipt(),
-                links=JobLinks(
-                    session_id=arguments.get("session_id"),
-                ),
-            )
-
+            # Plugin mode: work runs in the OpenCode child session (Task
+            # pane), NOT in a JobManager background job.  Returning a fake
+            # instantly-completing job_id would break the polling contract —
+            # callers would see "completed" while the child is still running.
+            # Instead we return job_id=None with an explicit status so no one
+            # accidentally polls a non-existent job.
             return build_subagent_result(
                 payload,
                 response_shape={
-                    "job_id": snapshot.job_id,
+                    "job_id": None,
                     "session_id": arguments.get("session_id"),
                     "execution_id": None,
-                    "status": "delegated_to_subagent",
+                    "status": "delegated_to_plugin",
                     "dispatch_mode": "plugin",
                     "runtime_backend": self.agent_runtime_backend,
                 },

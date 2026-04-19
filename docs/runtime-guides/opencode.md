@@ -297,6 +297,20 @@ uv run ouroboros run workflow --runtime opencode --resume <session_id> ~/.ourobo
 
 Each task execution via `opencode run` creates a visible session in OpenCode's session history. Long-running workflows with many orchestrator steps will accumulate sessions. This does **not** affect the plugin path — child sessions created by the bridge are reparented inline as Task panes and do not pollute the picker. See [#331](https://github.com/Q00/ouroboros/issues/331) for subprocess reparenting.
 
+### Background-job tools are fire-and-forget in plugin mode
+
+`ouroboros_start_execute_seed` and `ouroboros_start_evolve_step` are background-job APIs in subprocess mode: they return a `job_id` that callers poll via `ouroboros_job_status` / `ouroboros_job_result`.
+
+In **plugin mode**, these tools delegate execution to the bridge plugin, which spawns a child session inside the host. The MCP server has no visibility into that child's lifecycle, so:
+
+- `job_id` is `None` (no `JobManager` record is created)
+- `status` is `"delegated_to_plugin"` — not `"running"` or `"queued"`
+- `ouroboros_job_status(None)` / `ouroboros_job_result(None)` are not useful handles
+
+The bridge manages its own lifecycle: child creation, progress rendering (Task panes), and completion signaling. Callers should check `status == "delegated_to_plugin"` and rely on the bridge's inline rendering rather than polling.
+
+The `channel_workflow_handler` (used by OpenClaw/Discord) is unaffected — its inner handlers are pinned to subprocess mode via `_isolate()`, producing real `job_id`s regardless of outer configuration.
+
 ### No interactive mode
 
 The adapter uses `opencode run --format json` (non-interactive). Features that require interactive OpenCode sessions (e.g., manual approval prompts) are not available during Ouroboros execution.

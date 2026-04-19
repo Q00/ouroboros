@@ -1,6 +1,7 @@
 """Tests for PR #442 round-5 reviewer fixes.
 
-Issue #1: start_* plugin-mode registers real JobManager record (real job_id).
+Issue #1: start_* plugin-mode does NOT create fake JobManager record.
+          Returns job_id=None, status=delegated_to_plugin.
 Issue #2: get_ouroboros_tools wires all plugin-capable handlers.
 Issue extra: lateral_think single persona dispatches as subagent in plugin mode.
 """
@@ -11,16 +12,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.persistence.event_store import EventStore
 
 # ---------------------------------------------------------------------------
-# Issue #1: StartExecuteSeedHandler plugin-mode returns real job_id
+# Issue #1: StartExecuteSeedHandler plugin-mode — no fake job
 # ---------------------------------------------------------------------------
 
 
 class TestStartExecuteSeedPluginJobId:
-    """start_execute_seed in plugin mode registers a real job."""
+    """start_execute_seed in plugin mode returns delegation receipt, no fake job."""
 
     @pytest.fixture
     async def event_store(self):
@@ -33,38 +33,23 @@ class TestStartExecuteSeedPluginJobId:
     def handler(self, event_store):
         from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 
-        jm = JobManager(event_store)
         return StartExecuteSeedHandler(
             execute_handler=MagicMock(),
             event_store=event_store,
-            job_manager=jm,
+            job_manager=None,
             agent_runtime_backend="opencode",
             opencode_mode="plugin",
         )
 
-    async def test_returns_real_job_id(self, handler) -> None:
+    async def test_returns_none_job_id(self, handler) -> None:
         result = await handler.handle({"seed_content": "goal: test"})
         assert result.is_ok
         meta = result.value.meta
-        assert meta["job_id"] is not None
-        assert meta["job_id"].startswith("job_")
+        assert meta["job_id"] is None
 
-    async def test_job_id_is_queryable(self, handler) -> None:
+    async def test_status_is_delegated_to_plugin(self, handler) -> None:
         result = await handler.handle({"seed_content": "goal: test"})
-        job_id = result.value.meta["job_id"]
-        snapshot = await handler._job_manager.get_snapshot(job_id)
-        assert snapshot.job_id == job_id
-        assert snapshot.job_type == "execute_seed"
-
-    async def test_job_completes_with_dispatch_meta(self, handler) -> None:
-        result = await handler.handle({"seed_content": "goal: test"})
-        job_id = result.value.meta["job_id"]
-        # Allow background task to settle
-        import asyncio
-
-        await asyncio.sleep(0.1)
-        snapshot = await handler._job_manager.get_snapshot(job_id)
-        assert snapshot.status in {JobStatus.COMPLETED, JobStatus.RUNNING}
+        assert result.value.meta["status"] == "delegated_to_plugin"
 
     async def test_subagent_payload_still_present(self, handler) -> None:
         result = await handler.handle({"seed_content": "goal: test"})
@@ -74,16 +59,15 @@ class TestStartExecuteSeedPluginJobId:
     async def test_dispatch_mode_is_plugin(self, handler) -> None:
         result = await handler.handle({"seed_content": "goal: test"})
         assert result.value.meta["dispatch_mode"] == "plugin"
-        assert result.value.meta["status"] == "delegated_to_subagent"
 
 
 # ---------------------------------------------------------------------------
-# Issue #1: StartEvolveStepHandler plugin-mode returns real job_id
+# Issue #1: StartEvolveStepHandler plugin-mode — no fake job
 # ---------------------------------------------------------------------------
 
 
 class TestStartEvolveStepPluginJobId:
-    """start_evolve_step in plugin mode registers a real job."""
+    """start_evolve_step in plugin mode returns delegation receipt, no fake job."""
 
     @pytest.fixture
     async def event_store(self):
@@ -96,28 +80,23 @@ class TestStartEvolveStepPluginJobId:
     def handler(self, event_store):
         from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
 
-        jm = JobManager(event_store)
         return StartEvolveStepHandler(
             evolve_handler=MagicMock(),
             event_store=event_store,
-            job_manager=jm,
+            job_manager=None,
             agent_runtime_backend="opencode",
             opencode_mode="plugin",
         )
 
-    async def test_returns_real_job_id(self, handler) -> None:
+    async def test_returns_none_job_id(self, handler) -> None:
         result = await handler.handle({"lineage_id": "lin-abc"})
         assert result.is_ok
         meta = result.value.meta
-        assert meta["job_id"] is not None
-        assert meta["job_id"].startswith("job_")
+        assert meta["job_id"] is None
 
-    async def test_job_id_is_queryable(self, handler) -> None:
+    async def test_status_is_delegated_to_plugin(self, handler) -> None:
         result = await handler.handle({"lineage_id": "lin-abc"})
-        job_id = result.value.meta["job_id"]
-        snapshot = await handler._job_manager.get_snapshot(job_id)
-        assert snapshot.job_id == job_id
-        assert snapshot.job_type == "evolve_step"
+        assert result.value.meta["status"] == "delegated_to_plugin"
 
     async def test_subagent_payload_still_present(self, handler) -> None:
         result = await handler.handle({"lineage_id": "lin-abc"})

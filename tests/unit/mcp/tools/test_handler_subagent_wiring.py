@@ -287,11 +287,12 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
         result = await handler.handle({})
         assert result.is_err
 
-    async def test_returns_real_job_id(self, handler) -> None:
+    async def test_plugin_mode_returns_no_job_id(self, handler) -> None:
+        """Plugin path delegates to host — no fake job_id."""
         result = await handler.handle({"seed_content": "goal: test"})
         assert result.is_ok
-        assert result.value.meta["job_id"] is not None
-        assert result.value.meta["job_id"].startswith("job_")
+        assert result.value.meta["job_id"] is None
+        assert result.value.meta["status"] == "delegated_to_plugin"
 
 
 # ---------------------------------------------------------------------------

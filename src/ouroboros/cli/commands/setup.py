@@ -829,6 +829,38 @@ def _ensure_opencode_plugin_entry() -> None:
         print_success(f"Bridge plugin entry verified in {config_path}")
 
 
+def _cleanup_plugin_artifacts() -> None:
+    """Remove bridge-plugin files and config entries (subprocess mode cleanup).
+
+    Called when switching to subprocess mode so both paths are not active
+    simultaneously.  Best-effort — failures are warned but do not abort setup.
+    """
+    plugin_dir = opencode_config_dir() / "plugins" / "ouroboros-bridge"
+    if plugin_dir.exists():
+        try:
+            shutil.rmtree(plugin_dir)
+            print_info(f"Removed stale bridge plugin ({plugin_dir}/)")
+        except OSError:
+            print_warning(f"Could not remove {plugin_dir}/ — clean manually.")
+
+    config_path = find_opencode_config(allow_default=False)
+    if config_path is not None:
+        try:
+            raw = config_path.read_text()
+            data = json.loads(_strip_jsonc(raw))
+            plugins = data.get("plugin", [])
+            if isinstance(plugins, list):
+                kept = [e for e in plugins if not _is_bridge_plugin_entry(e)]
+                if len(kept) != len(plugins):
+                    data["plugin"] = kept
+                    with config_path.open("w") as f:
+                        json.dump(data, f, indent=2)
+                        f.write("\n")
+                    print_info(f"Removed bridge plugin entry from {config_path}")
+        except (json.JSONDecodeError, OSError, KeyError):
+            pass  # best effort
+
+
 def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
     """Configure Ouroboros for the OpenCode runtime.
 
@@ -879,11 +911,25 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
         with config_path.open("w") as f:
             yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
+        # Mutual-exclusion cleanup: remove plugin-mode artifacts so both
+        # paths are not active simultaneously (duplicate dispatch).
+        _cleanup_plugin_artifacts()
+
         print_success(f"Configured OpenCode subprocess runtime (CLI: {opencode_path})")
         print_info(f"Config saved to: {config_path}")
         return
 
     # mode == "plugin" — persist mode signal, then install plugin/MCP entries.
+    # Mutual-exclusion cleanup: clear subprocess-mode config keys so both
+    # paths are not active simultaneously (duplicate dispatch).
+    if orch.get("runtime_backend") == "opencode":
+        del orch["runtime_backend"]
+    if orch.get("opencode_cli_path"):
+        del orch["opencode_cli_path"]
+    llm = config_dict.get("llm")
+    if isinstance(llm, dict) and llm.get("backend") == "opencode":
+        del llm["backend"]
+
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
