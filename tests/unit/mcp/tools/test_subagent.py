@@ -575,11 +575,11 @@ class TestShouldDispatchViaPlugin:
 
         assert should_dispatch_via_plugin("opencode", "subprocess") is False
 
-    def test_opencode_mode_none_defaults_to_plugin(self) -> None:
-        """Legacy installs predate mode field; preserve plugin-only behaviour."""
+    def test_opencode_mode_none_does_not_dispatch(self) -> None:
+        """Upgraded users without explicit plugin setup must NOT get envelopes."""
         from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 
-        assert should_dispatch_via_plugin("opencode", None) is True
+        assert should_dispatch_via_plugin("opencode", None) is False
 
     def test_non_opencode_runtime_never_dispatches(self) -> None:
         from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
