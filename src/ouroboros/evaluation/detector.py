@@ -205,6 +205,18 @@ async def ensure_mechanical_toml(
     return True
 
 
+# Glob patterns for manifests whose name varies per project (common in
+# .NET repos where ``*.csproj`` / ``*.sln`` / ``*.fsproj`` stand in for a
+# top-level manifest). Listed separately from ``_MANIFEST_CANDIDATES`` so
+# the cheap exact-name lookup stays the hot path.
+_MANIFEST_GLOB_PATTERNS: tuple[str, ...] = (
+    "*.csproj",
+    "*.sln",
+    "*.fsproj",
+    "*.vbproj",
+)
+
+
 def _collect_manifests(working_dir: Path) -> dict[str, str]:
     """Read top-level manifest files into a name → text-excerpt mapping."""
     collected: dict[str, str] = {}
@@ -215,6 +227,18 @@ def _collect_manifests(working_dir: Path) -> dict[str, str]:
         try:
             raw = candidate.read_bytes()[:_MANIFEST_EXCERPT_BYTES]
             collected[name] = raw.decode("utf-8", errors="replace")
+        except OSError:
+            continue
+    for pattern in _MANIFEST_GLOB_PATTERNS:
+        try:
+            for path in working_dir.glob(pattern):
+                if not path.is_file() or path.name in collected:
+                    continue
+                try:
+                    raw = path.read_bytes()[:_MANIFEST_EXCERPT_BYTES]
+                except OSError:
+                    continue
+                collected[path.name] = raw.decode("utf-8", errors="replace")
         except OSError:
             continue
     return collected
@@ -1156,12 +1180,27 @@ _NODE_PM_VALUE_FLAGS: frozenset[str] = frozenset(
 _YARN_WORKSPACE_KEYWORDS: frozenset[str] = frozenset({"workspace", "workspaces"})
 
 
+# Yarn Berry ``workspaces foreach`` flags that consume a value. The
+# remaining positionals after the flag soup is the script the user wants
+# to run across the matched workspaces.
+_YARN_FOREACH_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--include",
+        "--exclude",
+        "--jobs",
+        "-j",
+        "--from",
+        "--since",
+    }
+)
+
+
 def _strip_pm_flags(head: str, parts: list[str]) -> list[str]:
     """Return ``parts`` with leading package-manager flag pairs dropped.
 
-    Handles ``--filter <name>`` / ``--workspace=<name>`` / ``-w <name>`` and
-    the ``yarn workspace <name>`` form so downstream checks see a clean
-    ``<pm> [run] <script>`` shape.
+    Handles ``--filter <name>`` / ``--workspace=<name>`` / ``-w <name>``,
+    ``yarn workspace <name>``, and ``yarn workspaces foreach [flags] <script>``
+    so downstream checks see a clean ``<pm> [run] <script>`` shape.
     """
     out: list[str] = [parts[0]]
     i = 1
@@ -1176,9 +1215,28 @@ def _strip_pm_flags(head: str, parts: list[str]) -> list[str]:
             i += 2
             continue
         i += 1
-    # Strip ``yarn workspace <name>`` pattern
     if head == "yarn" and i < len(parts) and parts[i] in _YARN_WORKSPACE_KEYWORDS:
-        i += 2  # skip keyword and workspace name
+        keyword = parts[i]
+        i += 1
+        if keyword == "workspaces" and i < len(parts) and parts[i] == "foreach":
+            # ``yarn workspaces foreach [flags] <script>`` — skip ``foreach``
+            # plus any of its flag/value pairs so the next positional is the
+            # script being invoked across workspaces.
+            i += 1
+            while i < len(parts):
+                token = parts[i]
+                if not token.startswith("-"):
+                    break
+                if "=" in token:
+                    i += 1
+                    continue
+                if token in _YARN_FOREACH_VALUE_FLAGS:
+                    i += 2
+                    continue
+                i += 1
+        elif i < len(parts):
+            # ``yarn workspace <name> <script>``: skip the workspace name.
+            i += 1
     out.extend(parts[i:])
     return out
 
@@ -1237,20 +1295,24 @@ def _node_workspace_filter(head: str, parts: list[str]) -> str | None:
     """Return the workspace name targeted by a PM invocation, if any.
 
     Recognises ``--filter <name>`` / ``--filter=<name>`` / ``-F <name>``
-    (pnpm), ``--workspace <name>`` / ``-w <name>`` (npm), and
-    ``yarn workspace <name>`` / ``yarn workspaces foreach --include <name>``.
+    (pnpm), ``--workspace <name>`` / ``-w <name>`` (npm),
+    ``yarn workspace <name>``, and
+    ``yarn workspaces foreach [flags] --include <name> <script>``.
     Returns ``None`` when no workspace filter is present.
     """
     i = 1
     while i < len(parts):
         token = parts[i]
-        if token in {"--filter", "-F", "--workspace", "-w"} and i + 1 < len(parts):
+        if token in {"--filter", "-F", "--workspace", "-w", "--include"} and i + 1 < len(parts):
             return parts[i + 1]
-        for prefix in ("--filter=", "--workspace="):
+        for prefix in ("--filter=", "--workspace=", "--include="):
             if token.startswith(prefix):
                 return token[len(prefix) :]
-        if head == "yarn" and token in {"workspace", "workspaces"} and i + 1 < len(parts):
+        if head == "yarn" and token == "workspace" and i + 1 < len(parts):
             return parts[i + 1]
+        # ``yarn workspaces foreach --include <name> <script>``: the filter
+        # is the ``--include`` flag; the ``workspaces`` keyword itself does
+        # not carry the name.
         i += 1
     return None
 

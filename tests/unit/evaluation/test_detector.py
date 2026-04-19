@@ -279,6 +279,13 @@ class TestMavenGoalAllowlist:
 class TestDotnetSubcommandAllowlist:
     """`dotnet publish`/`pack`/`nuget push` must not survive validation."""
 
+    def test_dotnet_build_accepted_with_csproj_only(self, tmp_path: Path) -> None:
+        """SDK-style repos with only ``*.csproj`` still seed the detector."""
+        (tmp_path / "app.csproj").write_text("<Project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "dotnet build"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
     def test_dotnet_publish_rejected(self, tmp_path: Path) -> None:
         (tmp_path / "global.json").write_text("{}")
         (tmp_path / "app.csproj").write_text("<Project/>")
@@ -1302,6 +1309,18 @@ class TestWorkspaceScopedPMCommands:
         )
         self._make_workspace(tmp_path, "web", "lint")
         adapter = _FakeAdapter(response=json.dumps({"lint": "pnpm --filter=web lint"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_yarn_workspaces_foreach_include_resolves(self, tmp_path: Path) -> None:
+        """yarn berry ``workspaces foreach --include <ws> <script>`` is supported."""
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "root", "workspaces": ["packages/*"]})
+        )
+        self._make_workspace(tmp_path, "web", "test")
+        adapter = _FakeAdapter(
+            response=json.dumps({"test": "yarn workspaces foreach --include web test"})
+        )
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
