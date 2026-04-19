@@ -271,3 +271,148 @@ class TestLateralThinkSinglePersonaDispatch:
             data = json.loads(r.value.content[0].text)
             assert "_subagent" in data, f"{persona} missing _subagent"
             assert data["persona"] == persona
+
+
+# ---------------------------------------------------------------------------
+# Blocker #1 (actual Round 5): InterviewHandler validates before plugin dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestInterviewHandlerValidationBeforeDispatch:
+    """Empty args or answer-without-session_id must error, not dispatch."""
+
+    @pytest.fixture
+    async def event_store(self):
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        yield store
+        await store.close()
+
+    @pytest.fixture
+    def handler(self, event_store):
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+
+        return InterviewHandler(
+            llm_backend="openai",
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+    async def test_empty_args_returns_error(self, handler) -> None:
+        """Empty {} must NOT dispatch — returns validation error."""
+        result = await handler.handle({})
+        assert result.is_err
+        assert (
+            "initial_context" in str(result.error).lower()
+            or "session_id" in str(result.error).lower()
+        )
+
+    async def test_answer_without_session_id_returns_error(self, handler) -> None:
+        """answer='foo' without session_id must NOT dispatch."""
+        result = await handler.handle({"answer": "some answer"})
+        assert result.is_err
+        assert (
+            "session_id" in str(result.error).lower()
+            or "initial_context" in str(result.error).lower()
+        )
+
+    async def test_valid_start_dispatches(self, handler) -> None:
+        """initial_context present → should dispatch (not error)."""
+        import json
+
+        result = await handler.handle({"initial_context": "build a CLI tool"})
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        assert "_subagent" in data
+
+    async def test_valid_resume_dispatches(self, handler) -> None:
+        """session_id present → should dispatch (not error)."""
+        import json
+
+        result = await handler.handle({"session_id": "ses_abc123"})
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        assert "_subagent" in data
+
+    async def test_valid_answer_dispatches(self, handler) -> None:
+        """session_id + answer → should dispatch (not error)."""
+        import json
+
+        result = await handler.handle({"session_id": "ses_abc123", "answer": "yes"})
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        assert "_subagent" in data
+
+
+# ---------------------------------------------------------------------------
+# Blocker #2 (actual Round 5): PMInterviewHandler validates before plugin dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestPMInterviewHandlerValidationBeforeDispatch:
+    """Invalid action+args combos must error, not dispatch."""
+
+    @pytest.fixture
+    async def event_store(self):
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        yield store
+        await store.close()
+
+    @pytest.fixture
+    def handler(self, event_store):
+        from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+
+        return PMInterviewHandler(
+            llm_backend="openai",
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+    async def test_empty_args_returns_error(self, handler) -> None:
+        """Empty {} must NOT dispatch — returns validation error."""
+        result = await handler.handle({})
+        assert result.is_err
+        assert (
+            "initial_context" in str(result.error).lower()
+            or "session_id" in str(result.error).lower()
+        )
+
+    async def test_generate_without_session_id_returns_error(self, handler) -> None:
+        """action=generate without session_id must error."""
+        result = await handler.handle({"action": "generate"})
+        assert result.is_err
+
+    async def test_resume_without_session_id_returns_error(self, handler) -> None:
+        """action=resume (explicit) without session_id must error."""
+        result = await handler.handle({"action": "resume"})
+        assert result.is_err
+
+    async def test_valid_start_dispatches(self, handler) -> None:
+        """initial_context present → should dispatch."""
+        import json
+
+        result = await handler.handle({"initial_context": "invoice SaaS app"})
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        assert "_subagent" in data
+
+    async def test_valid_resume_dispatches(self, handler) -> None:
+        """session_id present → should dispatch."""
+        import json
+
+        result = await handler.handle({"session_id": "ses_pm_123"})
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        assert "_subagent" in data
+
+    async def test_valid_generate_dispatches(self, handler) -> None:
+        """action=generate + session_id → should dispatch."""
+        import json
+
+        result = await handler.handle({"action": "generate", "session_id": "ses_pm_123"})
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        assert "_subagent" in data

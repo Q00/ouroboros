@@ -366,6 +366,22 @@ class PMInterviewHandler:
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
 
+        # --- Argument validation (before any dispatch) ---
+        # Reject invalid action+args combos early — applies to both plugin and subprocess.
+        _valid_combo = (
+            (action == "start" and initial_context)
+            or (action == "select_repos" and selected_repos is not None)
+            or (action == "resume" and session_id)
+            or (action == "generate" and session_id)
+        )
+        if not _valid_combo:
+            return Result.err(
+                MCPToolError(
+                    "Must provide initial_context to start, or session_id to resume/generate",
+                    tool_name="ouroboros_pm_interview",
+                )
+            )
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         payload = build_pm_interview_subagent(
             session_id=session_id or "new",
