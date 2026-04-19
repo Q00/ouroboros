@@ -351,6 +351,39 @@ class TestExecutablePathEscapes:
         assert ok is False
 
 
+class TestPathPrefixedExecutableExists:
+    """Path-prefixed executables must exist in the repo, not just match basename."""
+
+    def test_bin_pytest_dropped_when_file_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "bin/pytest -q"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_tools_eslint_dropped_when_file_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "demo", "devDependencies": {"eslint": "^9"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"lint": "tools/eslint ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
+class TestDotnetMsbuildRejected:
+    """`dotnet msbuild /t:Publish` must not be accepted as Stage 1."""
+
+    def test_msbuild_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "global.json").write_text("{}")
+        (tmp_path / "app.csproj").write_text("<Project/>")
+        adapter = _FakeAdapter(
+            response=json.dumps({"build": "dotnet msbuild /t:Publish"})
+        )
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestGmakeValidation:
     """`gmake` must enforce the same explicit-target contract as ``make``."""
 

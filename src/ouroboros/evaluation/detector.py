@@ -183,9 +183,9 @@ async def ensure_mechanical_toml(
     # known-good file intact if rendering or writing fails on any
     # transient error — ``ouroboros detect --force`` never destroys the
     # last working config before a replacement is ready.
+    temp = target.with_name(target.name + ".tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.with_name(target.name + ".tmp")
         temp.write_text(_render_toml(validated), encoding="utf-8")
         os.replace(temp, target)
     except OSError as exc:
@@ -344,6 +344,13 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
     # need its basename to match the allowlist.
     head = Path(raw_head).name
     if head not in _ALLOWED_EXECUTABLES:
+        return False
+    # When the proposal uses a path prefix (``bin/pytest``, ``tools/eslint``,
+    # ``./mvnw``), require the file to actually exist in the repo. Otherwise
+    # ``create_subprocess_exec`` would later fail with a phantom "no such
+    # file" error at Stage 1 time, which this detector is supposed to
+    # prevent.
+    if "/" in raw_head and not (working_dir / raw_head).is_file():
         return False
 
     return _verify_entry_point(working_dir, head, parts)
@@ -1395,13 +1402,17 @@ def _gmake_validator(working_dir: Path, parts: list[str]) -> bool:
 # Non-mutating dotnet subcommands. ``publish`` / ``pack`` / ``nuget push`` /
 # ``run`` / ``restore`` / ``new`` mutate either project artifacts, the package
 # cache, or external feeds and must never be persisted as Stage 1 commands.
+# ``dotnet msbuild`` exposes arbitrary MSBuild ``/t:<target>`` switches
+# (``Publish`` / ``Pack`` / ``Restore`` …) which can mutate state or publish
+# artifacts; parsing MSBuild target lists is out of scope for the validator,
+# so it is deliberately omitted. Users who need ``msbuild`` can author the
+# command into ``mechanical.toml`` manually.
 _DOTNET_SAFE_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "build",
         "test",
         "format",
         "list",
-        "msbuild",
     }
 )
 
