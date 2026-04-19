@@ -424,9 +424,7 @@ class TestHermesCliRuntime:
         ):
             messages = [
                 message
-                async for message in runtime.execute_task(
-                    "Do the thing", resume_handle=handle
-                )
+                async for message in runtime.execute_task("Do the thing", resume_handle=handle)
             ]
 
         assert len(messages) == 1
@@ -463,12 +461,8 @@ class TestHermesCliRuntime:
         orchestrator flows always started a fresh session.
         """
         runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
-        process = _FakeProcess(
-            "Continued work\nsession_id: 20260413_120000_deadbeef\n"
-        )
-        handle = RuntimeHandle(
-            backend="hermes_cli", native_session_id="20260412_090000_cafebabe"
-        )
+        process = _FakeProcess("Continued work\nsession_id: 20260413_120000_deadbeef\n")
+        handle = RuntimeHandle(backend="hermes_cli", native_session_id="20260412_090000_cafebabe")
 
         with patch(
             "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
@@ -476,9 +470,7 @@ class TestHermesCliRuntime:
         ) as mock_exec:
             messages = [
                 message
-                async for message in runtime.execute_task(
-                    "Continue the task", resume_handle=handle
-                )
+                async for message in runtime.execute_task("Continue the task", resume_handle=handle)
             ]
 
         assert len(messages) == 1
@@ -520,9 +512,7 @@ class TestHermesCliRuntime:
         from ouroboros.orchestrator.adapter import TaskResult
 
         runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
-        process = _FakeProcess(
-            "Completed\nsession_id: 20260413_120000_deadbeef\n"
-        )
+        process = _FakeProcess("Completed\nsession_id: 20260413_120000_deadbeef\n")
 
         with patch(
             "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
@@ -537,9 +527,7 @@ class TestHermesCliRuntime:
         assert task_result.final_message == "Completed"
         assert task_result.session_id == "20260413_120000_deadbeef"
         assert task_result.resume_handle is not None
-        assert (
-            task_result.resume_handle.native_session_id == "20260413_120000_deadbeef"
-        )
+        assert task_result.resume_handle.native_session_id == "20260413_120000_deadbeef"
         # Substitutability contract: the error branch type is ProviderError.
         assert issubclass(ProviderError, Exception)
 
