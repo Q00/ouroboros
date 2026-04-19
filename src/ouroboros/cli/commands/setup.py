@@ -813,6 +813,17 @@ def _ensure_opencode_plugin_entry() -> None:
 
     data["plugin"] = cleaned
 
+    # Warn if we're about to overwrite a .jsonc file that contained comments.
+    if config_path.suffix == ".jsonc":
+        try:
+            original_text = config_path.read_text(encoding="utf-8")
+        except OSError:
+            original_text = ""
+        if "//" in original_text or "/*" in original_text:
+            print_warning(
+                f"Note: JSONC comments in {config_path} were removed during config update."
+            )
+
     try:
         _atomic_write_text(config_path, json.dumps(data, indent=2) + "\n")
     except OSError as exc:
@@ -937,10 +948,6 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
     _ensure_opencode_mcp_entry()
     _ensure_opencode_plugin_entry()
     print_success("Installed OpenCode bridge plugin and registered MCP entry")
-
-    # MCP sidecar for Claude Code (runtime-independent, only if Claude present)
-    if (Path.home() / ".claude").is_dir():
-        _ensure_claude_mcp_entry()
 
 
 # ── Brownfield repo helpers ──────────────────────────────────────

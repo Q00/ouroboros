@@ -30,11 +30,20 @@ import {
   readText,
   stamp,
 } from "./ouroboros-bridge.ts"
+import {
+  _resolveMid,
+  _dispatch,
+  _patch,
+  _PATCH_RETRIES,
+  _RESOLVE_RETRIES,
+} from "./ouroboros-bridge.ts"
 
 const ENV_BACKUP = { ...process.env }
+const PLATFORM_BACKUP = process.platform
 const restoreEnv = () => {
   for (const k of Object.keys(process.env)) if (!(k in ENV_BACKUP)) delete process.env[k]
   for (const k of Object.keys(ENV_BACKUP)) process.env[k] = ENV_BACKUP[k]
+  Object.defineProperty(process, "platform", { value: PLATFORM_BACKUP })
 }
 
 afterEach(restoreEnv)
@@ -558,5 +567,137 @@ describe("buildEnvelope — dispatch schema", () => {
     const env = buildEnvelope([okR("a")], [], [])
     expect(env.failed).toEqual([])
     expect(env.skipped).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Runtime function tests (mocked client)
+// ---------------------------------------------------------------------------
+
+function mockCli(overrides: Partial<{
+  create: (...a: unknown[]) => Promise<unknown>
+  prompt: (...a: unknown[]) => Promise<unknown>
+  abort: (...a: unknown[]) => Promise<unknown>
+  messages: (...a: unknown[]) => Promise<unknown>
+}> = {}) {
+  return {
+    session: {
+      create: overrides.create ?? (async () => ({ data: { id: "child_abc" } })),
+      prompt: overrides.prompt ?? (async () => ({ data: { parts: [{ type: "text", text: "done" }] } })),
+      abort: overrides.abort ?? (async () => ({})),
+      messages: overrides.messages ?? (async () => ({ data: [] })),
+    },
+  }
+}
+
+function mockBase(patchFn?: (...a: unknown[]) => Promise<unknown>) {
+  return {
+    patch: patchFn ?? (async () => ({})),
+  }
+}
+
+describe("_resolveMid — message ID resolution with retry", () => {
+  test("finds message matching callID", async () => {
+    const cli = mockCli({
+      messages: async () => ({
+        data: [
+          { info: { id: "m1", role: "user" }, parts: [{ type: "text" }] },
+          { info: { id: "m2", role: "assistant" }, parts: [{ type: "tool", callID: "call_xyz" }] },
+        ],
+      }),
+    })
+    const mid = await _resolveMid(cli as never, "pid", "call_xyz")
+    expect(mid).toBe("m2")
+  })
+
+  test("falls back to newest assistant when no callID match", async () => {
+    const cli = mockCli({
+      messages: async () => ({
+        data: [
+          { info: { id: "m1", role: "assistant" }, parts: [{ type: "text" }] },
+          { info: { id: "m2", role: "user" }, parts: [{ type: "text" }] },
+        ],
+      }),
+    })
+    const mid = await _resolveMid(cli as never, "pid", "no_match")
+    expect(mid).toBe("m1")
+  })
+
+  test("returns null after retries when no messages", async () => {
+    const cli = mockCli({
+      messages: async () => ({ data: [] }),
+    })
+    const mid = await _resolveMid(cli as never, "pid", "call_xyz")
+    expect(mid).toBeNull()
+  })
+
+  test("returns null when messages call throws", async () => {
+    const cli = mockCli({
+      messages: async () => { throw new Error("network") },
+    })
+    const mid = await _resolveMid(cli as never, "pid", "call_xyz")
+    expect(mid).toBeNull()
+  })
+})
+
+describe("_patch — PATCH with retry", () => {
+  test("succeeds on first attempt", async () => {
+    const b = mockBase(async () => ({}))
+    await expect(_patch(b as never, "pid", "mid", "part1", {}, "test")).resolves.toBeUndefined()
+  })
+
+  test("retries on error then succeeds", async () => {
+    let calls = 0
+    const b = mockBase(async () => {
+      calls++
+      if (calls < 3) return { error: "transient" }
+      return {}
+    })
+    await expect(_patch(b as never, "pid", "mid", "part1", {}, "test")).resolves.toBeUndefined()
+    expect(calls).toBe(3)
+  })
+
+  test("throws after max retries", async () => {
+    const b = mockBase(async () => ({ error: "permanent" }))
+    await expect(_patch(b as never, "pid", "mid", "part1", {}, "test")).rejects.toThrow(
+      /PATCH failed after/,
+    )
+  })
+})
+
+describe("_dispatch — child session lifecycle", () => {
+  test("success: creates child, patches running, fires prompt", async () => {
+    const patchCalls: string[] = []
+    const cli = mockCli({
+      create: async () => ({ data: { id: "child_123" } }),
+      prompt: async () => ({ data: { parts: [{ type: "text", text: "result" }] } }),
+    })
+    const b = mockBase(async (_a: unknown) => {
+      patchCalls.push("patched")
+      return {}
+    })
+    const sub = { tool: "ouroboros_qa", title: "QA", prompt: "check it", agent: "general" }
+    const result = await _dispatch(cli as never, b as never, "pid", "mid", sub as never)
+    expect(result.childID).toBe("child_123")
+    // At least the PATCH-running call should have fired (awaited phase)
+    expect(patchCalls.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test("throws when child session create returns no id", async () => {
+    const cli = mockCli({ create: async () => ({ data: {} }) })
+    const b = mockBase()
+    const sub = { tool: "ouroboros_qa", title: "QA", prompt: "check", agent: "general" }
+    await expect(
+      _dispatch(cli as never, b as never, "pid", "mid", sub as never),
+    ).rejects.toThrow(/child session create returned no id/)
+  })
+
+  test("throws when PATCH-running fails", async () => {
+    const cli = mockCli({ create: async () => ({ data: { id: "child_456" } }) })
+    const b = mockBase(async () => ({ error: "server error" }))
+    const sub = { tool: "ouroboros_qa", title: "QA", prompt: "check", agent: "general" }
+    await expect(
+      _dispatch(cli as never, b as never, "pid", "mid", sub as never),
+    ).rejects.toThrow(/PATCH failed/)
   })
 })

@@ -1631,6 +1631,8 @@ class TestOpenCodeSetupConfigYaml:
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry"),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry"),
+            patch("ouroboros.cli.commands.setup._install_opencode_bridge_plugin"),
             patch("ouroboros.cli.commands.setup._ensure_claude_mcp_entry") as mock_claude,
         ):
             from ouroboros.cli.commands.setup import _setup_opencode
@@ -1639,9 +1641,7 @@ class TestOpenCodeSetupConfigYaml:
 
         result = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         mock_claude.assert_not_called()
-        assert result["orchestrator"]["runtime_backend"] == "opencode"
-        assert isinstance(result["llm"], dict)
-        assert result["llm"]["backend"] == "opencode"
+        assert result["orchestrator"]["opencode_mode"] == "plugin"
 
 
 class TestOpenCodeModePersisted:

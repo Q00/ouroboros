@@ -548,3 +548,6 @@ export default {
   server: OuroborosBridge,
 }
 
+// Test-only exports for mocked-client coverage.
+export { resolveMid as _resolveMid, dispatch as _dispatch, patch as _patch, sleep as _sleep, PATCH_RETRIES as _PATCH_RETRIES, RESOLVE_RETRIES as _RESOLVE_RETRIES }
+
