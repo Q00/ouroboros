@@ -852,7 +852,13 @@ def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     if sub is None:
         return False
     if sub != "run":
-        return sub in _UV_NON_RUN_SUBCOMMANDS
+        if sub not in _UV_NON_RUN_SUBCOMMANDS:
+            return False
+        # Even read-only subcommands (``uv tree`` / ``uv version``) require a
+        # Python project in the target directory — otherwise ``uv`` will
+        # either fail to resolve metadata or operate on the wrong cwd.
+        project_root = _uv_project_root(working_dir, parts)
+        return (project_root / "pyproject.toml").is_file() or (project_root / "uv.lock").is_file()
     tool = _uv_run_tool(parts)
     if tool is None:
         return False
@@ -1678,6 +1684,8 @@ def _gmake_validator(working_dir: Path, parts: list[str]) -> bool:
         return False
     target = _make_target(parts)
     if target is None:
+        return False
+    if _is_destructive_target(target):
         return False
     return _makefile_has_target(working_dir, target)
 

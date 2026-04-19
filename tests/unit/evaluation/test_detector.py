@@ -495,7 +495,7 @@ class TestDestructiveTargetsBlocked:
         assert ok is False
 
     def test_rake_deploy_rejected(self, tmp_path: Path) -> None:
-        (tmp_path / "Rakefile").write_text('task :deploy do\nend\n')
+        (tmp_path / "Rakefile").write_text("task :deploy do\nend\n")
         adapter = _FakeAdapter(response=json.dumps({"build": "rake deploy"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
@@ -536,6 +536,14 @@ class TestGmakeValidation:
         (tmp_path / "Makefile").write_text("build:\n\techo\n")
         (tmp_path / "package.json").write_text("{}")
         adapter = _FakeAdapter(response=json.dumps({"test": "gmake test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_gmake_destructive_target_rejected(self, tmp_path: Path) -> None:
+        """`gmake deploy` must be dropped even when the Makefile declares it."""
+        (tmp_path / "Makefile").write_text("deploy:\n\techo deploying\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"build": "gmake deploy"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
 
@@ -1250,6 +1258,14 @@ class TestPackageManagerStateChanges:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
+    def test_uv_tree_without_pyproject_rejected(self, tmp_path: Path) -> None:
+        """Even read-only ``uv tree`` needs a Python project to act on."""
+        # Seed a non-Python manifest so the detector runs at all.
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv tree"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
 
 class TestManifestCandidates:
     """Common project-manifest filename variants must seed the LLM call."""
@@ -1541,15 +1557,27 @@ class TestMakeValidation:
 
 
 class TestEvaluationPublicSurface:
-    """Removed preset symbols are no longer importable — explicit breaking change."""
+    """Legacy preset symbols stay importable as deprecated compat shims."""
 
-    def test_language_preset_is_not_importable(self) -> None:
-        with pytest.raises(ImportError):
-            from ouroboros.evaluation import LanguagePreset  # noqa: F401
+    def test_language_preset_importable(self) -> None:
+        from ouroboros.evaluation import LanguagePreset
 
-    def test_detect_language_is_not_importable(self) -> None:
-        with pytest.raises(ImportError):
-            from ouroboros.evaluation import detect_language  # noqa: F401
+        assert LanguagePreset(name="demo").test_command is None
+
+    def test_detect_language_emits_deprecation_warning(self, tmp_path: Path) -> None:
+        """Shim must flag callers so they migrate rather than silently lose config."""
+        import warnings
+
+        from ouroboros.evaluation import detect_language
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = detect_language(tmp_path)
+
+        assert result is None
+        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert deprecations, "detect_language must emit a DeprecationWarning on call"
+        assert "ensure_mechanical_toml" in str(deprecations[0].message)
 
 
 class TestAutoDetectBackendPropagation:

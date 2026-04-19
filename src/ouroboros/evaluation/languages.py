@@ -16,6 +16,7 @@ skips gracefully rather than running the wrong tool.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import shlex
@@ -294,4 +295,47 @@ def build_mechanical_config(
     )
 
 
-__all__ = ["build_mechanical_config"]
+@dataclass(frozen=True, slots=True)
+class LanguagePreset:
+    """Deprecated legacy preset shape.
+
+    Ouroboros 0.29+ stopped shipping per-language presets; Stage 1 reads
+    ``.ouroboros/mechanical.toml`` directly. This dataclass remains only
+    so that external callers that import ``LanguagePreset`` continue to
+    load. Every field defaults to ``None`` and the type does not feed
+    into Stage 1 resolution.
+    """
+
+    name: str = ""
+    lint_command: tuple[str, ...] | None = None
+    build_command: tuple[str, ...] | None = None
+    test_command: tuple[str, ...] | None = None
+    static_command: tuple[str, ...] | None = None
+    coverage_command: tuple[str, ...] | None = None
+
+
+def detect_language(working_dir: Path) -> LanguagePreset | None:  # noqa: ARG001
+    """Deprecated compatibility shim — always returns ``None``.
+
+    Emits a ``DeprecationWarning`` on every call so third-party callers
+    notice the semantic change. Migrate to
+    :func:`ouroboros.evaluation.detector.ensure_mechanical_toml` followed
+    by :func:`build_mechanical_config`, which reads the authored toml.
+    """
+    import warnings
+
+    warnings.warn(
+        "ouroboros.evaluation.detect_language() was removed in 0.29. "
+        "Call ensure_mechanical_toml() + build_mechanical_config() instead. "
+        "This shim always returns None.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return None
+
+
+__all__ = [
+    "LanguagePreset",
+    "build_mechanical_config",
+    "detect_language",
+]
