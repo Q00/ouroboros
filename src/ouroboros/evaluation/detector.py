@@ -681,8 +681,10 @@ def _uv_run_tool(parts: list[str]) -> str | None:
     """Return the tool name in a ``uv run ...`` invocation, or None.
 
     Properly skips ``--flag value`` pairs listed in ``_UV_RUN_VALUE_OPTIONS``
-    and the self-contained ``--flag=value`` form, so commands like
-    ``uv run --group dev --with pytest pytest -q`` resolve to ``pytest``.
+    and the self-contained ``--flag=value`` form. ``-m`` / ``--module``
+    is special-cased: the following token is the module being invoked
+    (``uv run -m pytest``), so the validator treats that token as the
+    "tool" just like the bare form ``uv run pytest``.
     """
     try:
         run_idx = parts.index("run")
@@ -693,6 +695,10 @@ def _uv_run_tool(parts: list[str]) -> str | None:
         token = parts[i]
         if not token.startswith("-"):
             return token
+        if token in {"-m", "--module"} and i + 1 < len(parts):
+            return parts[i + 1]
+        if token.startswith(("--module=", "-m=")):
+            return token.split("=", 1)[1]
         if "=" in token:
             i += 1
             continue

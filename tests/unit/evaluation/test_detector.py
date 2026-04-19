@@ -377,9 +377,7 @@ class TestDotnetMsbuildRejected:
     def test_msbuild_rejected(self, tmp_path: Path) -> None:
         (tmp_path / "global.json").write_text("{}")
         (tmp_path / "app.csproj").write_text("<Project/>")
-        adapter = _FakeAdapter(
-            response=json.dumps({"build": "dotnet msbuild /t:Publish"})
-        )
+        adapter = _FakeAdapter(response=json.dumps({"build": "dotnet msbuild /t:Publish"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
 
@@ -795,6 +793,30 @@ class TestUvRunOptionParsing:
         (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
         (tmp_path / "requirements-dev.txt").write_text("pyright==1.1\n")
         adapter = _FakeAdapter(response=json.dumps({"static": "uv run pyright"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_uv_run_dash_m_module_accepted(self, tmp_path: Path) -> None:
+        """``uv run -m pytest`` treats the module as the tool, not a skip value."""
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv run -m pytest -q"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        assert build_mechanical_config(tmp_path).test_command == (
+            "uv",
+            "run",
+            "-m",
+            "pytest",
+            "-q",
+        )
+
+    def test_uv_run_module_long_form_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pyright>=1"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv run --module pyright"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
