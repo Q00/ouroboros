@@ -365,7 +365,11 @@ def _register_hermes_mcp_server() -> None:
             print_warning(f"{hermes_config} top-level is not a mapping — resetting.")
             config_data = {}
 
-    config_data.setdefault("mcp_servers", {})
+    mcp_servers = config_data.get("mcp_servers")
+    if not isinstance(mcp_servers, dict):
+        if mcp_servers is not None:
+            print_warning(f"{hermes_config} 'mcp_servers' section is not a mapping — resetting.")
+        config_data["mcp_servers"] = {}
 
     # Use UVX install by default for robustness
     detected = _detect_mcp_entry()

@@ -533,6 +533,39 @@ class TestHermesSetup:
         ]
         assert result["mcp_servers"]["ouroboros"]["enabled"] is True
 
+    def test_register_hermes_mcp_server_repairs_malformed_mcp_servers_section(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Reset non-mapping ``mcp_servers:`` section instead of crashing.
+
+        Regression guard for the PR #457 round-2 review finding — previously
+        a hand-edited config like ``mcp_servers: just_a_string`` slipped past
+        ``setdefault`` and tripped ``TypeError: 'str' object does not support
+        item assignment`` on the very next line, so
+        ``ouroboros setup --runtime hermes`` failed instead of self-repairing.
+        """
+        hermes_dir = tmp_path / ".hermes"
+        hermes_dir.mkdir()
+        (hermes_dir / "config.yaml").write_text(
+            "mcp_servers: just_a_string\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                side_effect=lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None,
+            ),
+        ):
+            setup_cmd._register_hermes_mcp_server()
+
+        result = yaml.safe_load((hermes_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert isinstance(result["mcp_servers"], dict)
+        assert result["mcp_servers"]["ouroboros"]["command"] == "uvx"
+        assert result["mcp_servers"]["ouroboros"]["enabled"] is True
+
     def test_setup_hermes_does_not_register_claude_integration(self, tmp_path: Path) -> None:
         """Hermes setup should stay scoped to Hermes even when Claude is installed."""
         config_dir = tmp_path / ".ouroboros"
