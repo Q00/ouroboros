@@ -423,7 +423,10 @@ class TestHermesCliRuntime:
             return_value=process,
         ):
             messages = [
-                message async for message in runtime.execute_task("Do the thing", handle=handle)
+                message
+                async for message in runtime.execute_task(
+                    "Do the thing", resume_handle=handle
+                )
             ]
 
         assert len(messages) == 1
@@ -449,6 +452,115 @@ class TestHermesCliRuntime:
         assert messages[0].is_error
         assert messages[0].data["error_type"] == "TimeoutError"
         assert process.terminated or process.killed
+
+    @pytest.mark.asyncio
+    async def test_execute_task_resumes_from_resume_handle(self) -> None:
+        """Protocol contract: ``resume_handle`` feeds ``hermes chat --resume``.
+
+        Regression guard for the PR #457 review finding — previously the
+        runtime accepted a non-standard ``handle=`` kwarg and silently
+        swallowed the protocol's ``resume_handle``, so multi-turn
+        orchestrator flows always started a fresh session.
+        """
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        process = _FakeProcess(
+            "Continued work\nsession_id: 20260413_120000_deadbeef\n"
+        )
+        handle = RuntimeHandle(
+            backend="hermes_cli", native_session_id="20260412_090000_cafebabe"
+        )
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            messages = [
+                message
+                async for message in runtime.execute_task(
+                    "Continue the task", resume_handle=handle
+                )
+            ]
+
+        assert len(messages) == 1
+        call_args = mock_exec.call_args.args
+        assert "--resume" in call_args
+        assert "20260412_090000_cafebabe" in call_args
+
+    @pytest.mark.asyncio
+    async def test_execute_task_resumes_from_legacy_resume_session_id(self) -> None:
+        """Legacy ``resume_session_id`` fallback still resumes correctly."""
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        process = _FakeProcess("ok\n")
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            _ = [
+                message
+                async for message in runtime.execute_task(
+                    "Continue",
+                    resume_session_id="20260412_090000_cafebabe",
+                )
+            ]
+
+        call_args = mock_exec.call_args.args
+        assert "--resume" in call_args
+        assert "20260412_090000_cafebabe" in call_args
+
+    @pytest.mark.asyncio
+    async def test_execute_task_to_result_returns_task_result_on_success(self) -> None:
+        """Protocol contract: returns ``Result[TaskResult, ProviderError]``.
+
+        Regression guard for the PR #457 review finding — previously the
+        runtime returned ``Result[AgentMessage, RuntimeError]``, breaking
+        substitutability with other runtimes.
+        """
+        from ouroboros.core.errors import ProviderError
+        from ouroboros.orchestrator.adapter import TaskResult
+
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        process = _FakeProcess(
+            "Completed\nsession_id: 20260413_120000_deadbeef\n"
+        )
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            result = await runtime.execute_task_to_result("Do the thing")
+
+        assert result.is_ok
+        task_result = result.unwrap()
+        assert isinstance(task_result, TaskResult)
+        assert task_result.success is True
+        assert task_result.final_message == "Completed"
+        assert task_result.session_id == "20260413_120000_deadbeef"
+        assert task_result.resume_handle is not None
+        assert (
+            task_result.resume_handle.native_session_id == "20260413_120000_deadbeef"
+        )
+        # Substitutability contract: the error branch type is ProviderError.
+        assert issubclass(ProviderError, Exception)
+
+    @pytest.mark.asyncio
+    async def test_execute_task_to_result_returns_provider_error_on_failure(
+        self,
+    ) -> None:
+        """Failure path returns ``Result.err(ProviderError(...))`` per protocol."""
+        from ouroboros.core.errors import ProviderError
+
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        process = _FakeProcess("", stderr="kaboom", returncode=1)
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            result = await runtime.execute_task_to_result("Do the thing")
+
+        assert result.is_err
+        assert isinstance(result.error, ProviderError)
 
 
 class TestHermesCliRuntimeChildEnv:

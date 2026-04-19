@@ -24,12 +24,14 @@ import yaml
 
 from ouroboros.codex import resolve_packaged_codex_skill_path
 from ouroboros.config import get_hermes_cli_path
+from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
 from ouroboros.observability.logging import get_logger
 from ouroboros.orchestrator.adapter import (
     AgentMessage,
     AgentRuntime,
     RuntimeHandle,
+    TaskResult,
 )
 
 log = get_logger(__name__)
@@ -358,13 +360,27 @@ class HermesCliRuntime(AgentRuntime):
     async def execute_task(
         self,
         prompt: str,
-        *,
-        system_prompt: str | None = None,
         tools: list[str] | None = None,
-        handle: RuntimeHandle | None = None,
-        **kwargs: Any,
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
     ) -> AsyncIterator[AgentMessage]:
-        """Execute a task via Hermes CLI."""
+        """Execute a task via Hermes CLI.
+
+        Conforms to the ``AgentRuntime`` protocol: callers pass a
+        backend-neutral ``resume_handle`` (preferred) or a legacy
+        ``resume_session_id``; Hermes resolves both into its native
+        ``hermes chat --resume <session_id>`` invocation so that
+        multi-turn orchestrator flows resume the prior session instead
+        of starting a fresh one.
+        """
+
+        # Resolve the effective resume handle. Prefer the backend-neutral
+        # handle; fall back to the legacy session id for callers that have
+        # not migrated yet.
+        handle: RuntimeHandle | None = resume_handle
+        if handle is None and resume_session_id:
+            handle = self._build_runtime_handle(resume_session_id, None)
 
         # 1. Attempt deterministic skill dispatch before invoking Hermes
         intercepted_messages = await self._maybe_dispatch_skill_intercept(prompt, handle)
@@ -881,28 +897,61 @@ class HermesCliRuntime(AgentRuntime):
     async def execute_task_to_result(
         self,
         prompt: str,
-        *,
-        system_prompt: str | None = None,
         tools: list[str] | None = None,
-        handle: RuntimeHandle | None = None,
-        **kwargs: Any,
-    ) -> Result[AgentMessage, RuntimeError]:
-        """Execute a task and return the final message."""
-        last_message = None
+        system_prompt: str | None = None,
+        resume_handle: RuntimeHandle | None = None,
+        resume_session_id: str | None = None,
+    ) -> Result[TaskResult, ProviderError]:
+        """Execute a task and collect all messages into a ``TaskResult``.
+
+        Conforms to the ``AgentRuntime`` contract so Hermes is fully
+        substitutable for other runtimes. Generic consumers receive the
+        standard ``TaskResult`` shape (``success``/``final_message``/
+        ``messages``/``session_id``/``resume_handle``) rather than a
+        single ``AgentMessage``.
+        """
+        messages: list[AgentMessage] = []
+        final_message = ""
+        success = True
+        session_id: str | None = None
+        final_resume_handle: RuntimeHandle | None = resume_handle
+
         async for message in self.execute_task(
             prompt,
-            system_prompt=system_prompt,
             tools=tools,
-            handle=handle,
-            **kwargs,
+            system_prompt=system_prompt,
+            resume_handle=resume_handle,
+            resume_session_id=resume_session_id,
         ):
-            last_message = message
+            messages.append(message)
 
-        if (
-            last_message
-            and last_message.type == "result"
-            and last_message.data.get("subtype") == "success"
-        ):
-            return Result.ok(last_message)
+            if message.resume_handle is not None:
+                final_resume_handle = message.resume_handle
 
-        return Result.err(RuntimeError(last_message.content if last_message else "Task failed"))
+            if message.is_final:
+                final_message = message.content
+                success = not message.is_error
+                session_id = message.data.get("session_id")
+                if session_id and final_resume_handle is None:
+                    final_resume_handle = self._build_runtime_handle(session_id, None)
+
+        if not success:
+            return Result.err(
+                ProviderError(
+                    message=final_message or "Hermes task failed",
+                    details={"messages": [m.content for m in messages]},
+                )
+            )
+
+        if session_id is None and final_resume_handle is not None:
+            session_id = final_resume_handle.native_session_id
+
+        return Result.ok(
+            TaskResult(
+                success=success,
+                final_message=final_message,
+                messages=tuple(messages),
+                session_id=session_id,
+                resume_handle=final_resume_handle,
+            )
+        )
