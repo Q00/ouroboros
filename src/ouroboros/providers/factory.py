@@ -37,18 +37,25 @@ _LLM_USE_CASES = frozenset({"default", "interview"})
 # warnings on init and on per-event violations, audit metadata marking the
 # session as soft-enforced).
 #
-# Gemini is the concrete case today: ``GeminiCLIAdapter`` cooperates by
-# prepending a ``<tool_envelope>`` directive to the system prompt and
-# emits ``gemini_cli_adapter.tool_envelope_violation`` for any ``tool_use``
-# stream event that names a tool outside the envelope.  Hard enforcement
-# would require either a Gemini CLI flag that does not exist yet or a
-# sandboxed subprocess surface that is out of scope for this slice.
+# Gemini: ``GeminiCLIAdapter`` prepends a ``<tool_envelope>`` directive
+# to the system prompt and emits
+# ``gemini_cli_adapter.tool_envelope_violation`` for any out-of-envelope
+# ``tool_use`` stream event.  Hard enforcement would need a Gemini CLI
+# flag that does not exist.
 #
-# Claude/Codex/OpenCode enforce hard (SDK ``allowed_tools``, CLI
-# ``--sandbox``).  LiteLLM is not listed at all because it is a
-# completion-only API that never executes tools from the adapter —
-# enforcement is vacuously satisfied on that path.
-_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = frozenset({"gemini"})
+# OpenCode: ``OpenCodeLLMAdapter`` injects a ``## Tool Constraints``
+# section into the composed prompt and emits
+# ``opencode_adapter.tool_envelope_violation`` for any ``tool_use``
+# event outside the envelope.  The ``opencode run`` CLI has no
+# ``--permission-mode``/``--allowed-tools`` flag either (see the
+# adapter docstring), so enforcement is cooperative here as well.
+#
+# Claude Code and Codex remain hard-enforced (SDK ``allowed_tools`` and
+# ``--sandbox`` respectively).  LiteLLM is *not* listed: it is a
+# completion-only API that never executes tools from the adapter, so an
+# envelope has nothing to restrict on that path (enforcement is
+# vacuously satisfied).
+_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = frozenset({"gemini", "opencode"})
 
 
 def resolve_llm_backend(backend: str | None = None) -> str:

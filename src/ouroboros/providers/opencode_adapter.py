@@ -153,6 +153,26 @@ class OpenCodeLLMAdapter:
         self._max_retries = max_retries
         self._timeout = timeout if timeout and timeout > 0 else None
 
+        # OpenCode's ``run`` CLI exposes no hard tool-restriction flag, so the
+        # ``allowed_tools`` envelope can only be enforced softly: injected as a
+        # ``## Tool Constraints`` block in the prompt (see ``_build_prompt``)
+        # and verified post-hoc by scanning ``tool_use`` events in the
+        # response stream.  Announce the soft-enforcement status at init time
+        # so audit consumers can tell an OpenCode session apart from a
+        # hard-enforced Claude/Codex one.
+        if self._allowed_tools is not None:
+            log.warning(
+                "opencode_adapter.soft_tool_enforcement",
+                allowed_tools=list(self._allowed_tools),
+                reason=(
+                    "OpenCode CLI has no native allowed_tools flag; the "
+                    "envelope is injected as a prompt directive and "
+                    "violations are detected post-hoc in the tool_use "
+                    "event stream.  Enforcement is cooperative, not "
+                    "mandatory."
+                ),
+            )
+
     def _resolve_cli_path(self, cli_path: str | Path | None) -> str:
         """Resolve the OpenCode CLI binary path.
 
@@ -364,6 +384,32 @@ class OpenCodeLLMAdapter:
                 if isinstance(text, str) and text.strip():
                     text_parts.append(text.strip())
         return "\n".join(text_parts)
+
+    def _audit_tool_envelope_violations(self, events: list[dict[str, Any]]) -> None:
+        """Warn on ``tool_use`` events outside the declared envelope.
+
+        OpenCode's ``allowed_tools`` is enforced softly (prompt directive
+        only), so this scan is detection rather than prevention: by the
+        time we see the event the CLI has already issued the tool call.
+        The warning is the operator's signal that cooperative enforcement
+        was violated on this run.
+        """
+        if self._allowed_tools is None:
+            return
+        allowed = frozenset(self._allowed_tools)
+        for event in events:
+            if event.get("type") != "tool_use":
+                continue
+            part = event.get("part", {})
+            tool_name = part.get("tool") if isinstance(part, dict) else None
+            if not isinstance(tool_name, str) or not tool_name:
+                continue
+            if tool_name not in allowed:
+                log.warning(
+                    "opencode_adapter.tool_envelope_violation",
+                    tool=tool_name,
+                    allowed_tools=list(self._allowed_tools),
+                )
 
     def _extract_error_from_events(self, events: list[dict[str, Any]]) -> str | None:
         """Extract a terminal error message from OpenCode JSON events.
@@ -596,6 +642,12 @@ class OpenCodeLLMAdapter:
                     provider=self._provider_name,
                 )
             )
+
+        # Post-hoc soft-enforcement audit: if an envelope was declared,
+        # warn about any ``tool_use`` events outside it.  Runs regardless
+        # of success/failure so operators can diagnose violations even on
+        # failed runs.
+        self._audit_tool_envelope_violations(events)
 
         # Check for errors in the event stream
         error_msg = self._extract_error_from_events(events)
