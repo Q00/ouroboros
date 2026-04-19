@@ -332,6 +332,55 @@ def _validate_proposal(
 _FORBIDDEN_TOKENS: tuple[str, ...] = ("&&", "||", "|", ";", ">", "<", "`", "$(")
 
 
+# Target / recipe / task names that strongly imply the command mutates
+# external state: CI deploy/publish/release workflows, gem binaries like
+# ``capistrano``, destructive clean / reset flows, etc. Any user-named
+# target that matches this set is refused even when it exists in the
+# project's Makefile / justfile / Taskfile / build.gradle / Rakefile,
+# because Stage 1 is supposed to be zero-cost verification. Users who
+# *really* want to run these as Stage 1 can author them into
+# ``mechanical.toml`` by hand.
+_DESTRUCTIVE_TARGET_NAMES: frozenset[str] = frozenset(
+    {
+        "deploy",
+        "deployment",
+        "redeploy",
+        "release",
+        "publish",
+        "publish-package",
+        "publishpackage",
+        "push",
+        "upload",
+        "ship",
+        "install",
+        "uninstall",
+        "nuget-push",
+        "pypi-upload",
+        "docker-push",
+        "docker-publish",
+        "container-push",
+        "prod-deploy",
+        "production-deploy",
+        "staging-deploy",
+        "purge",
+        "reset",
+        "capistrano",
+        "cap",
+    }
+)
+
+
+def _is_destructive_target(name: str) -> bool:
+    """True when ``name`` looks like a state-changing pipeline step."""
+    lowered = name.lower()
+    if lowered in _DESTRUCTIVE_TARGET_NAMES:
+        return True
+    # Catch common suffix / prefix patterns (``deploy-staging``,
+    # ``publish-docker`` …). A single bare ``-`` split is enough; we don't
+    # want to be over-aggressive and reject ``test-integration``.
+    return any(token in _DESTRUCTIVE_TARGET_NAMES for token in lowered.replace("_", "-").split("-"))
+
+
 def _command_is_valid(working_dir: Path, command: str) -> bool:
     """Return True iff ``command`` is safely runnable from ``working_dir``.
 
@@ -439,11 +488,15 @@ def _verify_entry_point(
             # verify that from outside, so the command is dropped. Users who
             # want the default target can name it explicitly (``make all``).
             return False
+        if _is_destructive_target(target):
+            return False
         return _makefile_has_target(working_dir, target)
 
     if head == "just":
         recipe = _first_positional(parts)
         if recipe is None:
+            return False
+        if _is_destructive_target(recipe):
             return False
         return _justfile_has_recipe(working_dir, recipe)
 
@@ -1745,12 +1798,16 @@ def _gradle_task_is_declared(working_dir: Path, parts: list[str]) -> bool:
     ``check``, ``test`` …) or a task declared in ``build.gradle`` /
     ``build.gradle.kts`` via the common registration forms
     (``task <name> {…}``, ``tasks.register("<name>")``,
-    ``tasks.create("<name>")``).
+    ``tasks.create("<name>")``). Task names that look destructive
+    (``publish``, ``deploy``, ``release`` …) are refused even when
+    declared — Stage 1 is not the right place to run them.
     """
     import re as _re
 
     task = _first_positional(parts)
     if task is None:
+        return False
+    if _is_destructive_target(task):
         return False
     if task in _GRADLE_BUILTIN_TASKS:
         return True
@@ -1779,6 +1836,8 @@ def _task_task_is_declared(working_dir: Path, parts: list[str]) -> bool:
 
     name = _first_positional(parts)
     if name is None:
+        return False
+    if _is_destructive_target(name):
         return False
     for candidate in ("Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml"):
         path = working_dir / candidate
@@ -1814,6 +1873,8 @@ def _rake_task_is_declared(working_dir: Path, parts: list[str]) -> bool:
     task = _first_positional(parts)
     if task is None:
         return False
+    if _is_destructive_target(task):
+        return False
     for candidate in ("Rakefile", "rakefile"):
         path = working_dir / candidate
         if not path.is_file():
@@ -1848,6 +1909,9 @@ def _bundle_subcommand_is_safe(working_dir: Path, parts: list[str]) -> bool:
     for token in parts[exec_idx + 1 :]:
         if token.startswith("-"):
             continue
+        # Refuse deploy-style gem binaries even when the gem is declared.
+        if _is_destructive_target(token):
+            return False
         if (working_dir / "bin" / token).is_file():
             return True
         try:

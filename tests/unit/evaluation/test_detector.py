@@ -462,6 +462,59 @@ class TestDotnetMsbuildRejected:
         assert ok is False
 
 
+class TestDestructiveTargetsBlocked:
+    """Task runners must reject deploy/publish/release style targets."""
+
+    def test_make_deploy_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "Makefile").write_text("deploy:\n\techo deploying\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"build": "make deploy"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_just_release_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "justfile").write_text("release:\n    cargo publish\n")
+        adapter = _FakeAdapter(response=json.dumps({"build": "just release"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_task_publish_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "Taskfile.yml").write_text(
+            "version: '3'\ntasks:\n  publish:\n    cmds:\n      - echo publishing\n"
+        )
+        adapter = _FakeAdapter(response=json.dumps({"build": "task publish"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_gradle_publish_rejected_even_if_declared(self, tmp_path: Path) -> None:
+        (tmp_path / "build.gradle.kts").write_text(
+            'plugins { java }\n\ntasks.register("publish") {}\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"build": "gradle publish"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_rake_deploy_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "Rakefile").write_text('task :deploy do\nend\n')
+        adapter = _FakeAdapter(response=json.dumps({"build": "rake deploy"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bundle_exec_capistrano_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "Gemfile").write_text('gem "capistrano"\n')
+        adapter = _FakeAdapter(response=json.dumps({"build": "bundle exec capistrano deploy"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_suffix_match_deploy_staging_rejected(self, tmp_path: Path) -> None:
+        """Compound names like ``deploy-staging`` must also be caught."""
+        (tmp_path / "Makefile").write_text("deploy-staging:\n\techo\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"build": "make deploy-staging"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestGmakeValidation:
     """`gmake` must enforce the same explicit-target contract as ``make``."""
 
