@@ -45,7 +45,11 @@ from ouroboros.evaluation.detector import (
     ensure_mechanical_toml,
     has_mechanical_toml,
 )
-from ouroboros.evaluation.languages import build_mechanical_config
+from ouroboros.evaluation.languages import (
+    LanguagePreset,
+    build_mechanical_config,
+    detect_language,
+)
 from ouroboros.evaluation.mechanical import (
     MechanicalConfig,
     MechanicalVerifier,
@@ -101,9 +105,11 @@ __all__ = [
     "VoterRole",
     # Stage 1
     "DetectedCommands",
+    "LanguagePreset",  # deprecated compat shim
     "MechanicalConfig",
     "MechanicalVerifier",
     "build_mechanical_config",
+    "detect_language",  # deprecated compat shim — always returns None
     "ensure_mechanical_toml",
     "has_mechanical_toml",
     "run_mechanical_verification",

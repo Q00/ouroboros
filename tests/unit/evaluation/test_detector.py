@@ -491,6 +491,61 @@ class TestBunRuntimeBuiltins:
         assert ok is False
 
 
+class TestUvRunOptionParsing:
+    """`uv run --group dev pytest` must parse ``pytest`` as the tool."""
+
+    def test_uv_run_with_group_option_parses_tool_correctly(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\n[dependency-groups]\ndev = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv run --group dev pytest -q"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value=None):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        assert build_mechanical_config(tmp_path).test_command == (
+            "uv",
+            "run",
+            "--group",
+            "dev",
+            "pytest",
+            "-q",
+        )
+
+    def test_uv_run_with_provides_tool(self, tmp_path: Path) -> None:
+        """`uv run --with pytest pytest` is valid even without pytest declared."""
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv run --with pytest pytest -q"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value=None):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_uv_run_inline_equals_option_value(self, tmp_path: Path) -> None:
+        """`--with=pytest` (inline) is self-contained."""
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv run --with=pytest pytest"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value=None):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestEvaluationPublicSurface:
+    """Deprecated compat symbols must remain importable."""
+
+    def test_language_preset_is_importable(self) -> None:
+        from ouroboros.evaluation import LanguagePreset  # noqa: F401
+
+    def test_detect_language_is_importable_and_returns_none(self, tmp_path: Path) -> None:
+        from ouroboros.evaluation import detect_language
+
+        assert detect_language(tmp_path) is None
+
+
 class TestAutoDetectBackendPropagation:
     """_auto_detect_mechanical_toml must thread backend into adapter construction."""
 

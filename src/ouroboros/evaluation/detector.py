@@ -472,27 +472,102 @@ def _first_positional(parts: list[str]) -> str | None:
     return None
 
 
+# ``uv run`` options that consume a value argument (``--flag value`` form).
+# When ``--flag=value`` is used the entire token is self-contained and no
+# look-ahead is needed. This list drives the ``uv run`` parser so that
+# proposals like ``uv run --group dev pytest`` resolve to ``pytest`` rather
+# than to the value of ``--group``.
+_UV_RUN_VALUE_OPTIONS: frozenset[str] = frozenset(
+    {
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "--group",
+        "--no-group",
+        "--only-group",
+        "--extra",
+        "--no-extra",
+        "--python",
+        "-p",
+        "--directory",
+        "--project",
+        "--module",
+        "-m",
+        "--package",
+        "--env-file",
+        "--index-url",
+        "--extra-index-url",
+        "--default-index",
+        "--find-links",
+        "--config-setting",
+        "-C",
+        "--resolution",
+        "--override",
+        "--constraint",
+        "--link-mode",
+        "--python-preference",
+        "--upgrade-package",
+        "-P",
+        "--refresh-package",
+        "--script",
+        "--color",
+        "--cache-dir",
+        "--index",
+        "--index-strategy",
+        "--keyring-provider",
+        "--exclude-newer",
+    }
+)
+
+# ``uv run`` boolean flags (no value). Everything else starting with ``-``
+# that is not in ``_UV_RUN_VALUE_OPTIONS`` is treated as boolean — the
+# parser skips one token. ``--flag=value`` is always self-contained.
+
+
+def _uv_run_tool(parts: list[str]) -> str | None:
+    """Return the tool name in a ``uv run ...`` invocation, or None.
+
+    Properly skips ``--flag value`` pairs listed in ``_UV_RUN_VALUE_OPTIONS``
+    and the self-contained ``--flag=value`` form, so commands like
+    ``uv run --group dev --with pytest pytest -q`` resolve to ``pytest``.
+    """
+    try:
+        run_idx = parts.index("run")
+    except ValueError:
+        return None
+    i = run_idx + 1
+    while i < len(parts):
+        token = parts[i]
+        if not token.startswith("-"):
+            return token
+        if "=" in token:
+            i += 1
+            continue
+        if token in _UV_RUN_VALUE_OPTIONS:
+            i += 2
+            continue
+        i += 1
+    return None
+
+
 def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     """Validate ``uv`` invocations by inspecting the sub-tool they invoke.
 
     ``uv run <tool>`` is the common pattern; we require ``<tool>`` to exist in
     a venv entry (``.venv/bin/<tool>``), on PATH, or to be declared in
-    ``pyproject.toml`` dependencies so the repo can actually install it. Other
-    ``uv`` subcommands (``uv sync``, ``uv build``, ``uv pip install`` …) are
-    accepted by presence of the manifest alone — they do not invoke a
-    user-controlled tool name.
+    ``pyproject.toml`` dependencies so the repo can actually install it.
+    When ``uv run --with <pkg>`` provisions a package just for the run, the
+    packaged tool is treated as declared. Other ``uv`` subcommands
+    (``uv sync``, ``uv build``, ``uv pip install`` …) are accepted by
+    presence of the manifest alone — they do not invoke a user-controlled
+    tool name.
     """
     sub = _first_positional(parts)
     if sub is None:
         return False
     if sub != "run":
         return True
-    tool: str | None = None
-    for token in parts[parts.index("run") + 1 :]:
-        if token.startswith("-"):
-            continue
-        tool = token
-        break
+    tool = _uv_run_tool(parts)
     if tool is None:
         return False
     if (working_dir / ".venv" / "bin" / tool).exists():
@@ -501,7 +576,41 @@ def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
         return True
     if shutil.which(tool) is not None:
         return True
-    return _pyproject_declares_dependency(working_dir, tool)
+    if _pyproject_declares_dependency(working_dir, tool):
+        return True
+    # Fall back to ``--with <pkg>`` / ``--with-editable <pkg>`` provisioning:
+    # uv will install that package for the duration of the run, making the
+    # tool available even when it is not declared elsewhere.
+    return _uv_with_supplies_tool(parts, tool)
+
+
+def _uv_with_supplies_tool(parts: list[str], tool: str) -> bool:
+    """True when ``--with <pkg>`` / ``--with-editable`` declares ``tool``."""
+    lowered = tool.lower()
+    i = 0
+    while i < len(parts):
+        token = parts[i]
+        candidate: str | None = None
+        if token in {"--with", "--with-editable"} and i + 1 < len(parts):
+            candidate = parts[i + 1]
+            i += 2
+        elif token.startswith(("--with=", "--with-editable=")):
+            candidate = token.split("=", 1)[1]
+            i += 1
+        else:
+            i += 1
+            continue
+        if candidate is None:
+            continue
+        name = candidate.strip()
+        for sep in "[<>=!~ ":
+            idx = name.find(sep)
+            if idx != -1:
+                name = name[:idx]
+                break
+        if name.lower() == lowered:
+            return True
+    return False
 
 
 def _pyproject_declares_dependency(working_dir: Path, name: str) -> bool:
