@@ -319,6 +319,46 @@ def _format_interview_transcript(state: InterviewState) -> str:
     return "\n".join(lines).rstrip()
 
 
+async def _plugin_save_state(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+    """Persist interview state without needing InterviewEngine (no LLM dep).
+
+    Used exclusively in the plugin dispatch path where litellm may not be
+    installed. Returns Result so callers can propagate persistence failures.
+    """
+    try:
+        file_path = state_dir / f"interview_{state.interview_id}.json"
+        state.mark_updated()
+        content = state.model_dump_json(indent=2)
+
+        def _sync_write() -> None:
+            file_path.write_text(content, encoding="utf-8")
+
+        await asyncio.to_thread(_sync_write)
+        return Result.ok(file_path)
+    except (OSError, ValueError) as e:
+        return Result.err(f"Failed to save interview state: {e}")
+
+
+async def _plugin_load_state(state_dir: Path, interview_id: str) -> Result[InterviewState, str]:
+    """Load interview state without needing InterviewEngine (no LLM dep).
+
+    Used exclusively in the plugin dispatch path.
+    """
+    file_path = state_dir / f"interview_{interview_id}.json"
+    if not file_path.exists():
+        return Result.err(f"Interview state not found: {interview_id}")
+    try:
+
+        def _sync_read() -> str:
+            return file_path.read_text(encoding="utf-8")
+
+        content = await asyncio.to_thread(_sync_read)
+        state = InterviewState.model_validate_json(content)
+        return Result.ok(state)
+    except (OSError, ValueError) as e:
+        return Result.err(f"Failed to load interview state: {e}")
+
+
 @dataclass
 class GenerateSeedHandler:
     """Handler for the ouroboros_generate_seed tool.
@@ -868,19 +908,11 @@ class InterviewHandler:
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            # Plugin mode: persist state server-side, delegate LLM work to subagent.
-            # This ensures resume/generate_seed can load real interview state.
-            llm_adapter = self.llm_adapter or create_llm_adapter(
-                backend=self.llm_backend,
-                max_turns=1,
-                use_case="interview",
-                allowed_tools=_interview_allowed_tools(self.llm_backend),
-            )
-            engine = self.interview_engine or InterviewEngine(
-                llm_adapter=llm_adapter,
-                state_dir=Path.home() / ".ouroboros" / "data",
-                model=get_clarification_model(self.llm_backend),
-            )
+            # Plugin mode: persist state server-side WITHOUT creating an LLM adapter.
+            # Only state I/O is needed here — the subagent handles all LLM work.
+            # This avoids importing litellm (optional dep) on plugin-only installs.
+            state_dir = Path.home() / ".ouroboros" / "data"
+            state_dir.mkdir(parents=True, exist_ok=True)
 
             transcript = ""
             real_session_id = session_id
@@ -895,17 +927,39 @@ class InterviewHandler:
                             tool_name="ouroboros_interview",
                         )
                     )
-                result = await engine.start_interview(resolved_context.value, cwd=cwd)
-                if result.is_err:
+                # Pure state creation — mirrors InterviewEngine.start_interview()
+                from ouroboros.core.security import InputValidator
+
+                is_valid, error_msg = InputValidator.validate_initial_context(
+                    resolved_context.value
+                )
+                if not is_valid:
+                    return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
+                from datetime import UTC, datetime
+
+                interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+                state = InterviewState(
+                    interview_id=interview_id,
+                    initial_context=resolved_context.value,
+                )
+                # Detect brownfield
+                if cwd:
+                    from ouroboros.bigbang.explore import detect_brownfield
+
+                    if detect_brownfield(cwd):
+                        state.is_brownfield = True
+                        state.codebase_paths = [{"path": cwd, "role": "primary"}]
+
+                # Persist — propagate failure instead of silently ignoring
+                save_result = await _plugin_save_state(state_dir, state)
+                if save_result.is_err:
                     return Result.err(
-                        MCPToolError(str(result.error), tool_name="ouroboros_interview")
+                        MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
                     )
-                state = result.value
-                await engine.save_state(state)
                 real_session_id = state.interview_id
 
             elif session_id:
-                load_result = await engine.load_state(session_id)
+                load_result = await _plugin_load_state(state_dir, session_id)
                 if load_result.is_err:
                     return Result.err(
                         MCPToolError(str(load_result.error), tool_name="ouroboros_interview")
@@ -915,7 +969,11 @@ class InterviewHandler:
                 if answer and state.rounds and state.rounds[-1].user_response is None:
                     state.rounds[-1].user_response = answer
                     state.mark_updated()
-                    await engine.save_state(state)
+                    save_result = await _plugin_save_state(state_dir, state)
+                    if save_result.is_err:
+                        return Result.err(
+                            MCPToolError(str(save_result.error), tool_name="ouroboros_interview")
+                        )
                 # Build transcript from persisted rounds
                 transcript = _format_interview_transcript(state)
 

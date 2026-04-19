@@ -404,9 +404,17 @@ class PMInterviewHandler:
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
-            # Plugin mode: persist state server-side, delegate LLM work to subagent.
-            # This ensures resume/generate operations have real transcript to load.
-            engine = self._get_engine()
+            # Plugin mode: persist state server-side WITHOUT creating an LLM adapter.
+            # Only state I/O needed — subagent handles all LLM work.
+            # Avoids importing litellm (optional dep) on plugin-only installs.
+            from ouroboros.mcp.tools.authoring_handlers import (
+                _plugin_load_state,
+                _plugin_save_state,
+            )
+
+            state_dir = Path.home() / ".ouroboros" / "data"
+            state_dir.mkdir(parents=True, exist_ok=True)
+
             transcript = ""
             real_session_id = session_id
 
@@ -417,17 +425,35 @@ class PMInterviewHandler:
                     return Result.err(
                         MCPToolError(str(resolved.error), tool_name="ouroboros_pm_interview")
                     )
-                result = await engine.inner.start_interview(resolved.value, cwd=cwd)
-                if result.is_err:
+                # Pure state creation — no LLM needed
+                from ouroboros.core.security import InputValidator
+
+                is_valid, error_msg = InputValidator.validate_initial_context(resolved.value)
+                if not is_valid:
+                    return Result.err(MCPToolError(error_msg, tool_name="ouroboros_pm_interview"))
+                from datetime import UTC, datetime
+
+                interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+                state = InterviewState(
+                    interview_id=interview_id,
+                    initial_context=resolved.value,
+                )
+                if cwd:
+                    from ouroboros.bigbang.explore import detect_brownfield
+
+                    if detect_brownfield(cwd):
+                        state.is_brownfield = True
+                        state.codebase_paths = [{"path": cwd, "role": "primary"}]
+
+                save_result = await _plugin_save_state(state_dir, state)
+                if save_result.is_err:
                     return Result.err(
-                        MCPToolError(str(result.error), tool_name="ouroboros_pm_interview")
+                        MCPToolError(str(save_result.error), tool_name="ouroboros_pm_interview")
                     )
-                state = result.value
-                await engine.inner.save_state(state)
                 real_session_id = state.interview_id
 
             elif session_id:
-                load_result = await engine.inner.load_state(session_id)
+                load_result = await _plugin_load_state(state_dir, session_id)
                 if load_result.is_err:
                     return Result.err(
                         MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
@@ -437,7 +463,11 @@ class PMInterviewHandler:
                 if answer and state.rounds and state.rounds[-1].user_response is None:
                     state.rounds[-1].user_response = answer
                     state.mark_updated()
-                    await engine.inner.save_state(state)
+                    save_result = await _plugin_save_state(state_dir, state)
+                    if save_result.is_err:
+                        return Result.err(
+                            MCPToolError(str(save_result.error), tool_name="ouroboros_pm_interview")
+                        )
                 # Build transcript from persisted rounds
                 transcript = _format_pm_transcript(state)
 

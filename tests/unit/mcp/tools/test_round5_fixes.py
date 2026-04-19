@@ -284,10 +284,10 @@ class TestInterviewHandlerValidationBeforeDispatch:
     """Empty args or answer-without-session_id must error, not dispatch."""
 
     @pytest.fixture(autouse=True)
-    def mock_engine_io(self, monkeypatch):
-        """Mock load/save so plugin path doesn't need real state files."""
+    def mock_plugin_io(self, monkeypatch):
+        """Mock _plugin_load/save so plugin path doesn't need real state files."""
 
-        async def _fake_load(self, session_id):
+        async def _fake_load(state_dir, session_id):
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test context",
@@ -295,13 +295,15 @@ class TestInterviewHandlerValidationBeforeDispatch:
             )
             return Result.ok(state)
 
-        async def _fake_save(self, state):
-            pass
+        async def _fake_save(state_dir, state):
+            from pathlib import Path
 
-        from ouroboros.bigbang.interview import InterviewEngine
+            return Result.ok(Path("/tmp/fake"))
 
-        monkeypatch.setattr(InterviewEngine, "load_state", _fake_load)
-        monkeypatch.setattr(InterviewEngine, "save_state", _fake_save)
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
+        monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
 
     @pytest.fixture
     async def event_store(self):
@@ -376,10 +378,10 @@ class TestPMInterviewHandlerValidationBeforeDispatch:
     """Invalid action+args combos must error, not dispatch."""
 
     @pytest.fixture(autouse=True)
-    def mock_engine_io(self, monkeypatch):
-        """Mock load/save so plugin path doesn't need real state files."""
+    def mock_plugin_io(self, monkeypatch):
+        """Mock _plugin_load/save so plugin path doesn't need real state files."""
 
-        async def _fake_load(self, session_id):
+        async def _fake_load(state_dir, session_id):
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test context",
@@ -387,13 +389,15 @@ class TestPMInterviewHandlerValidationBeforeDispatch:
             )
             return Result.ok(state)
 
-        async def _fake_save(self, state):
-            pass
+        async def _fake_save(state_dir, state):
+            from pathlib import Path
 
-        from ouroboros.bigbang.interview import InterviewEngine
+            return Result.ok(Path("/tmp/fake"))
 
-        monkeypatch.setattr(InterviewEngine, "load_state", _fake_load)
-        monkeypatch.setattr(InterviewEngine, "save_state", _fake_save)
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
+        monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
 
     @pytest.fixture
     async def event_store(self):
