@@ -987,10 +987,20 @@ class TestEvaluationPublicSurface:
     def test_language_preset_is_importable(self) -> None:
         from ouroboros.evaluation import LanguagePreset  # noqa: F401
 
-    def test_detect_language_is_importable_and_returns_none(self, tmp_path: Path) -> None:
+    def test_detect_language_emits_deprecation_warning(self, tmp_path: Path) -> None:
+        """Compat shim must flag callers rather than silently dropping config."""
+        import warnings
+
         from ouroboros.evaluation import detect_language
 
-        assert detect_language(tmp_path) is None
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = detect_language(tmp_path)
+
+        assert result is None
+        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+        assert deprecations, "detect_language must emit a DeprecationWarning on call"
+        assert "ensure_mechanical_toml" in str(deprecations[0].message)
 
 
 class TestAutoDetectBackendPropagation:

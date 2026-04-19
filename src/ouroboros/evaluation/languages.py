@@ -268,9 +268,23 @@ def detect_language(working_dir: Path) -> LanguagePreset | None:  # noqa: ARG001
     :mod:`ouroboros.evaluation.detector`, which writes
     ``.ouroboros/mechanical.toml``. This function is kept only so that
     existing ``from ouroboros.evaluation import detect_language`` imports
-    do not break at import time; callers should migrate to
-    :func:`build_mechanical_config`, which reads the toml directly.
+    do not break at import time.
+
+    Emits a :class:`DeprecationWarning` on every call so third-party
+    callers notice the semantic change instead of silently losing Stage 1
+    configuration. Migrate to
+    :func:`ouroboros.evaluation.detector.ensure_mechanical_toml` followed
+    by :func:`build_mechanical_config`, which reads the authored toml.
     """
+    import warnings
+
+    warnings.warn(
+        "ouroboros.evaluation.detect_language() was removed in 0.29. "
+        "Call ensure_mechanical_toml() + build_mechanical_config() instead. "
+        "This shim returns None and does not configure Stage 1.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return None
 
 
