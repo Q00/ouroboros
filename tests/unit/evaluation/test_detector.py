@@ -178,5 +178,63 @@ class TestTomlPath:
         assert toml_path(tmp_path) == tmp_path / ".ouroboros" / "mechanical.toml"
 
 
+class TestNpxValidation:
+    def test_npx_dropped_when_package_not_declared(self, tmp_path: Path) -> None:
+        """``npx <pkg>`` must reference an installed/declared package."""
+        _make_node_project(tmp_path, {"test": "jest"})
+        adapter = _FakeAdapter(response=json.dumps({"lint": "npx eslint ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False  # eslint not in deps → dropped → empty proposal
+        assert not has_mechanical_toml(tmp_path)
+
+    def test_npx_accepted_when_in_dev_dependencies(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {}, "devDependencies": {"eslint": "^9.0.0"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"lint": "npx eslint ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command == ("npx", "eslint", ".")
+
+    def test_npx_accepted_when_installed_in_node_modules_bin(self, tmp_path: Path) -> None:
+        _make_node_project(tmp_path, {"test": "jest"})
+        bin_dir = tmp_path / "node_modules" / ".bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "eslint").write_text("#!/bin/sh\n")
+        adapter = _FakeAdapter(response=json.dumps({"lint": "npx --yes eslint ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command == ("npx", "--yes", "eslint", ".")
+
+    def test_npx_scoped_package_matches_dependency(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {}, "devDependencies": {"@biomejs/biome": "^1.0.0"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"lint": "npx @biomejs/biome check ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command == ("npx", "@biomejs/biome", "check", ".")
+
+
+class TestTomlSerialization:
+    def test_commands_with_quotes_roundtrip(self, tmp_path: Path) -> None:
+        """Commands containing ``"`` must survive the toml round-trip.
+
+        Previous implementation wrote ``test = "pytest -k "slow""`` which is
+        malformed TOML; the escaped serializer must produce a readable file.
+        """
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": 'pytest -k "slow"'}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        body = toml_path(tmp_path).read_text()
+        assert 'test = "pytest -k \\"slow\\""' in body
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command == ("pytest", "-k", "slow")
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

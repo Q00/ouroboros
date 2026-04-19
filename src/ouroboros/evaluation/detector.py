@@ -314,7 +314,10 @@ def _verify_entry_point(
         return _package_json_has_script(working_dir, script_name)
 
     if head == "npx":
-        return True
+        package = _npx_package(parts)
+        if package is None:
+            return False
+        return _npx_package_available(working_dir, package)
 
     if head == "make":
         target = _make_target(parts)
@@ -343,6 +346,52 @@ def _verify_entry_point(
     # Generic binary — require it on PATH. We do NOT require a manifest,
     # because standalone tools like pytest / ruff / mypy run from any repo.
     return shutil.which(head) is not None
+
+
+def _npx_package(parts: list[str]) -> str | None:
+    """Return the package name npx will execute, skipping flags.
+
+    ``npx --yes eslint .`` → ``eslint``. Scoped packages keep their scope
+    (``@biomejs/biome``); versioned specs drop the version
+    (``eslint@8`` → ``eslint``).
+    """
+    for token in parts[1:]:
+        if token.startswith("-"):
+            continue
+        if "=" in token and not token.startswith("@"):
+            continue
+        if token.startswith("@"):
+            # @scope/pkg or @scope/pkg@version → strip only the trailing version
+            slash = token.find("/")
+            if slash == -1:
+                return None
+            remainder = token[slash + 1 :]
+            name = remainder.split("@", 1)[0]
+            return token[: slash + 1] + name
+        return token.split("@", 1)[0]
+    return None
+
+
+def _npx_package_available(working_dir: Path, package: str) -> bool:
+    """True when ``package`` is declared in package.json or installed locally."""
+    bin_name = package.split("/")[-1]
+    if (working_dir / "node_modules" / ".bin" / bin_name).exists():
+        return True
+    try:
+        raw = (working_dir / "package.json").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    for section in ("dependencies", "devDependencies", "optionalDependencies"):
+        deps = data.get(section)
+        if isinstance(deps, dict) and package in deps:
+            return True
+    return False
 
 
 def _node_script_name(parts: list[str]) -> str | None:
@@ -409,15 +458,36 @@ def _makefile_has_target(working_dir: Path, target: str) -> bool:
 
 
 def _render_toml(commands: DetectedCommands) -> str:
-    """Serialize validated commands into ``mechanical.toml`` body."""
+    """Serialize validated commands into ``mechanical.toml`` body.
+
+    Values are written as TOML basic strings with ``\\`` and ``"`` escaped so
+    commands like ``pytest -k "slow"`` survive the round-trip intact.
+    """
     lines = [_DETECT_MARKER, ""]
     for key in _COMMAND_KEYS:
         value = getattr(commands, key)
         if value is None:
             continue
-        lines.append(f'{key} = "{value}"')
+        lines.append(f"{key} = {_toml_basic_string(value)}")
     lines.append("")
     return "\n".join(lines)
+
+
+_TOML_ESCAPES: dict[str, str] = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _toml_basic_string(value: str) -> str:
+    """Quote ``value`` as a TOML basic string with mandatory escapes."""
+    out = [_TOML_ESCAPES.get(ch, ch) for ch in value]
+    return '"' + "".join(out) + '"'
 
 
 def _redact(proposal: dict[str, str]) -> dict[str, str]:

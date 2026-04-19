@@ -333,10 +333,12 @@ class EvaluateHandler:
                     name="working_dir",
                     type=ToolInputType.STRING,
                     description=(
-                        "Project working directory for language auto-detection of Stage 1 "
-                        "mechanical verification commands. Auto-detects language from marker "
-                        "files (build.zig, Cargo.toml, go.mod, package.json, etc.). "
-                        "Supports .ouroboros/mechanical.toml for custom overrides."
+                        "Project root used to resolve Stage 1 mechanical verification "
+                        "commands. Commands are read from .ouroboros/mechanical.toml; "
+                        "when the file is missing, the evaluator makes one AI detect "
+                        "call that inspects manifests (package.json, pyproject.toml, "
+                        "Cargo.toml, Makefile, ...) and authors the toml. Stage 1 "
+                        "skips every check when no toml is produced — it never guesses."
                     ),
                     required=False,
                 ),
