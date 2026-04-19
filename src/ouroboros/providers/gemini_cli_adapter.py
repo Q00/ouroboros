@@ -722,7 +722,11 @@ class GeminiCLIAdapter:
             system_text_parts.append("\n\n".join(m.content for m in system_msgs))
 
         if system_text_parts:
-            parts.append(f"<system>\n{'\n\n'.join(system_text_parts)}\n</system>")
+            # Keep the newline escapes out of the f-string expression: some
+            # tooling and all Python versions prior to PEP 701 treat a
+            # backslash inside an f-string expression as a syntax error.
+            system_body = "\n\n".join(system_text_parts)
+            parts.append(f"<system>\n{system_body}\n</system>")
 
         for msg in non_system:
             if msg.role == MessageRole.USER:
