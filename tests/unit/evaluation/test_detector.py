@@ -534,6 +534,96 @@ class TestUvRunOptionParsing:
         assert ok is True
 
 
+class TestBunXValidation:
+    """`bun x` must not be treated as a self-contained builtin."""
+
+    def test_bun_x_dropped_when_package_not_declared(self, tmp_path: Path) -> None:
+        """`bun x biome check` with biome not in deps → dropped (no remote exec)."""
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        adapter = _FakeAdapter(response=json.dumps({"lint": "bun x biome check ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bun_x_accepted_when_dependency_declared(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "demo", "devDependencies": {"biome": "^1"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"lint": "bun x biome check ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestRepoCoupledRunners:
+    """Host-installed binaries still need matching repo config to be accepted."""
+
+    def test_gradle_dropped_without_build_gradle(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "package.json").write_text("{}")  # sanity — any manifest
+        adapter = _FakeAdapter(response=json.dumps({"build": "gradle build"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/gradle"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_gradle_accepted_with_build_gradle_kts(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "build.gradle.kts").write_text("")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"build": "gradle build"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/gradle"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_task_dropped_without_taskfile(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"test": "task test"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/task"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_task_accepted_with_taskfile(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "Taskfile.yml").write_text("version: 3\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"test": "task test"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/task"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_rake_dropped_without_rakefile(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"test": "rake test"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/rake"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_rake_accepted_with_rakefile(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "Rakefile").write_text("task :test\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"test": "rake test"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/rake"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_phpunit_dropped_without_config(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "composer.json").is_file()  # intentionally absent
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"test": "phpunit --verbose"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/phpunit"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestEvaluationPublicSurface:
     """Deprecated compat symbols must remain importable."""
 

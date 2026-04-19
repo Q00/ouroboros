@@ -18,6 +18,7 @@ Usage (async, called once per working_dir before Stage 1):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import os
@@ -317,6 +318,14 @@ def _verify_entry_point(
     declared script or target.
     """
     if head == "bun":
+        if len(parts) >= 2 and parts[1] == "x":
+            # ``bun x`` is network-fetch equivalent to ``npx``. Require the
+            # package to be declared (or locally installed) so Stage 1 cannot
+            # silently execute untrusted remote packages.
+            package = _npx_package(parts[1:])
+            if package is None:
+                return False
+            return _npx_package_available(working_dir, package)
         if _bun_builtin_runner(parts):
             return True
     if head in {"npm", "pnpm", "yarn", "bun"}:
@@ -381,6 +390,9 @@ def _verify_entry_point(
         ):
             return False
         return (working_dir / head).is_file()
+
+    if head in _REPO_COUPLED_RUNNERS:
+        return _REPO_COUPLED_RUNNERS[head](working_dir, parts)
 
     # Generic binary — require it on PATH. We do NOT require a manifest,
     # because standalone tools like pytest / ruff / mypy run from any repo.
@@ -846,12 +858,19 @@ _BUN_BUILTINS: frozenset[str] = frozenset(
 # they are safe Stage 1 entry points even when no matching ``package.json``
 # script exists. ``bun test`` is the canonical example — Bun ships its own
 # test runner, so requiring ``scripts.test`` would lose coverage for many
-# valid Bun projects (regression flagged by PR #454 review).
-_BUN_RUNTIME_BUILTINS: frozenset[str] = frozenset({"test", "build", "x"})
+# valid Bun projects (regression flagged by PR #454 review). ``bun x`` is
+# deliberately excluded here because, like ``npx``, it can fetch and execute
+# arbitrary packages from the network; it is validated separately against
+# declared dependencies to keep Stage 1 from running undeclared remote code.
+_BUN_RUNTIME_BUILTINS: frozenset[str] = frozenset({"test", "build"})
 
 
 def _bun_builtin_runner(parts: list[str]) -> bool:
-    """True when ``bun <sub>`` is a runtime builtin (test / build / x)."""
+    """True when ``bun <sub>`` is a self-contained runtime builtin.
+
+    ``bun x`` is handled elsewhere (network-fetch semantics require the
+    same declared-dependency check as ``npx``).
+    """
     if len(parts) < 2:
         return False
     return parts[1] in _BUN_RUNTIME_BUILTINS
@@ -965,6 +984,74 @@ def _makefile_has_target(working_dir: Path, target: str) -> bool:
         except OSError:
             continue
     return False
+
+
+def _has_any(working_dir: Path, names: tuple[str, ...]) -> bool:
+    """True when any of ``names`` exists as a file in ``working_dir``."""
+    return any((working_dir / name).is_file() for name in names)
+
+
+def _gmake_validator(working_dir: Path, parts: list[str]) -> bool:
+    target = _make_target(parts)
+    if target is None:
+        return _has_any(working_dir, ("Makefile", "makefile", "GNUmakefile"))
+    return _makefile_has_target(working_dir, target)
+
+
+def _dotnet_validator(working_dir: Path, parts: list[str]) -> bool:  # noqa: ARG001
+    if (working_dir / "global.json").is_file():
+        return True
+    try:
+        for pattern in ("*.csproj", "*.sln", "*.fsproj", "*.vbproj"):
+            if any(working_dir.glob(pattern)):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+# Runners whose behavior depends on project-local config files. Each entry
+# must prove the relevant manifest/target exists before the command is
+# accepted, closing the "host has binary but repo cannot actually run it"
+# phantom-failure window.
+_REPO_COUPLED_RUNNERS: dict[str, Callable[[Path, list[str]], bool]] = {
+    "gmake": _gmake_validator,
+    "task": lambda wd, _parts: _has_any(
+        wd,
+        ("Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml"),
+    ),
+    "gradle": lambda wd, _parts: _has_any(
+        wd,
+        (
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ),
+    ),
+    "ant": lambda wd, _parts: (wd / "build.xml").is_file(),
+    "tox": lambda wd, _parts: (wd / "tox.ini").is_file() or (wd / "pyproject.toml").is_file(),
+    "nox": lambda wd, _parts: (wd / "noxfile.py").is_file(),
+    "bazel": lambda wd, _parts: _has_any(
+        wd,
+        ("WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel", "BUILD", "BUILD.bazel"),
+    ),
+    "buck": lambda wd, _parts: _has_any(wd, (".buckconfig", "BUCK")),
+    "cmake": lambda wd, _parts: (wd / "CMakeLists.txt").is_file(),
+    "ninja": lambda wd, _parts: _has_any(wd, ("build.ninja", "CMakeLists.txt")),
+    "poetry": lambda wd, _parts: (wd / "pyproject.toml").is_file(),
+    "pdm": lambda wd, _parts: (wd / "pyproject.toml").is_file(),
+    "hatch": lambda wd, _parts: (wd / "pyproject.toml").is_file(),
+    "rake": lambda wd, _parts: _has_any(wd, ("Rakefile", "rakefile")),
+    "bundle": lambda wd, _parts: (wd / "Gemfile").is_file(),
+    "rubocop": lambda wd, _parts: _has_any(wd, (".rubocop.yml", ".rubocop.yaml", "Gemfile")),
+    "phpunit": lambda wd, _parts: _has_any(
+        wd, ("phpunit.xml", "phpunit.xml.dist", "composer.json")
+    ),
+    "composer": lambda wd, _parts: (wd / "composer.json").is_file(),
+    "mix": lambda wd, _parts: (wd / "mix.exs").is_file(),
+    "dotnet": _dotnet_validator,
+}
 
 
 def _render_toml(commands: DetectedCommands) -> str:
