@@ -151,35 +151,38 @@ class TestEnsureMechanicalToml:
         assert 'test = "npm test"' in body
         assert "old command" not in body
 
-    def test_force_removes_stale_toml_when_no_manifests(self, tmp_path: Path) -> None:
-        """Refresh must not leave stale commands active when detection fails."""
+    def test_force_preserves_old_toml_when_no_manifests(self, tmp_path: Path) -> None:
+        """Refresh must not destroy the prior config before a replacement is ready."""
         (tmp_path / ".ouroboros").mkdir()
-        (tmp_path / ".ouroboros" / "mechanical.toml").write_text('test = "old command"\n')
+        old_body = 'test = "old command"\n'
+        (tmp_path / ".ouroboros" / "mechanical.toml").write_text(old_body)
         # No manifests present → detector can propose nothing.
         adapter = _FakeAdapter(response="{}")
         ok = _run(ensure_mechanical_toml(tmp_path, adapter, force=True))
         assert ok is False
-        assert not has_mechanical_toml(tmp_path)
+        assert toml_path(tmp_path).read_text() == old_body
 
-    def test_force_removes_stale_toml_on_llm_failure(self, tmp_path: Path) -> None:
+    def test_force_preserves_old_toml_on_llm_failure(self, tmp_path: Path) -> None:
         (tmp_path / ".ouroboros").mkdir()
-        (tmp_path / ".ouroboros" / "mechanical.toml").write_text('test = "old command"\n')
+        old_body = 'test = "old command"\n'
+        (tmp_path / ".ouroboros" / "mechanical.toml").write_text(old_body)
         _make_node_project(tmp_path, {"test": "jest"})
         adapter = _FakeAdapter(error=ProviderError("network"))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter, force=True))
         assert ok is False
-        assert not has_mechanical_toml(tmp_path)
+        assert toml_path(tmp_path).read_text() == old_body
 
-    def test_force_removes_stale_toml_when_all_proposals_dropped(self, tmp_path: Path) -> None:
-        """Refresh whose proposal fails validation must not keep stale file."""
+    def test_force_preserves_old_toml_when_all_proposals_dropped(self, tmp_path: Path) -> None:
+        """Refresh whose proposal fails validation keeps the prior known-good file."""
         (tmp_path / ".ouroboros").mkdir()
-        (tmp_path / ".ouroboros" / "mechanical.toml").write_text('test = "old command"\n')
+        old_body = 'test = "old command"\n'
+        (tmp_path / ".ouroboros" / "mechanical.toml").write_text(old_body)
         _make_node_project(tmp_path, {"test": "jest"})
         # Proposal references a script that does not exist → dropped.
         adapter = _FakeAdapter(response=json.dumps({"test": "npm run nonexistent"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter, force=True))
         assert ok is False
-        assert not has_mechanical_toml(tmp_path)
+        assert toml_path(tmp_path).read_text() == old_body
 
     def test_make_target_validation(self, tmp_path: Path) -> None:
         """`make test` passes only when the Makefile actually declares ``test``."""
@@ -201,6 +204,35 @@ class TestEnsureMechanicalToml:
         assert ok is True
         config = build_mechanical_config(tmp_path)
         assert config.test_command == ("npm", "test")
+
+
+class TestWrapperInvocationForm:
+    """Build wrappers must be invoked via ``./name`` so execvp can resolve them."""
+
+    def test_bare_mvnw_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        (tmp_path / "mvnw").write_text("#!/bin/sh\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "mvnw test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bare_gradlew_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "build.gradle.kts").write_text("")
+        (tmp_path / "gradlew").write_text("#!/bin/sh\n")
+        adapter = _FakeAdapter(response=json.dumps({"build": "gradlew build"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_windows_bat_wrapper_rejected_on_posix(self, tmp_path: Path) -> None:
+        import os as _os
+
+        if _os.name == "nt":
+            pytest.skip("POSIX-only rejection test")
+        (tmp_path / "pom.xml").write_text("<project/>")
+        (tmp_path / "mvnw.cmd").write_text("")
+        adapter = _FakeAdapter(response=json.dumps({"test": "mvnw.cmd test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
 
 
 class TestMavenGoalAllowlist:

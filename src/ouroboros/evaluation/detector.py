@@ -160,18 +160,6 @@ async def ensure_mechanical_toml(
     if target.is_file() and not force:
         return True
 
-    # ``force=True`` is the "refresh" path: invalidate the prior toml up front
-    # so that if re-detection fails (missing manifests, LLM errors, empty
-    # validation, write errors) Stage 1 does not keep running stale commands.
-    # The contract surfaced to users ("skip gracefully until authored") only
-    # holds when the toml is actually removed on failure.
-    if force and target.is_file():
-        try:
-            target.unlink()
-        except OSError as exc:
-            log.warning("detector.force_unlink_failed", path=str(target), error=str(exc))
-            return False
-
     manifests = _collect_manifests(working_dir)
     if not manifests:
         log.info("detector.skipped", reason="no_manifests", working_dir=str(working_dir))
@@ -190,11 +178,23 @@ async def ensure_mechanical_toml(
         )
         return False
 
+    # Atomic replace: write the new toml to a sibling file first and
+    # ``os.replace`` it over the existing one. This keeps the prior
+    # known-good file intact if rendering or writing fails on any
+    # transient error — ``ouroboros detect --force`` never destroys the
+    # last working config before a replacement is ready.
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_render_toml(validated), encoding="utf-8")
+        temp = target.with_name(target.name + ".tmp")
+        temp.write_text(_render_toml(validated), encoding="utf-8")
+        os.replace(temp, target)
     except OSError as exc:
         log.warning("detector.write_failed", path=str(target), error=str(exc))
+        try:
+            if temp.exists():
+                temp.unlink()
+        except OSError:
+            pass
         return False
 
     log.info(
@@ -441,10 +441,12 @@ def _verify_entry_point(
         return _maven_goals_are_safe(parts)
 
     if head in {"mvnw", "mvnw.cmd"}:
-        # Maven wrapper scripts are project-local — they must exist on disk
-        # AND a pom.xml must be present. We accept ``./mvnw …`` (with the
-        # relative prefix) or a bare ``mvnw …`` that is invoked from the
-        # project root.
+        # Maven wrapper scripts must be invoked with the ``./`` prefix —
+        # ``create_subprocess_exec`` does not search the current directory
+        # and bare ``mvnw`` would fail to resolve on Unix. ``.cmd`` is only
+        # runnable on Windows; on POSIX it is rejected outright.
+        if not _wrapper_invocation_is_runnable(parts[0], head):
+            return False
         if not (working_dir / "pom.xml").is_file():
             return False
         if not (working_dir / head).is_file():
@@ -452,6 +454,8 @@ def _verify_entry_point(
         return _maven_goals_are_safe(parts)
 
     if head in {"gradlew", "gradlew.bat"}:
+        if not _wrapper_invocation_is_runnable(parts[0], head):
+            return False
         if not (
             (working_dir / "build.gradle").is_file() or (working_dir / "build.gradle.kts").is_file()
         ):
@@ -1215,6 +1219,25 @@ def _makefile_has_target(working_dir: Path, target: str) -> bool:
         except OSError:
             continue
     return False
+
+
+def _wrapper_invocation_is_runnable(raw_head: str, basename: str) -> bool:
+    """True when a build wrapper can actually be executed as-written.
+
+    ``create_subprocess_exec`` performs a straight ``execvp`` without
+    consulting the current working directory, so bare ``mvnw`` /
+    ``gradlew`` from the repo root silently fail on Unix unless ``.`` is
+    on ``PATH``. Require the explicit ``./`` prefix. ``.cmd`` / ``.bat``
+    launchers are Windows-only and are refused on POSIX hosts where they
+    would not be executable anyway.
+    """
+    if basename.endswith((".cmd", ".bat")):
+        # ``.cmd`` / ``.bat`` launchers are Windows-only; on Windows both
+        # ``mvnw.cmd`` and ``.\mvnw.cmd`` resolve via cmd.exe semantics.
+        return os.name == "nt"
+    # Unix-style wrapper (``mvnw`` / ``gradlew``): must be invoked via
+    # ``./mvnw`` so the OS resolves it without a ``PATH`` lookup.
+    return raw_head.startswith("./")
 
 
 def _has_any(working_dir: Path, names: tuple[str, ...]) -> bool:

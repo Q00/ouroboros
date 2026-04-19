@@ -78,12 +78,19 @@ def detect(
         print_error(f"Could not initialize LLM adapter: {exc}")
         raise typer.Exit(code=1) from exc
 
+    existed_before = has_mechanical_toml(working_dir)
     ok = asyncio.run(ensure_mechanical_toml(working_dir, adapter, backend=backend, force=force))
     if not ok:
-        print_warning(
-            "Detector could not propose any verifiable commands. "
-            "Stage 1 will skip gracefully until mechanical.toml is authored."
-        )
+        if existed_before and force:
+            print_warning(
+                "Detector could not propose any verifiable commands. "
+                f"Existing {target} was left untouched."
+            )
+        else:
+            print_warning(
+                "Detector could not propose any verifiable commands. "
+                "Stage 1 will skip gracefully until mechanical.toml is authored."
+            )
         raise typer.Exit(code=1)
 
     print_success(f"Wrote {target}")
