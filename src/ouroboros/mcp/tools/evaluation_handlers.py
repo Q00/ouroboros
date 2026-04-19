@@ -1177,8 +1177,8 @@ class LateralThinkHandler:
     Attributes:
         agent_runtime_backend: Configured runtime (e.g. ``"opencode"``).
         opencode_mode: Configured ``orchestrator.opencode_mode`` value
-            (``"plugin"`` or ``"subprocess"``). ``None`` means plugin by default
-            when the runtime is OpenCode (see ``should_dispatch_via_plugin``).
+            (``"plugin"`` or ``"subprocess"``). ``None`` falls through as
+            non-plugin (safe default — see ``should_dispatch_via_plugin``).
     """
 
     agent_runtime_backend: str | None = field(default=None, repr=False)
