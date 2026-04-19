@@ -69,6 +69,7 @@ ouroboros setup [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `-r, --runtime TEXT` | Runtime backend to configure. Shipped values: `claude`, `codex`, `opencode`. Auto-detected if omitted |
+| `--opencode-mode TEXT` | OpenCode integration mode: `plugin` (default, recommended — bridge plugin for interactive sessions) or `subprocess` (headless/CI). Mutually exclusive — see [OpenCode runtime guide](runtime-guides/opencode.md#configuration) |
 | `--non-interactive` | Skip interactive prompts (for scripted installs) |
 
 **Examples:**
@@ -98,6 +99,7 @@ ouroboros setup --non-interactive
 - For Codex CLI: installs managed Ouroboros skills into `~/.codex/skills/`
 - For Codex CLI: registers the Ouroboros MCP/env block in `~/.codex/config.toml`
 - For OpenCode: registers the Ouroboros MCP server in OpenCode's configuration
+- For OpenCode (plugin mode): installs the bridge plugin into `<opencode_config_dir>/plugins/ouroboros-bridge/`
 
 > **Codex config split:** put persistent Ouroboros per-role model overrides in `~/.ouroboros/config.yaml` (`clarification.default_model`, `llm.qa_model`, `evaluation.semantic_model`, `consensus.models`, `consensus.advocate_model`, `consensus.devil_model`, `consensus.judge_model`). `~/.codex/config.toml` is only the Codex MCP/env hookup file used by setup.
 
@@ -445,6 +447,7 @@ ouroboros uninstall --keep-data
 - `[mcp_servers.ouroboros]` section from `~/.codex/config.toml`
 - `~/.codex/rules/ouroboros.md` and `~/.codex/skills/ouroboros/`
 - `<!-- ooo:START -->` … `<!-- ooo:END -->` block from `CLAUDE.md`
+- OpenCode bridge plugin (`<opencode_config_dir>/plugins/ouroboros-bridge/`) and its entry in `opencode.jsonc`
 - `.ouroboros/` directory in the current project
 - `~/.ouroboros/` directory (unless `--keep-data`)
 
