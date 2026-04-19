@@ -316,6 +316,9 @@ def _verify_entry_point(
     Bare binaries must resolve on PATH. Script runners must reference a
     declared script or target.
     """
+    if head == "bun":
+        if _bun_builtin_runner(parts):
+            return True
     if head in {"npm", "pnpm", "yarn", "bun"}:
         script_name = _node_script_name(head, parts)
         if script_name is None:
@@ -335,7 +338,10 @@ def _verify_entry_point(
         return _makefile_has_target(working_dir, target)
 
     if head == "just":
-        return (working_dir / "justfile").is_file() or (working_dir / "Justfile").is_file()
+        recipe = _first_positional(parts)
+        if recipe is None:
+            return False
+        return _justfile_has_recipe(working_dir, recipe)
 
     if head == "uv":
         if not ((working_dir / "pyproject.toml").is_file() or (working_dir / "uv.lock").is_file()):
@@ -712,7 +718,6 @@ _BUN_BUILTINS: frozenset[str] = frozenset(
         "unlink",
         "publish",
         "pm",
-        "x",
         "create",
         "c",
         "init",
@@ -727,6 +732,20 @@ _BUN_BUILTINS: frozenset[str] = frozenset(
         "completions",
     }
 )
+
+# Bun subcommands that invoke a runtime instead of mutating project state;
+# they are safe Stage 1 entry points even when no matching ``package.json``
+# script exists. ``bun test`` is the canonical example — Bun ships its own
+# test runner, so requiring ``scripts.test`` would lose coverage for many
+# valid Bun projects (regression flagged by PR #454 review).
+_BUN_RUNTIME_BUILTINS: frozenset[str] = frozenset({"test", "build", "x"})
+
+
+def _bun_builtin_runner(parts: list[str]) -> bool:
+    """True when ``bun <sub>`` is a runtime builtin (test / build / x)."""
+    if len(parts) < 2:
+        return False
+    return parts[1] in _BUN_RUNTIME_BUILTINS
 
 
 def _node_script_name(head: str, parts: list[str]) -> str | None:
@@ -775,6 +794,33 @@ def _package_json_has_script(working_dir: Path, name: str) -> bool:
         return False
     scripts = data.get("scripts") if isinstance(data, dict) else None
     return isinstance(scripts, dict) and name in scripts
+
+
+def _justfile_has_recipe(working_dir: Path, recipe: str) -> bool:
+    """True when ``recipe`` is declared at column 0 in a project justfile.
+
+    Parses the justfile line-by-line looking for ``recipe-name[ args]:`` at
+    the start of a line (optionally prefixed with ``@`` for quiet recipes).
+    Body lines are indented with a tab or spaces and are skipped.
+    """
+    import re as _re
+
+    recipe_pattern = _re.compile(r"^\s*@?([A-Za-z_][A-Za-z0-9_\-]*)\b[^:\n]*:")
+    for name in ("justfile", "Justfile", ".justfile"):
+        path = working_dir / name
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line or line.startswith((" ", "\t", "#")):
+                continue
+            match = recipe_pattern.match(line)
+            if match and match.group(1) == recipe:
+                return True
+    return False
 
 
 def _make_target(parts: list[str]) -> str | None:

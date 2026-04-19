@@ -431,6 +431,66 @@ class TestToolchainSubcommandValidation:
         assert ok is False
 
 
+class TestJustValidation:
+    """`just` commands must reference a recipe declared in the justfile."""
+
+    def test_just_recipe_accepted_when_declared(self, tmp_path: Path) -> None:
+        (tmp_path / "justfile").write_text("test:\n    pytest\n\nbuild:\n    python -m build\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "just test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        assert build_mechanical_config(tmp_path).test_command == ("just", "test")
+
+    def test_just_recipe_dropped_when_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "justfile").write_text("build:\n    python -m build\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "just test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_just_accepts_quiet_recipe_prefix(self, tmp_path: Path) -> None:
+        (tmp_path / "justfile").write_text("@fast-test:\n    pytest -x\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "just fast-test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_just_recipe_with_args_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "justfile").write_text("lint tag='latest':\n    docker build\n")
+        adapter = _FakeAdapter(response=json.dumps({"lint": "just lint"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestBunRuntimeBuiltins:
+    """`bun test` / `bun build` / `bun x` are Bun runtime builtins, not scripts."""
+
+    def test_bun_test_accepted_without_scripts(self, tmp_path: Path) -> None:
+        """`bun test` uses Bun's built-in test runner; no scripts entry needed."""
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        adapter = _FakeAdapter(response=json.dumps({"test": "bun test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        assert build_mechanical_config(tmp_path).test_command == ("bun", "test")
+
+    def test_bun_build_accepted_without_scripts(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        adapter = _FakeAdapter(response=json.dumps({"build": "bun build ./index.ts"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_bun_run_still_requires_script(self, tmp_path: Path) -> None:
+        """`bun run <script>` still follows the script-lookup contract."""
+        _make_node_project(tmp_path, {"lint": "eslint ."})
+        adapter = _FakeAdapter(response=json.dumps({"lint": "bun run lint"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_bun_run_dropped_when_script_missing(self, tmp_path: Path) -> None:
+        _make_node_project(tmp_path, {"test": "bun test"})
+        adapter = _FakeAdapter(response=json.dumps({"lint": "bun run lint"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestAutoDetectBackendPropagation:
     """_auto_detect_mechanical_toml must thread backend into adapter construction."""
 
