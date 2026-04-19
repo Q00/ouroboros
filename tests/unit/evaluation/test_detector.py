@@ -203,6 +203,65 @@ class TestEnsureMechanicalToml:
         assert config.test_command == ("npm", "test")
 
 
+class TestMavenGoalAllowlist:
+    """Only non-mutating Maven phases / goals may be persisted."""
+
+    def test_mvn_deploy_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "mvn deploy"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_mvn_install_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "mvn install"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_mvn_release_goal_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "mvn release:perform"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_mvn_test_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        adapter = _FakeAdapter(response=json.dumps({"test": "mvn test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_mvn_verify_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "mvn verify"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_mvnw_versions_set_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        (tmp_path / "mvnw").write_text("#!/bin/sh\n")
+        adapter = _FakeAdapter(response=json.dumps({"build": "./mvnw versions:set"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
+class TestComposerBuiltinPrecedence:
+    """`composer install` must never validate, even if scripts.install exists."""
+
+    def test_composer_install_rejected_even_with_shadow_script(self, tmp_path: Path) -> None:
+        (tmp_path / "composer.json").write_text(
+            json.dumps({"scripts": {"install": "echo shadow", "test": "phpunit"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"build": "composer install"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_composer_update_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "composer.json").write_text(json.dumps({"scripts": {"update": "echo shadow"}}))
+        adapter = _FakeAdapter(response=json.dumps({"build": "composer update"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestMavenWrapper:
     """`./mvnw` / `./gradlew` wrappers must keep working for pre-PR projects."""
 
@@ -1083,10 +1142,23 @@ class TestMakeValidation:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
 
-    def test_bare_make_accepted_with_makefile(self, tmp_path: Path) -> None:
+    def test_bare_make_rejected_even_with_makefile(self, tmp_path: Path) -> None:
+        """Bare ``make`` runs the first target — which may be install/deploy.
+
+        The detector now refuses to persist a command whose effective target
+        cannot be determined statically. Users must name the target
+        explicitly (``make all``).
+        """
         (tmp_path / "Makefile").write_text("all:\n\techo ok\n")
         (tmp_path / "package.json").write_text("{}")
         adapter = _FakeAdapter(response=json.dumps({"build": "make"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_explicit_make_target_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "Makefile").write_text("all:\n\techo ok\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"build": "make all"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 

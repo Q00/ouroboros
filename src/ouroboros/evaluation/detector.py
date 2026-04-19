@@ -390,9 +390,11 @@ def _verify_entry_point(
             return False
         target = _make_target(parts)
         if target is None:
-            # Bare ``make`` runs the first target in the Makefile; accept only
-            # when the Makefile actually exists (verified above).
-            return True
+            # Bare ``make`` runs whatever happens to be the first rule in the
+            # Makefile, which may well be ``install`` or ``deploy``. We cannot
+            # verify that from outside, so the command is dropped. Users who
+            # want the default target can name it explicitly (``make all``).
+            return False
         return _makefile_has_target(working_dir, target)
 
     if head == "just":
@@ -422,7 +424,9 @@ def _verify_entry_point(
         return _zig_subcommand_is_builtin(parts)
 
     if head == "mvn":
-        return (working_dir / "pom.xml").is_file()
+        if not (working_dir / "pom.xml").is_file():
+            return False
+        return _maven_goals_are_safe(parts)
 
     if head in {"mvnw", "mvnw.cmd"}:
         # Maven wrapper scripts are project-local — they must exist on disk
@@ -431,7 +435,9 @@ def _verify_entry_point(
         # project root.
         if not (working_dir / "pom.xml").is_file():
             return False
-        return (working_dir / head).is_file()
+        if not (working_dir / head).is_file():
+            return False
+        return _maven_goals_are_safe(parts)
 
     if head in {"gradlew", "gradlew.bat"}:
         if not (
@@ -490,6 +496,49 @@ def _verify_entry_point(
 # lockfiles, wipe build artifacts, fetch remote packages) are deliberately
 # omitted so a hallucinated proposal cannot turn Stage 1 into a state-change
 # or a publish attempt.
+# Maven lifecycle phases / plugin goals that are safe Stage 1 verification
+# steps: they do not mutate the local install repo, deploy artifacts, or
+# bump versions. Everything else (``install``, ``deploy``, ``release:*``,
+# ``versions:set`` …) is rejected so a hallucinated Maven proposal cannot
+# trigger a state-changing build during Stage 1.
+_MAVEN_SAFE_GOALS: frozenset[str] = frozenset(
+    {
+        "validate",
+        "compile",
+        "test-compile",
+        "test",
+        "verify",
+        "checkstyle:check",
+        "spotbugs:check",
+        "spotless:check",
+        "dependency:analyze",
+        "dependency:tree",
+        "javadoc:javadoc",
+        "site",
+        "help:help",
+    }
+)
+
+
+def _maven_goals_are_safe(parts: list[str]) -> bool:
+    """True when every positional Maven goal is on the safe allowlist.
+
+    Reject if any goal is missing or points at a mutating phase. Flags
+    (``-P profile``, ``-Dkey=value``) are ignored — the gate is about
+    lifecycle / plugin goals, not JVM properties.
+    """
+    goals: list[str] = []
+    for token in parts[1:]:
+        if token.startswith("-"):
+            continue
+        if "=" in token:  # property override (key=value)
+            continue
+        goals.append(token)
+    if not goals:
+        return False
+    return all(goal in _MAVEN_SAFE_GOALS for goal in goals)
+
+
 _CARGO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "build",
@@ -1504,18 +1553,60 @@ def _bundle_subcommand_is_safe(working_dir: Path, parts: list[str]) -> bool:
     return False
 
 
+# Composer builtin subcommands. ``composer install`` / ``update`` / etc.
+# mutate project state; even if a repo declares a ``scripts.install`` hook,
+# Composer still executes the builtin behavior (it merely augments it), so
+# these names must never be accepted as "safe custom scripts".
+_COMPOSER_BUILTINS: frozenset[str] = frozenset(
+    {
+        "install",
+        "update",
+        "require",
+        "remove",
+        "create-project",
+        "init",
+        "global",
+        "dump-autoload",
+        "dumpautoload",
+        "depends",
+        "why",
+        "why-not",
+        "prohibits",
+        "suggests",
+        "archive",
+        "exec",
+        "config",
+        "clear-cache",
+        "clearcache",
+        "search",
+        "outdated",
+        "check-platform-reqs",
+        "status",
+        "licenses",
+        "bump",
+        "audit",
+        "reinstall",
+        "self-update",
+        "selfupdate",
+    }
+)
+
+
 def _composer_script_is_declared(working_dir: Path, parts: list[str]) -> bool:
-    """Validate a ``composer <script>`` invocation against ``composer.json``."""
+    """Validate a ``composer <script>`` invocation against ``composer.json``.
+
+    The lookup goes through the declared ``scripts`` table, but builtin
+    Composer subcommand names (``install`` / ``update`` / ``require`` …)
+    are rejected up front. Composer runs those builtins first even when a
+    same-named custom script exists, so letting them land in
+    ``mechanical.toml`` would re-open the state-mutation path.
+    """
     path = working_dir / "composer.json"
     if not path.is_file():
         return False
     sub = _first_positional(parts)
     if sub is None:
         return False
-    # ``composer run-script <name>`` and ``composer <name>`` both resolve
-    # against scripts declared in composer.json. Built-in subcommands like
-    # ``install`` / ``update`` / ``require`` mutate project state and are
-    # rejected — they would never pass as Stage 1 verification.
     if sub == "run-script":
         try:
             script_idx = parts.index("run-script") + 1
@@ -1525,6 +1616,8 @@ def _composer_script_is_declared(working_dir: Path, parts: list[str]) -> bool:
             return False
         script = parts[script_idx]
     else:
+        if sub in _COMPOSER_BUILTINS:
+            return False
         script = sub
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
