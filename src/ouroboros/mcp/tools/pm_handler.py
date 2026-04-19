@@ -416,7 +416,7 @@ class PMInterviewHandler:
                 _plugin_save_state,
             )
 
-            state_dir = Path.home() / ".ouroboros" / "data"
+            state_dir = self.data_dir or _DATA_DIR
             state_dir.mkdir(parents=True, exist_ok=True)
 
             transcript = ""
@@ -462,7 +462,10 @@ class PMInterviewHandler:
                     extra={
                         "initial_context": resolved.value,
                         "brownfield_repos": (
-                            [p["path"] for p in state.codebase_paths]
+                            [
+                                {"path": p["path"], "role": p.get("role", "primary")}
+                                for p in state.codebase_paths
+                            ]
                             if state.codebase_paths
                             else []
                         ),

@@ -204,38 +204,38 @@ class TestCreateAgentRuntime:
         assert runtime._skill_dispatcher is mock_dispatcher
         assert runtime._llm_backend == "codex"
 
-    def test_opencode_runtime_threads_opencode_mode_from_config(self) -> None:
-        """OpenCode runtime reads opencode_mode via get_opencode_mode and stores it."""
+    def test_opencode_runtime_always_uses_subprocess_mode(self) -> None:
+        """OpenCodeRuntime always gets opencode_mode='subprocess' regardless of config.
+
+        The runtime factory hardcodes 'subprocess' because OpenCodeRuntime
+        runs `opencode run --pure` (no bridge plugin). Plugin mode is
+        exclusively an MCP-server concern.
+        """
         with (
             patch(
                 "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
                 return_value=object(),
             ),
-            patch(
-                "ouroboros.orchestrator.runtime_factory.get_opencode_mode",
-                return_value="plugin",
-            ),
         ):
             runtime = create_agent_runtime(backend="opencode")
 
         assert isinstance(runtime, OpenCodeRuntime)
-        assert runtime._opencode_mode == "plugin"
+        assert runtime._opencode_mode == "subprocess"
 
-    def test_opencode_runtime_opencode_mode_none_when_unset(self) -> None:
-        """When config helper raises, opencode_mode falls back to None (safe default)."""
-        from ouroboros.config.loader import ConfigError
+    def test_opencode_runtime_ignores_config_plugin_mode(self) -> None:
+        """Even when config says plugin, runtime factory forces subprocess.
 
+        Config might say opencode_mode=plugin (user set up plugin mode) but
+        OpenCodeRuntime is standalone `ouroboros run` — no bridge, so
+        handlers must not emit _subagent envelopes.
+        """
         with (
             patch(
                 "ouroboros.orchestrator.runtime_factory.create_codex_command_dispatcher",
                 return_value=object(),
             ),
-            patch(
-                "ouroboros.orchestrator.runtime_factory.get_opencode_mode",
-                side_effect=ConfigError("not set"),
-            ),
         ):
             runtime = create_agent_runtime(backend="opencode")
 
         assert isinstance(runtime, OpenCodeRuntime)
-        assert runtime._opencode_mode is None
+        assert runtime._opencode_mode == "subprocess"

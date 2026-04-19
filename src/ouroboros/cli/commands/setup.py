@@ -931,12 +931,14 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
         return
 
     # mode == "plugin" — persist mode signal, then install plugin/MCP entries.
-    # Keep runtime_backend and opencode_cli_path intact: plugin mode is a
-    # SUBmode of the opencode runtime, not a replacement. Deleting these keys
-    # would break non-plugin Ouroboros executions (e.g. `ouroboros run` without
-    # the bridge) by falling back to claude/claude_code defaults.
-    # The opencode_mode="plugin" config key (set below via _ensure_opencode_plugin_entry)
-    # is what gates plugin dispatch in should_dispatch_via_plugin().
+    # Plugin mode still needs runtime_backend=opencode so the MCP server's
+    # should_dispatch_via_plugin() gate recognises the OpenCode context.
+    # Without this, fresh installs default to runtime_backend=claude and the
+    # gate always returns False — plugin dispatch never activates.
+    # opencode_cli_path is also set so `ouroboros run` (subprocess fallback)
+    # can still locate the CLI binary if needed.
+    orch["runtime_backend"] = "opencode"
+    orch["opencode_cli_path"] = opencode_path
 
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)

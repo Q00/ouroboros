@@ -65,6 +65,8 @@ from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
+_DATA_DIR = Path.home() / ".ouroboros" / "data"
+
 _LIVE_AMBIGUITY_MAX_RETRIES = 3
 
 _INTERVIEW_COMPLETION_SIGNALS = {
@@ -650,6 +652,7 @@ class InterviewHandler:
     llm_backend: str | None = field(default=None, repr=False)
     agent_runtime_backend: str | None = field(default=None, repr=False)
     opencode_mode: str | None = field(default=None, repr=False)
+    data_dir: Path | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize event store."""
@@ -911,7 +914,7 @@ class InterviewHandler:
             # Plugin mode: persist state server-side WITHOUT creating an LLM adapter.
             # Only state I/O is needed here — the subagent handles all LLM work.
             # This avoids importing litellm (optional dep) on plugin-only installs.
-            state_dir = Path.home() / ".ouroboros" / "data"
+            state_dir = self.data_dir or _DATA_DIR
             state_dir.mkdir(parents=True, exist_ok=True)
 
             transcript = ""
@@ -1013,7 +1016,7 @@ class InterviewHandler:
         )
         engine = self.interview_engine or InterviewEngine(
             llm_adapter=llm_adapter,
-            state_dir=Path.home() / ".ouroboros" / "data",
+            state_dir=self.data_dir or _DATA_DIR,
             model=get_clarification_model(self.llm_backend),
         )
 
