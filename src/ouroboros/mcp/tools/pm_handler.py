@@ -519,9 +519,24 @@ class PMInterviewHandler:
                         MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
                     )
                 state = load_result.value
-                # Record answer into persisted state
-                if answer and state.rounds and state.rounds[-1].user_response is None:
-                    state.rounds[-1].user_response = answer
+                # Record answer into persisted state.
+                # In plugin mode each dispatch = new child session. The child
+                # generates questions but can't write back to server-side state.
+                # We must always persist user answers for transcript continuity.
+                if answer:
+                    if state.rounds and state.rounds[-1].user_response is None:
+                        state.rounds[-1].user_response = answer
+                    else:
+                        # No rounds yet or all answered — append new round
+                        from ouroboros.bigbang.interview import InterviewRound
+
+                        state.rounds.append(
+                            InterviewRound(
+                                round_number=len(state.rounds) + 1,
+                                question="(continued from subagent)",
+                                user_response=answer,
+                            )
+                        )
                     state.mark_updated()
                     save_result = await _plugin_save_state(state_dir, state)
                     if save_result.is_err:
