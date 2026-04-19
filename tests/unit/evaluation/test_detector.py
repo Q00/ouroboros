@@ -351,6 +351,68 @@ class TestExecutablePathEscapes:
         assert ok is False
 
 
+class TestFormatterCheckMode:
+    """`cargo fmt` / `zig fmt` rewrite sources unless ``--check`` is set."""
+
+    def test_cargo_fmt_without_check_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"lint": "cargo fmt"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_cargo_fmt_with_check_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"lint": "cargo fmt -- --check"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_zig_fmt_without_check_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "build.zig").write_text("")
+        adapter = _FakeAdapter(response=json.dumps({"lint": "zig fmt src"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_zig_fmt_with_check_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "build.zig").write_text("")
+        adapter = _FakeAdapter(response=json.dumps({"lint": "zig fmt --check src"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestUvSubdirectoryProject:
+    """`uv run --directory backend` must validate against backend/pyproject.toml."""
+
+    def test_uv_run_directory_subpackage_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "backend").mkdir()
+        (tmp_path / "backend" / "pyproject.toml").write_text(
+            '[project]\nname = "svc"\ndependencies = ["pytest>=8"]\n'
+        )
+        # Root also needs *some* manifest to get through ``_collect_manifests``.
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "root"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv run --directory backend pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_uv_run_project_flag_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "backend").mkdir()
+        (tmp_path / "backend" / "pyproject.toml").write_text(
+            '[project]\nname = "svc"\ndependencies = ["ruff>=0.7"]\n'
+        )
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "root"\n')
+        adapter = _FakeAdapter(
+            response=json.dumps({"lint": "uv run --project=backend ruff check ."})
+        )
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_uv_run_directory_without_subpackage_manifest_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "backend").mkdir()
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "root"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv run --directory backend pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestPathPrefixedExecutableExists:
     """Path-prefixed executables must exist in the repo, not just match basename."""
 

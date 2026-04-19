@@ -423,8 +423,9 @@ def _verify_entry_point(
         return _justfile_has_recipe(working_dir, recipe)
 
     if head == "uv":
-        if not ((working_dir / "pyproject.toml").is_file() or (working_dir / "uv.lock").is_file()):
-            return False
+        # Manifest presence is delegated to ``_uv_subcommand_is_available``
+        # so that ``uv run --directory backend`` can validate against the
+        # subdirectory's ``pyproject.toml`` in monorepo layouts.
         return _uv_subcommand_is_available(working_dir, parts)
 
     if head == "cargo":
@@ -709,6 +710,25 @@ def _uv_run_tool(parts: list[str]) -> str | None:
     return None
 
 
+def _uv_project_root(working_dir: Path, parts: list[str]) -> Path:
+    """Return the project root that ``uv`` will operate against.
+
+    ``uv run --directory backend pytest`` / ``uv --project backend run pytest``
+    relocate the effective project root. Both ``--flag value`` and
+    ``--flag=value`` forms are honoured; the path is resolved relative to
+    ``working_dir`` so callers can verify the manifest without knowing the
+    CLI flag ordering.
+    """
+    for flag in ("--directory", "--project"):
+        for i, token in enumerate(parts):
+            if token == flag and i + 1 < len(parts):
+                return (working_dir / parts[i + 1]).resolve()
+            prefix = f"{flag}="
+            if token.startswith(prefix):
+                return (working_dir / token[len(prefix) :]).resolve()
+    return working_dir
+
+
 def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     """Validate ``uv`` invocations by inspecting the sub-tool they invoke.
 
@@ -720,6 +740,10 @@ def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     (``uv sync``, ``uv build``, ``uv pip install`` …) are accepted by
     presence of the manifest alone — they do not invoke a user-controlled
     tool name.
+
+    ``--directory`` / ``--project`` retarget the effective project root so
+    monorepo layouts like ``uv run --directory backend pytest`` validate
+    against the Python project that actually lives under ``backend/``.
     """
     sub = _first_positional(parts)
     if sub is None:
@@ -729,17 +753,20 @@ def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     tool = _uv_run_tool(parts)
     if tool is None:
         return False
+    project_root = _uv_project_root(working_dir, parts)
+    if not ((project_root / "pyproject.toml").is_file() or (project_root / "uv.lock").is_file()):
+        return False
     # Repo-coupled acceptance paths only. A host-wide ``shutil.which`` lookup
     # used to be accepted here, but that made a developer machine's globally
     # installed ``pyright`` / ``ruff`` / ``pytest`` enough to persist
     # ``uv run <tool>`` commands the project cannot actually run in CI.
-    if (working_dir / ".venv" / "bin" / tool).exists():
+    if (project_root / ".venv" / "bin" / tool).exists():
         return True
-    if (working_dir / ".venv" / "Scripts" / f"{tool}.exe").exists():
+    if (project_root / ".venv" / "Scripts" / f"{tool}.exe").exists():
         return True
-    if _pyproject_declares_dependency(working_dir, tool):
+    if _pyproject_declares_dependency(project_root, tool):
         return True
-    if _requirements_files_declare(working_dir, tool):
+    if _requirements_files_declare(project_root, tool):
         return True
     # ``uv run --with <pkg>`` / ``--with-editable <pkg>`` provisions the
     # package for the duration of the run, so the tool is runnable even when
@@ -857,10 +884,15 @@ def _cargo_subcommand_is_available(parts: list[str]) -> bool:
     CI or another developer machine without that plugin would phantom-fail
     Stage 1. If a project truly relies on a cargo extension, it can author
     the command into ``mechanical.toml`` directly.
+
+    ``cargo fmt`` rewrites files in its default mode, so it is only
+    accepted when combined with ``--check`` (CI-mode, read-only).
     """
     sub = _first_positional(parts)
     if sub is None:
         return False
+    if sub == "fmt":
+        return "--check" in parts
     return sub in _CARGO_BUILTIN_SUBCOMMANDS
 
 
@@ -872,9 +904,12 @@ def _go_subcommand_is_builtin(parts: list[str]) -> bool:
 
 
 def _zig_subcommand_is_builtin(parts: list[str]) -> bool:
+    """``zig fmt`` rewrites source unless ``--check`` is passed; gate it."""
     sub = _first_positional(parts)
     if sub is None:
         return False
+    if sub == "fmt":
+        return "--check" in parts
     return sub in _ZIG_BUILTIN_SUBCOMMANDS
 
 
