@@ -728,6 +728,113 @@ class TestBareToolRepoCoupling:
         assert ok is True
 
 
+class TestPythonModuleValidation:
+    """`python -m <module>` must be validated against repo state / stdlib."""
+
+    def test_python_without_m_flag_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "python script.py"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_python_m_unittest_accepted_as_stdlib(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "python -m unittest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_python_m_doctest_with_args_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "python -m doctest -v module.py"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_python_m_pytest_accepted_when_declared(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "python -m pytest -q"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_python_m_unknown_module_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "python -m mystery"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
+class TestPackageManagerStateChanges:
+    """State-mutating subcommands must never reach ``mechanical.toml``."""
+
+    def test_cargo_install_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "cargo install demo"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_cargo_publish_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"static": "cargo publish"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_cargo_update_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "cargo update"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_go_install_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "go.mod").write_text("module demo\n")
+        adapter = _FakeAdapter(response=json.dumps({"build": "go install ./..."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_go_get_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "go.mod").write_text("module demo\n")
+        adapter = _FakeAdapter(response=json.dumps({"build": "go get example.com/foo"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_uv_sync_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"build": "uv sync"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_uv_pip_install_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"build": "uv pip install requests"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_uv_tree_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv tree"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestManifestCandidates:
+    """Common project-manifest filename variants must seed the LLM call."""
+
+    def test_canonical_justfile_detects(self, tmp_path: Path) -> None:
+        (tmp_path / "Justfile").write_text("test:\n    pytest\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "just test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_yaml_taskfile_detects(self, tmp_path: Path) -> None:
+        (tmp_path / "Taskfile.yaml").write_text("version: 3\n")
+        from unittest.mock import patch
+
+        adapter = _FakeAdapter(response=json.dumps({"test": "task test"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/task"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
 class TestMakeValidation:
     """`make` without a Makefile must be dropped."""
 

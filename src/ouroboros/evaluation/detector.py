@@ -59,6 +59,7 @@ _MANIFEST_CANDIDATES: tuple[str, ...] = (
     "pyproject.toml",
     "uv.lock",
     "requirements.txt",
+    "requirements-dev.txt",
     "setup.py",
     "setup.cfg",
     "Cargo.toml",
@@ -67,17 +68,34 @@ _MANIFEST_CANDIDATES: tuple[str, ...] = (
     "build.gradle",
     "build.gradle.kts",
     "Makefile",
+    "makefile",
+    "GNUmakefile",
     "justfile",
+    "Justfile",
+    ".justfile",
     "Taskfile.yml",
+    "Taskfile.yaml",
+    "taskfile.yml",
+    "taskfile.yaml",
     "build.zig",
     "composer.json",
     "Gemfile",
+    "Rakefile",
+    "rakefile",
     "mix.exs",
     "deno.json",
     "biome.json",
     "eslint.config.js",
     ".eslintrc.json",
     "tsconfig.json",
+    "build.xml",
+    "WORKSPACE",
+    "MODULE.bazel",
+    "CMakeLists.txt",
+    "noxfile.py",
+    "tox.ini",
+    "global.json",
+    "tox.ini",
 )
 
 
@@ -407,6 +425,9 @@ def _verify_entry_point(
             return False
         return (working_dir / head).is_file()
 
+    if head in {"python", "python3"}:
+        return _python_module_is_available(working_dir, parts)
+
     if head in _REPO_COUPLED_RUNNERS:
         return _REPO_COUPLED_RUNNERS[head](working_dir, parts)
 
@@ -419,59 +440,40 @@ def _verify_entry_point(
     return _bare_tool_declared_by_repo(working_dir, head)
 
 
+# Subcommand allowlists for cargo / go / zig. These are the zero-cost
+# verification-oriented operations only: commands that mutate external state
+# (install a binary globally, publish to crates.io, add dependencies, modify
+# lockfiles, wipe build artifacts, fetch remote packages) are deliberately
+# omitted so a hallucinated proposal cannot turn Stage 1 into a state-change
+# or a publish attempt.
 _CARGO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
     {
         "build",
+        "bench",
         "check",
-        "clean",
         "clippy",
         "doc",
-        "fetch",
-        "fix",
-        "fmt",
-        "generate-lockfile",
-        "install",
+        "fmt",  # users typically combine with ``-- --check`` for verification
         "locate-project",
         "metadata",
-        "package",
         "pkgid",
-        "publish",
         "read-manifest",
-        "run",
-        "rustc",
-        "rustdoc",
-        "search",
         "test",
         "tree",
-        "update",
-        "vendor",
         "verify-project",
         "version",
-        "yank",
-        "bench",
     }
 )
 
 _GO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
     {
-        "bug",
         "build",
-        "clean",
         "doc",
         "env",
-        "fix",
-        "fmt",
-        "generate",
-        "get",
-        "install",
         "list",
-        "mod",
-        "run",
         "test",
-        "tool",
         "version",
         "vet",
-        "work",
     }
 )
 
@@ -481,17 +483,20 @@ _ZIG_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
         "build-exe",
         "build-lib",
         "build-obj",
-        "cc",
-        "c++",
-        "env",
-        "fetch",
-        "fmt",
-        "init",
-        "run",
+        "fmt",  # users typically combine with ``--check`` for verification
         "test",
-        "translate-c",
         "version",
-        "zen",
+    }
+)
+
+# ``uv`` subcommands accepted outside of ``uv run``. ``run`` has its own
+# tool-level validation path; everything here must be non-mutating and
+# zero-cost. ``uv sync`` / ``uv lock`` / ``uv pip install`` / ``uv publish``
+# change project or global state and are deliberately excluded.
+_UV_NON_RUN_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "tree",
+        "version",
     }
 )
 
@@ -598,7 +603,7 @@ def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     if sub is None:
         return False
     if sub != "run":
-        return True
+        return sub in _UV_NON_RUN_SUBCOMMANDS
     tool = _uv_run_tool(parts)
     if tool is None:
         return False
@@ -1062,6 +1067,67 @@ def _requirements_files_declare(working_dir: Path, name: str) -> bool:
                     break
             if token.strip().lower() == lowered:
                 return True
+    return False
+
+
+# Python standard-library modules that are safe, zero-cost Stage 1 entries
+# via ``python -m <module>``. This list is intentionally conservative —
+# modules that would start network services or mutate state (``pip``,
+# ``venv``, ``http.server`` …) are excluded. Third-party modules are only
+# accepted when they are declared as a project dependency.
+_PYTHON_STDLIB_RUNNABLE_MODULES: frozenset[str] = frozenset(
+    {
+        "unittest",
+        "doctest",
+        "compileall",
+        "pydoc",
+        "json.tool",
+        "pickletools",
+        "timeit",
+        "tabnanny",
+        "py_compile",
+        "zipfile",
+        "zipapp",
+        "dis",
+        "ast",
+        "cProfile",
+    }
+)
+
+
+def _python_module_is_available(working_dir: Path, parts: list[str]) -> bool:
+    """Validate ``python -m <module>`` forms against repo state.
+
+    Plain ``python`` without ``-m`` is too open-ended to verify, so Stage 1
+    rejects it. ``python -m <stdlib>`` is accepted for a curated safe list;
+    other modules must be a declared dependency or vendored in ``.venv``.
+    """
+    if "-m" not in parts:
+        return False
+    try:
+        module_idx = parts.index("-m") + 1
+    except ValueError:
+        return False
+    if module_idx >= len(parts):
+        return False
+    module = parts[module_idx]
+    if module.startswith("-"):
+        return False
+    top = module.split(".", 1)[0]
+    if module in _PYTHON_STDLIB_RUNNABLE_MODULES or top in _PYTHON_STDLIB_RUNNABLE_MODULES:
+        return True
+    if _bare_tool_declared_by_repo(working_dir, top):
+        return True
+    # Vendored into the project venv (e.g. ``.venv/lib/python3.12/site-packages/<mod>``).
+    for venv_dir in (working_dir / ".venv", working_dir / "venv"):
+        if not venv_dir.is_dir():
+            continue
+        try:
+            for lib in venv_dir.glob("lib/python*/site-packages"):
+                if (lib / top).exists() or (lib / f"{top}.py").exists():
+                    return True
+        except OSError:
+            continue
     return False
 
 
