@@ -367,15 +367,24 @@ def build_interview_subagent(
     initial_context: str | None = None,
     answer: str | None = None,
     cwd: str | None = None,
+    transcript: str = "",
 ) -> SubagentPayload:
     """Build subagent payload for Socratic interview.
 
     Supports start (with initial_context), answer (with user answer),
     and resume (session_id only) actions.
+
+    Args:
+        transcript: Full conversation history (Q&A pairs) for context
+            continuity across subagent invocations.
     """
     from ouroboros.agents.loader import load_agent_prompt
 
     system_prompt = load_agent_prompt("socratic-interviewer")
+
+    transcript_section = ""
+    if transcript:
+        transcript_section = f"\n## Conversation History\n{transcript}\n"
 
     if action == "start" and initial_context:
         prompt = f"""{system_prompt}
@@ -408,8 +417,8 @@ and ask the next clarifying question (or declare ready if ambiguity <= 0.2).
 
 ## Session ID
 {session_id}
-
-## User's Answer
+{transcript_section}
+## User's Latest Answer
 {answer}
 
 Continue the interview."""
@@ -423,7 +432,7 @@ Continue the interview."""
 
 Resume the Socratic interview for session {session_id}.
 Review the conversation history and continue from where we left off.
-
+{transcript_section}
 ## Action: {action}
 
 Continue the interview."""
@@ -629,10 +638,14 @@ def build_pm_interview_subagent(
     answer: str | None = None,
     cwd: str | None = None,
     selected_repos: list[str] | None = None,
+    transcript: str = "",
 ) -> SubagentPayload:
     """Build subagent payload for PM interview.
 
     Supports start, answer, and generate actions.
+
+    Args:
+        transcript: Full conversation history for context continuity.
     """
     from ouroboros.agents.loader import load_agent_prompt
 
@@ -643,6 +656,10 @@ def build_pm_interview_subagent(
         repos_section = (
             "\n## Selected Repositories\n" + "\n".join(f"- {r}" for r in selected_repos) + "\n"
         )
+
+    transcript_section = ""
+    if transcript:
+        transcript_section = f"\n## Conversation History\n{transcript}\n"
 
     if action == "start" and initial_context:
         prompt = f"""{system_prompt}
@@ -675,8 +692,8 @@ Analyze their answer, classify requirements, and ask the next question.
 
 ## Session ID
 {session_id}
-
-## User's Answer
+{transcript_section}
+## User's Latest Answer
 {answer}
 {repos_section}
 Continue the PM interview."""
@@ -694,7 +711,7 @@ acceptance criteria discussed.
 
 ## Session ID
 {session_id}
-{repos_section}
+{transcript_section}{repos_section}
 Generate the complete seed YAML specification."""
 
     else:

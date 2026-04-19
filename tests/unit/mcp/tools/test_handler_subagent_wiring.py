@@ -10,9 +10,12 @@ instead of calling LLMs directly. Each handler.handle() should:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.core.types import Result
 
 # ---------------------------------------------------------------------------
 # QAHandler
@@ -117,6 +120,26 @@ class TestGenerateSeedHandlerSubagentDispatch:
 
 class TestInterviewHandlerSubagentDispatch:
     """InterviewHandler.handle() returns _subagent payload."""
+
+    @pytest.fixture(autouse=True)
+    def mock_engine_io(self, monkeypatch):
+        """Mock load/save so plugin path doesn't need real state files."""
+
+        async def _fake_load(self, session_id):
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                rounds=[InterviewRound(round_number=1, question="Q?", user_response=None)],
+            )
+            return Result.ok(state)
+
+        async def _fake_save(self, state):
+            pass
+
+        from ouroboros.bigbang.interview import InterviewEngine
+
+        monkeypatch.setattr(InterviewEngine, "load_state", _fake_load)
+        monkeypatch.setattr(InterviewEngine, "save_state", _fake_save)
 
     @pytest.fixture
     def handler(self):
@@ -302,6 +325,26 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
 
 class TestPMInterviewHandlerSubagentDispatch:
     """PMInterviewHandler.handle() returns _subagent payload."""
+
+    @pytest.fixture(autouse=True)
+    def mock_engine_io(self, monkeypatch):
+        """Mock load/save so plugin path doesn't need real state files."""
+
+        async def _fake_load(self, session_id):
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                rounds=[InterviewRound(round_number=1, question="Q?", user_response=None)],
+            )
+            return Result.ok(state)
+
+        async def _fake_save(self, state):
+            pass
+
+        from ouroboros.bigbang.interview import InterviewEngine
+
+        monkeypatch.setattr(InterviewEngine, "load_state", _fake_load)
+        monkeypatch.setattr(InterviewEngine, "save_state", _fake_save)
 
     @pytest.fixture
     def handler(self):
