@@ -684,12 +684,16 @@ def _uv_with_supplies_tool(parts: list[str], tool: str) -> bool:
 
 
 def _pyproject_declares_dependency(working_dir: Path, name: str) -> bool:
-    """Return True iff ``name`` appears as a top-level dependency in pyproject.toml.
+    """Return True iff ``name`` appears as a declared dependency in pyproject.toml.
 
-    Handles the PEP 621 ``[project.dependencies]`` table plus
-    ``[project.optional-dependencies]`` and the conventional
-    ``[dependency-groups.*]`` / ``[tool.uv.dev-dependencies]`` sections so
-    ``uv run ruff`` resolves cleanly for the common dev-dependency layouts.
+    Covers both modern and legacy layouts so Poetry-managed repos keep Stage 1
+    coverage:
+
+    * PEP 621 ``[project.dependencies]`` / ``[project.optional-dependencies]``
+    * PEP 735 ``[dependency-groups.*]``
+    * ``[tool.uv.dev-dependencies]``
+    * ``[tool.poetry.dependencies]``, ``[tool.poetry.dev-dependencies]``, and
+      ``[tool.poetry.group.<name>.dependencies]`` (Poetry 1.2+ layout)
     """
     path = working_dir / "pyproject.toml"
     if not path.is_file():
@@ -701,23 +705,40 @@ def _pyproject_declares_dependency(working_dir: Path, name: str) -> bool:
             data = tomllib.load(handle)
     except (OSError, ValueError):
         return False
-    haystacks: list[object] = []
+    list_haystacks: list[object] = []
+    mapping_haystacks: list[object] = []
     project = data.get("project") if isinstance(data, dict) else None
     if isinstance(project, dict):
-        haystacks.append(project.get("dependencies"))
+        list_haystacks.append(project.get("dependencies"))
         optional = project.get("optional-dependencies")
         if isinstance(optional, dict):
-            haystacks.extend(optional.values())
+            list_haystacks.extend(optional.values())
     dep_groups = data.get("dependency-groups") if isinstance(data, dict) else None
     if isinstance(dep_groups, dict):
-        haystacks.extend(dep_groups.values())
+        list_haystacks.extend(dep_groups.values())
     tool = data.get("tool") if isinstance(data, dict) else None
     if isinstance(tool, dict):
         uv_section = tool.get("uv")
         if isinstance(uv_section, dict):
-            haystacks.append(uv_section.get("dev-dependencies"))
+            list_haystacks.append(uv_section.get("dev-dependencies"))
+        poetry = tool.get("poetry")
+        if isinstance(poetry, dict):
+            mapping_haystacks.append(poetry.get("dependencies"))
+            mapping_haystacks.append(poetry.get("dev-dependencies"))
+            groups = poetry.get("group")
+            if isinstance(groups, dict):
+                for entry in groups.values():
+                    if isinstance(entry, dict):
+                        mapping_haystacks.append(entry.get("dependencies"))
     lowered = name.lower()
-    for bucket in haystacks:
+    # Poetry-style tables use dep-name keys, so check those first via direct
+    # key lookup to avoid a list scan.
+    for bucket in mapping_haystacks:
+        if isinstance(bucket, dict):
+            for key in bucket:
+                if isinstance(key, str) and key.lower() == lowered:
+                    return True
+    for bucket in list_haystacks:
         if not isinstance(bucket, list):
             continue
         for raw in bucket:
@@ -940,25 +961,81 @@ def _bun_builtin_runner(parts: list[str]) -> bool:
     return parts[1] in _BUN_RUNTIME_BUILTINS
 
 
+# Node package-manager flags that take a value argument. When the validator
+# walks past the initial ``<pm>`` token it must skip these ``--flag value``
+# pairs (and their ``--flag=value`` self-contained form) before deciding
+# whether the next positional is a script, run keyword, or built-in.
+_NODE_PM_VALUE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--filter",
+        "-F",
+        "--workspace",
+        "-w",
+        "--workspace-root",
+        "-W",
+        "--cwd",
+        "-C",
+        "--prefix",
+        "--loglevel",
+        "--reporter",
+        "--package",
+    }
+)
+
+# Yarn ``workspace`` subcommand takes an explicit workspace *name* before the
+# script, so the validator needs to skip that name as well. This covers
+# ``yarn workspace <name> <script>`` and its ``workspaces`` variant.
+_YARN_WORKSPACE_KEYWORDS: frozenset[str] = frozenset({"workspace", "workspaces"})
+
+
+def _strip_pm_flags(head: str, parts: list[str]) -> list[str]:
+    """Return ``parts`` with leading package-manager flag pairs dropped.
+
+    Handles ``--filter <name>`` / ``--workspace=<name>`` / ``-w <name>`` and
+    the ``yarn workspace <name>`` form so downstream checks see a clean
+    ``<pm> [run] <script>`` shape.
+    """
+    out: list[str] = [parts[0]]
+    i = 1
+    while i < len(parts):
+        token = parts[i]
+        if not token.startswith("-"):
+            break
+        if "=" in token:
+            i += 1
+            continue
+        if token in _NODE_PM_VALUE_FLAGS:
+            i += 2
+            continue
+        i += 1
+    # Strip ``yarn workspace <name>`` pattern
+    if head == "yarn" and i < len(parts) and parts[i] in _YARN_WORKSPACE_KEYWORDS:
+        i += 2  # skip keyword and workspace name
+    out.extend(parts[i:])
+    return out
+
+
 def _node_script_name(head: str, parts: list[str]) -> str | None:
     """Return the script name a Node package manager will resolve from ``parts``.
 
-    The detector treats any bare token after ``<pm>`` as an implicit script
-    (``yarn typecheck``, ``pnpm check`` …) so every proposal can be validated
-    against ``package.json.scripts``. Explicit ``<pm> run <name>`` is also
-    supported. Tokens that are package-manager built-ins (``install``,
-    ``publish`` …) or flags return ``None`` so the caller can reject the
-    command rather than execute something unverified.
+    Leading flag pairs (``--filter <name>``, ``--workspace=<name>`` …) are
+    skipped so workspace-scoped commands like ``pnpm --filter web test`` keep
+    resolving to the ``test`` script. Bare tokens after ``<pm>`` are treated
+    as implicit scripts (``yarn typecheck``, ``pnpm check`` …); explicit
+    ``<pm> run <name>`` is also supported. Package-manager built-ins (``npm
+    install``, ``pnpm publish`` …) return ``None`` so the caller can reject
+    the command rather than execute something unverified.
     """
-    if len(parts) < 2:
+    cleaned = _strip_pm_flags(head, parts)
+    if len(cleaned) < 2:
         return None
-    second = parts[1]
+    second = cleaned[1]
     if second.startswith("-"):
         return None
     if second == "run":
-        if len(parts) < 3 or parts[2].startswith("-"):
+        if len(cleaned) < 3 or cleaned[2].startswith("-"):
             return None
-        return parts[2]
+        return cleaned[2]
     if head == "npm":
         # npm only treats a small set of lifecycle names as script shortcuts;
         # everything else must go through ``npm run``.

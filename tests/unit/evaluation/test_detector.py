@@ -870,6 +870,63 @@ class TestPythonPackageManagerRun:
         assert ok is False
 
 
+class TestWorkspaceScopedPMCommands:
+    """Workspace-scoped package-manager flags must not break script detection."""
+
+    def test_pnpm_filter_then_script_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
+        adapter = _FakeAdapter(response=json.dumps({"test": "pnpm --filter web test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_npm_workspace_flag_then_script_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
+        adapter = _FakeAdapter(response=json.dumps({"test": "npm --workspace api test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_yarn_workspace_keyword_then_script_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
+        adapter = _FakeAdapter(response=json.dumps({"test": "yarn workspace web test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_pnpm_inline_filter_equals_form(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"lint": "eslint ."}}))
+        adapter = _FakeAdapter(response=json.dumps({"lint": "pnpm --filter=web lint"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestPoetryPyprojectLayouts:
+    """Poetry dependency tables must be recognized as declared deps."""
+
+    def test_tool_poetry_dependencies_recognized(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.poetry]\nname = 'demo'\n"
+            "[tool.poetry.dependencies]\npython = '^3.11'\npytest = '^8'\n"
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "poetry run pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_tool_poetry_dev_dependencies_recognized(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.poetry]\nname = 'demo'\n[tool.poetry.dev-dependencies]\npytest = '^8'\n"
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_tool_poetry_group_dependencies_recognized(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            "[tool.poetry]\nname = 'demo'\n[tool.poetry.group.dev.dependencies]\npytest = '^8'\n"
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "python -m pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
 class TestGradleTaskValidation:
     def test_gradle_lifecycle_task_accepted(self, tmp_path: Path) -> None:
         (tmp_path / "build.gradle.kts").write_text("plugins { java }\n")
