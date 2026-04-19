@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import shutil
+import shutil  # noqa: F401 — retained so tests can still patch ``detector.shutil.which``
 from typing import Literal
 
 import structlog
@@ -735,13 +735,19 @@ def _pyproject_declares_dependency(working_dir: Path, name: str) -> bool:
 
 
 def _cargo_subcommand_is_available(parts: list[str]) -> bool:
-    """True when the cargo subcommand is builtin or a ``cargo-<name>`` extension."""
+    """True only for curated, non-mutating cargo builtin subcommands.
+
+    Cargo extensions (``cargo-nextest``, ``cargo-audit`` …) are host-installed
+    and are not declared by the repo, so treating them as valid based on
+    ``cargo-<name>`` being on ``PATH`` makes the detector host-dependent:
+    CI or another developer machine without that plugin would phantom-fail
+    Stage 1. If a project truly relies on a cargo extension, it can author
+    the command into ``mechanical.toml`` directly.
+    """
     sub = _first_positional(parts)
     if sub is None:
         return False
-    if sub in _CARGO_BUILTIN_SUBCOMMANDS:
-        return True
-    return shutil.which(f"cargo-{sub}") is not None
+    return sub in _CARGO_BUILTIN_SUBCOMMANDS
 
 
 def _go_subcommand_is_builtin(parts: list[str]) -> bool:
@@ -1424,13 +1430,18 @@ def _composer_script_is_declared(working_dir: Path, parts: list[str]) -> bool:
     return isinstance(scripts, dict) and script in scripts
 
 
+# True Mix builtins only. Third-party tasks like ``credo`` or ``dialyzer``
+# are provided by optional dependencies and must be declared in ``mix.exs``
+# to be runnable; the detector cannot prove that from the manifest excerpt
+# alone, so those tasks can be added to ``mechanical.toml`` by hand but are
+# not accepted by the AI-driven path.
 _MIX_BUILTIN_TASKS: frozenset[str] = frozenset(
     {
         "compile",
         "format",
         "test",
-        "credo",
-        "dialyzer",
+        "help",
+        "docs",
     }
 )
 

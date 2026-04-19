@@ -423,7 +423,8 @@ class TestToolchainSubcommandValidation:
             ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
 
-    def test_cargo_extension_accepted_when_binary_on_path(self, tmp_path: Path) -> None:
+    def test_cargo_extension_is_host_dependent_and_dropped(self, tmp_path: Path) -> None:
+        """``cargo nextest`` is host-installed — PATH must not unlock it."""
         from unittest.mock import patch
 
         (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
@@ -434,7 +435,7 @@ class TestToolchainSubcommandValidation:
 
         with patch("ouroboros.evaluation.detector.shutil.which", side_effect=fake_which):
             ok = _run(ensure_mechanical_toml(tmp_path, adapter))
-        assert ok is True
+        assert ok is False
 
     def test_cargo_builtin_subcommand_accepted(self, tmp_path: Path) -> None:
         (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
@@ -953,6 +954,14 @@ class TestComposerAndMixValidation:
         adapter = _FakeAdapter(response=json.dumps({"build": "mix weird"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
+
+    def test_mix_third_party_tasks_dropped(self, tmp_path: Path) -> None:
+        """`mix credo` / `mix dialyzer` are third-party plugins, not builtins."""
+        (tmp_path / "mix.exs").write_text("defmodule App.MixProject do\nend\n")
+        for task in ("mix credo", "mix dialyzer"):
+            adapter = _FakeAdapter(response=json.dumps({"lint": task}))
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter, force=True))
+            assert ok is False, f"{task!r} must not be treated as a builtin"
 
 
 class TestMakeValidation:
