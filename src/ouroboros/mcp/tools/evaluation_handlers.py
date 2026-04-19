@@ -1412,7 +1412,7 @@ class LateralThinkHandler:
                 )
             )
 
-        # --- Single-persona direct-response path (back-compat) ---
+        # --- Single-persona path ---
         try:
             persona = ThinkingPersona(persona_arg)
         except ValueError:
@@ -1431,6 +1431,44 @@ class LateralThinkHandler:
             failed_count=len(failed_attempts),
         )
 
+        # Plugin mode: dispatch even a single persona as a subagent so the
+        # LLM in the child Task pane does the actual thinking — the parent
+        # session stays responsive and gets the result asynchronously.
+        from ouroboros.mcp.tools.subagent import (
+            build_subagent_result,
+            should_dispatch_via_plugin,
+        )
+
+        if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            from ouroboros.mcp.tools.subagent import build_lateral_multi_subagent
+
+            try:
+                payloads = build_lateral_multi_subagent(
+                    personas=[persona.value],
+                    problem_context=str(problem_context),
+                    current_approach=str(current_approach),
+                    failed_attempts=failed_attempts,
+                )
+            except (ValueError, Exception) as e:  # noqa: BLE001
+                log.error("mcp.tool.lateral_think.single_dispatch.error", error=str(e))
+                return Result.err(
+                    MCPToolError(
+                        f"Failed to build single-persona subagent: {e}",
+                        tool_name="ouroboros_lateral_think",
+                    )
+                )
+
+            # Single payload → single _subagent envelope (not _subagents array)
+            return build_subagent_result(
+                payloads[0],
+                response_shape={
+                    "status": "delegated_to_subagent",
+                    "dispatch_mode": "plugin",
+                    "persona": persona.value,
+                },
+            )
+
+        # Inline fallback for subprocess / non-OpenCode runtimes.
         try:
             thinker = LateralThinker()
             result = thinker.generate_alternative(

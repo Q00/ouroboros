@@ -2,6 +2,7 @@
 
 Issue #1: start_* plugin-mode registers real JobManager record (real job_id).
 Issue #2: get_ouroboros_tools wires all plugin-capable handlers.
+Issue extra: lateral_think single persona dispatches as subagent in plugin mode.
 """
 
 from __future__ import annotations
@@ -198,3 +199,96 @@ class TestGetOuroborosToolsPluginWiring:
 
         tools = get_ouroboros_tools()
         assert len(tools) == 24
+
+
+# ---------------------------------------------------------------------------
+# Lateral think: single persona dispatches as subagent in plugin mode
+# ---------------------------------------------------------------------------
+
+
+class TestLateralThinkSinglePersonaDispatch:
+    """Single-persona lateral_think dispatches subagent when plugin mode."""
+
+    @pytest.fixture
+    def handler(self):
+        from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
+
+        return LateralThinkHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+    @pytest.fixture
+    def handler_subprocess(self):
+        from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
+
+        return LateralThinkHandler(
+            agent_runtime_backend="opencode",
+            opencode_mode="subprocess",
+        )
+
+    @pytest.mark.asyncio
+    async def test_single_persona_dispatches_in_plugin_mode(self, handler) -> None:
+        import json
+
+        r = await handler.handle(
+            {
+                "problem_context": "test problem",
+                "current_approach": "test approach",
+                "persona": "hacker",
+            }
+        )
+        assert r.is_ok
+        data = json.loads(r.value.content[0].text)
+        assert "_subagent" in data
+        assert data["persona"] == "hacker"
+        assert data["dispatch_mode"] == "plugin"
+        assert data["status"] == "delegated_to_subagent"
+
+    @pytest.mark.asyncio
+    async def test_single_persona_inline_in_subprocess_mode(self, handler_subprocess) -> None:
+        r = await handler_subprocess.handle(
+            {
+                "problem_context": "test problem",
+                "current_approach": "test approach",
+                "persona": "hacker",
+            }
+        )
+        assert r.is_ok
+        # Inline mode returns text, not JSON with _subagent
+        text = r.value.content[0].text
+        assert "Lateral Thinking" in text
+        assert r.value.meta.get("persona") == "hacker"
+
+    @pytest.mark.asyncio
+    async def test_single_persona_payload_has_correct_tool(self, handler) -> None:
+        import json
+
+        r = await handler.handle(
+            {
+                "problem_context": "stuck on auth",
+                "current_approach": "JWT tokens",
+                "persona": "contrarian",
+            }
+        )
+        data = json.loads(r.value.content[0].text)
+        assert data["_subagent"]["tool_name"] == "ouroboros_lateral_think"
+        assert data["_subagent"]["title"] == "Lateral (contrarian)"
+
+    @pytest.mark.asyncio
+    async def test_all_five_personas_dispatch_single(self, handler) -> None:
+        """Each single persona value dispatches as subagent."""
+        import json
+
+        for persona in ("hacker", "researcher", "simplifier", "architect", "contrarian"):
+            r = await handler.handle(
+                {
+                    "problem_context": "test",
+                    "current_approach": "test",
+                    "persona": persona,
+                }
+            )
+            assert r.is_ok, f"{persona} failed: {r.error}"
+            data = json.loads(r.value.content[0].text)
+            assert "_subagent" in data, f"{persona} missing _subagent"
+            assert data["persona"] == persona
