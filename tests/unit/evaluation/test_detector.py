@@ -244,6 +244,70 @@ class TestMavenGoalAllowlist:
         assert ok is False
 
 
+class TestDotnetSubcommandAllowlist:
+    """`dotnet publish`/`pack`/`nuget push` must not survive validation."""
+
+    def test_dotnet_publish_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "global.json").write_text("{}")
+        (tmp_path / "app.csproj").write_text("<Project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "dotnet publish"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_dotnet_pack_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "global.json").write_text("{}")
+        (tmp_path / "app.csproj").write_text("<Project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "dotnet pack"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_dotnet_nuget_push_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "global.json").write_text("{}")
+        (tmp_path / "app.csproj").write_text("<Project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "dotnet nuget push foo.nupkg"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_dotnet_build_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "global.json").write_text("{}")
+        (tmp_path / "app.csproj").write_text("<Project/>")
+        adapter = _FakeAdapter(response=json.dumps({"build": "dotnet build"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_dotnet_test_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "global.json").write_text("{}")
+        (tmp_path / "app.sln").write_text("")
+        adapter = _FakeAdapter(response=json.dumps({"test": "dotnet test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestGmakeValidation:
+    """`gmake` must enforce the same explicit-target contract as ``make``."""
+
+    def test_bare_gmake_rejected_even_with_makefile(self, tmp_path: Path) -> None:
+        (tmp_path / "Makefile").write_text("all:\n\techo ok\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"build": "gmake"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_gmake_with_declared_target_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "Makefile").write_text("test:\n\tpytest\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"test": "gmake test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_gmake_with_undeclared_target_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "Makefile").write_text("build:\n\techo\n")
+        (tmp_path / "package.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"test": "gmake test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestComposerBuiltinPrecedence:
     """`composer install` must never validate, even if scripts.install exists."""
 

@@ -1343,13 +1343,35 @@ def _bare_tool_declared_by_repo(working_dir: Path, tool: str) -> bool:
 
 
 def _gmake_validator(working_dir: Path, parts: list[str]) -> bool:
+    """Same contract as ``make``: require an explicit target.
+
+    Bare ``gmake`` would run whatever the first Makefile rule is (often
+    ``install`` / ``deploy``), so we refuse the command and force callers to
+    name the target explicitly.
+    """
+    if not _has_any(working_dir, ("Makefile", "makefile", "GNUmakefile")):
+        return False
     target = _make_target(parts)
     if target is None:
-        return _has_any(working_dir, ("Makefile", "makefile", "GNUmakefile"))
+        return False
     return _makefile_has_target(working_dir, target)
 
 
-def _dotnet_validator(working_dir: Path, parts: list[str]) -> bool:  # noqa: ARG001
+# Non-mutating dotnet subcommands. ``publish`` / ``pack`` / ``nuget push`` /
+# ``run`` / ``restore`` / ``new`` mutate either project artifacts, the package
+# cache, or external feeds and must never be persisted as Stage 1 commands.
+_DOTNET_SAFE_SUBCOMMANDS: frozenset[str] = frozenset(
+    {
+        "build",
+        "test",
+        "format",
+        "list",
+        "msbuild",
+    }
+)
+
+
+def _dotnet_project_markers_exist(working_dir: Path) -> bool:
     if (working_dir / "global.json").is_file():
         return True
     try:
@@ -1359,6 +1381,15 @@ def _dotnet_validator(working_dir: Path, parts: list[str]) -> bool:  # noqa: ARG
     except OSError:
         return False
     return False
+
+
+def _dotnet_validator(working_dir: Path, parts: list[str]) -> bool:
+    if not _dotnet_project_markers_exist(working_dir):
+        return False
+    sub = _first_positional(parts)
+    if sub is None:
+        return False
+    return sub in _DOTNET_SAFE_SUBCOMMANDS
 
 
 # Runners whose behavior depends on project-local config files. Each entry
