@@ -270,7 +270,10 @@ class PMInterviewHandler:
             description=(
                 "PM interview for product requirements gathering. "
                 "Start with initial_context, continue with session_id + answer, "
-                "or generate PM seed with action='generate'."
+                "or generate PM seed with action='generate'. "
+                "In plugin mode, returns a delegation receipt "
+                "(status=delegated_to_subagent) and the PM interview executes in an "
+                "OpenCode Task pane — the real session_id is returned there."
             ),
             parameters=(
                 MCPToolParameter(
@@ -397,10 +400,14 @@ class PMInterviewHandler:
                 session_id=session_id,
                 payload=payload,
             )
+            # Plugin mode: PM engine runs in the spawned Task pane (subprocess
+            # mode), which creates + persists the real session.  session_id is
+            # None for "start" (subagent creates it) or the real ID for
+            # resume/generate flows.
             return build_subagent_result(
                 payload,
                 response_shape={
-                    "session_id": session_id or "new",
+                    "session_id": session_id,
                     "action": action,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",
