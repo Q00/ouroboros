@@ -173,6 +173,69 @@ class TestEnsureMechanicalToml:
         assert config.test_command == ("npm", "test")
 
 
+class TestMavenWrapper:
+    """`./mvnw` / `./gradlew` wrappers must keep working for pre-PR projects."""
+
+    def test_mvnw_accepted_when_wrapper_and_pom_exist(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        (tmp_path / "mvnw").write_text("#!/bin/sh\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "./mvnw test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command == ("./mvnw", "test")
+
+    def test_mvnw_dropped_when_wrapper_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "pom.xml").write_text("<project/>")
+        adapter = _FakeAdapter(response=json.dumps({"test": "./mvnw test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_gradlew_accepted_when_wrapper_and_build_gradle_exist(self, tmp_path: Path) -> None:
+        (tmp_path / "build.gradle.kts").write_text("")
+        (tmp_path / "gradlew").write_text("#!/bin/sh\n")
+        adapter = _FakeAdapter(response=json.dumps({"build": "./gradlew build"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command == ("./gradlew", "build")
+
+
+class TestBackendModelResolution:
+    """The detector must delegate model selection to the config resolver."""
+
+    def test_model_defaults_to_resolver_when_none_provided(self, tmp_path: Path) -> None:
+        """When ``model`` is None the resolver supplies a backend-safe model."""
+        from unittest.mock import patch
+
+        _make_node_project(tmp_path, {"test": "jest"})
+        adapter = _FakeAdapter(response=json.dumps({"test": "npm test"}))
+        with patch(
+            "ouroboros.config.loader.get_mechanical_detector_model",
+            return_value="sentinel-model",
+        ) as resolver:
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter, backend="codex"))
+        assert ok is True
+        resolver.assert_called_once_with(backend="codex")
+        assert adapter.calls, "detector should have invoked the adapter"
+        _messages, config = adapter.calls[0]
+        assert config.model == "sentinel-model"
+
+    def test_explicit_model_overrides_resolver(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        _make_node_project(tmp_path, {"test": "jest"})
+        adapter = _FakeAdapter(response=json.dumps({"test": "npm test"}))
+        with patch(
+            "ouroboros.config.loader.get_mechanical_detector_model",
+            side_effect=AssertionError("resolver must not be called"),
+        ):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter, model="explicit-model"))
+        assert ok is True
+        _messages, config = adapter.calls[0]
+        assert config.model == "explicit-model"
+
+
 class TestTomlPath:
     def test_canonical_location(self, tmp_path: Path) -> None:
         assert toml_path(tmp_path) == tmp_path / ".ouroboros" / "mechanical.toml"

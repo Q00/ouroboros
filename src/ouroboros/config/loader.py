@@ -918,6 +918,20 @@ def get_assertion_extraction_model(backend: str | None = None) -> str:
         return _default_model_for_backend("claude-sonnet-4-6", backend=backend)
 
 
+def get_mechanical_detector_model(backend: str | None = None) -> str:
+    """Resolve the model used by the mechanical.toml AI detector.
+
+    Mirrors the assertion-extraction model resolution: env var override,
+    then ``OuroborosConfig.evaluation.assertion_extraction_model`` with
+    backend-safe fallback to the Codex ``"default"`` sentinel for
+    Codex/OpenCode backends.
+    """
+    env_model = os.environ.get("OUROBOROS_DETECTOR_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return get_assertion_extraction_model(backend=backend)
+
+
 def get_consensus_models(backend: str | None = None) -> tuple[str, ...]:
     """Get consensus stage model roster from environment variable or config."""
     env_models = os.environ.get("OUROBOROS_CONSENSUS_MODELS", "").strip()

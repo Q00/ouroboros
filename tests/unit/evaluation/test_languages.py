@@ -47,9 +47,14 @@ class TestParseCommand:
         assert _parse_command("bun run build") == ("bun", "run", "build")
 
     def test_generic_path_based_executable_is_blocked(self) -> None:
-        """Relative/absolute path binaries are refused — allowlist is name-based."""
-        assert _parse_command("./mvnw test") is None
-        assert _parse_command("../../tmp/mvnw test") is None
+        """Path-invoked binaries still go through the name-based allowlist."""
+        assert _parse_command("./rm -rf /") is None
+        assert _parse_command("../../tmp/evil arg") is None
+
+    def test_project_local_wrappers_are_allowed_by_basename(self) -> None:
+        """Build wrappers like ``./mvnw`` resolve through the name-based allowlist."""
+        assert _parse_command("./mvnw test") == ("./mvnw", "test")
+        assert _parse_command("./gradlew build") == ("./gradlew", "build")
 
 
 class TestBuildMechanicalConfigFromToml:

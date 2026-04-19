@@ -82,15 +82,18 @@ class ArtifactLocation:
 async def _auto_detect_mechanical_toml(
     working_dir: Path,
     llm_adapter: LLMAdapter | None,
+    llm_backend: str | None = None,
 ) -> None:
     """Best-effort author ``mechanical.toml`` when it is missing.
 
     Uses the caller-provided adapter when available; otherwise lazily
     constructs a default via ``create_llm_adapter`` so existing callers
     (evolve / run / execute) continue to get Stage 1 coverage without having
-    to thread an adapter through. Any failure is swallowed — the evaluator
-    simply runs with no Stage 1 commands, matching the skip-gracefully
-    contract.
+    to thread an adapter through. ``llm_backend`` is forwarded to
+    ``ensure_mechanical_toml`` so Codex/OpenCode backends pick up the
+    ``"default"`` model sentinel instead of a Claude model name. Any failure
+    is swallowed — the evaluator simply runs with no Stage 1 commands,
+    matching the skip-gracefully contract.
     """
     adapter = llm_adapter
     if adapter is None:
@@ -101,7 +104,7 @@ async def _auto_detect_mechanical_toml(
         except Exception:  # noqa: BLE001 — adapter construction must never break QA
             return
     try:
-        await ensure_mechanical_toml(working_dir, adapter)
+        await ensure_mechanical_toml(working_dir, adapter, backend=llm_backend)
     except Exception:  # noqa: BLE001 — detector must never break QA
         return
 
@@ -390,6 +393,7 @@ async def build_verification_artifacts(
     execution_output: str,
     working_dir: Path,
     llm_adapter: LLMAdapter | None = None,
+    llm_backend: str | None = None,
 ) -> VerificationArtifacts:
     """Run canonical mechanical checks and build QA evidence strings.
 
@@ -405,11 +409,9 @@ async def build_verification_artifacts(
     runs_dir = artifact_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=False)
 
-    if not has_mechanical_toml(working_dir):
-        await _auto_detect_mechanical_toml(working_dir, llm_adapter)
-
-    config = build_mechanical_config(working_dir)
-    commands = _configured_commands(config)
+    # Capture the execution's git diff BEFORE authoring the detector toml so
+    # ``changed_files`` reflects what the agent produced, not the side-effect
+    # of the detector writing ``.ouroboros/mechanical.toml``.
     (
         changed_files,
         git_status,
@@ -417,6 +419,12 @@ async def build_verification_artifacts(
         git_state_available,
         git_state_error,
     ) = await _capture_git_state(working_dir, artifact_dir)
+
+    if not has_mechanical_toml(working_dir):
+        await _auto_detect_mechanical_toml(working_dir, llm_adapter, llm_backend)
+
+    config = build_mechanical_config(working_dir)
+    commands = _configured_commands(config)
 
     runs: list[VerificationRunArtifact] = []
     for index, (check_type, command) in enumerate(commands, start=1):

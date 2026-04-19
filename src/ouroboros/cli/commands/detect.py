@@ -78,7 +78,7 @@ def detect(
         print_error(f"Could not initialize LLM adapter: {exc}")
         raise typer.Exit(code=1) from exc
 
-    ok = asyncio.run(ensure_mechanical_toml(working_dir, adapter, force=force))
+    ok = asyncio.run(ensure_mechanical_toml(working_dir, adapter, backend=backend, force=force))
     if not ok:
         print_warning(
             "Detector could not propose any verifiable commands. "

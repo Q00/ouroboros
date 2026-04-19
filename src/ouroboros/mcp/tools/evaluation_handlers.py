@@ -544,7 +544,11 @@ class EvaluateHandler:
             # on hardcoded preset guesses.
             if not has_mechanical_toml(working_dir):
                 try:
-                    await ensure_mechanical_toml(working_dir, llm_adapter)
+                    await ensure_mechanical_toml(
+                        working_dir,
+                        llm_adapter,
+                        backend=self.llm_backend,
+                    )
                 except Exception as exc:  # noqa: BLE001 — detector must never break eval
                     log.warning(
                         "mcp.tool.evaluate.detect_failed",

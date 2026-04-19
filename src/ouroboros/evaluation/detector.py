@@ -110,7 +110,8 @@ async def ensure_mechanical_toml(
     working_dir: Path,
     adapter: LLMAdapter,
     *,
-    model: str = "claude-sonnet-4-6",
+    model: str | None = None,
+    backend: str | None = None,
     force: bool = False,
 ) -> bool:
     """Write ``.ouroboros/mechanical.toml`` via one AI detect call.
@@ -122,12 +123,20 @@ async def ensure_mechanical_toml(
     Args:
         working_dir: Project root to detect against.
         adapter: LLM adapter used for the single detect call.
-        model: Model identifier passed to the adapter.
+        model: Explicit model identifier. When ``None``, resolved via
+            ``get_mechanical_detector_model(backend)`` so Codex / OpenCode
+            backends receive the ``"default"`` sentinel instead of a Claude
+            model name they cannot route.
+        backend: Optional backend hint used when ``model`` is ``None``.
         force: If True, re-detect and overwrite an existing toml.
 
     Returns:
         True on success (toml exists after the call), False otherwise.
     """
+    if model is None:
+        from ouroboros.config.loader import get_mechanical_detector_model
+
+        model = get_mechanical_detector_model(backend=backend)
     target = toml_path(working_dir)
     if target.is_file() and not force:
         return True
@@ -342,6 +351,22 @@ def _verify_entry_point(
 
     if head == "mvn":
         return (working_dir / "pom.xml").is_file()
+
+    if head in {"mvnw", "mvnw.cmd"}:
+        # Maven wrapper scripts are project-local — they must exist on disk
+        # AND a pom.xml must be present. We accept ``./mvnw …`` (with the
+        # relative prefix) or a bare ``mvnw …`` that is invoked from the
+        # project root.
+        if not (working_dir / "pom.xml").is_file():
+            return False
+        return (working_dir / head).is_file()
+
+    if head in {"gradlew", "gradlew.bat"}:
+        if not (
+            (working_dir / "build.gradle").is_file() or (working_dir / "build.gradle.kts").is_file()
+        ):
+            return False
+        return (working_dir / head).is_file()
 
     # Generic binary — require it on PATH. We do NOT require a manifest,
     # because standalone tools like pytest / ruff / mypy run from any repo.

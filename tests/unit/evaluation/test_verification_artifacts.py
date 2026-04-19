@@ -467,9 +467,16 @@ class TestAutoDetectIntegration:
         workdir.mkdir()
         called: dict[str, object] = {}
 
-        async def fake_ensure(working_dir: Path, adapter: object) -> bool:
+        async def fake_ensure(
+            working_dir: Path,
+            adapter: object,
+            *,
+            backend: object = None,
+            **_: object,
+        ) -> bool:
             called["working_dir"] = working_dir
             called["adapter"] = adapter
+            called["backend"] = backend
             return True
 
         sentinel_adapter = object()
@@ -477,10 +484,11 @@ class TestAutoDetectIntegration:
             "ouroboros.evaluation.verification_artifacts.ensure_mechanical_toml",
             side_effect=fake_ensure,
         ):
-            await _auto_detect_mechanical_toml(workdir, sentinel_adapter)  # type: ignore[arg-type]
+            await _auto_detect_mechanical_toml(workdir, sentinel_adapter, "codex")  # type: ignore[arg-type]
 
         assert called["working_dir"] == workdir
         assert called["adapter"] is sentinel_adapter
+        assert called["backend"] == "codex"
 
     @pytest.mark.asyncio
     async def test_auto_detect_uses_default_adapter_when_none_supplied(
@@ -491,10 +499,16 @@ class TestAutoDetectIntegration:
         workdir = tmp_path / "project"
         workdir.mkdir()
         default_adapter = object()
-        ensure_calls: list[tuple[Path, object]] = []
+        ensure_calls: list[tuple[Path, object, object]] = []
 
-        async def fake_ensure(working_dir: Path, adapter: object) -> bool:
-            ensure_calls.append((working_dir, adapter))
+        async def fake_ensure(
+            working_dir: Path,
+            adapter: object,
+            *,
+            backend: object = None,
+            **_: object,
+        ) -> bool:
+            ensure_calls.append((working_dir, adapter, backend))
             return True
 
         with (
@@ -509,7 +523,7 @@ class TestAutoDetectIntegration:
         ):
             await _auto_detect_mechanical_toml(workdir, None)
 
-        assert ensure_calls == [(workdir, default_adapter)]
+        assert ensure_calls == [(workdir, default_adapter, None)]
 
     @pytest.mark.asyncio
     async def test_auto_detect_swallows_adapter_construction_failure(
@@ -523,10 +537,16 @@ class TestAutoDetectIntegration:
         def boom(**_: object) -> object:
             raise RuntimeError("no backend configured")
 
-        ensure_calls: list[tuple[Path, object]] = []
+        ensure_calls: list[tuple[Path, object, object]] = []
 
-        async def fake_ensure(working_dir: Path, adapter: object) -> bool:
-            ensure_calls.append((working_dir, adapter))
+        async def fake_ensure(
+            working_dir: Path,
+            adapter: object,
+            *,
+            backend: object = None,
+            **_: object,
+        ) -> bool:
+            ensure_calls.append((working_dir, adapter, backend))
             return True
 
         with (
@@ -595,3 +615,62 @@ class TestAutoDetectIntegration:
             )
 
         ensure_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_git_state_captured_before_detector_authors_toml(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Detector must not pollute the captured git diff with its own toml."""
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+
+        sequence: list[str] = []
+
+        async def fake_git(
+            working_dir: Path,  # noqa: ARG001
+            artifact_dir: Path,  # noqa: ARG001
+        ) -> tuple[tuple[str, ...], str, str, bool, str | None]:
+            sequence.append("git_state")
+            return ((), "", "", True, None)
+
+        async def fake_detect(
+            working_dir: Path,  # noqa: ARG001
+            adapter: object,  # noqa: ARG001
+            llm_backend: object = None,  # noqa: ARG001
+        ) -> None:
+            sequence.append("detect")
+
+        config = MechanicalConfig(timeout_seconds=30, working_dir=workdir)
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts._capture_git_state",
+                side_effect=fake_git,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts._auto_detect_mechanical_toml",
+                side_effect=fake_detect,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.has_mechanical_toml",
+                return_value=False,
+            ),
+        ):
+            await build_verification_artifacts(
+                "exec-ordering",
+                "execution output",
+                workdir,
+            )
+
+        assert sequence == ["git_state", "detect"], (
+            "git state must be captured before the detector writes .ouroboros/mechanical.toml"
+        )
