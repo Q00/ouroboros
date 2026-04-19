@@ -30,9 +30,15 @@ const RESOLVE_RETRIES = 5
 export const SUB_RETRIES = num(process.env.OUROBOROS_SUB_RETRIES, 2)
 const BACKOFF_MS = 100
 
+// Ensure log dir exists once at module load, not per-call.
+try { mkdirSync(DIR, { recursive: true }) } catch {}
+
+export function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
 function log(msg: string): void {
   try {
-    mkdirSync(DIR, { recursive: true })
     appendFileSync(LOG, `[${new Date().toISOString()}] ${msg}\n`)
   } catch {}
 }
@@ -96,6 +102,17 @@ type Output = {
   [k: string]: unknown
 }
 
+// Truncate string to at most maxBytes of UTF-8. Walks backward past
+// continuation bytes (10xxxxxx) to a valid character boundary.
+export function truncateUtf8(s: string, maxBytes: number): string {
+  const buf = Buffer.from(s, "utf8")
+  if (buf.length <= maxBytes) return s
+  let end = maxBytes
+  // Skip past any UTF-8 continuation bytes (0x80..0xBF)
+  while (end > 0 && (buf[end] & 0xC0) === 0x80) end--
+  return buf.subarray(0, end).toString("utf8")
+}
+
 export function build(p: unknown, idx: number): Sub | null {
   if (!p || typeof p !== "object") { log(`REJECT reason=payload_not_object idx=${idx}`); return null }
   const r = p as Partial<Raw>
@@ -103,7 +120,7 @@ export function build(p: unknown, idx: number): Sub | null {
   if (typeof r.prompt !== "string" || !r.prompt) { log(`REJECT reason=missing_prompt idx=${idx} tool=${r.tool_name}`); return null }
   const truncated = Buffer.byteLength(r.prompt, "utf8") > MAX_BYTES
   const prompt = truncated
-    ? r.prompt.slice(0, MAX_BYTES) + `\n\n[...truncated at ${Math.round(MAX_BYTES / 1024)}KB]`
+    ? truncateUtf8(r.prompt, MAX_BYTES) + `\n\n[...truncated at ${Math.round(MAX_BYTES / 1024)}KB]`
     : r.prompt
   if (truncated) log(`WARN truncate idx=${idx} tool=${r.tool_name}`)
   return {
@@ -118,26 +135,37 @@ export function build(p: unknown, idx: number): Sub | null {
 
 // Parse { _subagent: {...} } OR { _subagents: [...] } from tool output text.
 // Single function, no hardcoding — returns 1..N Sub objects uniformly.
-export function parse(raw: string): Sub[] {
-  if (!raw || raw.length < 2) return []
+// Also extracts non-subagent top-level keys as response_shape (blocker #1).
+export function parse(raw: string): { subs: Sub[]; responseShape: Record<string, unknown> } {
+  const empty = { subs: [], responseShape: {} }
+  if (!raw || raw.length < 2) return empty
   let obj: unknown
-  try { obj = JSON.parse(raw) } catch { return [] }
-  if (!obj || typeof obj !== "object") return []
-  const multi = (obj as { _subagents?: unknown })._subagents
+  try { obj = JSON.parse(raw) } catch { return empty }
+  if (!obj || typeof obj !== "object") return empty
+  const record = obj as Record<string, unknown>
+
+  // Extract response_shape: all top-level keys EXCEPT _subagent/_subagents
+  const responseShape: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(record)) {
+    if (k !== "_subagent" && k !== "_subagents") responseShape[k] = v
+  }
+
+  const multi = record._subagents
   if (Array.isArray(multi)) {
-    if (multi.length === 0) { log("REJECT reason=empty_subagents_array"); return [] }
+    if (multi.length === 0) { log("REJECT reason=empty_subagents_array"); return empty }
     if (multi.length > MAX_FANOUT) log(`WARN fanout_capped requested=${multi.length} cap=${MAX_FANOUT}`)
-    return multi.slice(0, MAX_FANOUT).flatMap((p, i) => {
+    const subs = multi.slice(0, MAX_FANOUT).flatMap((p, i) => {
       const s = build(p, i)
       return s ? [s] : []
     })
+    return { subs, responseShape }
   }
-  const single = (obj as { _subagent?: unknown })._subagent
+  const single = record._subagent
   if (single && typeof single === "object") {
     const s = build(single, 0)
-    return s ? [s] : []
+    return s ? { subs: [s], responseShape } : empty
   }
-  return []
+  return empty
 }
 
 export function readText(r: Output): string {
@@ -229,7 +257,7 @@ export function buildEnvelope(
 }
 
 function fail(r: Output, label: string, err: unknown): void {
-  stamp(r, `[Ouroboros] Dispatch failed for '${label}': ${err instanceof Error ? err.message : String(err)}. See ${LOG}.`)
+  stamp(r, `[Ouroboros] Dispatch failed for '${label}': ${errMsg(err)}. See ${LOG}.`)
 }
 
 const seen = new Map<string, number>()
@@ -303,10 +331,10 @@ async function patch(b: Base, pid: string, mid: string, partID: string, body: un
     }).catch((e) => ({ error: e }))
     if (!r.error) return
     last = r.error
-    log(`PATCH_RETRY tag=${tag} attempt=${i + 1} err=${last instanceof Error ? last.message : String(last)}`)
+    log(`PATCH_RETRY tag=${tag} attempt=${i + 1} err=${errMsg(last)}`)
     await sleep(BACKOFF_MS * (i + 1))
   }
-  throw new Error(`PATCH failed after ${PATCH_RETRIES} attempts: ${last instanceof Error ? last.message : String(last)}`)
+  throw new Error(`PATCH failed after ${PATCH_RETRIES} attempts: ${errMsg(last)}`)
 }
 
 // Resolve assistant messageID hosting this callID — with retry for race conditions.
@@ -406,13 +434,13 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
         metadata: { sessionId: childID },
         time: { start, end: Date.now() },
       },
-    }, `done:${partID}`).catch((e) => log(`PATCH_DONE_FAIL part=${partID} err=${e instanceof Error ? e.message : String(e)}`))
+    }, `done:${partID}`).catch((e) => log(`PATCH_DONE_FAIL part=${partID} err=${errMsg(e)}`))
     log(`PROMPT_DONE part=${partID} child=${childID} bytes=${out.length}`)
   }).catch(async (e: unknown) => {
     clearTimeout(timer)
     const err = e instanceof Error ? e : new Error(String(e))
     const msg = ctrl.signal.aborted ? `child timed out after ${CHILD_TIMEOUT_MS}ms` : err.message
-    await cli.session.abort({ path: { id: childID } }).catch((ae) => log(`ABORT_FAIL child=${childID} err=${ae instanceof Error ? ae.message : String(ae)}`))
+    await cli.session.abort({ path: { id: childID } }).catch((ae) => log(`ABORT_FAIL child=${childID} err=${errMsg(ae)}`))
     await patch(b, pid, mid, partID, {
       id: partID,
       messageID: mid,
@@ -427,7 +455,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
         metadata: { sessionId: childID },
         time: { start, end: Date.now() },
       },
-    }, `error:${partID}`).catch((pe) => log(`PATCH_ERR_FAIL part=${partID} err=${pe instanceof Error ? pe.message : String(pe)}`))
+    }, `error:${partID}`).catch((pe) => log(`PATCH_ERR_FAIL part=${partID} err=${errMsg(pe)}`))
     log(`PROMPT_ERR part=${partID} child=${childID} err=${msg}`)
   })
 
@@ -444,7 +472,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         if (!output || typeof output !== "object") return
 
         const out = output as Output
-        const subs = parse(readText(out))
+        const { subs, responseShape } = parse(readText(out))
         if (subs.length === 0) return
 
         const pid = typeof input.sessionID === "string" ? input.sessionID : ""
@@ -465,6 +493,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
           stamp(out, notify([], [], subs))
           const meta = (out.metadata ?? {}) as Record<string, unknown>
           meta.ouroboros_dispatch = buildEnvelope([], [], subs)
+          if (Object.keys(responseShape).length > 0) meta.ouroboros_response_shape = responseShape
           out.metadata = meta
           return
         }
@@ -488,7 +517,7 @@ export const OuroborosBridge: Plugin = async (ctx) => {
           : [])
         const failed: Array<{ sub: Sub; reason?: string }> = results.flatMap((r, i) => {
           if (r.status !== "rejected") return []
-          const reason = r.reason instanceof Error ? r.reason.message : String(r.reason)
+          const reason = errMsg(r.reason)
           log(`DISPATCH_REJECT idx=${i} title=${subs[i].title} reason=${reason}`)
           return [{ sub: subs[i], reason }]
         })
@@ -502,9 +531,10 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         meta.ouroboros_subagents = subs.map((s) => ({ tool: s.tool, agent: s.agent, title: s.title, hash: s.hash, truncated: s.truncated }))
         meta.ouroboros_children = ok.map((r) => ({ title: r.sub.title, childID: r.childID }))
         if (failed.length > 0) meta.ouroboros_dispatch_failed = failed.map((f) => ({ title: f.sub.title, reason: f.reason }))
+        if (Object.keys(responseShape).length > 0) meta.ouroboros_response_shape = responseShape
         out.metadata = meta
       } catch (e) {
-        log(`HOOK_CRASH err=${e instanceof Error ? e.stack ?? e.message : String(e)}`)
+        log(`HOOK_CRASH err=${e instanceof Error ? e.stack ?? e.message : errMsg(e)}`)
       }
     },
   }

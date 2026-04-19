@@ -218,6 +218,19 @@ describe("build", () => {
     expect(s!.prompt).toContain("[...truncated")
   })
 
+  test("byte-safe truncation for CJK/emoji (blocker #2)", () => {
+    // Each CJK char = 3 UTF-8 bytes. MAX_BYTES/3 chars = MAX_BYTES bytes exactly.
+    // Adding one more char pushes over the limit.
+    const cjk = "漢".repeat(Math.floor(MAX_BYTES / 3) + 100)
+    expect(Buffer.byteLength(cjk, "utf8")).toBeGreaterThan(MAX_BYTES)
+    const s = build({ tool_name: "t", prompt: cjk }, 0)
+    expect(s).not.toBeNull()
+    expect(s!.truncated).toBe(true)
+    // The truncated prompt (minus the trailer) must fit within MAX_BYTES
+    const body = s!.prompt.split("\n\n[...truncated")[0]
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(MAX_BYTES)
+  })
+
   test("does not truncate exactly at MAX_BYTES", () => {
     const exact = "x".repeat(MAX_BYTES)
     const s = build({ tool_name: "t", prompt: exact }, 0)
@@ -227,19 +240,22 @@ describe("build", () => {
 })
 
 describe("parse", () => {
-  test("empty / garbage returns []", () => {
-    expect(parse("")).toEqual([])
-    expect(parse("x")).toEqual([])
-    expect(parse("not json")).toEqual([])
-    expect(parse("null")).toEqual([])
-    expect(parse("42")).toEqual([])
+  const empty = { subs: [], responseShape: {} }
+
+  test("empty / garbage returns empty", () => {
+    expect(parse("")).toEqual(empty)
+    expect(parse("x")).toEqual(empty)
+    expect(parse("not json")).toEqual(empty)
+    expect(parse("null")).toEqual(empty)
+    expect(parse("42")).toEqual(empty)
   })
 
   test("_subagent single object → 1 Sub", () => {
     const raw = JSON.stringify({ _subagent: { tool_name: "t", prompt: "p" } })
     const out = parse(raw)
-    expect(out.length).toBe(1)
-    expect(out[0].tool).toBe("t")
+    expect(out.subs.length).toBe(1)
+    expect(out.subs[0].tool).toBe("t")
+    expect(out.responseShape).toEqual({})
   })
 
   test("_subagents array → N Subs", () => {
@@ -251,18 +267,18 @@ describe("parse", () => {
       ],
     })
     const out = parse(raw)
-    expect(out.length).toBe(3)
-    expect(out.map((s) => s.tool)).toEqual(["a", "b", "c"])
+    expect(out.subs.length).toBe(3)
+    expect(out.subs.map((s) => s.tool)).toEqual(["a", "b", "c"])
   })
 
   test("_subagents empty array rejected", () => {
-    expect(parse(JSON.stringify({ _subagents: [] }))).toEqual([])
+    expect(parse(JSON.stringify({ _subagents: [] }))).toEqual(empty)
   })
 
   test("_subagents capped at MAX_FANOUT", () => {
     const many = Array.from({ length: MAX_FANOUT + 5 }, (_, i) => ({ tool_name: `t${i}`, prompt: `p${i}` }))
     const out = parse(JSON.stringify({ _subagents: many }))
-    expect(out.length).toBe(MAX_FANOUT)
+    expect(out.subs.length).toBe(MAX_FANOUT)
   })
 
   test("invalid children skipped in array", () => {
@@ -274,12 +290,35 @@ describe("parse", () => {
       ],
     })
     const out = parse(raw)
-    expect(out.length).toBe(2)
-    expect(out.map((s) => s.tool)).toEqual(["good", "also-good"])
+    expect(out.subs.length).toBe(2)
+    expect(out.subs.map((s) => s.tool)).toEqual(["good", "also-good"])
   })
 
-  test("neither _subagent nor _subagents → []", () => {
-    expect(parse(JSON.stringify({ other: "key" }))).toEqual([])
+  test("neither _subagent nor _subagents → empty", () => {
+    expect(parse(JSON.stringify({ other: "key" }))).toEqual(empty)
+  })
+
+  test("response_shape preserved alongside _subagent", () => {
+    const raw = JSON.stringify({
+      job_id: "job_123",
+      session_id: "ses_456",
+      status: "completed",
+      _subagent: { tool_name: "exec", prompt: "do stuff" },
+    })
+    const out = parse(raw)
+    expect(out.subs.length).toBe(1)
+    expect(out.subs[0].tool).toBe("exec")
+    expect(out.responseShape).toEqual({ job_id: "job_123", session_id: "ses_456", status: "completed" })
+  })
+
+  test("response_shape preserved alongside _subagents", () => {
+    const raw = JSON.stringify({
+      job_id: "job_789",
+      _subagents: [{ tool_name: "a", prompt: "pa" }],
+    })
+    const out = parse(raw)
+    expect(out.subs.length).toBe(1)
+    expect(out.responseShape).toEqual({ job_id: "job_789" })
   })
 })
 
