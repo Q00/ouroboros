@@ -787,6 +787,9 @@ class StartExecuteSeedHandler:
                 "Start a seed execution in the background and return a job ID immediately. "
                 "Use ouroboros_ac_tree_hud for live progress snapshots and "
                 "ouroboros_job_result for terminal output. "
+                "In plugin mode, execution is delegated to an OpenCode Task pane and "
+                "job_id is None — results appear in the Task pane instead of being "
+                "pollable via job_status/job_result. "
                 "This is the handler for 'ooo run' commands — "
                 "do NOT run 'ooo' in the shell; call this MCP tool instead."
             ),

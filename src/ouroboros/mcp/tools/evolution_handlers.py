@@ -803,7 +803,10 @@ class StartEvolveStepHandler:
             name="ouroboros_start_evolve_step",
             description=(
                 "Start one evolve_step generation in the background and return a job ID "
-                "immediately for later status checks."
+                "immediately for later status checks. "
+                "In plugin mode, evolution is delegated to an OpenCode Task pane and "
+                "job_id is None — results appear in the Task pane instead of being "
+                "pollable via job_status/job_result."
             ),
             parameters=EvolveStepHandler().definition.parameters,
         )

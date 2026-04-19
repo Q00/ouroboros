@@ -780,7 +780,10 @@ class InterviewHandler:
             description=(
                 "Interactive interview for requirement clarification. "
                 "Start a new interview with initial_context, resume with session_id, "
-                "or record an answer to the current question."
+                "or record an answer to the current question. "
+                "In plugin mode, returns a delegation receipt "
+                "(status=delegated_to_subagent) and the interview executes in an "
+                "OpenCode Task pane — the real session_id is returned there."
             ),
             parameters=(
                 MCPToolParameter(
@@ -861,10 +864,14 @@ class InterviewHandler:
                 session_id=session_id,
                 payload=payload,
             )
+            # Plugin mode: interview engine runs in the spawned Task pane
+            # (subprocess mode), which creates + persists the real session.
+            # The session_id here is None for "start" (subagent creates it)
+            # or the real ID for resume/answer flows.
             return build_subagent_result(
                 payload,
                 response_shape={
-                    "session_id": session_id or "new",
+                    "session_id": session_id,
                     "action": action,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",
