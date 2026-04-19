@@ -20,6 +20,7 @@ Tools that dispatch via the plugin when `runtime_backend=opencode` and
 |------|----------|-----------|
 | `ouroboros_qa` | `_subagent` | QA judge |
 | `ouroboros_lateral_think` (`persona=all`) | `_subagents` | one child per persona |
+| `ouroboros_lateral_think` (single persona) | `_subagent` | single persona child |
 | `ouroboros_interview` | `_subagent` | Socratic interviewer |
 | `ouroboros_pm_interview` | `_subagent` | PM interviewer |
 | `ouroboros_generate_seed` | `_subagent` | seed architect |
@@ -71,6 +72,12 @@ End result:
 
 Downstream tooling can distinguish plugin-dispatched runs from
 subprocess runs via `mode === "plugin_subagent"`.
+
+When the Python handler includes contract keys in its response (e.g.
+`job_id`, `session_id`, `status`), the bridge preserves them in
+`out.metadata.ouroboros_response_shape`. This lets callers recover the
+original tool contract even though `stamp()` overwrites the text content
+with a human-readable banner.
 
 ## Why a bridge
 
