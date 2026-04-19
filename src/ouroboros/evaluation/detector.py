@@ -348,6 +348,11 @@ def _verify_entry_point(
     declared script or target.
     """
     if head == "bun":
+        # Require some evidence that this is a Bun project before accepting
+        # any Bun command. Otherwise a hallucinated ``bun test`` could ride
+        # on an unrelated (e.g. Python) repo that has no Bun runtime.
+        if not _is_bun_project(working_dir):
+            return False
         if len(parts) >= 2 and parts[1] == "x":
             # ``bun x`` is network-fetch equivalent to ``npx``. Require the
             # package to be declared (or locally installed) so Stage 1 cannot
@@ -948,6 +953,20 @@ _BUN_BUILTINS: frozenset[str] = frozenset(
 # arbitrary packages from the network; it is validated separately against
 # declared dependencies to keep Stage 1 from running undeclared remote code.
 _BUN_RUNTIME_BUILTINS: frozenset[str] = frozenset({"test", "build"})
+
+
+def _is_bun_project(working_dir: Path) -> bool:
+    """True when the repo looks like it targets Bun.
+
+    Bun consumes ``package.json`` like Node, but a Bun-specific marker
+    (``bun.lockb``, ``bun.lock``, ``bunfig.toml``) gives the strongest
+    signal. ``package.json`` alone is also accepted because Bun projects
+    are commonly authored without a committed lockfile.
+    """
+    return _has_any(
+        working_dir,
+        ("bun.lockb", "bun.lock", "bunfig.toml", "package.json"),
+    )
 
 
 def _bun_builtin_runner(parts: list[str]) -> bool:

@@ -16,7 +16,6 @@ skips gracefully rather than running the wrong tool.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
 from pathlib import Path
 import shlex
@@ -242,54 +241,4 @@ def build_mechanical_config(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class LanguagePreset:
-    """Deprecated legacy preset shape.
-
-    Ouroboros 0.29+ stopped shipping per-language presets; Stage 1 reads
-    ``.ouroboros/mechanical.toml`` directly. This dataclass remains only to
-    keep ``from ouroboros.evaluation import LanguagePreset`` imports working
-    for third-party callers. New code should call
-    :func:`build_mechanical_config` and ignore this type.
-    """
-
-    name: str
-    lint_command: tuple[str, ...] | None = None
-    build_command: tuple[str, ...] | None = None
-    test_command: tuple[str, ...] | None = None
-    static_command: tuple[str, ...] | None = None
-    coverage_command: tuple[str, ...] | None = None
-
-
-def detect_language(working_dir: Path) -> LanguagePreset | None:  # noqa: ARG001
-    """Deprecated compatibility shim — always returns ``None``.
-
-    Language auto-detection was superseded by the AI-driven
-    :mod:`ouroboros.evaluation.detector`, which writes
-    ``.ouroboros/mechanical.toml``. This function is kept only so that
-    existing ``from ouroboros.evaluation import detect_language`` imports
-    do not break at import time.
-
-    Emits a :class:`DeprecationWarning` on every call so third-party
-    callers notice the semantic change instead of silently losing Stage 1
-    configuration. Migrate to
-    :func:`ouroboros.evaluation.detector.ensure_mechanical_toml` followed
-    by :func:`build_mechanical_config`, which reads the authored toml.
-    """
-    import warnings
-
-    warnings.warn(
-        "ouroboros.evaluation.detect_language() was removed in 0.29. "
-        "Call ensure_mechanical_toml() + build_mechanical_config() instead. "
-        "This shim returns None and does not configure Stage 1.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return None
-
-
-__all__ = [
-    "LanguagePreset",
-    "build_mechanical_config",
-    "detect_language",
-]
+__all__ = ["build_mechanical_config"]

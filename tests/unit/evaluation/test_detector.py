@@ -585,6 +585,30 @@ class TestUvRunOptionParsing:
         assert ok is True
 
 
+class TestBunProjectMarker:
+    """`bun test` must require Bun project evidence, not just any manifest."""
+
+    def test_bun_test_dropped_without_bun_marker(self, tmp_path: Path) -> None:
+        """Python-only repo with no package.json → bun commands dropped."""
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "bun test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bun_test_accepted_with_package_json(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        adapter = _FakeAdapter(response=json.dumps({"test": "bun test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_bun_test_accepted_with_bun_lockb(self, tmp_path: Path) -> None:
+        (tmp_path / "bun.lockb").write_bytes(b"")
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        adapter = _FakeAdapter(response=json.dumps({"test": "bun test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
 class TestBunXValidation:
     """`bun x` must not be treated as a self-contained builtin."""
 
@@ -1039,25 +1063,15 @@ class TestMakeValidation:
 
 
 class TestEvaluationPublicSurface:
-    """Deprecated compat symbols must remain importable."""
+    """Removed preset symbols are no longer importable — explicit breaking change."""
 
-    def test_language_preset_is_importable(self) -> None:
-        from ouroboros.evaluation import LanguagePreset  # noqa: F401
+    def test_language_preset_is_not_importable(self) -> None:
+        with pytest.raises(ImportError):
+            from ouroboros.evaluation import LanguagePreset  # noqa: F401
 
-    def test_detect_language_emits_deprecation_warning(self, tmp_path: Path) -> None:
-        """Compat shim must flag callers rather than silently dropping config."""
-        import warnings
-
-        from ouroboros.evaluation import detect_language
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = detect_language(tmp_path)
-
-        assert result is None
-        deprecations = [w for w in caught if issubclass(w.category, DeprecationWarning)]
-        assert deprecations, "detect_language must emit a DeprecationWarning on call"
-        assert "ensure_mechanical_toml" in str(deprecations[0].message)
+    def test_detect_language_is_not_importable(self) -> None:
+        with pytest.raises(ImportError):
+            from ouroboros.evaluation import detect_language  # noqa: F401
 
 
 class TestAutoDetectBackendPropagation:
