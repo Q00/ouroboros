@@ -513,3 +513,86 @@ class TestOpenCodeLLMAdapter:
         result = adapter._extract_text_from_events(events)
         assert "Here is my answer." in result
         assert "SECRET_TOOL_OUTPUT" not in result
+
+
+class TestOpenCodeToolEnvelopeSoftEnforcement:
+    """OpenCode enforces ``allowed_tools`` softly (prompt + post-hoc audit).
+
+    The ``opencode run`` CLI has no ``--allowed-tools`` or
+    ``--permission-mode`` flag, so the adapter must (a) make the
+    envelope visible to the model via a prompt directive and (b)
+    surface ``tool_use`` events outside the envelope as structured
+    warnings so drift is observable.  These tests pin both halves.
+    """
+
+    def test_envelope_is_injected_into_prompt(self) -> None:
+        """``allowed_tools`` shows up as a ``## Tool Constraints`` block."""
+        adapter = OpenCodeLLMAdapter(
+            cli_path="opencode",
+            cwd="/tmp",
+            allowed_tools=["Read", "Grep"],
+        )
+
+        prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Hi")])
+
+        assert "## Tool Constraints" in prompt
+        assert "Limit your tool usage to ONLY the following tools" in prompt
+        assert "- Read" in prompt
+        assert "- Grep" in prompt
+
+    def test_empty_envelope_forbids_all_tools(self) -> None:
+        """``allowed_tools=[]`` renders the "no tools" directive."""
+        adapter = OpenCodeLLMAdapter(
+            cli_path="opencode",
+            cwd="/tmp",
+            allowed_tools=[],
+        )
+
+        prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Hi")])
+
+        assert "Do NOT use any tools" in prompt
+
+    def test_audit_flags_tool_use_outside_envelope(self) -> None:
+        """A ``tool_use`` event for a tool outside the envelope triggers
+        the violation warning; an in-envelope event does not.
+        """
+        import structlog
+
+        adapter = OpenCodeLLMAdapter(
+            cli_path="opencode",
+            cwd="/tmp",
+            allowed_tools=["Read"],
+        )
+        events = [
+            {"type": "tool_use", "part": {"tool": "Read", "state": {"status": "completed"}}},
+            {"type": "tool_use", "part": {"tool": "Edit", "state": {"status": "completed"}}},
+            {"type": "text", "part": {"type": "text", "text": "done"}},
+        ]
+
+        with structlog.testing.capture_logs() as captured:
+            adapter._audit_tool_envelope_violations(events)
+
+        violations = [
+            e for e in captured if e.get("event") == "opencode_adapter.tool_envelope_violation"
+        ]
+        assert len(violations) == 1
+        assert violations[0]["tool"] == "Edit"
+        assert violations[0]["allowed_tools"] == ["Read"]
+
+    def test_no_envelope_means_no_audit(self) -> None:
+        """With no envelope declared, the audit is a no-op even when
+        ``tool_use`` events are present.
+        """
+        import structlog
+
+        adapter = OpenCodeLLMAdapter(cli_path="opencode", cwd="/tmp")
+        events = [
+            {"type": "tool_use", "part": {"tool": "Edit", "state": {"status": "completed"}}},
+        ]
+
+        with structlog.testing.capture_logs() as captured:
+            adapter._audit_tool_envelope_violations(events)
+
+        assert not [
+            e for e in captured if e.get("event") == "opencode_adapter.tool_envelope_violation"
+        ]
