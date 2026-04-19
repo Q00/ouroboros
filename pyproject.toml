@@ -51,6 +51,7 @@ version-file = "src/ouroboros/_version.py"
 [tool.hatch.build]
 exclude = [
     "/.smoke-home",
+    "**/node_modules",
 ]
 
 [tool.hatch.build.targets.wheel]
