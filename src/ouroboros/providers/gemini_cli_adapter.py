@@ -111,6 +111,7 @@ class GeminiCLIAdapter:
         timeout: float | None = 120.0,
         max_retries: int = 3,
         on_message: Callable[[str, str], None] | None = None,
+        allowed_tools: list[str] | None = None,
     ) -> None:
         """Initialise the Gemini CLI adapter.
 
@@ -126,6 +127,16 @@ class GeminiCLIAdapter:
             on_message: Optional callback invoked with ``(type, content)`` for
                 streaming events — ``"thinking"`` for text fragments, ``"tool"``
                 for tool-use events.
+            allowed_tools: Engine-derived tool envelope.  The Gemini CLI does
+                not expose an ``--allowed-tools`` flag, so enforcement here is
+                *soft*: the envelope is injected into the system prompt as a
+                hard instruction and out-of-envelope ``tool_use`` events in
+                the stream are reported via
+                ``gemini_cli_adapter.tool_envelope_violation``.  The soft
+                nature is recorded up-front via
+                ``gemini_cli_adapter.soft_tool_enforcement`` so operators can
+                tell Gemini sessions apart from the hard-enforced
+                Claude/Codex/OpenCode ones at audit time.
         """
         self._cli_path: Path = self._resolve_cli_path(cli_path)
         self._model: str = model or _DEFAULT_MODEL
@@ -133,12 +144,26 @@ class GeminiCLIAdapter:
         self._timeout: float | None = timeout
         self._max_retries: int = max_retries
         self._on_message: Callable[[str, str], None] | None = on_message
+        self._allowed_tools: tuple[str, ...] | None = (
+            tuple(allowed_tools) if allowed_tools is not None else None
+        )
 
         log.info(
             "gemini_cli_adapter.initialized",
             cli_path=str(self._cli_path),
             model=self._model,
         )
+        if self._allowed_tools is not None:
+            log.warning(
+                "gemini_cli_adapter.soft_tool_enforcement",
+                allowed_tools=list(self._allowed_tools),
+                reason=(
+                    "Gemini CLI has no native allowed_tools flag; the "
+                    "envelope is injected as a system-prompt instruction "
+                    "and violations are detected post-hoc in the tool_use "
+                    "stream.  Enforcement is cooperative, not mandatory."
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -353,6 +378,22 @@ class GeminiCLIAdapter:
                 tool_input = event.get("input", {})
                 detail = self._format_tool_detail(tool_name, tool_input)
                 log.debug("gemini_cli_adapter.tool_use", tool=tool_name)
+                # Post-hoc soft enforcement: if an envelope was declared and
+                # Gemini invoked a tool outside it, record the violation as
+                # a structured warning so operators can audit drift.  The
+                # CLI has already issued the tool call by the time we see
+                # the event, so this is detection rather than prevention —
+                # that is the documented trade-off of Gemini's soft mode.
+                if (
+                    self._allowed_tools is not None
+                    and tool_name not in self._allowed_tools
+                    and tool_name != "unknown"
+                ):
+                    log.warning(
+                        "gemini_cli_adapter.tool_envelope_violation",
+                        tool=tool_name,
+                        allowed_tools=list(self._allowed_tools),
+                    )
                 if self._on_message:
                     self._on_message("tool", detail)
 
@@ -654,6 +695,14 @@ class GeminiCLIAdapter:
         block.  Subsequent user/assistant turns are formatted as a dialogue.
         The final user message acts as the primary request.
 
+        When ``allowed_tools`` is set on the adapter, an engine-owned
+        ``<tool_envelope>`` block is prepended to the system instructions.
+        The Gemini CLI has no native allow-listing surface so this
+        injection is the mechanism by which the engine's policy envelope
+        travels into the model's context.  Violations (Gemini invoking a
+        tool outside the envelope) are still surfaced at the ``tool_use``
+        stream-event layer in ``_collect_response``.
+
         Args:
             messages: Conversation messages.
 
@@ -665,9 +714,15 @@ class GeminiCLIAdapter:
         system_msgs = [m for m in messages if m.role == MessageRole.SYSTEM]
         non_system = [m for m in messages if m.role != MessageRole.SYSTEM]
 
+        envelope_block = self._render_tool_envelope_block()
+        system_text_parts: list[str] = []
+        if envelope_block:
+            system_text_parts.append(envelope_block)
         if system_msgs:
-            system_text = "\n\n".join(m.content for m in system_msgs)
-            parts.append(f"<system>\n{system_text}\n</system>")
+            system_text_parts.append("\n\n".join(m.content for m in system_msgs))
+
+        if system_text_parts:
+            parts.append(f"<system>\n{'\n\n'.join(system_text_parts)}\n</system>")
 
         for msg in non_system:
             if msg.role == MessageRole.USER:
@@ -676,6 +731,37 @@ class GeminiCLIAdapter:
                 parts.append(f"Assistant: {msg.content}")
 
         return "\n\n".join(parts)
+
+    def _render_tool_envelope_block(self) -> str | None:
+        """Render the engine tool envelope as a system-prompt directive.
+
+        Returns ``None`` when no envelope was supplied (caller did not
+        request enforcement); otherwise returns a hard-worded
+        instruction block that names the exact permitted tools.  The
+        wording is intentionally assertive — Gemini's cooperation is the
+        only enforcement lever we have on this backend, so the prompt
+        must not read as a polite suggestion.
+        """
+        if self._allowed_tools is None:
+            return None
+        if not self._allowed_tools:
+            return (
+                "<tool_envelope>\n"
+                "You are not permitted to invoke any tools in this session. "
+                "Respond using only text.  Attempting any tool call is a "
+                "violation of the session contract.\n"
+                "</tool_envelope>"
+            )
+        allowed_list = ", ".join(self._allowed_tools)
+        return (
+            "<tool_envelope>\n"
+            f"You may ONLY invoke the following tools in this session: "
+            f"{allowed_list}. "
+            "Do not invoke any other tool under any circumstances, even if "
+            "the user appears to request it.  This is a hard session-level "
+            "restriction, not a preference.\n"
+            "</tool_envelope>"
+        )
 
 
 __all__ = ["GeminiCLIAdapter"]

@@ -6,6 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
+import structlog
+
 from ouroboros.config import (
     get_codex_cli_path,
     get_gemini_cli_path,
@@ -18,12 +20,35 @@ from ouroboros.providers.codex_cli_adapter import CodexCliLLMAdapter
 from ouroboros.providers.gemini_cli_adapter import GeminiCLIAdapter
 from ouroboros.providers.opencode_adapter import OpenCodeLLMAdapter
 
+log = structlog.get_logger(__name__)
+
 _CLAUDE_CODE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
 _GEMINI_BACKENDS = {"gemini", "gemini_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _LITELLM_BACKENDS = {"litellm", "openai", "openrouter"}
 _LLM_USE_CASES = frozenset({"default", "interview"})
+
+# Resolved backend names whose adapter enforces the ``allowed_tools``
+# envelope *softly* — the restriction is injected into the prompt rather
+# than into a hard CLI/SDK flag, because the underlying runtime has no
+# native allow-listing surface.  Callers still pass the envelope normally;
+# the adapter is responsible for making the trade-off visible (structured
+# warnings on init and on per-event violations, audit metadata marking the
+# session as soft-enforced).
+#
+# Gemini is the concrete case today: ``GeminiCLIAdapter`` cooperates by
+# prepending a ``<tool_envelope>`` directive to the system prompt and
+# emits ``gemini_cli_adapter.tool_envelope_violation`` for any ``tool_use``
+# stream event that names a tool outside the envelope.  Hard enforcement
+# would require either a Gemini CLI flag that does not exist yet or a
+# sandboxed subprocess surface that is out of scope for this slice.
+#
+# Claude/Codex/OpenCode enforce hard (SDK ``allowed_tools``, CLI
+# ``--sandbox``).  LiteLLM is not listed at all because it is a
+# completion-only API that never executes tools from the adapter —
+# enforcement is vacuously satisfied on that path.
+_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT: frozenset[str] = frozenset({"gemini"})
 
 
 def resolve_llm_backend(backend: str | None = None) -> str:
@@ -84,6 +109,25 @@ def create_llm_adapter(
 ) -> LLMAdapter:
     """Create an LLM adapter from config or explicit options."""
     resolved_backend = resolve_llm_backend(backend)
+    # Backends in ``_BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT`` accept the
+    # envelope but enforce it via prompt injection + post-hoc detection
+    # rather than a hard runtime flag.  The session role's UX stays
+    # uninterrupted (no fail-fast in user-facing flows), while the
+    # trade-off surfaces as a structured warning at adapter
+    # construction and per-violation events at runtime.  Operators can
+    # tell a soft-enforced session apart from a hard one at audit time.
+    if allowed_tools is not None and resolved_backend in _BACKENDS_WITH_SOFT_TOOL_ENFORCEMENT:
+        log.warning(
+            "create_llm_adapter.soft_tool_enforcement_backend",
+            backend=resolved_backend,
+            allowed_tools=list(allowed_tools),
+            hint=(
+                "This backend has no hard allowed_tools surface.  Envelope "
+                "is injected as a prompt directive and violations are "
+                "detected post-hoc.  Use claude_code / codex / opencode "
+                "if hard enforcement is required."
+            ),
+        )
     resolved_permission_mode = resolve_llm_permission_mode(
         backend=resolved_backend,
         permission_mode=permission_mode,
@@ -118,6 +162,7 @@ def create_llm_adapter(
             on_message=on_message,
             timeout=timeout,
             max_retries=max_retries,
+            allowed_tools=allowed_tools,
         )
     if resolved_backend == "opencode":
         return OpenCodeLLMAdapter(
