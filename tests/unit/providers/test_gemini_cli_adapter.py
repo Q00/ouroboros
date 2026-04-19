@@ -559,3 +559,91 @@ class TestInputValidation:
 
         assert result.is_ok
         assert result.value.content == "Hello, world!"
+
+
+class TestGeminiToolEnvelopeInjection:
+    """Soft enforcement of ``allowed_tools`` on the Gemini CLI backend.
+
+    The CLI has no ``--allowed-tools`` flag, so the adapter's job is to
+    (a) inject the envelope as a hard system-prompt directive, and
+    (b) detect violations post-hoc in the ``tool_use`` event stream.
+    These tests pin both behaviors.
+    """
+
+    def test_no_envelope_produces_plain_system_block(self) -> None:
+        """No ``allowed_tools`` → no ``<tool_envelope>`` block."""
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+
+        prompt = adapter._build_prompt(
+            [
+                Message(role=MessageRole.SYSTEM, content="Be concise."),
+                Message(role=MessageRole.USER, content="Hi"),
+            ]
+        )
+
+        assert "tool_envelope" not in prompt
+        assert "Be concise." in prompt
+
+    def test_envelope_is_injected_into_system_block(self) -> None:
+        """Allowed tools produce a hard directive before any user system text."""
+        adapter = GeminiCLIAdapter(
+            cli_path="gemini",
+            allowed_tools=["Read", "Grep"],
+        )
+
+        prompt = adapter._build_prompt(
+            [
+                Message(role=MessageRole.SYSTEM, content="Be concise."),
+                Message(role=MessageRole.USER, content="Hi"),
+            ]
+        )
+
+        assert "<tool_envelope>" in prompt
+        assert "You may ONLY invoke the following tools" in prompt
+        assert "Read, Grep" in prompt
+        assert "hard session-level restriction" in prompt
+        # User's own system message is preserved below the envelope.
+        assert "Be concise." in prompt
+
+    def test_empty_envelope_forbids_all_tools(self) -> None:
+        """``allowed_tools=[]`` renders as "no tools permitted"."""
+        adapter = GeminiCLIAdapter(cli_path="gemini", allowed_tools=[])
+
+        prompt = adapter._build_prompt([Message(role=MessageRole.USER, content="Hi")])
+
+        assert "not permitted to invoke any tools" in prompt
+
+    @pytest.mark.asyncio
+    async def test_out_of_envelope_tool_use_is_logged(self) -> None:
+        """A ``tool_use`` event for a tool outside the envelope is logged.
+
+        Runs a tiny stream through ``_collect_response`` that contains
+        one in-envelope tool (``Read``) and one out-of-envelope tool
+        (``Edit``) and asserts the latter triggers the structured
+        violation warning while the former does not.
+        """
+        import structlog
+
+        events = [
+            _INIT_EVENT,
+            {"type": "tool_use", "name": "Read", "input": {}},
+            {"type": "tool_use", "name": "Edit", "input": {}},
+            _RESULT_EVENT,
+        ]
+        stream = _make_stream(events)
+        process = _FakeProcess(stdout=stream, returncode=0)
+        adapter = GeminiCLIAdapter(
+            cli_path="gemini",
+            allowed_tools=["Read"],
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            result = await adapter._collect_response(process)
+
+        assert result.is_ok
+        violations = [
+            e for e in captured if e.get("event") == "gemini_cli_adapter.tool_envelope_violation"
+        ]
+        assert len(violations) == 1
+        assert violations[0]["tool"] == "Edit"
+        assert violations[0]["allowed_tools"] == ["Read"]
