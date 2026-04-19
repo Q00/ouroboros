@@ -221,9 +221,16 @@ def channel_workflow_handler(
     )
 
 
-def lateral_think_handler() -> LateralThinkHandler:
+def lateral_think_handler(
+    *,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> LateralThinkHandler:
     """Create a LateralThinkHandler instance."""
-    return LateralThinkHandler()
+    return LateralThinkHandler(
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
 
 def evaluate_handler(
@@ -252,14 +259,32 @@ def checklist_verify_handler(
     )
 
 
-def evolve_step_handler() -> EvolveStepHandler:
+def evolve_step_handler(
+    *,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> EvolveStepHandler:
     """Create an EvolveStepHandler instance."""
-    return EvolveStepHandler()
+    return EvolveStepHandler(
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
 
-def start_evolve_step_handler() -> StartEvolveStepHandler:
+def start_evolve_step_handler(
+    *,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> StartEvolveStepHandler:
     """Create a StartEvolveStepHandler instance."""
-    return StartEvolveStepHandler()
+    return StartEvolveStepHandler(
+        evolve_handler=EvolveStepHandler(
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
 
 
 def lineage_status_handler() -> LineageStatusHandler:
@@ -373,9 +398,22 @@ def get_ouroboros_tools(
         interview,
         evaluate,
         ChecklistVerifyHandler(evaluate_handler=evaluate, llm_backend=llm_backend),
-        LateralThinkHandler(),
-        EvolveStepHandler(),
-        StartEvolveStepHandler(),
+        LateralThinkHandler(
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        EvolveStepHandler(
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        StartEvolveStepHandler(
+            evolve_handler=EvolveStepHandler(
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
+            ),
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
         LineageStatusHandler(),
         EvolveRewindHandler(),
         CancelExecutionHandler(),
