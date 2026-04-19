@@ -308,9 +308,9 @@ def _verify_entry_point(
     declared script or target.
     """
     if head in {"npm", "pnpm", "yarn", "bun"}:
-        script_name = _node_script_name(parts)
+        script_name = _node_script_name(head, parts)
         if script_name is None:
-            return True
+            return False
         return _package_json_has_script(working_dir, script_name)
 
     if head == "npx":
@@ -394,19 +394,149 @@ def _npx_package_available(working_dir: Path, package: str) -> bool:
     return False
 
 
-def _node_script_name(parts: list[str]) -> str | None:
-    """Return the npm script target referenced by a ``<pm> run <name>`` call.
+_NPM_LIFECYCLE_SCRIPTS: frozenset[str] = frozenset({"test", "start"})
+# package-manager subcommands that are NOT script aliases. Kept conservative:
+# any token not in this set is treated as an implicit script name that must
+# exist in ``package.json.scripts`` before the command is accepted.
+_PNPM_BUILTINS: frozenset[str] = frozenset(
+    {
+        "install",
+        "i",
+        "add",
+        "remove",
+        "rm",
+        "uninstall",
+        "update",
+        "up",
+        "audit",
+        "outdated",
+        "list",
+        "ls",
+        "why",
+        "prune",
+        "dlx",
+        "exec",
+        "link",
+        "unlink",
+        "publish",
+        "pack",
+        "init",
+        "import",
+        "config",
+        "store",
+        "rebuild",
+        "root",
+        "bin",
+        "doctor",
+        "licenses",
+        "patch",
+        "patch-commit",
+        "server",
+        "setup",
+        "deploy",
+        "fetch",
+    }
+)
+_YARN_BUILTINS: frozenset[str] = frozenset(
+    {
+        "install",
+        "add",
+        "remove",
+        "upgrade",
+        "audit",
+        "outdated",
+        "list",
+        "why",
+        "dlx",
+        "exec",
+        "link",
+        "unlink",
+        "publish",
+        "pack",
+        "init",
+        "import",
+        "config",
+        "cache",
+        "global",
+        "bin",
+        "info",
+        "licenses",
+        "tag",
+        "team",
+        "login",
+        "logout",
+        "node",
+        "version",
+        "workspaces",
+        "workspace",
+        "create",
+        "policies",
+        "generate-lock-entry",
+    }
+)
+_BUN_BUILTINS: frozenset[str] = frozenset(
+    {
+        "install",
+        "i",
+        "add",
+        "a",
+        "remove",
+        "rm",
+        "update",
+        "link",
+        "unlink",
+        "publish",
+        "pm",
+        "x",
+        "create",
+        "c",
+        "init",
+        "audit",
+        "patch",
+        "outdated",
+        "why",
+        "upgrade",
+        "exec",
+        "repl",
+        "deploy",
+        "completions",
+    }
+)
 
-    ``npm test`` and ``pnpm test`` are sugar for ``scripts.test``; treat them
-    the same way.
+
+def _node_script_name(head: str, parts: list[str]) -> str | None:
+    """Return the script name a Node package manager will resolve from ``parts``.
+
+    The detector treats any bare token after ``<pm>`` as an implicit script
+    (``yarn typecheck``, ``pnpm check`` …) so every proposal can be validated
+    against ``package.json.scripts``. Explicit ``<pm> run <name>`` is also
+    supported. Tokens that are package-manager built-ins (``install``,
+    ``publish`` …) or flags return ``None`` so the caller can reject the
+    command rather than execute something unverified.
     """
     if len(parts) < 2:
         return None
-    if parts[1] == "run" and len(parts) >= 3:
+    second = parts[1]
+    if second.startswith("-"):
+        return None
+    if second == "run":
+        if len(parts) < 3 or parts[2].startswith("-"):
+            return None
         return parts[2]
-    if parts[1] in {"test", "lint", "build", "start"}:
-        return parts[1]
-    return None
+    if head == "npm":
+        # npm only treats a small set of lifecycle names as script shortcuts;
+        # everything else must go through ``npm run``.
+        if second in _NPM_LIFECYCLE_SCRIPTS:
+            return second
+        return None
+    builtins = {
+        "pnpm": _PNPM_BUILTINS,
+        "yarn": _YARN_BUILTINS,
+        "bun": _BUN_BUILTINS,
+    }.get(head, frozenset())
+    if second in builtins:
+        return None
+    return second
 
 
 def _package_json_has_script(working_dir: Path, name: str) -> bool:

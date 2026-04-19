@@ -526,6 +526,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                     result.value.execution_id,
                                     execution_artifact,
                                     verification_working_dir,
+                                    llm_adapter=self.llm_adapter,
                                 )
                                 artifact = verification.artifact
                                 reference = verification.reference

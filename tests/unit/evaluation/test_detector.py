@@ -219,6 +219,58 @@ class TestNpxValidation:
         assert config.lint_command == ("npx", "@biomejs/biome", "check", ".")
 
 
+class TestNodePackageManagerValidation:
+    """`yarn typecheck`, `pnpm check`, `bun foo` must reference a real script."""
+
+    def test_yarn_typecheck_dropped_when_script_absent(self, tmp_path: Path) -> None:
+        _make_node_project(tmp_path, {"test": "jest"})
+        adapter = _FakeAdapter(response=json.dumps({"static": "yarn typecheck"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+        assert not has_mechanical_toml(tmp_path)
+
+    def test_yarn_typecheck_accepted_when_script_present(self, tmp_path: Path) -> None:
+        _make_node_project(tmp_path, {"test": "jest", "typecheck": "tsc --noEmit"})
+        adapter = _FakeAdapter(response=json.dumps({"static": "yarn typecheck"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        config = build_mechanical_config(tmp_path)
+        assert config.static_command == ("yarn", "typecheck")
+
+    def test_pnpm_check_dropped_when_script_absent(self, tmp_path: Path) -> None:
+        _make_node_project(tmp_path, {"test": "jest"})
+        adapter = _FakeAdapter(response=json.dumps({"lint": "pnpm check"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bun_foo_dropped_when_script_absent(self, tmp_path: Path) -> None:
+        _make_node_project(tmp_path, {"test": "bun test"})
+        adapter = _FakeAdapter(response=json.dumps({"lint": "bun foo"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_npm_bare_subcommand_dropped(self, tmp_path: Path) -> None:
+        """`npm typecheck` is NOT a script shortcut — only `npm run typecheck` is."""
+        _make_node_project(tmp_path, {"typecheck": "tsc --noEmit"})
+        adapter = _FakeAdapter(response=json.dumps({"static": "npm typecheck"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_npm_test_is_lifecycle_shortcut(self, tmp_path: Path) -> None:
+        _make_node_project(tmp_path, {"test": "jest"})
+        adapter = _FakeAdapter(response=json.dumps({"test": "npm test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+        assert build_mechanical_config(tmp_path).test_command == ("npm", "test")
+
+    def test_pnpm_install_not_treated_as_script(self, tmp_path: Path) -> None:
+        """Built-in pm commands must not be validated as scripts — drop them."""
+        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"install": "echo hi"}}))
+        adapter = _FakeAdapter(response=json.dumps({"build": "pnpm install"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
 class TestTomlSerialization:
     def test_commands_with_quotes_roundtrip(self, tmp_path: Path) -> None:
         """Commands containing ``"`` must survive the toml round-trip.
