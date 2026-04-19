@@ -37,6 +37,7 @@ from ouroboros.bigbang.pm_completion import (
 from ouroboros.bigbang.pm_document import save_pm_document
 from ouroboros.bigbang.pm_interview import PMInterviewEngine
 from ouroboros.config import get_clarification_model
+from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
@@ -174,6 +175,22 @@ def _last_classification(engine: PMInterviewEngine) -> str | None:
     Delegates to ``engine.get_last_classification()``.
     """
     return engine.get_last_classification()
+
+
+def _format_pm_transcript(state: InterviewState) -> str:
+    """Format persisted PM interview rounds as readable transcript for subagent context."""
+    if not state.rounds:
+        return ""
+    lines: list[str] = []
+    if state.initial_context:
+        lines.append(f"**Product Idea:** {state.initial_context}")
+        lines.append("")
+    for r in state.rounds:
+        lines.append(f"**Q{r.round_number}:** {r.question}")
+        if r.user_response:
+            lines.append(f"**A{r.round_number}:** {r.user_response}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def _detect_action(arguments: dict[str, Any]) -> str:
@@ -386,28 +403,62 @@ class PMInterviewHandler:
             )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
-        payload = build_pm_interview_subagent(
-            session_id=session_id or "new",
-            action=action,
-            initial_context=initial_context,
-            answer=answer,
-            cwd=cwd_arg,
-            selected_repos=selected_repos,
-        )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Plugin mode: persist state server-side, delegate LLM work to subagent.
+            # This ensures resume/generate operations have real transcript to load.
+            engine = self._get_engine()
+            transcript = ""
+            real_session_id = session_id
+
+            if action == "start" and initial_context:
+                cwd = cwd_arg or os.getcwd()
+                resolved = resolve_initial_context_input(initial_context, cwd=cwd)
+                if resolved.is_err:
+                    return Result.err(
+                        MCPToolError(str(resolved.error), tool_name="ouroboros_pm_interview")
+                    )
+                result = await engine.inner.start_interview(resolved.value, cwd=cwd)
+                if result.is_err:
+                    return Result.err(
+                        MCPToolError(str(result.error), tool_name="ouroboros_pm_interview")
+                    )
+                state = result.value
+                await engine.inner.save_state(state)
+                real_session_id = state.interview_id
+
+            elif session_id:
+                load_result = await engine.inner.load_state(session_id)
+                if load_result.is_err:
+                    return Result.err(
+                        MCPToolError(str(load_result.error), tool_name="ouroboros_pm_interview")
+                    )
+                state = load_result.value
+                # Record answer into persisted state
+                if answer and state.rounds and state.rounds[-1].user_response is None:
+                    state.rounds[-1].user_response = answer
+                    state.mark_updated()
+                    await engine.inner.save_state(state)
+                # Build transcript from persisted rounds
+                transcript = _format_pm_transcript(state)
+
+            payload = build_pm_interview_subagent(
+                session_id=real_session_id or "new",
+                action=action,
+                initial_context=initial_context,
+                answer=answer,
+                cwd=cwd_arg,
+                selected_repos=selected_repos,
+                transcript=transcript,
+            )
             await emit_subagent_dispatched_event(
                 self.event_store,
-                session_id=session_id,
+                session_id=real_session_id,
                 payload=payload,
             )
-            # Plugin mode: PM engine runs in the spawned Task pane (subprocess
-            # mode), which creates + persists the real session.  session_id is
-            # None for "start" (subagent creates it) or the real ID for
-            # resume/generate flows.
             return build_subagent_result(
                 payload,
                 response_shape={
-                    "session_id": session_id,
+                    "session_id": real_session_id,
                     "action": action,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",

@@ -303,6 +303,22 @@ def _stored_ambiguity_snapshot_is_degraded(state: InterviewState) -> bool:
     return False
 
 
+def _format_interview_transcript(state: InterviewState) -> str:
+    """Format persisted interview rounds as a readable transcript for subagent context."""
+    if not state.rounds:
+        return ""
+    lines: list[str] = []
+    if state.initial_context:
+        lines.append(f"**Initial Context:** {state.initial_context}")
+        lines.append("")
+    for r in state.rounds:
+        lines.append(f"**Q{r.round_number}:** {r.question}")
+        if r.user_response:
+            lines.append(f"**A{r.round_number}:** {r.user_response}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 @dataclass
 class GenerateSeedHandler:
     """Handler for the ouroboros_generate_seed tool.
@@ -851,27 +867,75 @@ class InterviewHandler:
             )
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
-        payload = build_interview_subagent(
-            session_id=session_id or "new",
-            action=action,
-            initial_context=initial_context,
-            answer=answer,
-            cwd=arguments.get("cwd"),
-        )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
+            # Plugin mode: persist state server-side, delegate LLM work to subagent.
+            # This ensures resume/generate_seed can load real interview state.
+            llm_adapter = self.llm_adapter or create_llm_adapter(
+                backend=self.llm_backend,
+                max_turns=1,
+                use_case="interview",
+                allowed_tools=_interview_allowed_tools(self.llm_backend),
+            )
+            engine = self.interview_engine or InterviewEngine(
+                llm_adapter=llm_adapter,
+                state_dir=Path.home() / ".ouroboros" / "data",
+                model=get_clarification_model(self.llm_backend),
+            )
+
+            transcript = ""
+            real_session_id = session_id
+
+            if action == "start" and initial_context:
+                cwd = arguments.get("cwd") or os.getcwd()
+                resolved_context = resolve_initial_context_input(initial_context, cwd=cwd)
+                if resolved_context.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(resolved_context.error),
+                            tool_name="ouroboros_interview",
+                        )
+                    )
+                result = await engine.start_interview(resolved_context.value, cwd=cwd)
+                if result.is_err:
+                    return Result.err(
+                        MCPToolError(str(result.error), tool_name="ouroboros_interview")
+                    )
+                state = result.value
+                await engine.save_state(state)
+                real_session_id = state.interview_id
+
+            elif session_id:
+                load_result = await engine.load_state(session_id)
+                if load_result.is_err:
+                    return Result.err(
+                        MCPToolError(str(load_result.error), tool_name="ouroboros_interview")
+                    )
+                state = load_result.value
+                # Record answer into persisted state
+                if answer and state.rounds and state.rounds[-1].user_response is None:
+                    state.rounds[-1].user_response = answer
+                    state.mark_updated()
+                    await engine.save_state(state)
+                # Build transcript from persisted rounds
+                transcript = _format_interview_transcript(state)
+
+            payload = build_interview_subagent(
+                session_id=real_session_id or "new",
+                action=action,
+                initial_context=initial_context,
+                answer=answer,
+                cwd=arguments.get("cwd"),
+                transcript=transcript,
+            )
             await emit_subagent_dispatched_event(
                 self.event_store,
-                session_id=session_id,
+                session_id=real_session_id,
                 payload=payload,
             )
-            # Plugin mode: interview engine runs in the spawned Task pane
-            # (subprocess mode), which creates + persists the real session.
-            # The session_id here is None for "start" (subagent creates it)
-            # or the real ID for resume/answer flows.
             return build_subagent_result(
                 payload,
                 response_shape={
-                    "session_id": session_id,
+                    "session_id": real_session_id,
                     "action": action,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",

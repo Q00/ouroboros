@@ -12,6 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.core.types import Result
 from ouroboros.persistence.event_store import EventStore
 
 # ---------------------------------------------------------------------------
@@ -281,6 +283,26 @@ class TestLateralThinkSinglePersonaDispatch:
 class TestInterviewHandlerValidationBeforeDispatch:
     """Empty args or answer-without-session_id must error, not dispatch."""
 
+    @pytest.fixture(autouse=True)
+    def mock_engine_io(self, monkeypatch):
+        """Mock load/save so plugin path doesn't need real state files."""
+
+        async def _fake_load(self, session_id):
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                rounds=[InterviewRound(round_number=1, question="Q?", user_response=None)],
+            )
+            return Result.ok(state)
+
+        async def _fake_save(self, state):
+            pass
+
+        from ouroboros.bigbang.interview import InterviewEngine
+
+        monkeypatch.setattr(InterviewEngine, "load_state", _fake_load)
+        monkeypatch.setattr(InterviewEngine, "save_state", _fake_save)
+
     @pytest.fixture
     async def event_store(self):
         store = EventStore("sqlite+aiosqlite:///:memory:")
@@ -352,6 +374,26 @@ class TestInterviewHandlerValidationBeforeDispatch:
 
 class TestPMInterviewHandlerValidationBeforeDispatch:
     """Invalid action+args combos must error, not dispatch."""
+
+    @pytest.fixture(autouse=True)
+    def mock_engine_io(self, monkeypatch):
+        """Mock load/save so plugin path doesn't need real state files."""
+
+        async def _fake_load(self, session_id):
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                rounds=[InterviewRound(round_number=1, question="Q?", user_response=None)],
+            )
+            return Result.ok(state)
+
+        async def _fake_save(self, state):
+            pass
+
+        from ouroboros.bigbang.interview import InterviewEngine
+
+        monkeypatch.setattr(InterviewEngine, "load_state", _fake_load)
+        monkeypatch.setattr(InterviewEngine, "save_state", _fake_save)
 
     @pytest.fixture
     async def event_store(self):
