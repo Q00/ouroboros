@@ -142,6 +142,18 @@ async def ensure_mechanical_toml(
     if target.is_file() and not force:
         return True
 
+    # ``force=True`` is the "refresh" path: invalidate the prior toml up front
+    # so that if re-detection fails (missing manifests, LLM errors, empty
+    # validation, write errors) Stage 1 does not keep running stale commands.
+    # The contract surfaced to users ("skip gracefully until authored") only
+    # holds when the toml is actually removed on failure.
+    if force and target.is_file():
+        try:
+            target.unlink()
+        except OSError as exc:
+            log.warning("detector.force_unlink_failed", path=str(target), error=str(exc))
+            return False
+
     manifests = _collect_manifests(working_dir)
     if not manifests:
         log.info("detector.skipped", reason="no_manifests", working_dir=str(working_dir))

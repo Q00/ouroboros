@@ -151,6 +151,36 @@ class TestEnsureMechanicalToml:
         assert 'test = "npm test"' in body
         assert "old command" not in body
 
+    def test_force_removes_stale_toml_when_no_manifests(self, tmp_path: Path) -> None:
+        """Refresh must not leave stale commands active when detection fails."""
+        (tmp_path / ".ouroboros").mkdir()
+        (tmp_path / ".ouroboros" / "mechanical.toml").write_text('test = "old command"\n')
+        # No manifests present → detector can propose nothing.
+        adapter = _FakeAdapter(response="{}")
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter, force=True))
+        assert ok is False
+        assert not has_mechanical_toml(tmp_path)
+
+    def test_force_removes_stale_toml_on_llm_failure(self, tmp_path: Path) -> None:
+        (tmp_path / ".ouroboros").mkdir()
+        (tmp_path / ".ouroboros" / "mechanical.toml").write_text('test = "old command"\n')
+        _make_node_project(tmp_path, {"test": "jest"})
+        adapter = _FakeAdapter(error=ProviderError("network"))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter, force=True))
+        assert ok is False
+        assert not has_mechanical_toml(tmp_path)
+
+    def test_force_removes_stale_toml_when_all_proposals_dropped(self, tmp_path: Path) -> None:
+        """Refresh whose proposal fails validation must not keep stale file."""
+        (tmp_path / ".ouroboros").mkdir()
+        (tmp_path / ".ouroboros" / "mechanical.toml").write_text('test = "old command"\n')
+        _make_node_project(tmp_path, {"test": "jest"})
+        # Proposal references a script that does not exist → dropped.
+        adapter = _FakeAdapter(response=json.dumps({"test": "npm run nonexistent"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter, force=True))
+        assert ok is False
+        assert not has_mechanical_toml(tmp_path)
+
     def test_make_target_validation(self, tmp_path: Path) -> None:
         """`make test` passes only when the Makefile actually declares ``test``."""
         (tmp_path / "Makefile").write_text(".PHONY: build\nbuild:\n\techo building\n")
