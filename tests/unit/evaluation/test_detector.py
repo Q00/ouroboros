@@ -405,6 +405,17 @@ class TestUvSubdirectoryProject:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
+    def test_uv_global_project_flag_before_subcommand(self, tmp_path: Path) -> None:
+        """``uv --project backend run pytest`` resolves to ``run`` subcommand."""
+        (tmp_path / "backend").mkdir()
+        (tmp_path / "backend" / "pyproject.toml").write_text(
+            '[project]\nname = "svc"\ndependencies = ["pytest>=8"]\n'
+        )
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "root"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv --project backend run pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
     def test_uv_run_directory_without_subpackage_manifest_dropped(self, tmp_path: Path) -> None:
         (tmp_path / "backend").mkdir()
         (tmp_path / "pyproject.toml").write_text('[project]\nname = "root"\n')
@@ -1232,29 +1243,74 @@ class TestPythonPackageManagerRun:
 
 
 class TestWorkspaceScopedPMCommands:
-    """Workspace-scoped package-manager flags must not break script detection."""
+    """Workspace-scoped commands resolve against the target workspace, not root."""
 
-    def test_pnpm_filter_then_script_accepted(self, tmp_path: Path) -> None:
-        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
+    def _make_workspace(self, tmp_path: Path, ws_name: str, script: str) -> None:
+        """Create a ``packages/<ws_name>`` package.json with ``scripts[script]``."""
+        ws_dir = tmp_path / "packages" / ws_name
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "package.json").write_text(
+            json.dumps({"name": ws_name, "scripts": {script: "echo ok"}})
+        )
+
+    def test_pnpm_filter_resolves_to_workspace_script(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "root", "workspaces": ["packages/*"]})
+        )
+        self._make_workspace(tmp_path, "web", "test")
         adapter = _FakeAdapter(response=json.dumps({"test": "pnpm --filter web test"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
-    def test_npm_workspace_flag_then_script_accepted(self, tmp_path: Path) -> None:
-        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
+    def test_pnpm_filter_dropped_when_workspace_missing_script(self, tmp_path: Path) -> None:
+        """Root having ``scripts.test`` is not a valid excuse when workspace drops it."""
+        (tmp_path / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "root",
+                    "workspaces": ["packages/*"],
+                    "scripts": {"test": "echo root"},
+                }
+            )
+        )
+        self._make_workspace(tmp_path, "web", "lint")  # no ``test`` in web
+        adapter = _FakeAdapter(response=json.dumps({"test": "pnpm --filter web test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_npm_workspace_flag_resolves_to_workspace_script(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "root", "workspaces": ["packages/*"]})
+        )
+        self._make_workspace(tmp_path, "api", "test")
         adapter = _FakeAdapter(response=json.dumps({"test": "npm --workspace api test"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
-    def test_yarn_workspace_keyword_then_script_accepted(self, tmp_path: Path) -> None:
-        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"test": "jest"}}))
+    def test_yarn_workspace_keyword_resolves_to_workspace_script(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "root", "workspaces": ["packages/*"]})
+        )
+        self._make_workspace(tmp_path, "web", "test")
         adapter = _FakeAdapter(response=json.dumps({"test": "yarn workspace web test"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
     def test_pnpm_inline_filter_equals_form(self, tmp_path: Path) -> None:
-        (tmp_path / "package.json").write_text(json.dumps({"scripts": {"lint": "eslint ."}}))
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "root", "workspaces": ["packages/*"]})
+        )
+        self._make_workspace(tmp_path, "web", "lint")
         adapter = _FakeAdapter(response=json.dumps({"lint": "pnpm --filter=web lint"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_pnpm_workspace_yaml_glob_resolves(self, tmp_path: Path) -> None:
+        """pnpm-workspace.yaml globs also drive workspace resolution."""
+        (tmp_path / "package.json").write_text(json.dumps({"name": "root"}))
+        (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - 'packages/*'\n")
+        self._make_workspace(tmp_path, "web", "test")
+        adapter = _FakeAdapter(response=json.dumps({"test": "pnpm --filter web test"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 

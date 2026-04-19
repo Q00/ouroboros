@@ -396,7 +396,8 @@ def _verify_entry_point(
         script_name = _node_script_name(head, parts)
         if script_name is None:
             return False
-        return _package_json_has_script(working_dir, script_name)
+        workspace = _node_workspace_filter(head, parts)
+        return _node_workspace_has_script(working_dir, workspace, script_name)
 
     if head == "npx":
         package = _npx_package(parts)
@@ -729,6 +730,29 @@ def _uv_project_root(working_dir: Path, parts: list[str]) -> Path:
     return working_dir
 
 
+def _uv_subcommand(parts: list[str]) -> str | None:
+    """Return the ``uv`` subcommand, skipping global flag / value pairs.
+
+    ``uv --project backend run pytest`` and ``uv --directory=backend run
+    pytest`` both resolve to ``run``. ``--flag=value`` is self-contained;
+    ``--flag value`` pairs consume two tokens. Boolean flags like
+    ``--frozen`` / ``--quiet`` / ``--verbose`` consume one token.
+    """
+    i = 1  # skip ``uv`` itself
+    while i < len(parts):
+        token = parts[i]
+        if not token.startswith("-"):
+            return token
+        if "=" in token:
+            i += 1
+            continue
+        if token in _UV_RUN_VALUE_OPTIONS:
+            i += 2
+            continue
+        i += 1
+    return None
+
+
 def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     """Validate ``uv`` invocations by inspecting the sub-tool they invoke.
 
@@ -744,8 +768,10 @@ def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     ``--directory`` / ``--project`` retarget the effective project root so
     monorepo layouts like ``uv run --directory backend pytest`` validate
     against the Python project that actually lives under ``backend/``.
+    The same flags are honoured in ``uv --project backend run pytest``
+    form (global option before the subcommand).
     """
-    sub = _first_positional(parts)
+    sub = _uv_subcommand(parts)
     if sub is None:
         return False
     if sub != "run":
@@ -1205,6 +1231,107 @@ def _package_json_has_script(working_dir: Path, name: str) -> bool:
         return False
     scripts = data.get("scripts") if isinstance(data, dict) else None
     return isinstance(scripts, dict) and name in scripts
+
+
+def _node_workspace_filter(head: str, parts: list[str]) -> str | None:
+    """Return the workspace name targeted by a PM invocation, if any.
+
+    Recognises ``--filter <name>`` / ``--filter=<name>`` / ``-F <name>``
+    (pnpm), ``--workspace <name>`` / ``-w <name>`` (npm), and
+    ``yarn workspace <name>`` / ``yarn workspaces foreach --include <name>``.
+    Returns ``None`` when no workspace filter is present.
+    """
+    i = 1
+    while i < len(parts):
+        token = parts[i]
+        if token in {"--filter", "-F", "--workspace", "-w"} and i + 1 < len(parts):
+            return parts[i + 1]
+        for prefix in ("--filter=", "--workspace="):
+            if token.startswith(prefix):
+                return token[len(prefix) :]
+        if head == "yarn" and token in {"workspace", "workspaces"} and i + 1 < len(parts):
+            return parts[i + 1]
+        i += 1
+    return None
+
+
+def _node_workspace_has_script(
+    working_dir: Path,
+    workspace_filter: str | None,
+    script_name: str,
+) -> bool:
+    """Check whether ``script_name`` is declared in the targeted package.json.
+
+    When a workspace filter is supplied, we walk the common monorepo layouts
+    (``<name>/``, ``packages/<name>/``, ``apps/<name>/``) and the
+    ``package.json.workspaces`` / ``pnpm-workspace.yaml`` globs, validating
+    against the first matching package.json. Without a filter the root
+    ``package.json`` is authoritative.
+    """
+    if workspace_filter is None:
+        return _package_json_has_script(working_dir, script_name)
+    for candidate in _iter_workspace_package_dirs(working_dir, workspace_filter):
+        if _package_json_has_script(candidate, script_name):
+            return True
+    return False
+
+
+def _iter_workspace_package_dirs(working_dir: Path, name: str):
+    """Yield directories that could house the workspace package ``name``.
+
+    The search is intentionally conservative: it covers the flat root,
+    ``packages/`` and ``apps/`` conventions, and the declared globs in
+    ``package.json.workspaces`` / ``pnpm-workspace.yaml``. Globs like
+    ``packages/*`` are expanded with ``Path.glob`` so the workspace's own
+    ``package.json`` name can be inspected to confirm the match.
+    """
+    for relative in (name, f"packages/{name}", f"apps/{name}"):
+        candidate = working_dir / relative
+        if (candidate / "package.json").is_file():
+            yield candidate
+    try:
+        root_data = json.loads((working_dir / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        root_data = None
+    globs: list[str] = []
+    if isinstance(root_data, dict):
+        raw_ws = root_data.get("workspaces")
+        if isinstance(raw_ws, list):
+            globs.extend(g for g in raw_ws if isinstance(g, str))
+        elif isinstance(raw_ws, dict):
+            packages = raw_ws.get("packages")
+            if isinstance(packages, list):
+                globs.extend(g for g in packages if isinstance(g, str))
+    pnpm_ws = working_dir / "pnpm-workspace.yaml"
+    if pnpm_ws.is_file():
+        try:
+            for line in pnpm_ws.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    entry = stripped[2:].strip().strip("'\"")
+                    if entry:
+                        globs.append(entry)
+        except OSError:
+            pass
+    seen: set[Path] = set()
+    for pattern in globs:
+        try:
+            for candidate in working_dir.glob(pattern):
+                if not (candidate / "package.json").is_file():
+                    continue
+                key = candidate.resolve()
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    body = json.loads((candidate / "package.json").read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                ws_name = body.get("name") if isinstance(body, dict) else None
+                if ws_name == name or candidate.name == name:
+                    yield candidate
+        except (OSError, ValueError):
+            continue
 
 
 def _justfile_has_recipe(working_dir: Path, recipe: str) -> bool:
