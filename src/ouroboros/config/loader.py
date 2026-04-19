@@ -553,7 +553,7 @@ def get_opencode_mode() -> str | None:
 
     Priority:
         1. config.yaml orchestrator.opencode_mode
-        2. None (legacy install — runtime gate defaults to plugin)
+        2. None (no explicit mode — runtime gate requires "plugin" to dispatch)
 
     No environment override by design. Users switch by re-running
     ``ouroboros setup --opencode-mode=<plugin|subprocess>``.
