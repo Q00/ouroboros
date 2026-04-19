@@ -450,6 +450,19 @@ def uninstall(
     bridge_plugin_dir = opencode_config_dir() / "plugins" / "ouroboros-bridge"
     if bridge_plugin_dir.exists():
         targets.append(f"OpenCode bridge plugin ({bridge_plugin_dir}/)")
+    else:
+        # Directory gone but config entry may linger — check opencode config
+        _oc_cfg = find_opencode_config(allow_default=False)
+        if _oc_cfg is not None:
+            try:
+                _oc_data = json.loads(_strip_jsonc(_oc_cfg.read_text()))
+                _oc_plugins = _oc_data.get("plugin", [])
+                if isinstance(_oc_plugins, list) and any(
+                    is_bridge_plugin_entry(e) for e in _oc_plugins
+                ):
+                    targets.append(f"OpenCode bridge plugin entry in {_oc_cfg}")
+            except (json.JSONDecodeError, OSError):
+                pass
 
     data_dir = Path.home() / ".ouroboros"
     if not keep_data and data_dir.exists():

@@ -520,7 +520,14 @@ export const OuroborosBridge: Plugin = async (ctx) => {
         })
 
         log(`DISPATCH_DONE pid=${pid} ok=${ok.length} failed=${failed.length}`)
-        stamp(out, notify(ok, failed.map((f) => f.sub), []))
+        const banner = notify(ok, failed.map((f) => f.sub), [])
+        // Preserve response_shape in text so the LLM can read contract fields
+        // (session_id, job_id, status) that build_subagent_result() provides.
+        // Without this, stamp() replaces the JSON and the LLM loses these values.
+        const shapeSuffix = Object.keys(responseShape).length > 0
+          ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
+          : ""
+        stamp(out, banner + shapeSuffix)
 
         const envelope = buildEnvelope(ok, failed, [])
         const meta = (out.metadata ?? {}) as Record<string, unknown>

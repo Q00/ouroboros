@@ -348,8 +348,8 @@ def get_ouroboros_tools(
 
     ``opencode_mode`` is threaded into every handler that dispatches a
     ``_subagent`` envelope. When ``runtime_backend`` is an OpenCode variant
-    AND ``opencode_mode`` is ``"plugin"`` (or None, for legacy safety) the
-    handler returns the envelope. In every other combination the handler
+    AND ``opencode_mode`` is ``"plugin"`` the handler returns the envelope.
+    In every other combination (including ``opencode_mode=None``) the handler
     falls through to its real in-process path. See
     ``ouroboros.mcp.tools.subagent.should_dispatch_via_plugin``.
     """
