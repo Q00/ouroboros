@@ -624,6 +624,77 @@ class TestRepoCoupledRunners:
         assert ok is False
 
 
+class TestBareToolRepoCoupling:
+    """Bare binaries must be declared in a repo manifest, not just on PATH."""
+
+    def test_bare_pytest_dropped_when_not_declared(self, tmp_path: Path) -> None:
+        """Host-installed pytest alone is not enough to write to mechanical.toml."""
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest -q"}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/pytest"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bare_pytest_accepted_when_in_pyproject(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest -q"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_bare_pytest_accepted_when_in_requirements_txt(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        (tmp_path / "requirements-dev.txt").write_text("pytest==8.0\ncoverage\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest -q"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_bare_eslint_dropped_when_not_declared(self, tmp_path: Path) -> None:
+        from unittest.mock import patch
+
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        adapter = _FakeAdapter(response=json.dumps({"lint": "eslint ."}))
+        with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/eslint"):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bare_eslint_accepted_when_in_package_json(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"name": "demo", "devDependencies": {"eslint": "^9"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"lint": "eslint ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_bare_eslint_accepted_when_in_node_modules_bin(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text('{"name": "demo"}')
+        (tmp_path / "node_modules" / ".bin").mkdir(parents=True)
+        (tmp_path / "node_modules" / ".bin" / "eslint").write_text("")
+        adapter = _FakeAdapter(response=json.dumps({"lint": "eslint ."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestMakeValidation:
+    """`make` without a Makefile must be dropped."""
+
+    def test_bare_make_dropped_without_makefile(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text('{}')
+        adapter = _FakeAdapter(response=json.dumps({"build": "make"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bare_make_accepted_with_makefile(self, tmp_path: Path) -> None:
+        (tmp_path / "Makefile").write_text("all:\n\techo ok\n")
+        (tmp_path / "package.json").write_text('{}')
+        adapter = _FakeAdapter(response=json.dumps({"build": "make"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
 class TestEvaluationPublicSurface:
     """Deprecated compat symbols must remain importable."""
 
@@ -676,7 +747,9 @@ class TestTomlSerialization:
         Previous implementation wrote ``test = "pytest -k "slow""`` which is
         malformed TOML; the escaped serializer must produce a readable file.
         """
-        (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "x"\ndependencies = ["pytest>=8"]\n'
+        )
         adapter = _FakeAdapter(response=json.dumps({"test": 'pytest -k "slow"'}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True

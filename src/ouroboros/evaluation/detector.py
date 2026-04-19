@@ -341,8 +341,12 @@ def _verify_entry_point(
         return _npx_package_available(working_dir, package)
 
     if head == "make":
+        if not _has_any(working_dir, ("Makefile", "makefile", "GNUmakefile")):
+            return False
         target = _make_target(parts)
         if target is None:
+            # Bare ``make`` runs the first target in the Makefile; accept only
+            # when the Makefile actually exists (verified above).
             return True
         return _makefile_has_target(working_dir, target)
 
@@ -394,9 +398,13 @@ def _verify_entry_point(
     if head in _REPO_COUPLED_RUNNERS:
         return _REPO_COUPLED_RUNNERS[head](working_dir, parts)
 
-    # Generic binary — require it on PATH. We do NOT require a manifest,
-    # because standalone tools like pytest / ruff / mypy run from any repo.
-    return shutil.which(head) is not None
+    # Final fallback: the tool must be provably installable from the repo
+    # state — declared in a Python / Node manifest or already vendored into a
+    # project-local bin directory. Falling back to a host-wide ``shutil.which``
+    # lookup would let an LLM hallucination become a phantom Stage 1 failure
+    # on any machine that happens to have the binary installed, so that path
+    # is intentionally removed.
+    return _bare_tool_declared_by_repo(working_dir, head)
 
 
 _CARGO_BUILTIN_SUBCOMMANDS: frozenset[str] = frozenset(
@@ -989,6 +997,77 @@ def _makefile_has_target(working_dir: Path, target: str) -> bool:
 def _has_any(working_dir: Path, names: tuple[str, ...]) -> bool:
     """True when any of ``names`` exists as a file in ``working_dir``."""
     return any((working_dir / name).is_file() for name in names)
+
+
+def _package_json_declares_dependency(working_dir: Path, name: str) -> bool:
+    """True when ``name`` appears in any ``package.json`` dependency section."""
+    path = working_dir / "package.json"
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    for section in (
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ):
+        deps = data.get(section)
+        if isinstance(deps, dict) and name in deps:
+            return True
+    return False
+
+
+def _requirements_files_declare(working_dir: Path, name: str) -> bool:
+    """True when ``name`` appears in any ``requirements*.txt`` in the repo root."""
+    lowered = name.lower()
+    try:
+        candidates = sorted(working_dir.glob("requirements*.txt"))
+    except OSError:
+        return False
+    for path in candidates:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for raw in content.splitlines():
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                continue
+            token = stripped.split(";", 1)[0].strip()
+            for sep in "[<>=!~ ":
+                idx = token.find(sep)
+                if idx != -1:
+                    token = token[:idx]
+                    break
+            if token.strip().lower() == lowered:
+                return True
+    return False
+
+
+def _bare_tool_declared_by_repo(working_dir: Path, tool: str) -> bool:
+    """True when a bare tool (pytest, ruff, eslint…) is provisioned by the repo.
+
+    Accepts any of:
+      * Project-local bin: ``.venv/bin/<tool>`` or ``node_modules/.bin/<tool>``
+      * Python: declared in ``pyproject.toml`` or ``requirements*.txt``
+      * Node: declared in ``package.json`` dependencies
+    """
+    if (working_dir / ".venv" / "bin" / tool).exists():
+        return True
+    if (working_dir / ".venv" / "Scripts" / f"{tool}.exe").exists():
+        return True
+    if (working_dir / "node_modules" / ".bin" / tool).exists():
+        return True
+    if _pyproject_declares_dependency(working_dir, tool):
+        return True
+    if _package_json_declares_dependency(working_dir, tool):
+        return True
+    return _requirements_files_declare(working_dir, tool)
 
 
 def _gmake_validator(working_dir: Path, parts: list[str]) -> bool:
