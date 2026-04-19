@@ -3,11 +3,11 @@
 Verifies the multi-persona fan-out path honours the shared
 ``should_dispatch_via_plugin`` contract:
 
-* Plugin-gated (OpenCode runtime + ``opencode_mode="plugin"`` or unset) →
+* Plugin-gated (OpenCode runtime + ``opencode_mode="plugin"`` explicitly) →
   emits a ``_subagents`` envelope for the bridge plugin to consume.
-* Subprocess-gated (``opencode_mode="subprocess"`` or non-OpenCode runtime)
-  → falls back to inline concatenation of persona prompts so the caller
-  gets a useful text response instead of a dead envelope.
+* Non-plugin (``opencode_mode="subprocess"``, unset/None, or non-OpenCode
+  runtime) → falls back to inline concatenation of persona prompts so the
+  caller gets a useful text response instead of a dead envelope.
 """
 
 from __future__ import annotations

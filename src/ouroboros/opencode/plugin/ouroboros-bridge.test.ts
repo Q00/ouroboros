@@ -610,7 +610,7 @@ describe("_resolveMid — message ID resolution with retry", () => {
     expect(mid).toBe("m2")
   })
 
-  test("falls back to newest assistant when no callID match", async () => {
+  test("returns null when no callID match (fail closed, no fallback)", async () => {
     const cli = mockCli({
       messages: async () => ({
         data: [
@@ -620,7 +620,7 @@ describe("_resolveMid — message ID resolution with retry", () => {
       }),
     })
     const mid = await _resolveMid(cli as never, "pid", "no_match")
-    expect(mid).toBe("m1")
+    expect(mid).toBeNull()
   })
 
   test("returns null after retries when no messages", async () => {

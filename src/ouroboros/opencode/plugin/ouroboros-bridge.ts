@@ -27,7 +27,6 @@ export function num(v: string | undefined, d: number): number {
 export const CHILD_TIMEOUT_MS = num(process.env.OUROBOROS_CHILD_TIMEOUT_MS, 20 * 60 * 1000)
 const PATCH_RETRIES = 3
 const RESOLVE_RETRIES = 5
-export const SUB_RETRIES = num(process.env.OUROBOROS_SUB_RETRIES, 2)
 const BACKOFF_MS = 100
 
 // Ensure log dir exists once at module load, not per-call.
@@ -338,6 +337,8 @@ async function patch(b: Base, pid: string, mid: string, partID: string, body: un
 }
 
 // Resolve assistant messageID hosting this callID — with retry for race conditions.
+// Fails closed: returns null if exact callID match not found after all retries.
+// Never falls back to arbitrary messages — prevents cross-talk in busy sessions.
 async function resolveMid(cli: Cli, pid: string, callID: string): Promise<string | null> {
   for (let i = 0; i < RESOLVE_RETRIES; i++) {
     const res = await cli.session.messages({ path: { id: pid } }).catch(() => null)
@@ -347,10 +348,6 @@ async function resolveMid(cli: Cli, pid: string, callID: string): Promise<string
         const m = msgs[j]
         if (m.info.role !== "assistant") continue
         if (m.parts.some((p) => p.type === "tool" && p.callID === callID)) return m.info.id
-      }
-      // fallback: newest assistant — valid for MCP tool results attached post-factum
-      for (let j = msgs.length - 1; j >= 0; j--) {
-        if (msgs[j].info.role === "assistant") return msgs[j].info.id
       }
     }
     if (i < RESOLVE_RETRIES - 1) await sleep(BACKOFF_MS)
@@ -463,7 +460,7 @@ async function dispatch(cli: Cli, b: Base, pid: string, mid: string, s: Sub): Pr
 }
 
 export const OuroborosBridge: Plugin = async (ctx) => {
-  log(`INIT dir=${ctx.directory ?? "?"} timeout=${CHILD_TIMEOUT_MS}ms retries=${SUB_RETRIES}`)
+  log(`INIT dir=${ctx.directory ?? "?"} timeout=${CHILD_TIMEOUT_MS}ms`)
   return {
     "tool.execute.after": async (input, output) => {
       try {
