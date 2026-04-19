@@ -189,12 +189,13 @@ def should_dispatch_via_plugin(
 
     Rules:
         - runtime_backend not OpenCode → False.
-        - runtime_backend OpenCode, opencode_mode="subprocess" → False.
         - runtime_backend OpenCode, opencode_mode="plugin" → True.
-        - runtime_backend OpenCode, opencode_mode None → True.
-            Safe default: legacy installs predate the mode field and only ever
-            worked with the plugin. Preserves existing behaviour until the
-            user re-runs ``ouroboros setup --opencode-mode=...``.
+        - runtime_backend OpenCode, opencode_mode="subprocess" → False.
+        - runtime_backend OpenCode, opencode_mode None/empty → False.
+            Safe default: upgraded users who haven't re-run ``ouroboros setup``
+            will have opencode_mode=None. They don't have the bridge plugin
+            installed, so dispatching envelopes would break their flows.
+            Require explicit opt-in via ``ouroboros setup --opencode-mode=plugin``.
 
     Args:
         runtime_backend: Resolved agent runtime backend name.
@@ -207,7 +208,7 @@ def should_dispatch_via_plugin(
     if backend not in _OPENCODE_RUNTIMES:
         return False
     mode = (opencode_mode or "").strip().lower()
-    return mode != "subprocess"
+    return mode == "plugin"
 
 
 async def emit_subagent_dispatched_event(
