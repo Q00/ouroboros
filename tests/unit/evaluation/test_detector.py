@@ -523,6 +523,26 @@ class TestUvRunOptionParsing:
             ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
+    def test_uv_run_tool_on_host_path_is_dropped(self, tmp_path: Path) -> None:
+        """Host-only pyright is not repo-coupled → drop even if on PATH."""
+        from unittest.mock import patch
+
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv run pyright ."}))
+        with patch(
+            "ouroboros.evaluation.detector.shutil.which",
+            return_value="/usr/bin/pyright",
+        ):
+            ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_uv_run_tool_in_requirements_txt_is_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        (tmp_path / "requirements-dev.txt").write_text("pyright==1.1\n")
+        adapter = _FakeAdapter(response=json.dumps({"static": "uv run pyright"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
     def test_uv_run_inline_equals_option_value(self, tmp_path: Path) -> None:
         """`--with=pytest` (inline) is self-contained."""
         from unittest.mock import patch
@@ -682,14 +702,14 @@ class TestMakeValidation:
     """`make` without a Makefile must be dropped."""
 
     def test_bare_make_dropped_without_makefile(self, tmp_path: Path) -> None:
-        (tmp_path / "package.json").write_text('{}')
+        (tmp_path / "package.json").write_text("{}")
         adapter = _FakeAdapter(response=json.dumps({"build": "make"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
 
     def test_bare_make_accepted_with_makefile(self, tmp_path: Path) -> None:
         (tmp_path / "Makefile").write_text("all:\n\techo ok\n")
-        (tmp_path / "package.json").write_text('{}')
+        (tmp_path / "package.json").write_text("{}")
         adapter = _FakeAdapter(response=json.dumps({"build": "make"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True

@@ -590,17 +590,21 @@ def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
     tool = _uv_run_tool(parts)
     if tool is None:
         return False
+    # Repo-coupled acceptance paths only. A host-wide ``shutil.which`` lookup
+    # used to be accepted here, but that made a developer machine's globally
+    # installed ``pyright`` / ``ruff`` / ``pytest`` enough to persist
+    # ``uv run <tool>`` commands the project cannot actually run in CI.
     if (working_dir / ".venv" / "bin" / tool).exists():
         return True
     if (working_dir / ".venv" / "Scripts" / f"{tool}.exe").exists():
         return True
-    if shutil.which(tool) is not None:
-        return True
     if _pyproject_declares_dependency(working_dir, tool):
         return True
-    # Fall back to ``--with <pkg>`` / ``--with-editable <pkg>`` provisioning:
-    # uv will install that package for the duration of the run, making the
-    # tool available even when it is not declared elsewhere.
+    if _requirements_files_declare(working_dir, tool):
+        return True
+    # ``uv run --with <pkg>`` / ``--with-editable <pkg>`` provisions the
+    # package for the duration of the run, so the tool is runnable even when
+    # it is not declared in the repo manifests.
     return _uv_with_supplies_tool(parts, tool)
 
 
