@@ -423,10 +423,39 @@ def _verify_entry_point(
             (working_dir / "build.gradle").is_file() or (working_dir / "build.gradle.kts").is_file()
         ):
             return False
-        return (working_dir / head).is_file()
+        if not (working_dir / head).is_file():
+            return False
+        return _gradle_task_is_declared(working_dir, parts)
+
+    if head == "gradle":
+        if not (
+            (working_dir / "build.gradle").is_file() or (working_dir / "build.gradle.kts").is_file()
+        ):
+            return False
+        return _gradle_task_is_declared(working_dir, parts)
 
     if head in {"python", "python3"}:
         return _python_module_is_available(working_dir, parts)
+
+    if head in {"poetry", "pdm", "hatch"}:
+        if not (working_dir / "pyproject.toml").is_file():
+            return False
+        return _python_pm_run_tool_is_declared(working_dir, parts)
+
+    if head == "task":
+        return _task_task_is_declared(working_dir, parts)
+
+    if head == "rake":
+        return _rake_task_is_declared(working_dir, parts)
+
+    if head == "bundle":
+        return _bundle_subcommand_is_safe(working_dir, parts)
+
+    if head == "composer":
+        return _composer_script_is_declared(working_dir, parts)
+
+    if head == "mix":
+        return _mix_task_is_builtin(working_dir, parts)
 
     if head in _REPO_COUPLED_RUNNERS:
         return _REPO_COUPLED_RUNNERS[head](working_dir, parts)
@@ -1175,21 +1204,14 @@ def _dotnet_validator(working_dir: Path, parts: list[str]) -> bool:  # noqa: ARG
 # must prove the relevant manifest/target exists before the command is
 # accepted, closing the "host has binary but repo cannot actually run it"
 # phantom-failure window.
+# Runners whose *existence* on disk is enough: they either wrap fixed
+# manifests (``ant`` → ``build.xml``) or drive their own discovery
+# (``bazel``, ``cmake``). Runners that take a user-controlled target name
+# (``poetry run``, ``gradle <task>``, ``task <name>``, ``rake <task>``,
+# ``composer <script>``, ``bundle exec``, ``mix <task>``) are validated with
+# dedicated helpers below because manifest presence alone is not proof.
 _REPO_COUPLED_RUNNERS: dict[str, Callable[[Path, list[str]], bool]] = {
     "gmake": _gmake_validator,
-    "task": lambda wd, _parts: _has_any(
-        wd,
-        ("Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml"),
-    ),
-    "gradle": lambda wd, _parts: _has_any(
-        wd,
-        (
-            "build.gradle",
-            "build.gradle.kts",
-            "settings.gradle",
-            "settings.gradle.kts",
-        ),
-    ),
     "ant": lambda wd, _parts: (wd / "build.xml").is_file(),
     "tox": lambda wd, _parts: (wd / "tox.ini").is_file() or (wd / "pyproject.toml").is_file(),
     "nox": lambda wd, _parts: (wd / "noxfile.py").is_file(),
@@ -1200,19 +1222,227 @@ _REPO_COUPLED_RUNNERS: dict[str, Callable[[Path, list[str]], bool]] = {
     "buck": lambda wd, _parts: _has_any(wd, (".buckconfig", "BUCK")),
     "cmake": lambda wd, _parts: (wd / "CMakeLists.txt").is_file(),
     "ninja": lambda wd, _parts: _has_any(wd, ("build.ninja", "CMakeLists.txt")),
-    "poetry": lambda wd, _parts: (wd / "pyproject.toml").is_file(),
-    "pdm": lambda wd, _parts: (wd / "pyproject.toml").is_file(),
-    "hatch": lambda wd, _parts: (wd / "pyproject.toml").is_file(),
-    "rake": lambda wd, _parts: _has_any(wd, ("Rakefile", "rakefile")),
-    "bundle": lambda wd, _parts: (wd / "Gemfile").is_file(),
     "rubocop": lambda wd, _parts: _has_any(wd, (".rubocop.yml", ".rubocop.yaml", "Gemfile")),
     "phpunit": lambda wd, _parts: _has_any(
         wd, ("phpunit.xml", "phpunit.xml.dist", "composer.json")
     ),
-    "composer": lambda wd, _parts: (wd / "composer.json").is_file(),
-    "mix": lambda wd, _parts: (wd / "mix.exs").is_file(),
     "dotnet": _dotnet_validator,
 }
+
+
+def _python_pm_run_tool_is_declared(working_dir: Path, parts: list[str]) -> bool:
+    """Validate ``poetry run`` / ``pdm run`` / ``hatch run`` invocations.
+
+    The tool invoked must be a declared project dependency or installed
+    into the project venv. Non-``run`` subcommands (``poetry lock``,
+    ``pdm install``, ``hatch build`` …) mutate project state and are
+    dropped so they never land in ``mechanical.toml`` as Stage 1 commands.
+    """
+    sub = _first_positional(parts)
+    if sub != "run":
+        return False
+    try:
+        run_idx = parts.index("run")
+    except ValueError:
+        return False
+    for token in parts[run_idx + 1 :]:
+        if token.startswith("-"):
+            continue
+        return _bare_tool_declared_by_repo(working_dir, token.split("@", 1)[0])
+    return False
+
+
+_GRADLE_BUILTIN_TASKS: frozenset[str] = frozenset(
+    {
+        "assemble",
+        "build",
+        "check",
+        "clean",
+        "dependencies",
+        "help",
+        "jar",
+        "javadoc",
+        "projects",
+        "properties",
+        "tasks",
+        "test",
+    }
+)
+
+
+def _gradle_task_is_declared(working_dir: Path, parts: list[str]) -> bool:
+    """Validate a ``gradle <task>`` / ``./gradlew <task>`` invocation.
+
+    Accepts either a curated set of core-plugin lifecycle tasks (``build``,
+    ``check``, ``test`` …) or a task declared in ``build.gradle`` /
+    ``build.gradle.kts`` via the common registration forms
+    (``task <name> {…}``, ``tasks.register("<name>")``,
+    ``tasks.create("<name>")``).
+    """
+    import re as _re
+
+    task = _first_positional(parts)
+    if task is None:
+        return False
+    if task in _GRADLE_BUILTIN_TASKS:
+        return True
+    declared: set[str] = set()
+    for name in ("build.gradle", "build.gradle.kts"):
+        path = working_dir / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        declared.update(_re.findall(r"\btask\s+([A-Za-z_][A-Za-z0-9_]*)\b", text))
+        declared.update(
+            _re.findall(
+                r"\btasks\s*\.\s*(?:register|create|named)\s*\(\s*['\"]([A-Za-z_][A-Za-z0-9_]*)",
+                text,
+            )
+        )
+    return task in declared
+
+
+def _task_task_is_declared(working_dir: Path, parts: list[str]) -> bool:
+    """Validate a ``task <name>`` (go-task) invocation against ``Taskfile.yml``."""
+    import re as _re
+
+    name = _first_positional(parts)
+    if name is None:
+        return False
+    for candidate in ("Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml"):
+        path = working_dir / candidate
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # ``tasks:`` block keys; each task name appears as ``  <name>:`` at
+        # the same indent level — a simple regex is sufficient for the
+        # common layout without pulling a YAML parser into the hot path.
+        in_tasks = False
+        for line in text.splitlines():
+            stripped = line.rstrip()
+            if not stripped or stripped.lstrip().startswith("#"):
+                continue
+            if not stripped.startswith((" ", "\t")):
+                in_tasks = stripped.strip() == "tasks:"
+                continue
+            if not in_tasks:
+                continue
+            match = _re.match(r"^[ \t]+([A-Za-z_][A-Za-z0-9_\-]*)\s*:", line)
+            if match and match.group(1) == name:
+                return True
+    return False
+
+
+def _rake_task_is_declared(working_dir: Path, parts: list[str]) -> bool:
+    """Validate a ``rake <task>`` invocation against ``Rakefile`` declarations."""
+    import re as _re
+
+    task = _first_positional(parts)
+    if task is None:
+        return False
+    for candidate in ("Rakefile", "rakefile"):
+        path = working_dir / candidate
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if _re.search(rf"\btask\s+:({_re.escape(task)})\b", text):
+            return True
+        if _re.search(rf"\btask\s+['\"]({_re.escape(task)})['\"]", text):
+            return True
+    return False
+
+
+def _bundle_subcommand_is_safe(working_dir: Path, parts: list[str]) -> bool:
+    """Validate a ``bundle`` invocation.
+
+    Accepts ``bundle exec <tool>`` only when ``<tool>`` is declared as a gem
+    in ``Gemfile`` or present as a binstub in ``bin/``. Bare ``bundle`` with
+    no subcommand falls through to require a Gemfile in place.
+    """
+    if not (working_dir / "Gemfile").is_file():
+        return False
+    sub = _first_positional(parts)
+    if sub != "exec":
+        return False
+    try:
+        exec_idx = parts.index("exec")
+    except ValueError:
+        return False
+    for token in parts[exec_idx + 1 :]:
+        if token.startswith("-"):
+            continue
+        if (working_dir / "bin" / token).is_file():
+            return True
+        try:
+            gem_text = (working_dir / "Gemfile").read_text(encoding="utf-8")
+        except OSError:
+            return False
+        import re as _re_bundle
+
+        return bool(_re_bundle.search(rf"\bgem\s+['\"]({_re_bundle.escape(token)})['\"]", gem_text))
+    return False
+
+
+def _composer_script_is_declared(working_dir: Path, parts: list[str]) -> bool:
+    """Validate a ``composer <script>`` invocation against ``composer.json``."""
+    path = working_dir / "composer.json"
+    if not path.is_file():
+        return False
+    sub = _first_positional(parts)
+    if sub is None:
+        return False
+    # ``composer run-script <name>`` and ``composer <name>`` both resolve
+    # against scripts declared in composer.json. Built-in subcommands like
+    # ``install`` / ``update`` / ``require`` mutate project state and are
+    # rejected — they would never pass as Stage 1 verification.
+    if sub == "run-script":
+        try:
+            script_idx = parts.index("run-script") + 1
+        except ValueError:
+            return False
+        if script_idx >= len(parts):
+            return False
+        script = parts[script_idx]
+    else:
+        script = sub
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    scripts = data.get("scripts")
+    return isinstance(scripts, dict) and script in scripts
+
+
+_MIX_BUILTIN_TASKS: frozenset[str] = frozenset(
+    {
+        "compile",
+        "format",
+        "test",
+        "credo",
+        "dialyzer",
+    }
+)
+
+
+def _mix_task_is_builtin(working_dir: Path, parts: list[str]) -> bool:
+    """Validate a ``mix <task>`` invocation against a safe builtin list."""
+    if not (working_dir / "mix.exs").is_file():
+        return False
+    task = _first_positional(parts)
+    if task is None:
+        return False
+    return task in _MIX_BUILTIN_TASKS
 
 
 def _render_toml(commands: DetectedCommands) -> str:

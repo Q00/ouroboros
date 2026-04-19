@@ -637,7 +637,9 @@ class TestRepoCoupledRunners:
     def test_task_accepted_with_taskfile(self, tmp_path: Path) -> None:
         from unittest.mock import patch
 
-        (tmp_path / "Taskfile.yml").write_text("version: 3\n")
+        (tmp_path / "Taskfile.yml").write_text(
+            "version: '3'\ntasks:\n  test:\n    cmds:\n      - pytest\n"
+        )
         (tmp_path / "package.json").write_text("{}")
         adapter = _FakeAdapter(response=json.dumps({"test": "task test"}))
         with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/task"):
@@ -826,13 +828,131 @@ class TestManifestCandidates:
         assert ok is True
 
     def test_yaml_taskfile_detects(self, tmp_path: Path) -> None:
-        (tmp_path / "Taskfile.yaml").write_text("version: 3\n")
+        (tmp_path / "Taskfile.yaml").write_text(
+            "version: '3'\ntasks:\n  test:\n    cmds:\n      - pytest\n"
+        )
         from unittest.mock import patch
 
         adapter = _FakeAdapter(response=json.dumps({"test": "task test"}))
         with patch("ouroboros.evaluation.detector.shutil.which", return_value="/opt/bin/task"):
             ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
+
+
+class TestPythonPackageManagerRun:
+    """`poetry run <tool>` / `pdm run` / `hatch run` must validate the tool."""
+
+    def test_poetry_run_dropped_when_tool_not_declared(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"static": "poetry run pyright"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_poetry_run_accepted_when_declared(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pyright>=1"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"static": "poetry run pyright"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_poetry_lock_rejected_as_mutation(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"build": "poetry lock"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_pdm_run_requires_declaration(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "pdm run pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
+class TestGradleTaskValidation:
+    def test_gradle_lifecycle_task_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "build.gradle.kts").write_text("plugins { java }\n")
+        adapter = _FakeAdapter(response=json.dumps({"build": "gradle build"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_gradle_unknown_task_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "build.gradle.kts").write_text("plugins { java }\n")
+        adapter = _FakeAdapter(response=json.dumps({"lint": "gradle spotlessCheck"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_gradle_custom_task_accepted_when_declared(self, tmp_path: Path) -> None:
+        (tmp_path / "build.gradle.kts").write_text(
+            'plugins { java }\n\ntasks.register("customCheck") {}\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"lint": "gradle customCheck"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestTaskRunnerValidation:
+    def test_task_unknown_name_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "Taskfile.yml").write_text(
+            "version: '3'\ntasks:\n  build:\n    cmds:\n      - go build\n"
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "task test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_task_declared_name_accepted(self, tmp_path: Path) -> None:
+        (tmp_path / "Taskfile.yml").write_text(
+            "version: '3'\ntasks:\n  test:\n    cmds:\n      - go test ./...\n"
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "task test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+
+class TestRakeAndBundleValidation:
+    def test_rake_unknown_task_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "Rakefile").write_text("task :build do\nend\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "rake test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_bundle_exec_requires_gemfile_declaration(self, tmp_path: Path) -> None:
+        (tmp_path / "Gemfile").write_text('gem "rspec"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "bundle exec rspec"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_bundle_exec_dropped_when_gem_missing(self, tmp_path: Path) -> None:
+        (tmp_path / "Gemfile").write_text('gem "pry"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "bundle exec rspec"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+
+class TestComposerAndMixValidation:
+    def test_composer_script_accepted_when_declared(self, tmp_path: Path) -> None:
+        (tmp_path / "composer.json").write_text(json.dumps({"scripts": {"test": "phpunit"}}))
+        adapter = _FakeAdapter(response=json.dumps({"test": "composer test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_composer_install_rejected(self, tmp_path: Path) -> None:
+        (tmp_path / "composer.json").write_text("{}")
+        adapter = _FakeAdapter(response=json.dumps({"build": "composer install"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_mix_test_accepted_as_builtin(self, tmp_path: Path) -> None:
+        (tmp_path / "mix.exs").write_text("defmodule App.MixProject do\nend\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "mix test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_mix_unknown_task_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "mix.exs").write_text("defmodule App.MixProject do\nend\n")
+        adapter = _FakeAdapter(response=json.dumps({"build": "mix weird"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
 
 
 class TestMakeValidation:
