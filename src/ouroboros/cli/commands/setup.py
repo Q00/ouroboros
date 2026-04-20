@@ -495,7 +495,7 @@ def _find_opencode_config() -> Path:
     return result
 
 
-def _ensure_opencode_mcp_entry() -> None:
+def _ensure_opencode_mcp_entry() -> bool:
     """Ensure the platform-appropriate OpenCode config has a correct ouroboros MCP entry.
 
     OpenCode reads config from the platform config dir (see :func:`opencode_config_dir`)
@@ -504,6 +504,10 @@ def _ensure_opencode_mcp_entry() -> None:
 
     MCP entry format (local):
         ``{ "type": "local", "command": [...], "environment": {...}, "timeout": 300000 }``
+
+    Returns:
+        True if the MCP entry is registered (or already present),
+        False if registration failed.
     """
     config_path = _find_opencode_config()
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -517,7 +521,7 @@ def _ensure_opencode_mcp_entry() -> None:
                 f"Could not parse {config_path} — skipping MCP registration to avoid "
                 "overwriting existing settings.  Fix the JSON syntax and re-run setup."
             )
-            return
+            return False
 
     if not isinstance(data, dict):
         print_warning(f"{config_path} top-level is not an object — resetting to {{}}.")
@@ -539,7 +543,7 @@ def _ensure_opencode_mcp_entry() -> None:
             "Cannot register MCP server: no working ouroboros installation found.\n"
             "Install with: pip install ouroboros-ai[all]"
         )
-        return
+        return False
 
     entry = {
         "type": "local",
@@ -614,6 +618,8 @@ def _ensure_opencode_mcp_entry() -> None:
             f.write("\n")
     except OSError:
         print_warning(f"Could not write {config_path} — skipping.")
+        return False
+    return True
 
 
 def _detect_opencode_mcp_command() -> dict[str, list[str]] | None:
@@ -707,7 +713,7 @@ def _atomic_write_text(path: Path, content: str, *, mode: int = 0o644) -> None:
         raise
 
 
-def _install_opencode_bridge_plugin() -> None:
+def _install_opencode_bridge_plugin() -> bool:
     """Install the ouroboros-bridge plugin into OpenCode's plugin directory.
 
     Writes to the platform-appropriate OpenCode plugins directory:
@@ -723,7 +729,11 @@ def _install_opencode_bridge_plugin() -> None:
     * Atomic write (temp file + ``os.replace``) → crash mid-write never
       leaves a corrupted ``.ts`` file that would fail the plugin loader.
     * Missing source (wheel built without package-data, truncated checkout)
-      warns but does not raise — setup continues.
+      returns False — caller must abort setup.
+
+    Returns:
+        True if the bridge plugin is installed (or already up to date),
+        False if installation failed.
     """
     import hashlib
 
@@ -738,7 +748,7 @@ def _install_opencode_bridge_plugin() -> None:
             f"Bridge plugin source not found — manually copy {_BRIDGE_PLUGIN_FILENAME} "
             f"into {plugin_dir}/"
         )
-        return
+        return False
 
     new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     existing_hash: str | None = None
@@ -750,20 +760,21 @@ def _install_opencode_bridge_plugin() -> None:
 
     if existing_hash == new_hash:
         print_info(f"Bridge plugin already up to date: {dest}")
-        return
+        return True
 
     try:
         _atomic_write_text(dest, content)
     except OSError as exc:
         print_warning(f"Could not install bridge plugin at {dest}: {exc}")
-        return
+        return False
 
     print_success(
         f"{'Updated' if existing_hash is not None else 'Installed'} bridge plugin: {dest}"
     )
+    return True
 
 
-def _ensure_opencode_plugin_entry() -> None:
+def _ensure_opencode_plugin_entry() -> bool:
     """Ensure the bridge plugin is registered in OpenCode's ``plugin`` array.
 
     Reads ``opencode.jsonc``/``opencode.json``, deduplicates any stale bridge
@@ -771,6 +782,10 @@ def _ensure_opencode_plugin_entry() -> None:
     changes across XDG shifts and OS migrations), appends the canonical
     current path, and writes the config back atomically.  No-ops when the
     canonical entry is already present and no stale siblings exist.
+
+    Returns:
+        True if the entry is registered (or already present),
+        False if registration failed.
     """
     canonical = opencode_config_dir()
     for part in _BRIDGE_PLUGIN_SUBDIR:
@@ -786,7 +801,7 @@ def _ensure_opencode_plugin_entry() -> None:
             data = json.loads(_strip_jsonc(config_path.read_text()))
         except (json.JSONDecodeError, OSError):
             print_warning(f"Could not parse {config_path} — skipping plugin registration.")
-            return
+            return False
 
     if not isinstance(data, dict):
         data = {}
@@ -809,7 +824,7 @@ def _ensure_opencode_plugin_entry() -> None:
     )
     if already_ok:
         print_info("Bridge plugin already registered in opencode config.")
-        return
+        return True
 
     data["plugin"] = cleaned
 
@@ -828,7 +843,7 @@ def _ensure_opencode_plugin_entry() -> None:
         _atomic_write_text(config_path, json.dumps(data, indent=2) + "\n")
     except OSError as exc:
         print_warning(f"Could not write {config_path}: {exc}")
-        return
+        return False
 
     if len(stale) > 1:
         print_info(f"Removed {len(stale) - 1} stale bridge entries from {config_path}.")
@@ -838,6 +853,7 @@ def _ensure_opencode_plugin_entry() -> None:
         print_success(f"Registered bridge plugin in {config_path}")
     else:
         print_success(f"Bridge plugin entry verified in {config_path}")
+    return True
 
 
 def _cleanup_plugin_artifacts() -> None:
@@ -953,9 +969,24 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    _install_opencode_bridge_plugin()
-    _ensure_opencode_mcp_entry()
-    _ensure_opencode_plugin_entry()
+    _install_ok = _install_opencode_bridge_plugin()
+    _mcp_ok = _ensure_opencode_mcp_entry()
+    _plugin_ok = _ensure_opencode_plugin_entry()
+
+    if not (_install_ok and _mcp_ok and _plugin_ok):
+        failed = []
+        if not _install_ok:
+            failed.append("bridge plugin installation")
+        if not _mcp_ok:
+            failed.append("MCP server registration")
+        if not _plugin_ok:
+            failed.append("plugin entry registration")
+        print_error(
+            f"Plugin-mode setup incomplete — failed: {', '.join(failed)}. "
+            "Re-run 'ouroboros setup opencode --mode plugin' after fixing the "
+            "issues above."
+        )
+        return
     print_success("Installed OpenCode bridge plugin and registered MCP entry")
 
 

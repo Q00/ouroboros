@@ -520,6 +520,20 @@ class PMInterviewHandler:
                     )
                 state = load_result.value
 
+                # Restore brownfield repos from pm_meta if not provided in
+                # the current request.  The user selects repos during
+                # select_repos action; subsequent resume/generate turns omit
+                # them from the request params.  Without this, the child
+                # subagent loses repo context on later turns.
+                if not selected_repos:
+                    meta = _load_pm_meta(session_id, data_dir=self.data_dir)
+                    if meta:
+                        if meta.get("brownfield_repos"):
+                            selected_repos = meta["brownfield_repos"]
+                        # Also restore initial_context for generate prompts
+                        if not initial_context and meta.get("initial_context"):
+                            initial_context = meta["initial_context"]
+
                 # Gate: generate requires interview evidence.  In plugin
                 # mode is_complete is never set (child owns progression),
                 # so we gate on answered rounds instead.  The child session
