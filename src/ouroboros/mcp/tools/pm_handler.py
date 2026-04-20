@@ -434,9 +434,9 @@ class PMInterviewHandler:
                 is_valid, error_msg = InputValidator.validate_initial_context(resolved.value)
                 if not is_valid:
                     return Result.err(MCPToolError(error_msg, tool_name="ouroboros_pm_interview"))
-                from datetime import UTC, datetime
+                from uuid import uuid4
 
-                interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+                interview_id = f"interview_{uuid4().hex[:16]}"
                 state = InterviewState(
                     interview_id=interview_id,
                     initial_context=resolved.value,
@@ -520,16 +520,21 @@ class PMInterviewHandler:
                     )
                 state = load_result.value
 
-                # Gate: generate requires completed interview — matches
-                # the subprocess path's _handle_generate guard.
-                if action == "generate" and not state.is_complete:
-                    return Result.err(
-                        MCPToolError(
-                            "Interview is not complete. Continue the interview "
-                            "before generating a PM seed.",
-                            tool_name="ouroboros_pm_interview",
+                # Gate: generate requires interview evidence.  In plugin
+                # mode is_complete is never set (child owns progression),
+                # so we gate on answered rounds instead.  The child session
+                # performs the real completeness validation.
+                if action == "generate":
+                    answered_rounds = [r for r in state.rounds if r.user_response is not None]
+                    if not state.is_complete and not answered_rounds:
+                        return Result.err(
+                            MCPToolError(
+                                "Interview has no answered rounds and is not "
+                                "marked complete. Continue the interview "
+                                "before generating a PM seed.",
+                                tool_name="ouroboros_pm_interview",
+                            )
                         )
-                    )
 
                 # Record answer into persisted state.
                 # In plugin mode each dispatch = new child session. The child

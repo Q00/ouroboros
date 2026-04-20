@@ -489,8 +489,11 @@ class GenerateSeedHandler:
             # Plugin mode: validate interview readiness server-side before
             # delegating.  The subprocess path loads state + computes/checks
             # ambiguity via litellm.  Plugin can't compute ambiguity (no
-            # litellm), but CAN enforce the persisted gate: the interview
-            # must be either complete or have a stored score <= threshold.
+            # litellm), so we accept three evidence sources:
+            #   1. Caller-supplied ambiguity_score (from parent LLM output)
+            #   2. Persisted score on state (set by prior subprocess run)
+            #   3. Round count — at least one answered round means the
+            #      interview happened; the child validates completeness.
             state_dir = self.data_dir or _DATA_DIR
             load_result = await _plugin_load_state(state_dir, session_id)
             if load_result.is_err:
@@ -502,25 +505,32 @@ class GenerateSeedHandler:
                 )
             interview_state = load_result.value
 
-            # Gate: require either completion or low persisted ambiguity.
+            # Determine best available ambiguity score for the gate.
             _THRESHOLD = 0.2
-            persisted_score = interview_state.ambiguity_score
+            effective_score = ambiguity_score_value  # caller-supplied
+            if effective_score is None:
+                effective_score = interview_state.ambiguity_score  # persisted
+
             if not interview_state.is_complete:
-                if persisted_score is None:
-                    return Result.err(
-                        MCPToolError(
-                            "Interview has no persisted ambiguity score and is "
-                            "not marked complete. Complete the interview before "
-                            "generating a seed.",
-                            tool_name="ouroboros_generate_seed",
+                answered_rounds = [r for r in interview_state.rounds if r.user_response is not None]
+                if effective_score is not None:
+                    # Have a score — enforce threshold
+                    if effective_score > _THRESHOLD:
+                        return Result.err(
+                            MCPToolError(
+                                f"Ambiguity score {effective_score:.2f} exceeds "
+                                f"threshold {_THRESHOLD}. Continue interviewing "
+                                f"to reduce ambiguity before seed generation.",
+                                tool_name="ouroboros_generate_seed",
+                            )
                         )
-                    )
-                if persisted_score > _THRESHOLD:
+                elif not answered_rounds:
+                    # No score AND no rounds — nothing to generate from
                     return Result.err(
                         MCPToolError(
-                            f"Ambiguity score {persisted_score:.2f} exceeds "
-                            f"threshold {_THRESHOLD}. Continue interviewing "
-                            f"to reduce ambiguity before seed generation.",
+                            "Interview has no answered rounds and no ambiguity "
+                            "score. Complete at least one interview round before "
+                            "generating a seed.",
                             tool_name="ouroboros_generate_seed",
                         )
                     )
@@ -529,7 +539,7 @@ class GenerateSeedHandler:
 
             payload = build_generate_seed_subagent(
                 session_id=session_id,
-                ambiguity_score=persisted_score,
+                ambiguity_score=effective_score,
                 transcript=transcript,
             )
             await emit_subagent_dispatched_event(
@@ -981,9 +991,9 @@ class InterviewHandler:
                 )
                 if not is_valid:
                     return Result.err(MCPToolError(error_msg, tool_name="ouroboros_interview"))
-                from datetime import UTC, datetime
+                from uuid import uuid4
 
-                interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
+                interview_id = f"interview_{uuid4().hex[:16]}"
                 state = InterviewState(
                     interview_id=interview_id,
                     initial_context=resolved_context.value,

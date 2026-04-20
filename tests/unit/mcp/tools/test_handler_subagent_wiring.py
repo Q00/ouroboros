@@ -132,8 +132,8 @@ class TestGenerateSeedHandlerSubagentDispatch:
         )
         ctx = result.value.meta["_subagent"]["context"]
         assert ctx["session_id"] == "sess-456"
-        # Plugin path uses persisted score from state (0.1), not caller-supplied
-        assert ctx["ambiguity_score"] == 0.1
+        # Plugin path now prefers caller-supplied score over persisted
+        assert ctx["ambiguity_score"] == 0.15
 
 
 # ---------------------------------------------------------------------------
