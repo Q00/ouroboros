@@ -469,3 +469,149 @@ class TestPMInterviewHandlerValidationBeforeDispatch:
         assert result.is_ok
         data = json.loads(result.value.content[0].text)
         assert "_subagent" in data
+
+
+# ---------------------------------------------------------------------------
+# Regression: PM brownfield repos survive across plugin turns
+# ---------------------------------------------------------------------------
+
+
+class TestPMBrownfieldReposPersistence:
+    """Brownfield repos set at start/select_repos must be present in resume/generate."""
+
+    @pytest.fixture
+    async def event_store(self):
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        yield store
+        await store.close()
+
+    @pytest.fixture
+    def handler(self, event_store, monkeypatch, tmp_path):
+        """PM handler with real pm_meta persistence but mocked plugin I/O."""
+        from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+
+        # Use real _save_pm_meta / _load_pm_meta but pointed at tmp_path
+        h = PMInterviewHandler(
+            llm_backend="openai",
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+            data_dir=tmp_path,
+        )
+
+        # Mock plugin state I/O (no real state files)
+        async def _fake_load(state_dir, session_id):
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test brownfield app",
+                status=InterviewStatus.COMPLETED,
+                rounds=[
+                    InterviewRound(round_number=1, question="Q?", user_response="A1"),
+                ],
+            )
+            return Result.ok(state)
+
+        async def _fake_save(state_dir, state):
+            from pathlib import Path
+
+            return Result.ok(Path("/tmp/fake"))
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
+        monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
+
+        return h
+
+    async def test_1step_start_persists_selected_repos(self, handler, monkeypatch) -> None:
+        """1-step start (initial_context + selected_repos) persists repos in pm_meta."""
+        import json
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.pm_handler.resolve_initial_context_input",
+            lambda ctx, cwd="": Result.ok(ctx),  # noqa: ARG005
+        )
+        monkeypatch.setattr(
+            "ouroboros.core.security.InputValidator.validate_initial_context",
+            staticmethod(lambda ctx: (True, None)),  # noqa: ARG005
+        )
+
+        repos = ["/home/user/project-a", "/home/user/project-b"]
+        result = await handler.handle(
+            {
+                "initial_context": "brownfield app",
+                "selected_repos": repos,
+            }
+        )
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        session_id = data.get("session_id")
+        assert session_id
+
+        # Verify pm_meta persisted the caller's selected_repos
+        from ouroboros.mcp.tools.pm_handler import _load_pm_meta
+
+        meta = _load_pm_meta(session_id, data_dir=handler.data_dir)
+        assert meta is not None
+        assert meta["brownfield_repos"] == repos
+
+    async def test_resume_restores_repos_from_meta(self, handler, monkeypatch) -> None:
+        """Resume without selected_repos still gets repos from pm_meta."""
+        import json
+
+        from ouroboros.mcp.tools.pm_handler import _save_pm_meta
+
+        session_id = "ses_brownfield_test"
+        repos = ["/repo/alpha", "/repo/beta"]
+
+        # Pre-persist pm_meta with repos
+        _save_pm_meta(
+            session_id,
+            engine=None,
+            cwd="/tmp",
+            data_dir=handler.data_dir,
+            extra={"initial_context": "test", "brownfield_repos": repos},
+        )
+
+        # Resume WITHOUT passing selected_repos
+        result = await handler.handle(
+            {
+                "session_id": session_id,
+                "answer": "yes, those repos",
+            }
+        )
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        subagent = data.get("_subagent", {})
+        context = subagent.get("context", {})
+        assert context.get("selected_repos") == repos
+
+    async def test_generate_restores_repos_from_meta(self, handler, monkeypatch) -> None:
+        """Generate without selected_repos still gets repos from pm_meta."""
+        import json
+
+        from ouroboros.mcp.tools.pm_handler import _save_pm_meta
+
+        session_id = "ses_brownfield_gen"
+        repos = ["/repo/gamma"]
+
+        _save_pm_meta(
+            session_id,
+            engine=None,
+            cwd="/tmp",
+            data_dir=handler.data_dir,
+            extra={"initial_context": "test", "brownfield_repos": repos},
+        )
+
+        result = await handler.handle(
+            {
+                "action": "generate",
+                "session_id": session_id,
+            }
+        )
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        subagent = data.get("_subagent", {})
+        context = subagent.get("context", {})
+        assert context.get("selected_repos") == repos

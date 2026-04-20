@@ -454,6 +454,18 @@ class PMInterviewHandler:
                         MCPToolError(str(save_result.error), tool_name="ouroboros_pm_interview")
                     )
                 # Persist PM-specific metadata (no engine needed for initial save)
+                # For 1-step start (initial_context + selected_repos), persist
+                # the caller's selected_repos so later resume/generate turns
+                # can restore them.  Fall back to cwd-derived codebase_paths
+                # when no explicit repos provided.
+                persisted_repos: list[Any] = []
+                if selected_repos:
+                    persisted_repos = selected_repos
+                elif state.codebase_paths:
+                    persisted_repos = [
+                        {"path": p["path"], "role": p.get("role", "primary")}
+                        for p in state.codebase_paths
+                    ]
                 _save_pm_meta(
                     interview_id,
                     engine=None,
@@ -461,14 +473,7 @@ class PMInterviewHandler:
                     data_dir=self.data_dir,
                     extra={
                         "initial_context": resolved.value,
-                        "brownfield_repos": (
-                            [
-                                {"path": p["path"], "role": p.get("role", "primary")}
-                                for p in state.codebase_paths
-                            ]
-                            if state.codebase_paths
-                            else []
-                        ),
+                        "brownfield_repos": persisted_repos,
                     },
                 )
                 real_session_id = state.interview_id
