@@ -60,7 +60,7 @@ The orchestrator uses `claude-agent-sdk` which connects directly to your authent
 
 ## Claude Code-Specific Strengths
 
-- **Zero API key management** -- uses your Max Plan subscription directly
+- **Zero API key management** -- uses your Pro or Max Plan subscription directly
 - **Rich tool access** -- full suite of file, shell, and search tools via Claude Code
 - **Session continuity** -- resume interrupted workflows with `--resume`
 
