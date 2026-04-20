@@ -5,7 +5,7 @@ doc_metadata:
 
 # Running Ouroboros with Claude Code
 
-Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude Code Max Plan** subscription to execute workflows without requiring a separate API key.
+Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude Code Pro or Max Plan** subscription to execute workflows without requiring a separate API key.
 
 > For installation and first-run onboarding, see [Getting Started](../getting-started.md).
 
@@ -17,7 +17,7 @@ Ouroboros can use **Claude Code** as a runtime backend, leveraging your **Claude
 
 ## Prerequisites
 
-- Claude Code CLI installed and authenticated (Max Plan)
+- Claude Code CLI installed and authenticated (Pro or Max Plan)
 - Python >= 3.12
 - Ouroboros installed (see [Getting Started](../getting-started.md) for install options)
 
@@ -39,7 +39,7 @@ When using the `--orchestrator` CLI flag, Claude Code is the default runtime bac
 ```
 +-----------------+     +------------------+     +-----------------+
 |   Seed YAML     | --> |   Orchestrator   | --> |  Claude Code    |
-|  (your task)    |     |   (adapter.py)   |     |  (Max Plan)     |
+|  (your task)    |     |   (adapter.py)   |     |  (Pro/Max Plan) |
 +-----------------+     +------------------+     +-----------------+
                                 |
                                 v
@@ -121,8 +121,9 @@ The database will be created automatically at `~/.ouroboros/ouroboros.db`.
 
 ## Cost
 
-Using Claude Code as the runtime backend with a Max Plan means:
+Using Claude Code as the runtime backend with a Pro or Max Plan means:
 - **No additional API costs** -- uses your subscription
 - Execution time varies by task complexity
 - Typical simple tasks: 15-30 seconds
 - Complex multi-file tasks: 1-3 minutes
+> **Note:** Pro plan ($20/month) works but has lower usage limits. For long agentic workflows, **Max plan is recommended** to avoid hitting limits mid-session.
