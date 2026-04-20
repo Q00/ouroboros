@@ -1665,8 +1665,9 @@ class TestOpenCodeModePersisted:
     def test_mode_plugin_persisted(self, tmp_path: Path) -> None:
         result = self._run(tmp_path, "plugin")
         assert result["orchestrator"]["opencode_mode"] == "plugin"
-        # Plugin branch intentionally does NOT set runtime_backend — plugin
-        # runs in-process inside OpenCode; runtime stays at caller default.
+        # Plugin mode sets runtime_backend=opencode so the MCP server's
+        # should_dispatch_via_plugin() gate recognises the OpenCode context.
+        assert result["orchestrator"]["runtime_backend"] == "opencode"
 
     def test_mode_subprocess_persisted(self, tmp_path: Path) -> None:
         result = self._run(tmp_path, "subprocess")

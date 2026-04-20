@@ -487,7 +487,10 @@ export const OuroborosBridge: Plugin = async (ctx) => {
 
         if (dupe(pid, callID)) {
           log(`DEDUPE pid=${pid} callID=${callID} tool=${subs[0].tool} count=${subs.length}`)
-          stamp(out, notify([], [], subs))
+          const dedupeShapeSuffix = Object.keys(responseShape).length > 0
+            ? "\n\n```json\n" + JSON.stringify(responseShape, null, 2) + "\n```"
+            : ""
+          stamp(out, notify([], [], subs) + dedupeShapeSuffix)
           const meta = (out.metadata ?? {}) as Record<string, unknown>
           meta.ouroboros_dispatch = buildEnvelope([], [], subs)
           if (Object.keys(responseShape).length > 0) meta.ouroboros_response_shape = responseShape
