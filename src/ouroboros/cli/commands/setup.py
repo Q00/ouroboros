@@ -946,7 +946,30 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
         print_info(f"Config saved to: {config_path}")
         return
 
-    # mode == "plugin" — persist mode signal, then install plugin/MCP entries.
+    # mode == "plugin" — install plugin/MCP entries FIRST, only persist config
+    # if ALL steps succeed (fail-closed).  Without this, a failed bridge install
+    # leaves the user in plugin mode without a working bridge — subsequent runs
+    # take the plugin dispatch path and silently break.
+    _install_ok = _install_opencode_bridge_plugin()
+    _mcp_ok = _ensure_opencode_mcp_entry()
+    _plugin_ok = _ensure_opencode_plugin_entry()
+
+    if not (_install_ok and _mcp_ok and _plugin_ok):
+        failed = []
+        if not _install_ok:
+            failed.append("bridge plugin installation")
+        if not _mcp_ok:
+            failed.append("MCP server registration")
+        if not _plugin_ok:
+            failed.append("plugin entry registration")
+        print_error(
+            f"Plugin-mode setup incomplete — failed: {', '.join(failed)}. "
+            "Re-run 'ouroboros setup opencode --runtime opencode --opencode-mode plugin' "
+            "after fixing the issues above."
+        )
+        return
+
+    # All installs succeeded — now safe to persist config.
     # Plugin mode still needs runtime_backend=opencode so the MCP server's
     # should_dispatch_via_plugin() gate recognises the OpenCode context.
     # Without this, fresh installs default to runtime_backend=claude and the
@@ -969,24 +992,6 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
     with config_path.open("w") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
-    _install_ok = _install_opencode_bridge_plugin()
-    _mcp_ok = _ensure_opencode_mcp_entry()
-    _plugin_ok = _ensure_opencode_plugin_entry()
-
-    if not (_install_ok and _mcp_ok and _plugin_ok):
-        failed = []
-        if not _install_ok:
-            failed.append("bridge plugin installation")
-        if not _mcp_ok:
-            failed.append("MCP server registration")
-        if not _plugin_ok:
-            failed.append("plugin entry registration")
-        print_error(
-            f"Plugin-mode setup incomplete — failed: {', '.join(failed)}. "
-            "Re-run 'ouroboros setup opencode --mode plugin' after fixing the "
-            "issues above."
-        )
-        return
     print_success("Installed OpenCode bridge plugin and registered MCP entry")
 
 

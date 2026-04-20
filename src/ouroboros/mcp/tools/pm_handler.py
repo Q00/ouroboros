@@ -473,7 +473,7 @@ class PMInterviewHandler:
                 # can restore them.  Fall back to cwd-derived codebase_paths
                 # when no explicit repos provided.
                 persisted_repos: list[Any] = []
-                if selected_repos:
+                if selected_repos is not None:
                     persisted_repos = selected_repos
                 elif state.codebase_paths:
                     persisted_repos = [
@@ -544,10 +544,10 @@ class PMInterviewHandler:
                 # select_repos action; subsequent resume/generate turns omit
                 # them from the request params.  Without this, the child
                 # subagent loses repo context on later turns.
-                if not selected_repos:
+                if selected_repos is None:
                     meta = _load_pm_meta(session_id, data_dir=self.data_dir)
                     if meta:
-                        if meta.get("brownfield_repos"):
+                        if meta.get("brownfield_repos") is not None:
                             selected_repos = meta["brownfield_repos"]
                         # Also restore initial_context for generate prompts
                         if not initial_context and meta.get("initial_context"):
