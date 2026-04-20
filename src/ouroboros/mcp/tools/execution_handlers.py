@@ -854,28 +854,29 @@ class StartExecuteSeedHandler:
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # StartExecuteSeedHandler delegates to ExecuteSeedHandler internally.
-        payload = build_execute_subagent(
-            seed_content=seed_content,
-            session_id=arguments.get("session_id"),
-            seed_path=arguments.get("seed_path"),
-            cwd=arguments.get("cwd"),
-            max_iterations=arguments.get("max_iterations", 10),
-            skip_qa=arguments.get("skip_qa", False),
-            model_tier=arguments.get("model_tier", "medium"),
-        )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             # Initialize event store first so the audit event persists.
             await self._event_store.initialize()
 
-            # Generate session_id for fresh runs so the caller always gets a
-            # resumable identifier — matching the subprocess background path
-            # contract. Without this, fresh plugin dispatches return None and
-            # downstream tooling/UI that relies on session_id breaks.
+            # Generate session_id for fresh runs BEFORE building the payload
+            # so the child prompt, context, audit event, and response all
+            # share the same identity.  Without this the prompt says "new"
+            # while the receipt advertises an orch_* id the child never sees.
             plugin_session_id = arguments.get("session_id")
             if not plugin_session_id:
                 from uuid import uuid4
 
                 plugin_session_id = f"orch_{uuid4().hex[:12]}"
+
+            payload = build_execute_subagent(
+                seed_content=seed_content,
+                session_id=plugin_session_id,
+                seed_path=arguments.get("seed_path"),
+                cwd=arguments.get("cwd"),
+                max_iterations=arguments.get("max_iterations", 10),
+                skip_qa=arguments.get("skip_qa", False),
+                model_tier=arguments.get("model_tier", "medium"),
+            )
 
             await emit_subagent_dispatched_event(
                 self._event_store,
@@ -901,7 +902,17 @@ class StartExecuteSeedHandler:
                 },
             )
 
-        # Fall-through: real background job path (subprocess / non-opencode runtimes).
+        # Fall-through: real background job path — build payload here where
+        # session_id may still be None (background path generates its own).
+        payload = build_execute_subagent(
+            seed_content=seed_content,
+            session_id=arguments.get("session_id"),
+            seed_path=arguments.get("seed_path"),
+            cwd=arguments.get("cwd"),
+            max_iterations=arguments.get("max_iterations", 10),
+            skip_qa=arguments.get("skip_qa", False),
+            model_tier=arguments.get("model_tier", "medium"),
+        )
 
         await self._event_store.initialize()
 
