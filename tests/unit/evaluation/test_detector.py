@@ -430,6 +430,26 @@ class TestUvSubdirectoryProject:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
 
+    def test_uv_directory_escaping_repo_dropped(self, tmp_path: Path) -> None:
+        """``--directory ../other`` must not validate against a sibling checkout."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "pyproject.toml").write_text('[project]\nname = "root"\n')
+        other = tmp_path / "other"
+        other.mkdir()
+        (other / "pyproject.toml").write_text(
+            '[project]\nname = "evil"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv run --directory ../other pytest"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_uv_project_absolute_path_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "root"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "uv --project=/tmp/other run pytest"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
 
 class TestPathPrefixedExecutableExists:
     """Path-prefixed executables must exist in the repo, not just match basename."""

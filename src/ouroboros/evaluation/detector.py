@@ -887,23 +887,43 @@ def _uv_run_tool(parts: list[str]) -> str | None:
     return None
 
 
-def _uv_project_root(working_dir: Path, parts: list[str]) -> Path:
+def _uv_project_root(working_dir: Path, parts: list[str]) -> Path | None:
     """Return the project root that ``uv`` will operate against.
 
     ``uv run --directory backend pytest`` / ``uv --project backend run pytest``
     relocate the effective project root. Both ``--flag value`` and
     ``--flag=value`` forms are honoured; the path is resolved relative to
-    ``working_dir`` so callers can verify the manifest without knowing the
-    CLI flag ordering.
+    ``working_dir`` and must stay inside it. An escape attempt
+    (``--directory ../other``) returns ``None`` so the caller can reject
+    the command — Stage 1 must not validate against a sibling checkout
+    outside the repo under evaluation.
     """
     for flag in ("--directory", "--project"):
         for i, token in enumerate(parts):
             if token == flag and i + 1 < len(parts):
-                return (working_dir / parts[i + 1]).resolve()
+                return _resolve_within(working_dir, parts[i + 1])
             prefix = f"{flag}="
             if token.startswith(prefix):
-                return (working_dir / token[len(prefix) :]).resolve()
+                return _resolve_within(working_dir, token[len(prefix) :])
     return working_dir
+
+
+def _resolve_within(working_dir: Path, relative: str) -> Path | None:
+    """Resolve ``relative`` against ``working_dir``, or None if it escapes.
+
+    ``working_dir`` itself is also resolved so symlinked repo roots still
+    match. Absolute paths, ``~`` references, and ``..`` segments that
+    land outside the root all return ``None``.
+    """
+    if relative.startswith(("/", "~")):
+        return None
+    candidate = (working_dir / relative).resolve()
+    root = working_dir.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
 
 
 def _uv_subcommand(parts: list[str]) -> str | None:
@@ -957,11 +977,15 @@ def _uv_subcommand_is_available(working_dir: Path, parts: list[str]) -> bool:
         # Python project in the target directory — otherwise ``uv`` will
         # either fail to resolve metadata or operate on the wrong cwd.
         project_root = _uv_project_root(working_dir, parts)
+        if project_root is None:
+            return False
         return (project_root / "pyproject.toml").is_file() or (project_root / "uv.lock").is_file()
     tool = _uv_run_tool(parts)
     if tool is None:
         return False
     project_root = _uv_project_root(working_dir, parts)
+    if project_root is None:
+        return False
     if not ((project_root / "pyproject.toml").is_file() or (project_root / "uv.lock").is_file()):
         return False
     # Repo-coupled acceptance paths only. A host-wide ``shutil.which`` lookup
