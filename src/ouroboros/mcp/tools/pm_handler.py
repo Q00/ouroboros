@@ -344,6 +344,19 @@ class PMInterviewHandler:
                     required=False,
                     items={"type": "string"},
                 ),
+                MCPToolParameter(
+                    name="last_question",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "The question text from the previous child session's response. "
+                        "In plugin mode each dispatch creates a new child session whose "
+                        "questions are not automatically persisted server-side. Pass the "
+                        "child's last question here when submitting an answer so the "
+                        "PM interview transcript preserves the real question text instead "
+                        "of a placeholder."
+                    ),
+                    required=False,
+                ),
             ),
         )
 
@@ -382,6 +395,7 @@ class PMInterviewHandler:
         answer = arguments.get("answer")
         cwd_arg = arguments.get("cwd")
         selected_repos: list[str] | None = arguments.get("selected_repos")
+        last_question = arguments.get("last_question")
 
         # Auto-detect action from parameter presence (AC 13)
         action = _detect_action(arguments)
@@ -559,17 +573,34 @@ class PMInterviewHandler:
                 # In plugin mode each dispatch = new child session. The child
                 # generates questions but can't write back to server-side state.
                 # We must always persist user answers for transcript continuity.
+                #
+                # The ``last_question`` parameter solves the question-text gap:
+                # the parent LLM sees the child's response (which contains the
+                # question) and passes it back here so we can persist the real
+                # question text instead of a placeholder.
                 if answer:
                     if state.rounds and state.rounds[-1].user_response is None:
+                        # Round exists with question but no answer yet — fill it.
+                        # If last_question was provided, update the question text
+                        # in case the existing one is a stale placeholder from a
+                        # previous partial persistence.
+                        if last_question:
+                            state.rounds[-1].question = last_question
                         state.rounds[-1].user_response = answer
                     else:
-                        # No rounds yet or all answered — append new round
+                        # No rounds yet or all answered — append new round.
+                        # Use last_question when available; fall back to a
+                        # descriptive placeholder for backward compatibility
+                        # (callers that don't supply last_question yet).
                         from ouroboros.bigbang.interview import InterviewRound
 
+                        question_text = (
+                            last_question if last_question else "(continued from subagent)"
+                        )
                         state.rounds.append(
                             InterviewRound(
                                 round_number=len(state.rounds) + 1,
-                                question="(continued from subagent)",
+                                question=question_text,
                                 user_response=answer,
                             )
                         )
@@ -603,6 +634,11 @@ class PMInterviewHandler:
                     "action": action,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",
+                    "next_turn_hint": (
+                        "When the user answers, pass the child session's "
+                        "question text as 'last_question' alongside 'answer' "
+                        "to preserve PM interview transcript fidelity."
+                    ),
                 },
             )
 

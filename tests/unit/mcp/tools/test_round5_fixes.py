@@ -8,6 +8,7 @@ Issue extra: lateral_think single persona dispatches as subagent in plugin mode.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,6 +16,38 @@ import pytest
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
 from ouroboros.persistence.event_store import EventStore
+
+# ---------------------------------------------------------------------------
+# Shared mock helpers for plugin I/O
+# ---------------------------------------------------------------------------
+
+
+async def _noop_save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+    """Mock ``_plugin_save_state`` — mirrors real signature, no disk I/O.
+
+    Returns a realistic path built from *state_dir* + *interview_id* so
+    callers that inspect the result get a plausible ``Path`` object rather
+    than a hard-coded ``/tmp/fake``.
+    """
+    return Result.ok(state_dir / f"interview_{state.interview_id}.json")
+
+
+def _make_capturing_save(
+    capture_list: list[InterviewState],
+):
+    """Factory: returns a ``_plugin_save_state`` mock that records every state.
+
+    The returned coroutine appends *state* to *capture_list* before
+    returning ``Result.ok`` so tests can assert on persisted state without
+    touching the filesystem.
+    """
+
+    async def _save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+        capture_list.append(state)
+        return Result.ok(state_dir / f"interview_{state.interview_id}.json")
+
+    return _save
+
 
 # ---------------------------------------------------------------------------
 # Issue #1: StartExecuteSeedHandler plugin-mode — no fake job
@@ -287,7 +320,7 @@ class TestInterviewHandlerValidationBeforeDispatch:
     def mock_plugin_io(self, monkeypatch):
         """Mock _plugin_load/save so plugin path doesn't need real state files."""
 
-        async def _fake_load(state_dir, session_id):
+        async def _fake_load(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test context",
@@ -295,15 +328,10 @@ class TestInterviewHandlerValidationBeforeDispatch:
             )
             return Result.ok(state)
 
-        async def _fake_save(state_dir, state):
-            from pathlib import Path
-
-            return Result.ok(Path("/tmp/fake"))
-
         import ouroboros.mcp.tools.authoring_handlers as ah
 
         monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
-        monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
+        monkeypatch.setattr(ah, "_plugin_save_state", _noop_save)
 
     @pytest.fixture
     async def event_store(self):
@@ -381,7 +409,7 @@ class TestPMInterviewHandlerValidationBeforeDispatch:
     def mock_plugin_io(self, monkeypatch):
         """Mock plugin I/O + pm_meta so plugin path doesn't need real state files."""
 
-        async def _fake_load(state_dir, session_id):
+        async def _fake_load(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test context",
@@ -390,16 +418,11 @@ class TestPMInterviewHandlerValidationBeforeDispatch:
             )
             return Result.ok(state)
 
-        async def _fake_save(state_dir, state):
-            from pathlib import Path
-
-            return Result.ok(Path("/tmp/fake"))
-
         import ouroboros.mcp.tools.authoring_handlers as ah
         import ouroboros.mcp.tools.pm_handler as pmh
 
         monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
-        monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
+        monkeypatch.setattr(ah, "_plugin_save_state", _noop_save)
         # Mock pm_meta persistence (no disk needed in tests)
         monkeypatch.setattr(pmh, "_save_pm_meta", lambda *_a, **_kw: None)
         monkeypatch.setattr(
@@ -501,7 +524,7 @@ class TestPMBrownfieldReposPersistence:
         )
 
         # Mock plugin state I/O (no real state files)
-        async def _fake_load(state_dir, session_id):
+        async def _fake_load(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test brownfield app",
@@ -512,15 +535,10 @@ class TestPMBrownfieldReposPersistence:
             )
             return Result.ok(state)
 
-        async def _fake_save(state_dir, state):
-            from pathlib import Path
-
-            return Result.ok(Path("/tmp/fake"))
-
         import ouroboros.mcp.tools.authoring_handlers as ah
 
         monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
-        monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
+        monkeypatch.setattr(ah, "_plugin_save_state", _noop_save)
 
         return h
 
@@ -615,3 +633,274 @@ class TestPMBrownfieldReposPersistence:
         subagent = data.get("_subagent", {})
         context = subagent.get("context", {})
         assert context.get("selected_repos") == repos
+
+
+# ---------------------------------------------------------------------------
+# Bot R11: last_question roundtrip — InterviewHandler
+# ---------------------------------------------------------------------------
+
+
+class TestInterviewLastQuestionRoundtrip:
+    """Verify last_question param persists real question text in interview rounds.
+
+    Bot R11 finding: round 2+ child sessions receive transcripts with placeholder
+    question ``(continued from subagent)`` instead of the real question the child
+    session asked.  The ``last_question`` parameter lets the parent LLM relay the
+    child's question back so it's persisted correctly.
+    """
+
+    @pytest.fixture(autouse=True)
+    def capture_save(self, monkeypatch):
+        """Mock plugin I/O and capture saved state for assertions."""
+        self.saved_states: list[InterviewState] = []
+
+        async def _fake_load(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                rounds=[],  # No rounds yet — simulates first answer after start
+            )
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
+        monkeypatch.setattr(ah, "_plugin_save_state", _make_capturing_save(self.saved_states))
+
+    @pytest.fixture
+    async def event_store(self):
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        yield store
+        await store.close()
+
+    @pytest.fixture
+    def handler(self, event_store):
+        from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
+
+        return InterviewHandler(
+            llm_backend="openai",
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+    async def test_last_question_persisted_in_new_round(self, handler) -> None:
+        """answer + last_question → round question uses real text, not placeholder."""
+        result = await handler.handle(
+            {
+                "session_id": "ses_lq_1",
+                "answer": "I want a REST API",
+                "last_question": "What kind of interface does your app need?",
+            }
+        )
+        assert result.is_ok
+        assert len(self.saved_states) == 1
+        state = self.saved_states[0]
+        assert len(state.rounds) == 1
+        assert state.rounds[0].question == "What kind of interface does your app need?"
+        assert state.rounds[0].user_response == "I want a REST API"
+
+    async def test_no_last_question_uses_placeholder(self, handler) -> None:
+        """answer without last_question → falls back to placeholder (backward compat)."""
+        result = await handler.handle(
+            {
+                "session_id": "ses_lq_2",
+                "answer": "Python please",
+            }
+        )
+        assert result.is_ok
+        assert len(self.saved_states) == 1
+        state = self.saved_states[0]
+        assert len(state.rounds) == 1
+        assert state.rounds[0].question == "(continued from subagent)"
+        assert state.rounds[0].user_response == "Python please"
+
+    async def test_last_question_updates_existing_round(self, monkeypatch, handler) -> None:
+        """When round exists with question but no answer, last_question updates it."""
+
+        # Override _fake_load to return state with an unanswered round
+        async def _load_with_round(state_dir, session_id):
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                rounds=[
+                    InterviewRound(
+                        round_number=1,
+                        question="(continued from subagent)",
+                        user_response=None,
+                    )
+                ],
+            )
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_with_round)
+
+        result = await handler.handle(
+            {
+                "session_id": "ses_lq_3",
+                "answer": "yes, that's right",
+                "last_question": "Do you want database persistence?",
+            }
+        )
+        assert result.is_ok
+        assert len(self.saved_states) == 1
+        state = self.saved_states[0]
+        assert len(state.rounds) == 1
+        # Question text should be updated from placeholder to real text
+        assert state.rounds[0].question == "Do you want database persistence?"
+        assert state.rounds[0].user_response == "yes, that's right"
+
+    async def test_response_includes_next_turn_hint(self, handler) -> None:
+        """Plugin response includes next_turn_hint telling parent to pass last_question."""
+        import json
+
+        result = await handler.handle(
+            {
+                "session_id": "ses_lq_hint",
+                "answer": "test answer",
+            }
+        )
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        # response_shape keys are merged at top level of body (see build_subagent_result)
+        assert "last_question" in data.get("next_turn_hint", "")
+
+
+# ---------------------------------------------------------------------------
+# Bot R11: last_question roundtrip — PMInterviewHandler
+# ---------------------------------------------------------------------------
+
+
+class TestPMInterviewLastQuestionRoundtrip:
+    """Verify last_question param persists real question text in PM interview rounds.
+
+    Same issue as InterviewHandler: plugin-mode child sessions generate questions
+    but can't write back to server-side state.  last_question lets parent relay.
+    """
+
+    @pytest.fixture(autouse=True)
+    def capture_save(self, monkeypatch):
+        """Mock plugin I/O + pm_meta, capture saved state."""
+        self.saved_states: list[InterviewState] = []
+
+        async def _fake_load(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                rounds=[],
+            )
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+        import ouroboros.mcp.tools.pm_handler as pmh
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
+        monkeypatch.setattr(ah, "_plugin_save_state", _make_capturing_save(self.saved_states))
+        monkeypatch.setattr(pmh, "_save_pm_meta", lambda *_a, **_kw: None)
+        monkeypatch.setattr(
+            pmh,
+            "_load_pm_meta",
+            lambda *_a, **_kw: {"initial_context": "test", "cwd": "/tmp"},
+        )
+
+    @pytest.fixture
+    async def event_store(self):
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        yield store
+        await store.close()
+
+    @pytest.fixture
+    def handler(self, event_store):
+        from ouroboros.mcp.tools.pm_handler import PMInterviewHandler
+
+        return PMInterviewHandler(
+            llm_backend="openai",
+            event_store=event_store,
+            agent_runtime_backend="opencode",
+            opencode_mode="plugin",
+        )
+
+    async def test_last_question_persisted_in_new_round(self, handler) -> None:
+        """answer + last_question → round uses real question text."""
+        result = await handler.handle(
+            {
+                "session_id": "ses_pm_lq_1",
+                "answer": "yes, invoice management",
+                "last_question": "What is the core domain of your product?",
+            }
+        )
+        assert result.is_ok
+        assert len(self.saved_states) == 1
+        state = self.saved_states[0]
+        assert len(state.rounds) == 1
+        assert state.rounds[0].question == "What is the core domain of your product?"
+        assert state.rounds[0].user_response == "yes, invoice management"
+
+    async def test_no_last_question_uses_placeholder(self, handler) -> None:
+        """answer without last_question → placeholder (backward compat)."""
+        result = await handler.handle(
+            {
+                "session_id": "ses_pm_lq_2",
+                "answer": "B2B SaaS",
+            }
+        )
+        assert result.is_ok
+        assert len(self.saved_states) == 1
+        state = self.saved_states[0]
+        assert len(state.rounds) == 1
+        assert state.rounds[0].question == "(continued from subagent)"
+        assert state.rounds[0].user_response == "B2B SaaS"
+
+    async def test_last_question_updates_existing_round(self, monkeypatch, handler) -> None:
+        """Existing unanswered round + last_question → question text updated."""
+
+        async def _load_with_round(state_dir, session_id):
+            state = InterviewState(
+                interview_id=session_id,
+                initial_context="test context",
+                rounds=[
+                    InterviewRound(
+                        round_number=1,
+                        question="(continued from subagent)",
+                        user_response=None,
+                    )
+                ],
+            )
+            return Result.ok(state)
+
+        import ouroboros.mcp.tools.authoring_handlers as ah
+
+        monkeypatch.setattr(ah, "_plugin_load_state", _load_with_round)
+
+        result = await handler.handle(
+            {
+                "session_id": "ses_pm_lq_3",
+                "answer": "React frontend",
+                "last_question": "What tech stack do you prefer?",
+            }
+        )
+        assert result.is_ok
+        assert len(self.saved_states) == 1
+        state = self.saved_states[0]
+        assert len(state.rounds) == 1
+        assert state.rounds[0].question == "What tech stack do you prefer?"
+        assert state.rounds[0].user_response == "React frontend"
+
+    async def test_pm_response_includes_next_turn_hint(self, handler) -> None:
+        """PM plugin response includes next_turn_hint for last_question."""
+        import json
+
+        result = await handler.handle(
+            {
+                "session_id": "ses_pm_lq_hint",
+                "answer": "test",
+            }
+        )
+        assert result.is_ok
+        data = json.loads(result.value.content[0].text)
+        # response_shape keys are merged at top level (see build_subagent_result)
+        assert "last_question" in data.get("next_turn_hint", "")

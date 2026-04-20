@@ -10,12 +10,28 @@ instead of calling LLMs directly. Each handler.handle() should:
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
+
+# ---------------------------------------------------------------------------
+# Shared mock helper for plugin I/O
+# ---------------------------------------------------------------------------
+
+
+async def _noop_save(state_dir: Path, state: InterviewState) -> Result[Path, str]:
+    """Mock ``_plugin_save_state`` — mirrors real signature, no disk I/O.
+
+    Returns a realistic path built from *state_dir* + *interview_id* so
+    callers that inspect the result get a plausible ``Path`` object rather
+    than a hard-coded ``/tmp/fake``.
+    """
+    return Result.ok(state_dir / f"interview_{state.interview_id}.json")
+
 
 # ---------------------------------------------------------------------------
 # QAHandler
@@ -148,7 +164,7 @@ class TestInterviewHandlerSubagentDispatch:
     def mock_plugin_io(self, monkeypatch):
         """Mock _plugin_load/save so plugin path doesn't need real state files."""
 
-        async def _fake_load(state_dir, session_id):
+        async def _fake_load(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test context",
@@ -156,15 +172,10 @@ class TestInterviewHandlerSubagentDispatch:
             )
             return Result.ok(state)
 
-        async def _fake_save(state_dir, state):
-            from pathlib import Path
-
-            return Result.ok(Path("/tmp/fake"))
-
         import ouroboros.mcp.tools.authoring_handlers as ah
 
         monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
-        monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
+        monkeypatch.setattr(ah, "_plugin_save_state", _noop_save)
 
     @pytest.fixture
     def handler(self):
@@ -355,7 +366,7 @@ class TestPMInterviewHandlerSubagentDispatch:
     def mock_plugin_io(self, monkeypatch):
         """Mock _plugin_load/save and pm_meta so plugin path doesn't need real state files."""
 
-        async def _fake_load(state_dir, session_id):
+        async def _fake_load(state_dir: Path, session_id: str) -> Result[InterviewState, str]:
             state = InterviewState(
                 interview_id=session_id,
                 initial_context="test context",
@@ -364,16 +375,11 @@ class TestPMInterviewHandlerSubagentDispatch:
             )
             return Result.ok(state)
 
-        async def _fake_save(state_dir, state):
-            from pathlib import Path
-
-            return Result.ok(Path("/tmp/fake"))
-
         import ouroboros.mcp.tools.authoring_handlers as ah
         import ouroboros.mcp.tools.pm_handler as pmh
 
         monkeypatch.setattr(ah, "_plugin_load_state", _fake_load)
-        monkeypatch.setattr(ah, "_plugin_save_state", _fake_save)
+        monkeypatch.setattr(ah, "_plugin_save_state", _noop_save)
         # PM plugin path now calls _save_pm_meta on start and select_repos
         monkeypatch.setattr(pmh, "_save_pm_meta", lambda *_a, **_kw: None)
         monkeypatch.setattr(
