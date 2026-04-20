@@ -229,7 +229,10 @@ class Seed(BaseModel, frozen=True):
 
     # Structure
     ontology_schema: OntologySchema = Field(
-        ...,
+        default_factory=lambda: OntologySchema(
+            name="default",
+            description="Workflow output schema",
+        ),
         description="Schema defining the structure of workflow outputs",
     )
 
@@ -247,7 +250,7 @@ class Seed(BaseModel, frozen=True):
 
     # Metadata
     metadata: SeedMetadata = Field(
-        ...,
+        default_factory=SeedMetadata,
         description="Generation metadata (version, timestamp, etc.)",
     )
 
