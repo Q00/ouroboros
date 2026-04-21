@@ -36,6 +36,7 @@ connection:
 
 ```yaml
 goal: "Create a sourced implementation brief for adding streaming responses."
+task_type: research
 constraints:
   - "Use official documentation for API behavior."
   - "Separate facts from recommendations."
@@ -44,6 +45,21 @@ acceptance_criteria:
   - "Brief explains the recommended implementation path."
   - "Brief lists risks, unknowns, and verification steps."
   - "All current API claims are attributed to fetched sources."
+ontology_schema:
+  name: "implementation_brief"
+  description: "Structured sourced brief for an engineering decision."
+  fields:
+    - name: "recommendation"
+      field_type: "markdown"
+      description: "Recommended implementation path and rationale."
+    - name: "sources"
+      field_type: "list"
+      description: "Source identifiers or links for current external claims."
+    - name: "risks"
+      field_type: "list"
+      description: "Known risks, unknowns, and verification steps."
+metadata:
+  ambiguity_score: 0.15
 ```
 
 ## Execution Notes

@@ -44,6 +44,7 @@ connection:
 
 ```yaml
 goal: "Implement the settings panel from the referenced Figma frame."
+task_type: code
 constraints:
   - "Use the existing component system."
   - "Do not add new styling primitives unless required by the design."
@@ -52,6 +53,21 @@ acceptance_criteria:
   - "Implemented UI matches the referenced layout, spacing, and states."
   - "Local component tests or app tests pass."
   - "Browser QA confirms the panel renders at desktop and mobile sizes."
+ontology_schema:
+  name: "settings_panel"
+  description: "UI implementation aligned to a referenced design frame."
+  fields:
+    - name: "component_structure"
+      field_type: "code"
+      description: "Components, props, and state used for the panel."
+    - name: "visual_states"
+      field_type: "list"
+      description: "Desktop, mobile, loading, error, and interaction states."
+    - name: "verification"
+      field_type: "list"
+      description: "Local and browser QA evidence for the implemented UI."
+metadata:
+  ambiguity_score: 0.15
 ```
 
 ## Execution Notes
