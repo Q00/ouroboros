@@ -69,10 +69,16 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
             aggregate_id=session_id,
             event_type="orchestrator.session.cancelled",
         )
+        terminal_events = await store.query_events(
+            aggregate_id="exec_cancel_123",
+            event_type="execution.terminal",
+        )
 
         assert process.returncode is not None
         assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
         assert cancellation_events
+        assert terminal_events
+        assert terminal_events[0].data["status"] == "cancelled"
         assert await is_cancellation_requested(session_id) is False
     finally:
         process = process_holder.get("process")

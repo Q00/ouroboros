@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.events import create_execution_terminal_event
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
@@ -454,6 +455,15 @@ class JobManager:
             from ouroboros.orchestrator.heartbeat import release as release_session_lock
 
             release_session_lock(snapshot.links.session_id)
+            if snapshot.links.execution_id:
+                await self._event_store.append(
+                    create_execution_terminal_event(
+                        execution_id=snapshot.links.execution_id,
+                        session_id=snapshot.links.session_id,
+                        status="cancelled",
+                        error_message="Background job cancelled",
+                    )
+                )
             await clear_cancellation(snapshot.links.session_id)
 
         return await self.get_snapshot(job_id)
