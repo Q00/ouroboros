@@ -35,6 +35,8 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 - [Evolutionary Loop & Ralph](./guides/evolution-loop.md) - Wonder/Reflect cycle, convergence detection, persistent evolution
 - [Evaluation Pipeline Guide](./guides/evaluation-pipeline.md) - Three-stage evaluation, failure modes, and configuration
 - [Shared `ooo` Skill Dispatch Router](./guides/ooo-skill-dispatch-router.md) - Runtime setup boundary for Codex CLI, Hermes, and OpenCode skill dispatch
+- [MCP Best Practices](./guides/mcp-best-practices.md) - Upstream MCP server configuration, security, and workflow mapping
+- [QA Backends](./guides/qa-backends.md) - External QA backend patterns, including OpenCron-style synthetic checks
 - [TUI Usage Guide](./guides/tui-usage.md) - Dashboard, screens, keyboard shortcuts
 
 ### Contributing
