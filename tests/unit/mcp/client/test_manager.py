@@ -185,8 +185,8 @@ class TestMCPClientManagerTools:
         tools = await manager.list_all_tools()
         assert len(tools) == 0
 
-    async def test_call_tool_reconnects_once_after_transport_failure(self) -> None:
-        """call_tool reconnects and retries once when the transport is closed."""
+    async def test_call_tool_reconnects_without_replaying_transport_failure(self) -> None:
+        """call_tool restores the connection but does not replay side effects."""
         manager = MCPClientManager()
         config = MCPServerConfig(
             name="test-server",
@@ -196,11 +196,14 @@ class TestMCPClientManagerTools:
         stale_adapter = _ToolAdapter(
             Result.err(MCPConnectionError("transport closed", server_name="test-server"))
         )
-        fresh_result = MCPToolResult(
-            content=(MCPContentItem(type=ContentType.TEXT, text="ok"),),
-            is_error=False,
+        fresh_adapter = _ToolAdapter(
+            Result.ok(
+                MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="ok"),),
+                    is_error=False,
+                )
+            )
         )
-        fresh_adapter = _ToolAdapter(Result.ok(fresh_result))
         tool = MCPToolDefinition(name="tool", description="")
         manager._connections["test-server"] = ServerConnection(
             config=config,
@@ -228,10 +231,11 @@ class TestMCPClientManagerTools:
 
         result = await manager.call_tool("test-server", "tool", {})
 
-        assert result.is_ok
-        assert result.value.text_content == "ok"
+        assert result.is_err
+        assert isinstance(result.error, MCPConnectionError)
         assert stale_adapter.calls == 1
-        assert fresh_adapter.calls == 1
+        assert fresh_adapter.calls == 0
+        assert manager.get_connection_state("test-server") == ConnectionState.CONNECTED
 
     async def test_call_tool_does_not_reconnect_after_timeout_result(self) -> None:
         """Timeout failures are not retried because tools may have side effects."""

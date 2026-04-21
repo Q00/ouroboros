@@ -441,15 +441,8 @@ class MCPClientManager:
         if result.is_ok or not self._should_reconnect_after_error(result.error):
             return result
 
-        reconnect_result = await self._mark_unhealthy_and_reconnect(server_name, conn, result.error)
-        if reconnect_result.is_err:
-            return Result.err(reconnect_result.error)
-        return await self._call_tool_once(
-            reconnect_result.value,
-            tool_name,
-            arguments,
-            effective_timeout,
-        )
+        await self._mark_unhealthy_and_reconnect(server_name, conn, result.error)
+        return result
 
     async def _call_tool_once(
         self,
