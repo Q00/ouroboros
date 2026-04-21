@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.runner import request_cancellation
+from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
 
@@ -434,12 +434,18 @@ class JobManager:
         if snapshot.links.session_id:
             await request_cancellation(snapshot.links.session_id)
 
+        local_task_cancelled = False
         task = self._tasks.get(job_id)
         if task is not None:
             task.cancel()
+            local_task_cancelled = True
         runner_task = self._runner_tasks.get(job_id)
         if runner_task is not None and not runner_task.done():
             runner_task.cancel()
+            local_task_cancelled = True
+
+        if snapshot.links.session_id and local_task_cancelled:
+            await clear_cancellation(snapshot.links.session_id)
 
         return await self.get_snapshot(job_id)
 

@@ -10,6 +10,7 @@ import pytest
 
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -20,6 +21,8 @@ def _build_store(tmp_path: Path) -> EventStore:
 @pytest.mark.asyncio
 async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -> None:
     """Cancelling a linked session job must cancel its runner and child process."""
+    session_id = "orch_cancel_123"
+    await clear_cancellation(session_id)
     store = _build_store(tmp_path)
     manager = JobManager(store)
     process_started = asyncio.Event()
@@ -54,7 +57,7 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
             job_type="linked-session-process",
             initial_message="queued",
             runner=_runner(),
-            links=JobLinks(session_id="orch_cancel_123", execution_id="exec_cancel_123"),
+            links=JobLinks(session_id=session_id, execution_id="exec_cancel_123"),
         )
         await asyncio.wait_for(process_started.wait(), timeout=5)
         process = process_holder["process"]
@@ -65,9 +68,11 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
 
         assert process.returncode is not None
         assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+        assert await is_cancellation_requested(session_id) is False
     finally:
         process = process_holder.get("process")
         if process is not None and process.returncode is None:
             process.kill()
             await process.wait()
+        await clear_cancellation(session_id)
         await store.close()
