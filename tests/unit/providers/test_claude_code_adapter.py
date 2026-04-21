@@ -704,9 +704,7 @@ class TestErrorDiagnostics:
                 captured_stderr["fn"]("fatal: SDK process died")
             if False:
                 yield
-            raise RuntimeError(
-                "Command failed with exit code 1. Check stderr output for details"
-            )
+            raise RuntimeError("Command failed with exit code 1. Check stderr output for details")
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=failing_query))
 
