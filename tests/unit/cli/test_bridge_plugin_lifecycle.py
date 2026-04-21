@@ -12,6 +12,12 @@ from unittest.mock import MagicMock, patch
 from ouroboros.cli.commands.setup import _install_opencode_bridge_plugin
 from ouroboros.cli.commands.uninstall import _remove_opencode_bridge_plugin
 
+# Patch targets — both namespaces so internal calls through
+# find_opencode_config() also resolve to the test directory.
+_OCD_SETUP = "ouroboros.cli.commands.setup.opencode_config_dir"
+_OCD_UNINSTALL = "ouroboros.cli.commands.uninstall.opencode_config_dir"
+_OCD_CONFIG = "ouroboros.cli.opencode_config.opencode_config_dir"
+
 # ── _install_opencode_bridge_plugin ──────────────────────────────
 
 
@@ -21,6 +27,7 @@ class TestInstallBridgePlugin:
     def test_creates_plugin_dir_and_writes_file(self, tmp_path: Path) -> None:
         """Plugin dir created, .ts file written from package resource."""
         fake_content = "// ouroboros bridge plugin v2\nexport default {}\n"
+        oc_dir = tmp_path / "opencode"
 
         mock_source = MagicMock()
         mock_source.read_text.return_value = fake_content
@@ -29,25 +36,20 @@ class TestInstallBridgePlugin:
         mock_package.joinpath.return_value = mock_source
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(_OCD_SETUP, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
             patch("importlib.resources.files", return_value=mock_package),
         ):
             _install_opencode_bridge_plugin()
 
-        dest = (
-            tmp_path
-            / ".config"
-            / "opencode"
-            / "plugins"
-            / "ouroboros-bridge"
-            / "ouroboros-bridge.ts"
-        )
+        dest = oc_dir / "plugins" / "ouroboros-bridge" / "ouroboros-bridge.ts"
         assert dest.exists()
         assert dest.read_text() == fake_content
 
     def test_overwrites_existing_file(self, tmp_path: Path) -> None:
         """Existing plugin file overwritten with new version."""
-        plugin_dir = tmp_path / ".config" / "opencode" / "plugins" / "ouroboros-bridge"
+        oc_dir = tmp_path / "opencode"
+        plugin_dir = oc_dir / "plugins" / "ouroboros-bridge"
         plugin_dir.mkdir(parents=True)
         dest = plugin_dir / "ouroboros-bridge.ts"
         dest.write_text("// old version")
@@ -59,7 +61,8 @@ class TestInstallBridgePlugin:
         mock_package.joinpath.return_value = mock_source
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(_OCD_SETUP, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
             patch("importlib.resources.files", return_value=mock_package),
         ):
             _install_opencode_bridge_plugin()
@@ -68,10 +71,7 @@ class TestInstallBridgePlugin:
 
     def test_fallback_to_dev_source(self, tmp_path: Path) -> None:
         """When importlib.resources fails, fallback to dev tree source."""
-        # Create dev source file relative to setup.py's __file__
-        # setup.py is at src/ouroboros/cli/commands/setup.py
-        # dev_source = parents[3] / "opencode" / "plugin" / "ouroboros-bridge.ts"
-        # parents[3] of setup.py = src/ouroboros/
+        oc_dir = tmp_path / "opencode"
         dev_content = "// dev bridge plugin"
         dev_root = tmp_path / "src" / "ouroboros"
         dev_plugin = dev_root / "opencode" / "plugin" / "ouroboros-bridge.ts"
@@ -84,7 +84,8 @@ class TestInstallBridgePlugin:
         fake_setup_file.write_text("")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(_OCD_SETUP, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
             patch("importlib.resources.files", side_effect=FileNotFoundError),
             patch(
                 "ouroboros.cli.commands.setup.__file__",
@@ -93,26 +94,20 @@ class TestInstallBridgePlugin:
         ):
             _install_opencode_bridge_plugin()
 
-        dest = (
-            tmp_path
-            / ".config"
-            / "opencode"
-            / "plugins"
-            / "ouroboros-bridge"
-            / "ouroboros-bridge.ts"
-        )
+        dest = oc_dir / "plugins" / "ouroboros-bridge" / "ouroboros-bridge.ts"
         assert dest.exists()
         assert dest.read_text() == dev_content
 
     def test_prints_warning_when_no_source(self, tmp_path: Path) -> None:
         """Warning printed when both importlib and dev source fail."""
-        # Point __file__ somewhere with no dev tree so fallback also fails
+        oc_dir = tmp_path / "opencode"
         fake_file = tmp_path / "nowhere" / "cli" / "commands" / "setup.py"
         fake_file.parent.mkdir(parents=True)
         fake_file.write_text("")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(_OCD_SETUP, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
             patch("importlib.resources.files", side_effect=ModuleNotFoundError),
             patch("ouroboros.cli.commands.setup.__file__", str(fake_file)),
             patch("ouroboros.cli.commands.setup.print_warning") as mock_warn,
@@ -131,11 +126,15 @@ class TestRemoveBridgePlugin:
 
     def test_removes_existing_plugin_dir(self, tmp_path: Path) -> None:
         """Plugin dir removed successfully returns True."""
-        plugin_dir = tmp_path / ".config" / "opencode" / "plugins" / "ouroboros-bridge"
+        oc_dir = tmp_path / "opencode"
+        plugin_dir = oc_dir / "plugins" / "ouroboros-bridge"
         plugin_dir.mkdir(parents=True)
         (plugin_dir / "ouroboros-bridge.ts").write_text("// plugin")
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with (
+            patch(_OCD_UNINSTALL, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
+        ):
             result = _remove_opencode_bridge_plugin(dry_run=False)
 
         assert result is True
@@ -143,11 +142,15 @@ class TestRemoveBridgePlugin:
 
     def test_dry_run_preserves_dir(self, tmp_path: Path) -> None:
         """Dry run returns True but does not delete."""
-        plugin_dir = tmp_path / ".config" / "opencode" / "plugins" / "ouroboros-bridge"
+        oc_dir = tmp_path / "opencode"
+        plugin_dir = oc_dir / "plugins" / "ouroboros-bridge"
         plugin_dir.mkdir(parents=True)
         (plugin_dir / "ouroboros-bridge.ts").write_text("// plugin")
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with (
+            patch(_OCD_UNINSTALL, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
+        ):
             result = _remove_opencode_bridge_plugin(dry_run=True)
 
         assert result is True
@@ -155,19 +158,26 @@ class TestRemoveBridgePlugin:
 
     def test_missing_dir_returns_false(self, tmp_path: Path) -> None:
         """No plugin dir returns False (nothing to remove)."""
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        oc_dir = tmp_path / "opencode"
+
+        with (
+            patch(_OCD_UNINSTALL, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
+        ):
             result = _remove_opencode_bridge_plugin(dry_run=False)
 
         assert result is False
 
     def test_os_error_returns_false(self, tmp_path: Path) -> None:
         """OSError during rmtree returns False + prints warning."""
-        plugin_dir = tmp_path / ".config" / "opencode" / "plugins" / "ouroboros-bridge"
+        oc_dir = tmp_path / "opencode"
+        plugin_dir = oc_dir / "plugins" / "ouroboros-bridge"
         plugin_dir.mkdir(parents=True)
         (plugin_dir / "ouroboros-bridge.ts").write_text("// plugin")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(_OCD_UNINSTALL, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
             patch("shutil.rmtree", side_effect=OSError("permission denied")),
             patch("ouroboros.cli.commands.uninstall.print_warning") as mock_warn,
         ):
@@ -189,8 +199,9 @@ class TestUninstallBridgePluginIntegration:
 
         from ouroboros.cli.commands.uninstall import app
 
-        # Create bridge plugin dir
-        plugin_dir = tmp_path / ".config" / "opencode" / "plugins" / "ouroboros-bridge"
+        # Create bridge plugin dir under the patched opencode config dir.
+        oc_dir = tmp_path / "opencode"
+        plugin_dir = oc_dir / "plugins" / "ouroboros-bridge"
         plugin_dir.mkdir(parents=True)
         (plugin_dir / "ouroboros-bridge.ts").write_text("// plugin")
 
@@ -198,6 +209,8 @@ class TestUninstallBridgePluginIntegration:
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("pathlib.Path.cwd", return_value=tmp_path),
+            patch(_OCD_UNINSTALL, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
         ):
             result = runner.invoke(app, ["--dry-run"])
 
@@ -215,8 +228,9 @@ class TestUninstallBridgePluginIntegration:
         project_dir = tmp_path / "project"
         project_dir.mkdir()
 
-        # Create bridge plugin dir
-        plugin_dir = home_dir / ".config" / "opencode" / "plugins" / "ouroboros-bridge"
+        # Create bridge plugin dir under the patched opencode config dir.
+        oc_dir = tmp_path / "opencode"
+        plugin_dir = oc_dir / "plugins" / "ouroboros-bridge"
         plugin_dir.mkdir(parents=True)
         (plugin_dir / "ouroboros-bridge.ts").write_text("// plugin")
 
@@ -224,6 +238,8 @@ class TestUninstallBridgePluginIntegration:
         with (
             patch("pathlib.Path.home", return_value=home_dir),
             patch("pathlib.Path.cwd", return_value=project_dir),
+            patch(_OCD_UNINSTALL, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
         ):
             result = runner.invoke(app, ["-y"])
 

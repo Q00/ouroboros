@@ -20,6 +20,11 @@ from ouroboros.cli.commands.setup import (
     _is_bridge_plugin_entry,
 )
 
+# Patch targets — both namespaces so internal calls through
+# find_opencode_config() also resolve to the test directory.
+_OCD_SETUP = "ouroboros.cli.commands.setup.opencode_config_dir"
+_OCD_CONFIG = "ouroboros.cli.opencode_config.opencode_config_dir"
+
 # ── helpers ──────────────────────────────────────────────────────
 
 
@@ -40,14 +45,8 @@ class TestContentHashSkip:
 
     def test_identical_content_skips_write(self, tmp_path: Path) -> None:
         content = "// v28 bridge\n"
-        dest = (
-            tmp_path
-            / ".config"
-            / "opencode"
-            / "plugins"
-            / "ouroboros-bridge"
-            / "ouroboros-bridge.ts"
-        )
+        oc_dir = tmp_path / "opencode"
+        dest = oc_dir / "plugins" / "ouroboros-bridge" / "ouroboros-bridge.ts"
         dest.parent.mkdir(parents=True)
         dest.write_text(content)
         original_mtime = dest.stat().st_mtime_ns
@@ -57,7 +56,11 @@ class TestContentHashSkip:
         os.utime(dest, ns=(original_mtime - 1_000_000_000, original_mtime - 1_000_000_000))
         baseline_mtime = dest.stat().st_mtime_ns
 
-        with patch("pathlib.Path.home", return_value=tmp_path), _patch_source(content):
+        with (
+            patch(_OCD_SETUP, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
+            _patch_source(content),
+        ):
             _install_opencode_bridge_plugin()
 
         # mtime untouched → no write happened
@@ -67,18 +70,16 @@ class TestContentHashSkip:
         assert dest.read_text() == content
 
     def test_different_content_triggers_write(self, tmp_path: Path) -> None:
-        dest = (
-            tmp_path
-            / ".config"
-            / "opencode"
-            / "plugins"
-            / "ouroboros-bridge"
-            / "ouroboros-bridge.ts"
-        )
+        oc_dir = tmp_path / "opencode"
+        dest = oc_dir / "plugins" / "ouroboros-bridge" / "ouroboros-bridge.ts"
         dest.parent.mkdir(parents=True)
         dest.write_text("// old v27\n")
 
-        with patch("pathlib.Path.home", return_value=tmp_path), _patch_source("// new v28\n"):
+        with (
+            patch(_OCD_SETUP, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
+            _patch_source("// new v28\n"),
+        ):
             _install_opencode_bridge_plugin()
 
         assert dest.read_text() == "// new v28\n"
@@ -115,10 +116,12 @@ class TestAtomicWrite:
 
     def test_install_uses_atomic_write(self, tmp_path: Path) -> None:
         """Install path never leaves partial .ts when os.replace fails."""
-        dest_parent = tmp_path / ".config" / "opencode" / "plugins" / "ouroboros-bridge"
+        oc_dir = tmp_path / "opencode"
+        dest_parent = oc_dir / "plugins" / "ouroboros-bridge"
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(_OCD_SETUP, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
             _patch_source("// content\n"),
             patch("os.replace", side_effect=OSError("disk full")),
             patch("ouroboros.cli.commands.setup.print_warning") as warn,
@@ -196,27 +199,21 @@ class TestEnsurePluginEntry:
     """Plugin-array management: append, dedupe, idempotent, atomic."""
 
     def _setup_cfg(self, tmp_path: Path, data: dict | None) -> Path:
-        cfg_dir = tmp_path / ".config" / "opencode"
-        cfg_dir.mkdir(parents=True)
+        cfg_dir = tmp_path / "opencode"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
         cfg = cfg_dir / "opencode.json"
         if data is not None:
             cfg.write_text(json.dumps(data))
         return cfg
 
     def _canonical(self, tmp_path: Path) -> str:
-        return str(
-            tmp_path
-            / ".config"
-            / "opencode"
-            / "plugins"
-            / "ouroboros-bridge"
-            / "ouroboros-bridge.ts"
-        )
+        return str(tmp_path / "opencode" / "plugins" / "ouroboros-bridge" / "ouroboros-bridge.ts")
 
     def test_appends_when_missing(self, tmp_path: Path) -> None:
         cfg = self._setup_cfg(tmp_path, {"provider": "x"})
+        oc_dir = tmp_path / "opencode"
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(_OCD_SETUP, return_value=oc_dir), patch(_OCD_CONFIG, return_value=oc_dir):
             _ensure_opencode_plugin_entry()
 
         data = json.loads(cfg.read_text())
@@ -224,9 +221,10 @@ class TestEnsurePluginEntry:
         assert data["provider"] == "x"  # preserved
 
     def test_creates_config_when_missing(self, tmp_path: Path) -> None:
-        cfg = tmp_path / ".config" / "opencode" / "opencode.json"
+        oc_dir = tmp_path / "opencode"
+        cfg = oc_dir / "opencode.json"
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(_OCD_SETUP, return_value=oc_dir), patch(_OCD_CONFIG, return_value=oc_dir):
             _ensure_opencode_plugin_entry()
 
         data = json.loads(cfg.read_text())
@@ -238,8 +236,9 @@ class TestEnsurePluginEntry:
         mtime_before = cfg.stat().st_mtime_ns
         os.utime(cfg, ns=(mtime_before - 1_000_000_000, mtime_before - 1_000_000_000))
         baseline = cfg.stat().st_mtime_ns
+        oc_dir = tmp_path / "opencode"
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(_OCD_SETUP, return_value=oc_dir), patch(_OCD_CONFIG, return_value=oc_dir):
             _ensure_opencode_plugin_entry()
 
         # No rewrite → mtime unchanged
@@ -250,8 +249,9 @@ class TestEnsurePluginEntry:
         stale2 = "/root/.config/opencode/plugins/ouroboros-bridge/ouroboros-bridge.ts"
         other = "/home/alice/.config/opencode/plugins/other/other.ts"
         cfg = self._setup_cfg(tmp_path, {"plugin": [stale1, other, stale2]})
+        oc_dir = tmp_path / "opencode"
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(_OCD_SETUP, return_value=oc_dir), patch(_OCD_CONFIG, return_value=oc_dir):
             _ensure_opencode_plugin_entry()
 
         data = json.loads(cfg.read_text())
@@ -261,8 +261,9 @@ class TestEnsurePluginEntry:
     def test_repoints_single_stale_to_canonical(self, tmp_path: Path) -> None:
         stale = "/wrong/path/plugins/ouroboros-bridge/ouroboros-bridge.ts"
         cfg = self._setup_cfg(tmp_path, {"plugin": [stale]})
+        oc_dir = tmp_path / "opencode"
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(_OCD_SETUP, return_value=oc_dir), patch(_OCD_CONFIG, return_value=oc_dir):
             _ensure_opencode_plugin_entry()
 
         data = json.loads(cfg.read_text())
@@ -270,12 +271,12 @@ class TestEnsurePluginEntry:
 
     def test_rewrites_non_dict_root(self, tmp_path: Path) -> None:
         """A bare array at root is replaced with a proper dict."""
-        cfg_dir = tmp_path / ".config" / "opencode"
-        cfg_dir.mkdir(parents=True)
-        cfg = cfg_dir / "opencode.json"
+        oc_dir = tmp_path / "opencode"
+        oc_dir.mkdir(parents=True, exist_ok=True)
+        cfg = oc_dir / "opencode.json"
         cfg.write_text(json.dumps(["broken"]))
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(_OCD_SETUP, return_value=oc_dir), patch(_OCD_CONFIG, return_value=oc_dir):
             _ensure_opencode_plugin_entry()
 
         data = json.loads(cfg.read_text())
@@ -283,13 +284,14 @@ class TestEnsurePluginEntry:
         assert data["plugin"] == [self._canonical(tmp_path)]
 
     def test_skips_on_parse_error(self, tmp_path: Path) -> None:
-        cfg_dir = tmp_path / ".config" / "opencode"
-        cfg_dir.mkdir(parents=True)
-        cfg = cfg_dir / "opencode.json"
+        oc_dir = tmp_path / "opencode"
+        oc_dir.mkdir(parents=True, exist_ok=True)
+        cfg = oc_dir / "opencode.json"
         cfg.write_text("{ this is not json")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(_OCD_SETUP, return_value=oc_dir),
+            patch(_OCD_CONFIG, return_value=oc_dir),
             patch("ouroboros.cli.commands.setup.print_warning") as warn,
         ):
             _ensure_opencode_plugin_entry()
@@ -301,8 +303,9 @@ class TestEnsurePluginEntry:
     def test_atomic_json_write(self, tmp_path: Path) -> None:
         """JSON config written atomically — no leftover temp files."""
         cfg = self._setup_cfg(tmp_path, {})
+        oc_dir = tmp_path / "opencode"
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(_OCD_SETUP, return_value=oc_dir), patch(_OCD_CONFIG, return_value=oc_dir):
             _ensure_opencode_plugin_entry()
 
         leftovers = list(cfg.parent.glob(".opencode.json.*"))
@@ -314,11 +317,12 @@ class TestEnsurePluginEntry:
             tmp_path,
             {"plugin": ["/stale1/plugins/ouroboros-bridge/ouroboros-bridge.ts"]},
         )
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        oc_dir = tmp_path / "opencode"
+        with patch(_OCD_SETUP, return_value=oc_dir), patch(_OCD_CONFIG, return_value=oc_dir):
             _ensure_opencode_plugin_entry()
             _ensure_opencode_plugin_entry()
             _ensure_opencode_plugin_entry()
 
-        cfg = tmp_path / ".config" / "opencode" / "opencode.json"
+        cfg = oc_dir / "opencode.json"
         data = json.loads(cfg.read_text())
         assert data["plugin"] == [self._canonical(tmp_path)]
