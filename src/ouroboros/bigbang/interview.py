@@ -237,7 +237,6 @@ class InterviewEngine:
     max_tokens: int = 512
     _MAX_SYSTEM_PROMPT_CHARS = 3500
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
-    _MAX_INITIAL_CONTEXT_OVERFLOW_CHARS = 1200
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -619,8 +618,6 @@ class InterviewEngine:
         if len(initial_context) <= self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS:
             return ""
         overflow = initial_context[self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS :]
-        if len(overflow) > self._MAX_INITIAL_CONTEXT_OVERFLOW_CHARS:
-            overflow = overflow[: self._MAX_INITIAL_CONTEXT_OVERFLOW_CHARS] + "..."
         return f"Additional initial context omitted from the system prompt:\n{overflow}"
 
     def _build_ambiguity_snapshot_prompt(self, state: InterviewState) -> str:

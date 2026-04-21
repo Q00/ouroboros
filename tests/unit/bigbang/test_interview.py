@@ -397,6 +397,28 @@ class TestInterviewEngineAskNextQuestion:
         assert "Additional initial context omitted" in messages[1].content
 
     @pytest.mark.asyncio
+    async def test_very_long_initial_context_overflow_is_not_truncated(self) -> None:
+        """Initial context beyond the system cap is moved without dropping the tail."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        initial_context = ("A" * 49_990) + "TAIL_MARKER"
+        state = InterviewState(
+            interview_id="test_very_long_context",
+            initial_context=initial_context,
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
+        assert messages[1].role == MessageRole.USER
+        assert "TAIL_MARKER" in messages[1].content
+        assert not messages[1].content.endswith("...")
+
+    @pytest.mark.asyncio
     async def test_ask_question_with_history(self) -> None:
         """ask_next_question includes conversation history."""
         mock_adapter = MagicMock()
