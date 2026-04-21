@@ -1311,7 +1311,7 @@ class LateralThinkHandler:
         # --- Parallel multi-persona dispatch path ---
         explicit_list = arguments.get("personas")
         raw_persona_arg = arguments.get("persona")
-        if raw_persona_arg is None:
+        if explicit_list or raw_persona_arg is None:
             persona_arg = ""
         else:
             persona_arg = str(raw_persona_arg).strip()

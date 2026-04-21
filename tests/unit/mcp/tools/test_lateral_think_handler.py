@@ -167,6 +167,29 @@ async def test_blank_persona_is_invalid(persona: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_personas_list_takes_precedence_over_blank_persona() -> None:
+    """Explicit personas list is honored even when persona is blank."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "stuck on X",
+            "current_approach": "tried Y",
+            "persona": "",
+            "personas": ["hacker", "contrarian"],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta.get("dispatch_mode") == "inline_fallback"
+    assert payload.meta.get("persona_count") == 2
+
+
+@pytest.mark.asyncio
 async def test_stagnation_pattern_excludes_known_failed_personas() -> None:
     """failed_attempts persona names are excluded and unknown values are skipped."""
     handler = LateralThinkHandler(
