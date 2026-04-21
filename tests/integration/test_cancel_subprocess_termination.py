@@ -65,9 +65,14 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
         await manager.cancel_job(started.job_id)
         await asyncio.wait_for(process.wait(), timeout=5)
         snapshot = await manager.get_snapshot(started.job_id)
+        cancellation_events = await store.query_events(
+            aggregate_id=session_id,
+            event_type="orchestrator.session.cancelled",
+        )
 
         assert process.returncode is not None
         assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+        assert cancellation_events
         assert await is_cancellation_requested(session_id) is False
     finally:
         process = process_holder.get("process")

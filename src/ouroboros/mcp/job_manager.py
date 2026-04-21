@@ -445,6 +445,15 @@ class JobManager:
             local_task_cancelled = True
 
         if snapshot.links.session_id and local_task_cancelled:
+            repo = SessionRepository(self._event_store)
+            await repo.mark_cancelled(
+                snapshot.links.session_id,
+                reason="Background job cancelled",
+                cancelled_by="mcp_job_manager",
+            )
+            from ouroboros.orchestrator.heartbeat import release as release_session_lock
+
+            release_session_lock(snapshot.links.session_id)
             await clear_cancellation(snapshot.links.session_id)
 
         return await self.get_snapshot(job_id)
