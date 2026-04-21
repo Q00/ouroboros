@@ -1176,12 +1176,17 @@ class TestSetDefaultRepoExtended:
 
 
 class TestOpenCodeMCPSetup:
-    """Tests for OpenCode JSONC config handling in _ensure_opencode_mcp_entry."""
+    """Tests for OpenCode JSONC config handling in _ensure_opencode_mcp_entry.
+
+    Patches ``opencode_config_dir`` directly for platform-agnostic tests.
+    """
+
+    _OCD = "ouroboros.cli.opencode_config.opencode_config_dir"
 
     def test_jsonc_comments_preserved(self, tmp_path: Path) -> None:
         """JSONC with line and block comments parses without crashing and preserves non-MCP keys."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             '{\n  // line comment\n  /* block comment */\n  "theme": "dark",\n  "mcp": {}\n}\n',
@@ -1189,7 +1194,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1204,8 +1209,8 @@ class TestOpenCodeMCPSetup:
 
     def test_jsonc_trailing_commas_preserved(self, tmp_path: Path) -> None:
         """JSONC with trailing commas parses correctly and preserves keys."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             '{\n  "editor": "vim",\n  "mcp": {},\n}\n',
@@ -1213,7 +1218,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1227,8 +1232,8 @@ class TestOpenCodeMCPSetup:
 
     def test_existing_keys_survive_setup(self, tmp_path: Path) -> None:
         """Non-MCP keys like $schema and plugin survive _ensure_opencode_mcp_entry."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps(
@@ -1238,7 +1243,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1253,8 +1258,8 @@ class TestOpenCodeMCPSetup:
 
     def test_mcp_as_non_dict_is_replaced(self, tmp_path: Path) -> None:
         """If mcp is a list instead of a dict, setup replaces it with a valid dict."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps({"mcp": ["invalid"]}),
@@ -1262,7 +1267,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1276,8 +1281,8 @@ class TestOpenCodeMCPSetup:
 
     def test_ouroboros_entry_as_non_dict_is_replaced(self, tmp_path: Path) -> None:
         """If mcp.ouroboros is a string, setup replaces it with a proper entry."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps({"mcp": {"ouroboros": "disabled"}}),
@@ -1285,7 +1290,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1299,8 +1304,8 @@ class TestOpenCodeMCPSetup:
 
     def test_quoted_slashes_in_config_values_survive(self, tmp_path: Path) -> None:
         """URLs and patterns containing // or /* */ inside values are preserved."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             '{\n  "$schema": "https://opencode.ai/config.json",\n  "mcp": {}\n}\n',
@@ -1308,7 +1313,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1322,8 +1327,8 @@ class TestOpenCodeMCPSetup:
 
     def test_environment_as_string_is_replaced(self, tmp_path: Path) -> None:
         """If mcp.ouroboros.environment is a string, setup replaces it with a valid dict."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps(
@@ -1341,7 +1346,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1355,14 +1360,14 @@ class TestOpenCodeMCPSetup:
 
     def test_malformed_json_aborts_without_overwriting(self, tmp_path: Path) -> None:
         """If the config file is unparseable, setup must abort — not overwrite it."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         original_content = '{"theme": "dark", BROKEN JSON HERE}'
         config_path.write_text(original_content, encoding="utf-8")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1375,8 +1380,8 @@ class TestOpenCodeMCPSetup:
 
     def test_custom_command_not_overwritten(self, tmp_path: Path) -> None:
         """User-managed commands (docker, nix, etc.) must survive setup."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         custom_cmd = ["docker", "run", "--rm", "ouroboros", "mcp", "serve"]
         config_path.write_text(
@@ -1395,7 +1400,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1410,8 +1415,8 @@ class TestOpenCodeMCPSetup:
 
     def test_stale_type_remote_rewritten_to_local(self, tmp_path: Path) -> None:
         """A stale type='remote' must be normalised to 'local' by setup."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps(
@@ -1429,7 +1434,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1442,8 +1447,8 @@ class TestOpenCodeMCPSetup:
 
     def test_command_as_bare_string_replaced_with_array(self, tmp_path: Path) -> None:
         """A hand-edited command: "ouroboros" string must be replaced with array."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps(
@@ -1461,7 +1466,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1475,8 +1480,8 @@ class TestOpenCodeMCPSetup:
 
     def test_empty_list_command_replaced(self, tmp_path: Path) -> None:
         """An empty command array must be replaced with the detected launcher."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps(
@@ -1494,7 +1499,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1507,8 +1512,8 @@ class TestOpenCodeMCPSetup:
 
     def test_non_string_first_element_replaced(self, tmp_path: Path) -> None:
         """A command array with non-string first element must be replaced."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps(
@@ -1526,7 +1531,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1539,8 +1544,8 @@ class TestOpenCodeMCPSetup:
 
     def test_none_first_element_replaced(self, tmp_path: Path) -> None:
         """A command array with null first element must be replaced."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         config_path = config_dir / "opencode.json"
         config_path.write_text(
             json.dumps(
@@ -1558,7 +1563,7 @@ class TestOpenCodeMCPSetup:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1581,10 +1586,10 @@ class TestOpenCodeSetupConfigYaml:
         config_path.write_text("just_a_string\n", encoding="utf-8")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry"),
             patch("ouroboros.cli.commands.setup._ensure_claude_mcp_entry"),
+            patch("ouroboros.cli.commands.setup._cleanup_plugin_artifacts"),
         ):
             from ouroboros.cli.commands.setup import _setup_opencode
 
@@ -1606,10 +1611,10 @@ class TestOpenCodeSetupConfigYaml:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry"),
             patch("ouroboros.cli.commands.setup._ensure_claude_mcp_entry"),
+            patch("ouroboros.cli.commands.setup._cleanup_plugin_artifacts"),
         ):
             from ouroboros.cli.commands.setup import _setup_opencode
 
@@ -1629,7 +1634,6 @@ class TestOpenCodeSetupConfigYaml:
         claude_dir.mkdir()
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry"),
             patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry"),
@@ -1655,7 +1659,6 @@ class TestOpenCodeSetupConfigYaml:
         config_path.write_text("{}", encoding="utf-8")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._install_opencode_bridge_plugin", return_value=False
@@ -1677,7 +1680,6 @@ class TestOpenCodeSetupConfigYaml:
 
         runner = CliRunner()
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_runtimes",
@@ -1712,10 +1714,12 @@ class TestOpenCodeModePersisted:
         config_dir.mkdir()
         config_path = config_dir / "config.yaml"
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry"),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry"),
+            patch("ouroboros.cli.commands.setup._install_opencode_bridge_plugin"),
             patch("ouroboros.cli.commands.setup._ensure_claude_mcp_entry"),
+            patch("ouroboros.cli.commands.setup._cleanup_plugin_artifacts"),
         ):
             from ouroboros.cli.commands.setup import _setup_opencode
 
@@ -1739,37 +1743,43 @@ class TestOpenCodeModePersisted:
 
 
 class TestFindOpencodeConfig:
-    """Tests for _find_opencode_config — .jsonc/.json detection logic."""
+    """Tests for _find_opencode_config — .jsonc/.json detection logic.
+
+    Patches ``opencode_config_dir`` directly so tests are platform-agnostic
+    (no reliance on Linux-specific ``~/.config/opencode`` paths).
+    """
+
+    _OCD = "ouroboros.cli.opencode_config.opencode_config_dir"
 
     def test_prefers_jsonc_over_json(self, tmp_path: Path) -> None:
         """When both opencode.jsonc and opencode.json exist, .jsonc wins."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         (config_dir / "opencode.jsonc").write_text("{}", encoding="utf-8")
         (config_dir / "opencode.json").write_text("{}", encoding="utf-8")
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(self._OCD, return_value=config_dir):
             result = _find_opencode_config()
 
         assert result.name == "opencode.jsonc"
 
     def test_falls_back_to_json(self, tmp_path: Path) -> None:
         """When only opencode.json exists, it is returned."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         (config_dir / "opencode.json").write_text("{}", encoding="utf-8")
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(self._OCD, return_value=config_dir):
             result = _find_opencode_config()
 
         assert result.name == "opencode.json"
 
     def test_returns_json_default_when_neither_exists(self, tmp_path: Path) -> None:
         """When no config exists, returns opencode.json as default for creation."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(self._OCD, return_value=config_dir):
             result = _find_opencode_config()
 
         assert result.name == "opencode.json"
@@ -1777,23 +1787,28 @@ class TestFindOpencodeConfig:
 
     def test_only_jsonc_exists(self, tmp_path: Path) -> None:
         """When only opencode.jsonc exists, it is returned."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         (config_dir / "opencode.jsonc").write_text("{}", encoding="utf-8")
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with patch(self._OCD, return_value=config_dir):
             result = _find_opencode_config()
 
         assert result.name == "opencode.jsonc"
 
 
 class TestSetupJsoncDetection:
-    """Tests for _ensure_opencode_mcp_entry picking up .jsonc files."""
+    """Tests for _ensure_opencode_mcp_entry picking up .jsonc files.
+
+    Patches ``opencode_config_dir`` directly for platform-agnostic tests.
+    """
+
+    _OCD = "ouroboros.cli.opencode_config.opencode_config_dir"
 
     def test_setup_reads_existing_jsonc(self, tmp_path: Path) -> None:
         """Setup should read and update an existing opencode.jsonc file."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         jsonc_path = config_dir / "opencode.jsonc"
         jsonc_path.write_text(
             '{\n  // user comment\n  "theme": "dark",\n  "mcp": {}\n}\n',
@@ -1801,7 +1816,7 @@ class TestSetupJsoncDetection:
         )
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
@@ -1817,13 +1832,13 @@ class TestSetupJsoncDetection:
 
     def test_setup_does_not_create_json_when_jsonc_exists(self, tmp_path: Path) -> None:
         """No stray opencode.json should be created when .jsonc is present."""
-        config_dir = tmp_path / ".config" / "opencode"
-        config_dir.mkdir(parents=True)
+        config_dir = tmp_path / "opencode"
+        config_dir.mkdir()
         jsonc_path = config_dir / "opencode.jsonc"
         jsonc_path.write_text('{"mcp": {}}', encoding="utf-8")
 
         with (
-            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(self._OCD, return_value=config_dir),
             patch(
                 "ouroboros.cli.commands.setup._detect_opencode_mcp_command",
                 return_value={"command": ["ouroboros", "mcp", "serve"]},
