@@ -370,6 +370,33 @@ class TestInterviewEngineAskNextQuestion:
         assert "Additional initial context omitted" in messages[1].content
 
     @pytest.mark.asyncio
+    async def test_long_initial_context_overflow_remains_after_first_round(self) -> None:
+        """Overflow initial_context remains present in later stateless requests."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_long_context_round_2",
+            initial_context="X" * 3500,
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question="What is the main goal?",
+                user_response="Ship the feature",
+            )
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
+        assert messages[1].role == MessageRole.USER
+        assert "Additional initial context omitted" in messages[1].content
+
+    @pytest.mark.asyncio
     async def test_ask_question_with_history(self) -> None:
         """ask_next_question includes conversation history."""
         mock_adapter = MagicMock()

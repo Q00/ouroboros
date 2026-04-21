@@ -820,10 +820,9 @@ class InterviewEngine:
         """
         messages: list[Message] = []
 
-        if state.current_round_number == 1:
-            overflow = self._initial_context_overflow_message(state.initial_context)
-            if overflow:
-                messages.append(Message(role=MessageRole.USER, content=overflow))
+        overflow = self._initial_context_overflow_message(state.initial_context)
+        if overflow:
+            messages.append(Message(role=MessageRole.USER, content=overflow))
 
         for round_data in state.rounds:
             messages.append(Message(role=MessageRole.ASSISTANT, content=round_data.question))
