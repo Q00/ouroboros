@@ -240,6 +240,12 @@ class InterviewEngine:
     _MIN_SYSTEM_PROMPT_CHARS = 1200
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
     _MAX_INITIAL_CONTEXT_TOTAL_CHARS = 3500
+    _INITIAL_CONTEXT_SUMMARY_QUESTION = (
+        "Your saved initial context is too long to safely send to the interview "
+        "model without risking CLI prompt failure. Please reply with a concise "
+        "summary of the full context, including goals, constraints, and success "
+        "criteria. I will use that summary for the next interview question."
+    )
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -275,18 +281,6 @@ class InterviewEngine:
         is_valid, error_msg = InputValidator.validate_initial_context(initial_context)
         if not is_valid:
             return Result.err(ValidationError(error_msg, field="initial_context"))
-        if len(initial_context) > self._MAX_INITIAL_CONTEXT_TOTAL_CHARS:
-            return Result.err(
-                ValidationError(
-                    (
-                        "initial_context is too long for safe interview prompt generation "
-                        f"({len(initial_context)} chars > "
-                        f"{self._MAX_INITIAL_CONTEXT_TOTAL_CHARS}). Provide a shorter "
-                        "summary or store the full document in a file and reference its path."
-                    ),
-                    field="initial_context",
-                )
-            )
 
         if interview_id is None:
             interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
@@ -334,29 +328,31 @@ class InterviewEngine:
                     value=state.status,
                 )
             )
-        if len(state.initial_context) > self._MAX_INITIAL_CONTEXT_TOTAL_CHARS:
-            return Result.err(
-                ValidationError(
-                    (
-                        "Interview initial_context is too long for safe prompt generation "
-                        f"({len(state.initial_context)} chars > "
-                        f"{self._MAX_INITIAL_CONTEXT_TOTAL_CHARS}). Resume with a shorter "
-                        "summary or reference the full document by file path."
-                    ),
-                    field="initial_context",
-                )
-            )
+        effective_initial_context = self._effective_initial_context(state)
+        if effective_initial_context is None:
+            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
 
         # Build the context from previous rounds
-        conversation_history = self._build_conversation_history(state)
+        conversation_history = self._build_conversation_history(
+            state,
+            initial_context=effective_initial_context,
+        )
+        conversation_history = self._trim_messages_to_budget(
+            conversation_history,
+            max_chars=self._MAX_TOTAL_PROMPT_CHARS - self._MIN_SYSTEM_PROMPT_CHARS,
+        )
 
         # Generate next question
         history_chars = sum(len(message.content) for message in conversation_history)
-        system_prompt_budget = max(
-            self._MIN_SYSTEM_PROMPT_CHARS,
-            min(self._MAX_SYSTEM_PROMPT_CHARS, self._MAX_TOTAL_PROMPT_CHARS - history_chars),
+        system_prompt_budget = min(
+            self._MAX_SYSTEM_PROMPT_CHARS,
+            self._MAX_TOTAL_PROMPT_CHARS - history_chars,
         )
-        system_prompt = self._build_system_prompt(state, max_chars=system_prompt_budget)
+        system_prompt = self._build_system_prompt(
+            state,
+            initial_context=effective_initial_context,
+            max_chars=system_prompt_budget,
+        )
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
             *conversation_history,
@@ -555,11 +551,18 @@ class InterviewEngine:
                 )
             )
 
-    def _build_system_prompt(self, state: InterviewState, max_chars: int | None = None) -> str:
+    def _build_system_prompt(
+        self,
+        state: InterviewState,
+        initial_context: str | None = None,
+        max_chars: int | None = None,
+    ) -> str:
         """Build the system prompt for question generation.
 
         Args:
             state: Current interview state.
+            initial_context: Optional prompt-safe context to use instead of
+                ``state.initial_context``.
             max_chars: Optional cap for the returned system prompt. When omitted,
                 uses the standard system-prompt cap.
 
@@ -573,7 +576,10 @@ class InterviewEngine:
 
         base_prompt = load_agent_prompt("socratic-interviewer")
 
-        prompt_initial_context = self._initial_context_for_system_prompt(state.initial_context)
+        context_for_prompt = (
+            initial_context if initial_context is not None else state.initial_context
+        )
+        prompt_initial_context = self._initial_context_for_system_prompt(context_for_prompt)
 
         # For first round, add explicit instruction to start directly with a question
         if state.current_round_number == 1:
@@ -654,6 +660,18 @@ class InterviewEngine:
             return ""
         overflow = initial_context[self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS :]
         return f"Additional initial context omitted from the system prompt:\n{overflow}"
+
+    def _effective_initial_context(self, state: InterviewState) -> str | None:
+        """Return prompt-safe initial context, or None when a summary is needed."""
+        if len(state.initial_context) <= self._MAX_INITIAL_CONTEXT_TOTAL_CHARS:
+            return state.initial_context
+        for round_data in reversed(state.rounds):
+            if (
+                round_data.question == self._INITIAL_CONTEXT_SUMMARY_QUESTION
+                and round_data.user_response
+            ):
+                return round_data.user_response
+        return None
 
     def _build_ambiguity_snapshot_prompt(self, state: InterviewState) -> str:
         """Build prompt context from the latest ambiguity snapshot."""
@@ -838,7 +856,11 @@ class InterviewEngine:
     # Cap each user response to keep the total prompt within safe limits.
     _MAX_USER_RESPONSE_CHARS = 800
 
-    def _build_conversation_history(self, state: InterviewState) -> list[Message]:
+    def _build_conversation_history(
+        self,
+        state: InterviewState,
+        initial_context: str | None = None,
+    ) -> list[Message]:
         """Build conversation history from completed rounds.
 
         Long user responses are truncated to prevent Agent SDK CLI from
@@ -846,17 +868,24 @@ class InterviewEngine:
 
         Args:
             state: Current interview state.
+            initial_context: Prompt-safe initial context to use for overflow
+                instead of ``state.initial_context``.
 
         Returns:
             List of messages representing the conversation.
         """
         messages: list[Message] = []
+        context_for_prompt = (
+            initial_context if initial_context is not None else state.initial_context
+        )
 
-        overflow = self._initial_context_overflow_message(state.initial_context)
+        overflow = self._initial_context_overflow_message(context_for_prompt)
         if overflow:
             messages.append(Message(role=MessageRole.USER, content=overflow))
 
         for round_data in state.rounds:
+            if round_data.question == self._INITIAL_CONTEXT_SUMMARY_QUESTION:
+                continue
             messages.append(Message(role=MessageRole.ASSISTANT, content=round_data.question))
             if round_data.user_response:
                 response = round_data.user_response
@@ -865,6 +894,30 @@ class InterviewEngine:
                 messages.append(Message(role=MessageRole.USER, content=response))
 
         return messages
+
+    def _trim_messages_to_budget(
+        self,
+        messages: list[Message],
+        *,
+        max_chars: int,
+    ) -> list[Message]:
+        """Keep the newest conversation messages within a character budget."""
+        if sum(len(message.content) for message in messages) <= max_chars:
+            return messages
+
+        retained: list[Message] = []
+        used_chars = 0
+        for message in reversed(messages):
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                break
+            if len(message.content) <= remaining:
+                retained.append(message)
+                used_chars += len(message.content)
+            else:
+                retained.append(Message(role=message.role, content=message.content[-remaining:]))
+                break
+        return list(reversed(retained))
 
     async def complete_interview(
         self, state: InterviewState

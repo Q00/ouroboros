@@ -400,7 +400,7 @@ class TestInterviewEngineAskNextQuestion:
 
     @pytest.mark.asyncio
     async def test_very_long_initial_context_is_rejected_before_prompting(self) -> None:
-        """Very long initial_context fails explicitly instead of being truncated."""
+        """Persisted long initial_context asks for a summary instead of failing."""
         mock_adapter = MagicMock()
         mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
 
@@ -413,23 +413,46 @@ class TestInterviewEngineAskNextQuestion:
 
         result = await engine.ask_next_question(state)
 
-        assert result.is_err
-        assert isinstance(result.error, ValidationError)
-        assert "too long for safe prompt generation" in result.error.message
+        assert result.is_ok
+        assert "too long to safely send" in result.value
         mock_adapter.complete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_start_rejects_very_long_initial_context(self) -> None:
-        """start_interview refuses contexts that cannot be passed without loss."""
+    async def test_start_accepts_very_long_initial_context_for_summary_recovery(self) -> None:
+        """start_interview remains backward-compatible with security limits."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
         result = await engine.start_interview(("A" * 4_000) + "TAIL_MARKER")
 
-        assert result.is_err
-        assert isinstance(result.error, ValidationError)
-        assert result.error.field == "initial_context"
-        assert "too long for safe interview prompt generation" in result.error.message
+        assert result.is_ok
+        assert result.value.initial_context.endswith("TAIL_MARKER")
+
+    @pytest.mark.asyncio
+    async def test_long_history_stays_under_total_prompt_cap(self) -> None:
+        """Later rounds trim retained history so the full request stays safe."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_long_history",
+            initial_context="X" * 3500,
+        )
+        for i in range(8):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=i + 1,
+                    question=f"What detail matters next? {i}",
+                    user_response="Y" * 800,
+                )
+            )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
 
     @pytest.mark.asyncio
     async def test_ask_question_with_history(self) -> None:
