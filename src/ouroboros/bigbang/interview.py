@@ -237,6 +237,7 @@ class InterviewEngine:
     max_tokens: int = 512
     _MAX_SYSTEM_PROMPT_CHARS = 3500
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
+    _MAX_INITIAL_CONTEXT_TOTAL_CHARS = 3500
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -272,6 +273,18 @@ class InterviewEngine:
         is_valid, error_msg = InputValidator.validate_initial_context(initial_context)
         if not is_valid:
             return Result.err(ValidationError(error_msg, field="initial_context"))
+        if len(initial_context) > self._MAX_INITIAL_CONTEXT_TOTAL_CHARS:
+            return Result.err(
+                ValidationError(
+                    (
+                        "initial_context is too long for safe interview prompt generation "
+                        f"({len(initial_context)} chars > "
+                        f"{self._MAX_INITIAL_CONTEXT_TOTAL_CHARS}). Provide a shorter "
+                        "summary or store the full document in a file and reference its path."
+                    ),
+                    field="initial_context",
+                )
+            )
 
         if interview_id is None:
             interview_id = f"interview_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}"
@@ -317,6 +330,18 @@ class InterviewEngine:
                     "Interview is already complete",
                     field="status",
                     value=state.status,
+                )
+            )
+        if len(state.initial_context) > self._MAX_INITIAL_CONTEXT_TOTAL_CHARS:
+            return Result.err(
+                ValidationError(
+                    (
+                        "Interview initial_context is too long for safe prompt generation "
+                        f"({len(state.initial_context)} chars > "
+                        f"{self._MAX_INITIAL_CONTEXT_TOTAL_CHARS}). Resume with a shorter "
+                        "summary or reference the full document by file path."
+                    ),
+                    field="initial_context",
                 )
             )
 
