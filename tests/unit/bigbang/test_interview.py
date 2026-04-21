@@ -345,8 +345,8 @@ class TestInterviewEngineAskNextQuestion:
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
         async def _complete(messages, _config):
-            system_prompt = messages[0].content
-            if len(system_prompt) > engine._MAX_SYSTEM_PROMPT_CHARS:
+            total_prompt_chars = sum(len(message.content) for message in messages)
+            if total_prompt_chars > engine._MAX_TOTAL_PROMPT_CHARS:
                 return Result.err(
                     ProviderError(
                         "Command failed with exit code 1. Check stderr output for details"
@@ -365,6 +365,7 @@ class TestInterviewEngineAskNextQuestion:
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
+        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
         assert "Initial context continues in the first user message" in messages[0].content
         assert messages[1].role == MessageRole.USER
         assert "Additional initial context omitted" in messages[1].content
@@ -393,6 +394,7 @@ class TestInterviewEngineAskNextQuestion:
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
         assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
+        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
         assert messages[1].role == MessageRole.USER
         assert "Additional initial context omitted" in messages[1].content
 

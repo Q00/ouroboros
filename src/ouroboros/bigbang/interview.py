@@ -235,7 +235,9 @@ class InterviewEngine:
     model: str = field(default_factory=get_clarification_model)
     temperature: float = 0.7
     max_tokens: int = 512
+    _MAX_TOTAL_PROMPT_CHARS = 4800
     _MAX_SYSTEM_PROMPT_CHARS = 3500
+    _MIN_SYSTEM_PROMPT_CHARS = 1200
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
     _MAX_INITIAL_CONTEXT_TOTAL_CHARS = 3500
 
@@ -349,7 +351,12 @@ class InterviewEngine:
         conversation_history = self._build_conversation_history(state)
 
         # Generate next question
-        system_prompt = self._build_system_prompt(state)
+        history_chars = sum(len(message.content) for message in conversation_history)
+        system_prompt_budget = max(
+            self._MIN_SYSTEM_PROMPT_CHARS,
+            min(self._MAX_SYSTEM_PROMPT_CHARS, self._MAX_TOTAL_PROMPT_CHARS - history_chars),
+        )
+        system_prompt = self._build_system_prompt(state, max_chars=system_prompt_budget)
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
             *conversation_history,
@@ -548,17 +555,20 @@ class InterviewEngine:
                 )
             )
 
-    def _build_system_prompt(self, state: InterviewState) -> str:
+    def _build_system_prompt(self, state: InterviewState, max_chars: int | None = None) -> str:
         """Build the system prompt for question generation.
 
         Args:
             state: Current interview state.
+            max_chars: Optional cap for the returned system prompt. When omitted,
+                uses the standard system-prompt cap.
 
         Returns:
             The system prompt.
         """
         from ouroboros.agents.loader import load_agent_prompt
 
+        max_prompt_chars = max_chars or self._MAX_SYSTEM_PROMPT_CHARS
         round_info = f"Round {state.current_round_number}"
 
         base_prompt = load_agent_prompt("socratic-interviewer")
@@ -609,9 +619,9 @@ class InterviewEngine:
         # Preserve the dynamic header first; it contains the capped initial
         # context and first-turn instructions. Trim the optional panel/base
         # prompt before falling back to hard-truncating the header.
-        available_after_header = self._MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - _OVERHEAD
+        available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
         if available_after_header <= 0:
-            dynamic_header = dynamic_header[: self._MAX_SYSTEM_PROMPT_CHARS - _OVERHEAD]
+            dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
             perspective_panel = ""
             base_budget = 0
         elif len(perspective_panel) > available_after_header:
@@ -624,8 +634,8 @@ class InterviewEngine:
         full_prompt = f"{dynamic_header}\n{trimmed_base}\n\n{perspective_panel}"
 
         # Hard-truncate as final safety net
-        if len(full_prompt) > self._MAX_SYSTEM_PROMPT_CHARS:
-            full_prompt = full_prompt[: self._MAX_SYSTEM_PROMPT_CHARS]
+        if len(full_prompt) > max_prompt_chars:
+            full_prompt = full_prompt[:max_prompt_chars]
 
         return full_prompt
 
@@ -639,7 +649,7 @@ class InterviewEngine:
         )
 
     def _initial_context_overflow_message(self, initial_context: str) -> str:
-        """Return overflow initial context as user-message content for round one."""
+        """Return overflow initial context as durable user-message content."""
         if len(initial_context) <= self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS:
             return ""
         overflow = initial_context[self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS :]
