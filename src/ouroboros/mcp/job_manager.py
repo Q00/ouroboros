@@ -437,7 +437,7 @@ class JobManager:
 
         local_task_cancelled = False
         task = self._tasks.get(job_id)
-        if task is not None:
+        if task is not None and not task.done():
             task.cancel()
             local_task_cancelled = True
         runner_task = self._runner_tasks.get(job_id)

@@ -105,3 +105,42 @@ class TestJobManager:
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
         finally:
             await store.close()
+
+    async def test_cancel_job_does_not_mark_linked_session_when_task_already_done(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+
+            async def _runner() -> MCPToolResult:
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="done"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="race-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_done_123", execution_id="exec_done_123"),
+            )
+            task = manager._tasks[started.job_id]
+            await task
+
+            snapshot = await manager.cancel_job(started.job_id)
+            session_cancelled = await store.query_events(
+                aggregate_id="orch_done_123",
+                event_type="orchestrator.session.cancelled",
+            )
+            execution_cancelled = await store.query_events(
+                aggregate_id="exec_done_123",
+                event_type="execution.terminal",
+            )
+
+            assert snapshot.is_terminal
+            assert not session_cancelled
+            assert not any(event.data.get("status") == "cancelled" for event in execution_cancelled)
+        finally:
+            await store.close()
