@@ -235,6 +235,9 @@ class InterviewEngine:
     model: str = field(default_factory=get_clarification_model)
     temperature: float = 0.7
     max_tokens: int = 512
+    _MAX_SYSTEM_PROMPT_CHARS = 3500
+    _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
+    _MAX_INITIAL_CONTEXT_OVERFLOW_CHARS = 1200
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -536,6 +539,8 @@ class InterviewEngine:
 
         base_prompt = load_agent_prompt("socratic-interviewer")
 
+        prompt_initial_context = self._initial_context_for_system_prompt(state.initial_context)
+
         # For first round, add explicit instruction to start directly with a question
         if state.current_round_number == 1:
             dynamic_header = (
@@ -544,13 +549,13 @@ class InterviewEngine:
                 f'Do NOT introduce yourself. Do NOT say "I\'ll conduct" or "Let me ask". '
                 f"Just ask a specific, clarifying question immediately.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
-                f"Initial context: {state.initial_context}\n"
+                f"Initial context: {prompt_initial_context}\n"
             )
         else:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
-                f"Initial context: {state.initial_context}\n"
+                f"Initial context: {prompt_initial_context}\n"
             )
 
         # Answer prefix hints — always present so the question generator
@@ -575,31 +580,48 @@ class InterviewEngine:
 
         perspective_panel = self._build_perspective_panel_prompt(state)
 
-        # Cap total system prompt to prevent Agent SDK CLI empty responses.
-        # The bundled CLI can fail silently when the prompt exceeds ~5,000 chars.
-        _MAX_SYSTEM_PROMPT_CHARS = 4800
         _OVERHEAD = 20  # newlines, ellipsis, separators
 
-        # Budget for base_prompt after accounting for other sections
-        base_budget = (
-            _MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - len(perspective_panel) - _OVERHEAD
-        )
-        if base_budget < 0:
-            # Header + panel already exceed budget — truncate both proportionally
-            total = len(dynamic_header) + len(perspective_panel)
-            ratio = max(0.0, (_MAX_SYSTEM_PROMPT_CHARS - _OVERHEAD) / total) if total > 0 else 0.0
-            dynamic_header = dynamic_header[: int(len(dynamic_header) * ratio)]
-            perspective_panel = perspective_panel[: int(len(perspective_panel) * ratio)]
+        # Preserve the dynamic header first; it contains the capped initial
+        # context and first-turn instructions. Trim the optional panel/base
+        # prompt before falling back to hard-truncating the header.
+        available_after_header = self._MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - _OVERHEAD
+        if available_after_header <= 0:
+            dynamic_header = dynamic_header[: self._MAX_SYSTEM_PROMPT_CHARS - _OVERHEAD]
+            perspective_panel = ""
             base_budget = 0
+        elif len(perspective_panel) > available_after_header:
+            perspective_panel = perspective_panel[:available_after_header]
+            base_budget = 0
+        else:
+            base_budget = available_after_header - len(perspective_panel)
 
         trimmed_base = base_prompt[:base_budget] if base_budget < len(base_prompt) else base_prompt
         full_prompt = f"{dynamic_header}\n{trimmed_base}\n\n{perspective_panel}"
 
         # Hard-truncate as final safety net
-        if len(full_prompt) > _MAX_SYSTEM_PROMPT_CHARS:
-            full_prompt = full_prompt[:_MAX_SYSTEM_PROMPT_CHARS]
+        if len(full_prompt) > self._MAX_SYSTEM_PROMPT_CHARS:
+            full_prompt = full_prompt[: self._MAX_SYSTEM_PROMPT_CHARS]
 
         return full_prompt
+
+    def _initial_context_for_system_prompt(self, initial_context: str) -> str:
+        """Return the initial context portion safe to embed in system prompt."""
+        if len(initial_context) <= self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS:
+            return initial_context
+        return (
+            initial_context[: self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS]
+            + "\n\n[Initial context continues in the first user message.]"
+        )
+
+    def _initial_context_overflow_message(self, initial_context: str) -> str:
+        """Return overflow initial context as user-message content for round one."""
+        if len(initial_context) <= self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS:
+            return ""
+        overflow = initial_context[self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS :]
+        if len(overflow) > self._MAX_INITIAL_CONTEXT_OVERFLOW_CHARS:
+            overflow = overflow[: self._MAX_INITIAL_CONTEXT_OVERFLOW_CHARS] + "..."
+        return f"Additional initial context omitted from the system prompt:\n{overflow}"
 
     def _build_ambiguity_snapshot_prompt(self, state: InterviewState) -> str:
         """Build prompt context from the latest ambiguity snapshot."""
@@ -797,6 +819,11 @@ class InterviewEngine:
             List of messages representing the conversation.
         """
         messages: list[Message] = []
+
+        if state.current_round_number == 1:
+            overflow = self._initial_context_overflow_message(state.initial_context)
+            if overflow:
+                messages.append(Message(role=MessageRole.USER, content=overflow))
 
         for round_data in state.rounds:
             messages.append(Message(role=MessageRole.ASSISTANT, content=round_data.question))

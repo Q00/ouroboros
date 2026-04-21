@@ -336,6 +336,40 @@ class TestInterviewEngineAskNextQuestion:
         assert "Build a task manager" in system_message.content
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("context_length", [2500, 3500])
+    async def test_long_initial_context_stays_below_cli_failure_cap(
+        self, context_length: int
+    ) -> None:
+        """Long initial_context is split so the system prompt stays below 3500 chars."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        async def _complete(messages, _config):
+            system_prompt = messages[0].content
+            if len(system_prompt) > engine._MAX_SYSTEM_PROMPT_CHARS:
+                return Result.err(
+                    ProviderError(
+                        "Command failed with exit code 1. Check stderr output for details"
+                    )
+                )
+            return Result.ok(create_mock_completion_response())
+
+        mock_adapter.complete = AsyncMock(side_effect=_complete)
+        state = InterviewState(
+            interview_id=f"test_long_context_{context_length}",
+            initial_context="X" * context_length,
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
+        assert "Initial context continues in the first user message" in messages[0].content
+        assert messages[1].role == MessageRole.USER
+        assert "Additional initial context omitted" in messages[1].content
+
+    @pytest.mark.asyncio
     async def test_ask_question_with_history(self) -> None:
         """ask_next_question includes conversation history."""
         mock_adapter = MagicMock()
@@ -1023,7 +1057,7 @@ class TestSystemPromptBrownfield:
         assert "### architect" in prompt
 
     def test_system_prompt_hard_cap_enforced(self) -> None:
-        """Final prompt must never exceed _MAX_SYSTEM_PROMPT_CHARS (4800)."""
+        """Final prompt must never exceed _MAX_SYSTEM_PROMPT_CHARS (3500)."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
@@ -1037,10 +1071,10 @@ class TestSystemPromptBrownfield:
 
         prompt = engine._build_system_prompt(state)
 
-        assert len(prompt) <= 4800
+        assert len(prompt) <= engine._MAX_SYSTEM_PROMPT_CHARS
 
     def test_system_prompt_cap_when_header_and_panel_exceed_budget(self) -> None:
-        """Cap holds even when dynamic_header + perspective_panel alone exceed 4800."""
+        """Cap holds even when dynamic_header + perspective_panel alone exceed 3500."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
@@ -1055,4 +1089,4 @@ class TestSystemPromptBrownfield:
 
         prompt = engine._build_system_prompt(state)
 
-        assert len(prompt) <= 4800
+        assert len(prompt) <= engine._MAX_SYSTEM_PROMPT_CHARS
