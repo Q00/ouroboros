@@ -469,7 +469,7 @@ class MCPClientManager:
             return Result.err(
                 MCPTimeoutError(
                     f"Tool call timed out: {tool_name}",
-                    server_name=server_name,
+                    server_name=conn.config.name,
                     timeout_seconds=effective_timeout,
                     operation="call_tool",
                 )
@@ -553,7 +553,7 @@ class MCPClientManager:
             return Result.err(
                 MCPTimeoutError(
                     f"Resource read timed out: {uri}",
-                    server_name=server_name,
+                    server_name=conn.config.name,
                     timeout_seconds=effective_timeout,
                     operation="read_resource",
                 )
@@ -593,7 +593,7 @@ class MCPClientManager:
 
     def _should_reconnect_after_error(self, error: MCPClientError) -> bool:
         """Return True when an MCP failure looks like a lost transport."""
-        if isinstance(error, MCPConnectionError) or error.is_retriable:
+        if isinstance(error, MCPConnectionError):
             return True
         error_text = str(error).lower()
         return any(

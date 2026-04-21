@@ -1,12 +1,14 @@
 """Tests for MCP client manager."""
 
+import asyncio
+
 from ouroboros.core.types import Result
 from ouroboros.mcp.client.manager import (
     ConnectionState,
     MCPClientManager,
     ServerConnection,
 )
-from ouroboros.mcp.errors import MCPClientError, MCPConnectionError
+from ouroboros.mcp.errors import MCPClientError, MCPConnectionError, MCPTimeoutError
 from ouroboros.mcp.types import (
     ContentType,
     MCPCapabilities,
@@ -28,6 +30,15 @@ class _ToolAdapter:
     async def call_tool(self, _tool_name, _arguments=None):
         self.calls += 1
         return self.result
+
+
+class _SlowToolAdapter:
+    def __init__(self):
+        self.calls = 0
+
+    async def call_tool(self, _tool_name, _arguments=None):
+        self.calls += 1
+        await asyncio.sleep(10)
 
 
 class _ResourceAdapter:
@@ -221,6 +232,74 @@ class TestMCPClientManagerTools:
         assert result.value.text_content == "ok"
         assert stale_adapter.calls == 1
         assert fresh_adapter.calls == 1
+
+    async def test_call_tool_does_not_reconnect_after_timeout_result(self) -> None:
+        """Timeout failures are not retried because tools may have side effects."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="test-server",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        timeout_adapter = _ToolAdapter(
+            Result.err(
+                MCPTimeoutError(
+                    "Tool call timed out: tool",
+                    server_name="test-server",
+                    timeout_seconds=0.01,
+                    operation="call_tool",
+                )
+            )
+        )
+        manager._connections["test-server"] = ServerConnection(
+            config=config,
+            adapter=timeout_adapter,
+            state=ConnectionState.CONNECTED,
+        )
+        reconnects: list[str] = []
+
+        async def _connect(server_name: str):
+            reconnects.append(server_name)
+            return Result.err(MCPConnectionError("should not reconnect", server_name=server_name))
+
+        manager.connect = _connect  # type: ignore[method-assign]
+
+        result = await manager.call_tool("test-server", "tool", {})
+
+        assert result.is_err
+        assert isinstance(result.error, MCPTimeoutError)
+        assert timeout_adapter.calls == 1
+        assert reconnects == []
+
+    async def test_call_tool_timeout_preserves_server_name_without_retry(self) -> None:
+        """wait_for timeouts return MCPTimeoutError without reconnecting."""
+        manager = MCPClientManager()
+        config = MCPServerConfig(
+            name="test-server",
+            transport=TransportType.STDIO,
+            command="test-cmd",
+        )
+        slow_adapter = _SlowToolAdapter()
+        manager._connections["test-server"] = ServerConnection(
+            config=config,
+            adapter=slow_adapter,
+            state=ConnectionState.CONNECTED,
+        )
+        reconnects: list[str] = []
+
+        async def _connect(server_name: str):
+            reconnects.append(server_name)
+            return Result.err(MCPConnectionError("should not reconnect", server_name=server_name))
+
+        manager.connect = _connect  # type: ignore[method-assign]
+
+        result = await manager.call_tool("test-server", "tool", {}, timeout=0.01)
+
+        assert result.is_err
+        assert isinstance(result.error, MCPTimeoutError)
+        assert result.error.server_name == "test-server"
+        assert slow_adapter.calls == 1
+        assert reconnects == []
 
 
 class TestMCPClientManagerResources:
