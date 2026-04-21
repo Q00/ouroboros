@@ -331,9 +331,7 @@ class TestMCPClientManagerResources:
         stale_adapter = _ResourceAdapter(
             Result.err(MCPConnectionError("transport closed", server_name="test-server"))
         )
-        fresh_adapter = _ResourceAdapter(
-            Result.ok(MCPResourceContent(uri="file://doc", text="ok"))
-        )
+        fresh_adapter = _ResourceAdapter(Result.ok(MCPResourceContent(uri="file://doc", text="ok")))
         manager._connections["test-server"] = ServerConnection(
             config=config,
             adapter=stale_adapter,
