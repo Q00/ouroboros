@@ -433,13 +433,13 @@ class JobManager:
 
         if snapshot.links.session_id:
             await request_cancellation(snapshot.links.session_id)
-        else:
-            task = self._tasks.get(job_id)
-            if task is not None:
-                task.cancel()
-            runner_task = self._runner_tasks.get(job_id)
-            if runner_task is not None and not runner_task.done():
-                runner_task.cancel()
+
+        task = self._tasks.get(job_id)
+        if task is not None:
+            task.cancel()
+        runner_task = self._runner_tasks.get(job_id)
+        if runner_task is not None and not runner_task.done():
+            runner_task.cancel()
 
         return await self.get_snapshot(job_id)
 
