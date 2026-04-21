@@ -16,6 +16,19 @@ def _build_store(tmp_path) -> EventStore:
     return EventStore(f"sqlite+aiosqlite:///{db_path}")
 
 
+async def _cancel_manager_tasks(manager: JobManager) -> None:
+    tasks = [
+        *manager._tasks.values(),
+        *manager._runner_tasks.values(),
+        *manager._monitors.values(),
+    ]
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class TestJobManager:
     """Test background job lifecycle behavior."""
 
@@ -187,4 +200,5 @@ class TestJobManager:
             )
             assert not terminal_events
         finally:
+            await _cancel_manager_tasks(manager)
             await store.close()

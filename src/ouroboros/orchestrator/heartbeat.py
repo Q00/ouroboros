@@ -122,6 +122,14 @@ def release_if_owned_by_current_process(session_id: str) -> bool:
         return False
     if pid != os.getpid():
         return False
+    if len(parts) > 1 and parts[1] != "None":
+        try:
+            recorded_start = float(parts[1])
+        except ValueError:
+            return False
+        current_start = _get_process_start_time(pid)
+        if current_start is not None and abs(current_start - recorded_start) > 2.0:
+            return False
 
     release(session_id)
     return True

@@ -432,9 +432,6 @@ class JobManager:
 
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
-        if snapshot.links.session_id:
-            await request_cancellation(snapshot.links.session_id)
-
         local_task_cancelled = False
         task = self._tasks.get(job_id)
         if task is not None and not task.done():
@@ -444,6 +441,9 @@ class JobManager:
         if runner_task is not None and not runner_task.done():
             runner_task.cancel()
             local_task_cancelled = True
+
+        if snapshot.links.session_id and not local_task_cancelled:
+            await request_cancellation(snapshot.links.session_id)
 
         if snapshot.links.session_id and local_task_cancelled:
             repo = SessionRepository(self._event_store)
