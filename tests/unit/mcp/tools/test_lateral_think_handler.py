@@ -121,3 +121,74 @@ async def test_single_persona_path_unchanged() -> None:
     # Single-persona path returns inline text unconditionally.
     assert "_subagents" not in (payload.meta or {})
     assert payload.meta.get("persona") == "contrarian"
+
+
+@pytest.mark.asyncio
+async def test_stagnation_pattern_suggests_persona_when_persona_omitted() -> None:
+    """stagnation_pattern selects an affinity persona when persona is omitted."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "progress is flat",
+            "current_approach": "rerun the same checks",
+            "stagnation_pattern": "no_drift",
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta.get("persona") == "researcher"
+
+
+@pytest.mark.asyncio
+async def test_stagnation_pattern_excludes_known_failed_personas() -> None:
+    """failed_attempts persona names are excluded and unknown values are skipped."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "same failure repeats",
+            "current_approach": "retry the same edit",
+            "stagnation_pattern": "spinning",
+            "failed_attempts": ["hacker", "not-a-persona"],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta.get("persona") == "contrarian"
+
+
+@pytest.mark.asyncio
+async def test_stagnation_pattern_falls_back_to_contrarian_when_all_excluded() -> None:
+    """When every suggested persona is excluded, contrarian remains the fallback."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "progress is flat",
+            "current_approach": "tried every persona",
+            "stagnation_pattern": "no_drift",
+            "failed_attempts": [
+                "hacker",
+                "researcher",
+                "simplifier",
+                "architect",
+                "contrarian",
+            ],
+        }
+    )
+
+    assert result.is_ok, result
+    payload = result.unwrap()
+    assert payload.meta.get("persona") == "contrarian"

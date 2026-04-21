@@ -1253,6 +1253,21 @@ class LateralThinkHandler:
                     ),
                 ),
                 MCPToolParameter(
+                    name="stagnation_pattern",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Detected stagnation pattern used to suggest a persona when "
+                        "persona is omitted."
+                    ),
+                    required=False,
+                    enum=(
+                        "spinning",
+                        "oscillation",
+                        "no_drift",
+                        "diminishing_returns",
+                    ),
+                ),
+                MCPToolParameter(
                     name="personas",
                     type=ToolInputType.ARRAY,
                     description=(
@@ -1292,6 +1307,7 @@ class LateralThinkHandler:
             Result containing lateral thinking prompt(s) or error.
         """
         from ouroboros.resilience.lateral import LateralThinker, ThinkingPersona
+        from ouroboros.resilience.stagnation import StagnationPattern
 
         problem_context = arguments.get("problem_context")
         if not problem_context:
@@ -1316,7 +1332,8 @@ class LateralThinkHandler:
 
         # --- Parallel multi-persona dispatch path ---
         explicit_list = arguments.get("personas")
-        persona_arg = arguments.get("persona", "contrarian")
+        raw_persona_arg = arguments.get("persona")
+        persona_arg = str(raw_persona_arg).strip() if raw_persona_arg else ""
         dispatch_all = persona_arg == "all"
 
         if explicit_list or dispatch_all:
@@ -1435,6 +1452,39 @@ class LateralThinkHandler:
             )
 
         # --- Single-persona path ---
+        if not persona_arg:
+            stagnation_pattern_arg = arguments.get("stagnation_pattern")
+            if stagnation_pattern_arg:
+                try:
+                    stagnation_pattern = StagnationPattern(str(stagnation_pattern_arg))
+                except ValueError:
+                    return Result.err(
+                        MCPToolError(
+                            (
+                                f"Invalid stagnation_pattern: {stagnation_pattern_arg}. "
+                                "Must be one of: spinning, oscillation, no_drift, "
+                                "diminishing_returns"
+                            ),
+                            tool_name="ouroboros_lateral_think",
+                        )
+                    )
+
+                excluded_personas: list[ThinkingPersona] = []
+                for attempt in failed_attempts:
+                    try:
+                        excluded_personas.append(ThinkingPersona(attempt.strip().lower()))
+                    except ValueError:
+                        continue
+
+                thinker = LateralThinker()
+                suggested = thinker.suggest_persona_for_pattern(
+                    stagnation_pattern,
+                    exclude_personas=tuple(excluded_personas),
+                )
+                persona_arg = (suggested or ThinkingPersona.CONTRARIAN).value
+            else:
+                persona_arg = ThinkingPersona.CONTRARIAN.value
+
         try:
             persona = ThinkingPersona(persona_arg)
         except ValueError:
