@@ -552,7 +552,7 @@ class CodexCliRuntime:
         prompt: str | None = None,
     ) -> list[str]:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
-        command = [self._cli_path, "exec"]
+        command = [self._cli_path, "exec", "--ignore-user-config"]
 
         command.extend(
             [

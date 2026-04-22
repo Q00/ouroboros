@@ -358,6 +358,7 @@ class CodexCliLLMAdapter:
         command = [
             self._cli_path,
             "exec",
+            "--ignore-user-config",
             "--json",
             "--skip-git-repo-check",
             "-C",

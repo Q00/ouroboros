@@ -207,6 +207,7 @@ class TestCodexCliLLMAdapter:
             model=None,
         )
 
+        assert "--ignore-user-config" in command
         assert "--sandbox" in command
         assert "read-only" in command
 
@@ -244,7 +245,7 @@ class TestCodexCliLLMAdapter:
             output_index = command.index("--output-last-message") + 1
             Path(command[output_index]).write_text("Final answer", encoding="utf-8")
             assert "--model" not in command
-            assert kwargs["cwd"] == "/tmp/project"
+            assert Path(kwargs["cwd"]) == Path("/tmp/project")
             # Prompt is now fed via stdin, not as a positional argument
             assert kwargs.get("stdin") is not None
             return _FakeProcess(

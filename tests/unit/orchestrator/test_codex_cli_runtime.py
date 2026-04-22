@@ -209,13 +209,15 @@ class TestCodexCliRuntime:
             output_last_message_path="/tmp/out.txt",
         )
 
-        assert command[:2] == ["/usr/local/bin/codex", "exec"]
+        assert Path(command[0]) == Path("/usr/local/bin/codex")
+        assert command[1] == "exec"
+        assert "--ignore-user-config" in command
         assert "--json" in command
         assert "--full-auto" in command
         assert "--model" in command
         assert "o3" in command
         assert "-C" in command
-        assert "/tmp/project" in command
+        assert Path(command[command.index("-C") + 1]) == Path("/tmp/project")
 
     def test_build_command_for_resume(self) -> None:
         """Builds an exec resume command when a session id is provided."""
@@ -233,7 +235,7 @@ class TestCodexCliRuntime:
         assert command.index("--skip-git-repo-check") < resume_index
         assert command.index("--output-last-message") < resume_index
         assert command.index("-C") < resume_index
-        assert command[command.index("-C") + 1] == "/tmp/project"
+        assert Path(command[command.index("-C") + 1]) == Path("/tmp/project")
 
     def test_resolve_cli_path_falls_back_from_wrapper(self, tmp_path: Path) -> None:
         """Runtime should bypass wrappers the same way provider adapters do."""
@@ -452,7 +454,7 @@ class TestCodexCliRuntime:
         request = mock_resolve.call_args.args[1]
         assert isinstance(request, ResolveRequest)
         assert request.prompt == "ooo run seed.yaml"
-        assert request.cwd == "/tmp/project"
+        assert Path(request.cwd) == Path("/tmp/project")
         assert request.skills_dir == tmp_path
         dispatcher.assert_awaited_once()
         intercept_request = dispatcher.await_args.args[0]
@@ -1120,10 +1122,8 @@ class TestCodexCliRuntime:
         intercept_request = dispatcher.await_args.args[0]
         assert intercept_request.mcp_tool == "ouroboros_interview"
         assert intercept_request.first_argument == "Build a REST API"
-        assert intercept_request.mcp_args == {
-            "initial_context": "Build a REST API",
-            "cwd": "/tmp/project",
-        }
+        assert intercept_request.mcp_args["initial_context"] == "Build a REST API"
+        assert Path(intercept_request.mcp_args["cwd"]) == Path("/tmp/project")
         mock_exec.assert_not_called()
         assert [message.content for message in messages] == [
             "Starting interview",
