@@ -1,19 +1,48 @@
-"""Event factories for control-plane directive emissions.
+"""Event factories for the Phase 2 Event Journal — directive emissions.
 
-This module provides the factory for persisting control-plane decisions
-(continue / evaluate / evolve / unstuck / retry / compact / wait / cancel /
-converge) to the EventStore. Existing event categories (decomposition,
-evaluation, interview, lineage, ontology) capture data causality — what was
-produced — but not decision causality — *why* the run moved from one step to
-the next. This module adds the missing category without modifying existing
-emission sites.
+This module corresponds to the **Event Journal** layer in the Phase 2
+Agent OS framing (RFC #476). Existing event categories — ``decomposition``,
+``evaluation``, ``interview``, ``lineage``, ``ontology`` — capture *what*
+was produced. This category captures *why* the run moved from one step
+to the next, so the journal can answer both questions from the same
+replayable source.
 
-Event Types:
-    control.directive.emitted - A workflow site emitted a Directive
+The Event Journal is the causal source of truth. Every control-plane
+decision persists here before any live projection observes it. Consumers
+that later react to directives (TUI lineage timelines, drift monitors,
+future ControlBus subscribers) are projections of these events — they
+do not decide anything the journal does not already record.
 
-Follow-up changes will wire this factory into individual decision sites so
-the store contains a full directive timeline. This module adds only the
-factory and its tests; no production emission is added here.
+Event types:
+    control.directive.emitted — a workflow site emitted a ``Directive``
+
+Emission stance:
+
+This PR is **observational-first**. It persists the event; no emission
+site is wired, and no reactive consumer is added. Reactive consumption
+via a ControlBus subscription surface is a separate, later concern so
+the primitive stays stable while projections evolve. The TUI lineage
+renderer is the intended first projection.
+
+Payload shape:
+
+- ``emitted_by``   — logical source, e.g. ``"evaluator"``, ``"evolver"``,
+                     ``"resilience.lateral"``. Free-form to keep new
+                     emission sites from requiring a schema change.
+- ``directive``    — the ``Directive`` member's string value, so downstream
+                     consumers classify events without importing the enum.
+- ``is_terminal``  — denormalized terminality flag, for the same reason.
+- ``reason``       — short audit rationale; the structured source of
+                     truth for "why" remains the surrounding lineage.
+- ``context_snapshot_id`` — optional link into the context snapshot
+                     captured at emission; omitted when absent so stored
+                     rows stay compact.
+- ``extra``        — optional forward-compatibility slot; omitted when
+                     unused. Prefer promoting fields to named arguments
+                     over expanding ``extra`` in the long run.
+
+This module adds only the factory and its unit tests; follow-up changes
+wire it into individual decision sites one at a time.
 """
 
 from __future__ import annotations
