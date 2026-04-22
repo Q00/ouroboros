@@ -76,134 +76,163 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      session_id: <existing session ID>
    ```
 
-5. **Ask user about polling strategy** using `AskUserQuestion` immediately after IDs are returned:
+5. **Default monitoring stance: relay compact progress in the main session.**
 
-   Present the session/job IDs first, then ask:
-
-   ```
-   Question: "Execution started. How would you like to monitor progress?"
-   Header: "Monitoring"
-   Options:
-     - label: "Poll here (Recommended)"
-       description: "Poll in this session. Context window is consumed but you get real-time updates."
-     - label: "Don't poll — I'll monitor separately"
-       description: "End here. Use `ooo status <session_id>` in a new terminal or /clone to monitor."
-   ```
-
-   **If user chooses "Poll here"**, ask follow-up:
-   ```
-   Question: "How often should I check progress?"
-   Header: "Interval"
-   Options:
-     - label: "Per level (Recommended)"
-       description: "Check once when each parallel level completes. Most context-efficient with meaningful updates."
-     - label: "Every 10 minutes"
-       description: "Periodic check regardless of level progress. Balanced context usage."
-     - label: "Every 20 minutes"
-       description: "Minimal context usage. Best for large seeds with many ACs."
-   ```
-
-   Then display:
-   ```
-   💡 Note: Context compression may occur during long executions.
-   MCP tools remain available after compression, but prior poll results are summarized.
-   If this session is needed for follow-up (ooo evaluate, ooo evolve), shorter polling = more context consumed.
-   ```
-
-   **If user chooses "Don't poll"**, display:
+   After IDs are returned, print only this short handoff:
 
    ```
-   Execution running in background.
-   Session ID: <session_id>
+   Execution started in background.
    Job ID: <job_id>
-   
-   To monitor progress:
-     Option A: Open a new terminal → `ooo status <session_id>`
-     Option B: Use /clone to fork this conversation for monitoring
-     Option C: Come back later and run `ooo status <session_id>` here
-   
-   When execution completes, continue with: `ooo evaluate <session_id>`
+   Session ID: <session_id>
+   Execution ID: <execution_id>
+
+   I will wait in low-token relay mode and report only meaningful state changes.
+   For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>, view="tree")`
    ```
-   Then **stop** — do NOT proceed to polling steps.
 
-6. **Poll for progress** using `ouroboros_ac_tree_hud` (only if user chose to poll):
+   Rationale: the main chat session must wait for MCP calls. Frequent full-tree
+   polling burns context without improving execution. The user usually wants
+   "what is it doing now?" rather than the whole tree, so use compact job
+   read-model snapshots and narrate them like a brief live relay.
 
-   The polling behavior differs based on the user's interval choice. In all cases,
-   the tool returns a compact markdown snapshot when state changed, or a one-line
-   delta ("No AC tree change since cursor <cursor>.") when nothing changed.
-   Keep the latest cursor from the tool's meta payload for the next call.
+6. **Low-token relay loop with `ouroboros_job_wait` (recommended default).**
 
-   **Option A: "Per level (Recommended)"**
+   Use `ouroboros_job_wait`, not repeated `ouroboros_ac_tree_hud`, for routine
+   monitoring. Keep the latest cursor and previous progress counters from the
+   tool meta payload.
+
+   This loop is intentionally harness/model friendly:
+   - Treat `response.meta` as the source of truth.
+   - Do not parse `response.text` for counts, status, or cursor.
+   - Use `response.text` only as a human-readable current-message hint.
+   - Keep all local monitor state in simple scalar variables.
+   - Emit at most one short relay message per changed response.
+   - Always continue to final `ouroboros_job_result` after a terminal status.
+
    ```
-   prev_completed = 0
+   cursor = <cursor from start/status response, or 0>
+   prev_status = "running"
+   prev_phase = null
+   prev_ac_completed = 0
+   prev_sub_ac_completed = 0
+   prev_message = null
 
    loop:
-     Tool: ouroboros_ac_tree_hud
+     Tool: ouroboros_job_wait
      Arguments:
-       session_id: <session_id from step 3>
-       cursor: <cursor from previous response, starts at 0>
-       max_nodes: 50
+       job_id: <job_id from step 3>
+       cursor: <cursor>
+       timeout_seconds: 180
+       view: "summary"
 
-     # Parse completed/total from the snapshot or meta
-     current_completed = <completed count>
-     total = <total count>
+     cursor = response.meta.cursor
 
-     if current_completed > prev_completed:
-       # A level completed — show the returned markdown snapshot as-is
-       print snapshot
-       prev_completed = current_completed
-     # else: continue silently (no output)
+     if response.meta.changed is false:
+       # Do not narrate unless the user explicitly asked for heartbeat updates.
+       continue
 
-     # Continue until meta.status is "completed", "failed", or "cancelled"
+     status = response.meta.status
+     phase = response.meta.current_phase
+     ac_completed = response.meta.ac_completed
+     ac_total = response.meta.ac_total
+     sub_ac_completed = response.meta.sub_ac_completed
+     sub_ac_total = response.meta.sub_ac_total
+     message_hint = first non-empty non-metadata line from response.text, or null
+
+     # Build one short relay update from structured fields.
+     if status in ["completed", "failed", "cancelled", "interrupted"]:
+       print terminal_relay(status, phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total)
+       break
+
+     if ac_completed > prev_ac_completed:
+       print ac_progress_relay(phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total, message_hint)
+     elif sub_ac_completed > prev_sub_ac_completed:
+       print sub_ac_progress_relay(phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total, message_hint)
+     elif phase != prev_phase or status != prev_status:
+       print phase_or_status_relay(status, phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total)
+     elif message_hint != prev_message:
+       print current_work_relay(phase, ac_completed, ac_total, sub_ac_completed, sub_ac_total, message_hint)
+
+     prev_status = status
+     prev_phase = phase
+     prev_ac_completed = ac_completed or prev_ac_completed
+     prev_sub_ac_completed = sub_ac_completed or prev_sub_ac_completed
+     prev_message = message_hint or prev_message
    ```
 
-   **Option B: "Every 10 minutes"**
+   Notes:
+   - `timeout_seconds: 180` means the MCP call can block for up to 3 minutes.
+     This keeps the main session available often enough for a live relay while
+     still avoiding noisy polling.
+   - Use `view: "compact"` for very long jobs or when the user only wants a
+     heartbeat. It returns one-line state such as `job_x | running | AC 3/17`.
+   - Use `view: "summary"` for normal monitoring. It includes the job message
+     plus AC/Sub-AC counts.
+   - Use `view: "full"` only when the user asks for detailed job status.
+
+   Relay style examples:
+   - `In progress: Deliver is at AC 1/3 and Sub-AC 12/16. Current work is the Sub-AC 3 regression test.`
+   - `Level update: parallel level 1/1 has finished, and AC progress advanced to 3/3.`
+   - `Completed: execution finished. Fetching the final job result now.`
+
+   Relay output contract for other harnesses/models:
+   - One update should be 1-2 sentences or 1 compact line.
+   - Include `phase`, `AC completed/total`, and `Sub-AC completed/total` when present.
+   - Include the current work hint only if it changes.
+   - Never include the full AC tree in routine relay output.
+   - Never include raw JSON, raw meta dumps, or repeated unchanged cursor lines.
+   - Terminal statuses must be explicit: completed, failed, cancelled, or interrupted.
+
+   Do not paste the full raw tool output unless the user asks for raw status.
+   Do not add speculative ETA unless the tool provides one.
+
+7. **Use `ouroboros_ac_tree_hud` only for manual drill-down or anomaly checks.**
+
+   Do not call full tree HUD in the normal polling loop.
+
+   Use these targeted calls:
+
    ```
-   loop:
-     Tool: ouroboros_ac_tree_hud
-     Arguments:
-       session_id: <session_id from step 3>
-       cursor: <cursor from previous response, starts at 0>
-       max_nodes: 50
+   # Default short HUD, useful for a one-off check
+   Tool: ouroboros_ac_tree_hud
+   Arguments:
+     session_id: <session_id>
+     cursor: <cursor>
+     view: "summary"
 
-     # Report on every return regardless of change
-     - If unchanged: echo the one-line delta only
-     - If changed: show the returned markdown snapshot as-is
-     sleep 600  # 10 min between polls
+   # Lowest-token one-line HUD
+   Tool: ouroboros_ac_tree_hud
+   Arguments:
+     session_id: <session_id>
+     cursor: <cursor>
+     view: "compact"
 
-     # Continue until meta.status is "completed", "failed", or "cancelled"
+   # Full tree only when user asks "show details", progress looks stuck,
+   # or debugging requires seeing AC/Sub-AC structure.
+   Tool: ouroboros_ac_tree_hud
+   Arguments:
+     session_id: <session_id>
+     cursor: <cursor>
+     view: "tree"
+     max_nodes: 30
    ```
 
-   **Option C: "Every 20 minutes"**
-   ```
-   loop:
-     Tool: ouroboros_ac_tree_hud
-     Arguments:
-       session_id: <session_id from step 3>
-       cursor: <cursor from previous response, starts at 0>
-       max_nodes: 50
+   Treat `unchanged cursor=<cursor>` as a no-op. Do not explain it to the user
+   unless they explicitly asked for heartbeat messages.
 
-     # Report on every return regardless of change
-     - If unchanged: echo the one-line delta only
-     - If changed: show the returned markdown snapshot as-is
-     sleep 1200  # 20 min between polls
-
-     # Continue until meta.status is "completed", "failed", or "cancelled"
-   ```
-
-7. **Fetch final result** with `ouroboros_job_result`:
+8. **Fetch final result** with `ouroboros_job_result`:
    ```
    Tool: ouroboros_job_result
    Arguments:
      job_id: <job_id>
    ```
 
-8. Present the execution results to the user:
+9. Present the execution results to the user:
    - Show success/failure status
    - Show session ID (for later status checks)
    - Show execution summary
 
-9. **Post-execution QA** (automatic):
+10. **Post-execution QA** (automatic):
    `ouroboros_start_execute_seed` automatically runs QA after successful execution.
    The QA verdict is included in the final job result text.
    To skip: pass `skip_qa: true` to the tool.
@@ -239,13 +268,13 @@ Job ID: job_a1b2c3d4e5f6
 Session ID: orch_x1y2z3
 Execution ID: exec_m1n2o3
 
-[Polling for progress...]
-🌳 AC Tree
-✅ Parse seed
-⏳ Implement workflow routing [Edit src/ouroboros/mcp/tools/ac_tree_hud_handler.py]
-⬜ Verify output
+[Relay]
+In progress: Deliver is at AC 1/3 and Sub-AC 12/16.
+Current work is finishing the workflow routing Sub-AC.
 
-elapsed 45s | messages 12 | tools 4
+[Relay]
+Level update: parallel level 1/1 has finished, and AC progress advanced to 3/3.
+Execution is complete. Fetching the final job result now.
 
 [Fetching final result...]
 

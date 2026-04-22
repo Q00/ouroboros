@@ -13,6 +13,10 @@ import structlog
 
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
+from ouroboros.mcp.tools.ac_tree_hud_handler import (
+    format_subtask_progress_summary,
+    summarize_subtask_events,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -114,6 +118,34 @@ class SessionStatusHandler:
                 )
 
             tracker = result.value
+            progress = dict(tracker.progress or {})
+            if tracker.execution_id:
+                try:
+                    execution_events = await self._event_store.replay(
+                        "execution",
+                        tracker.execution_id,
+                    )
+                except Exception:
+                    execution_events = []
+                    log.debug(
+                        "mcp.tool.session_status.subtask_summary_unavailable",
+                        session_id=session_id,
+                        execution_id=tracker.execution_id,
+                    )
+                if isinstance(execution_events, list):
+                    subtask_summary = summarize_subtask_events(execution_events)
+                    subtask_progress = format_subtask_progress_summary(subtask_summary)
+                    if subtask_progress:
+                        progress["sub_ac_progress"] = subtask_progress
+                        progress["sub_ac_completed_count"] = subtask_summary.get(
+                            "completed_count",
+                        )
+                        progress["sub_ac_total_count"] = subtask_summary.get("total_count")
+                        progress["sub_ac_executing_count"] = subtask_summary.get(
+                            "executing_count",
+                        )
+                        progress["sub_ac_pending_count"] = subtask_summary.get("pending_count")
+                        progress["sub_ac_failed_count"] = subtask_summary.get("failed_count")
 
             # Build status response from SessionTracker.
             # The "Terminal:" line is a machine-parseable summary so callers
@@ -138,9 +170,9 @@ class SessionStatusHandler:
             if tracker.last_message_time:
                 status_text += f"Last Message: {tracker.last_message_time.isoformat()}\n"
 
-            if tracker.progress:
+            if progress:
                 status_text += "\nProgress:\n"
-                for key, value in tracker.progress.items():
+                for key, value in progress.items():
                     status_text += f"  {key}: {value}\n"
 
             return Result.ok(
@@ -156,7 +188,7 @@ class SessionStatusHandler:
                         "is_completed": tracker.is_completed,
                         "is_failed": tracker.is_failed,
                         "messages_processed": tracker.messages_processed,
-                        "progress": tracker.progress,
+                        "progress": progress,
                     },
                 )
             )

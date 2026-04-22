@@ -16,6 +16,10 @@ import structlog
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
+from ouroboros.mcp.tools.ac_tree_hud_handler import (
+    format_subtask_progress_summary,
+    summarize_subtask_events,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -28,6 +32,26 @@ from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
+
+_DEFAULT_JOB_VIEW = "summary"
+_JOB_VIEW_ALIASES = {
+    "compact": "compact",
+    "brief": "compact",
+    "summary": "summary",
+    "default": "summary",
+    "full": "full",
+    "tree": "full",
+    "verbose": "full",
+}
+
+
+def _normalize_job_view(value: object) -> str:
+    """Normalize requested job-status verbosity."""
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped:
+            return _JOB_VIEW_ALIASES.get(stripped, _DEFAULT_JOB_VIEW)
+    return _DEFAULT_JOB_VIEW
 
 
 @dataclass
@@ -253,6 +277,36 @@ async def _render_job_snapshot(
     return text, progress
 
 
+def _render_compact_job_snapshot(
+    snapshot: JobSnapshot,
+    progress: dict[str, Any],
+    *,
+    include_message: bool,
+) -> str:
+    """Render a low-token job monitor summary."""
+    parts = [snapshot.job_id, snapshot.status.value]
+
+    phase = progress.get("current_phase")
+    if phase:
+        parts.append(str(phase))
+
+    ac_completed = progress.get("ac_completed")
+    ac_total = progress.get("ac_total")
+    if ac_completed is not None or ac_total is not None:
+        parts.append(f"AC {ac_completed if ac_completed is not None else '?'}/{ac_total or '?'}")
+
+    sub_ac_completed = progress.get("sub_ac_completed")
+    sub_ac_total = progress.get("sub_ac_total")
+    if sub_ac_completed is not None and sub_ac_total:
+        parts.append(f"Sub-AC {sub_ac_completed}/{sub_ac_total}")
+
+    parts.append(f"cursor {snapshot.cursor}")
+    lines = [" | ".join(parts)]
+    if include_message and snapshot.message:
+        lines.append(snapshot.message)
+    return "\n".join(lines)
+
+
 async def _render_job_snapshot_inner(
     snapshot: JobSnapshot, event_store: EventStore
 ) -> tuple[str, dict[str, Any]]:
@@ -270,11 +324,14 @@ async def _render_job_snapshot_inner(
     ]
 
     if snapshot.links.execution_id:
-        events = await event_store.query_events(
-            aggregate_id=snapshot.links.execution_id,
-            limit=25,
-        )
-        workflow_event = next((e for e in events if e.type == "workflow.progress.updated"), None)
+        events = await event_store.replay("execution", snapshot.links.execution_id)
+        workflow_event = None
+        for event in events:
+            if event.type == "workflow.progress.updated":
+                workflow_event = event
+
+        subtask_summary = summarize_subtask_events(events)
+        subtask_progress = format_subtask_progress_summary(subtask_summary)
         if workflow_event is not None:
             data = workflow_event.data
             progress = {
@@ -283,6 +340,16 @@ async def _render_job_snapshot_inner(
                 "current_phase": data.get("current_phase") or "Working",
                 "activity": data.get("activity_detail") or data.get("activity") or "running",
             }
+            if subtask_summary:
+                progress.update(
+                    {
+                        "sub_ac_completed": subtask_summary.get("completed_count"),
+                        "sub_ac_total": subtask_summary.get("total_count"),
+                        "sub_ac_executing": subtask_summary.get("executing_count"),
+                        "sub_ac_pending": subtask_summary.get("pending_count"),
+                        "sub_ac_failed": subtask_summary.get("failed_count"),
+                    }
+                )
             lines.extend(
                 [
                     "",
@@ -293,9 +360,11 @@ async def _render_job_snapshot_inner(
                     f"**AC Progress**: {progress['ac_completed']}/{progress['ac_total'] or '?'}",
                 ]
             )
+            if subtask_progress:
+                lines.append(f"**Sub-AC Progress**: {subtask_progress}")
 
         subtasks: dict[str, tuple[str, str]] = {}
-        for event in events:
+        for event in reversed(events):
             if event.type != "execution.subtask.updated":
                 continue
             sub_task_id = event.data.get("sub_task_id")
@@ -304,6 +373,8 @@ async def _render_job_snapshot_inner(
                     event.data.get("content", ""),
                     event.data.get("status", "unknown"),
                 )
+            if len(subtasks) >= 5:
+                break
 
         if subtasks:
             lines.append("")
@@ -395,6 +466,13 @@ class JobStatusHandler:
                     description="Job ID returned by a start tool",
                     required=True,
                 ),
+                MCPToolParameter(
+                    name="view",
+                    type=ToolInputType.STRING,
+                    description="'compact', 'summary' (default), or 'full'.",
+                    required=False,
+                    default=_DEFAULT_JOB_VIEW,
+                ),
             ),
         )
 
@@ -410,6 +488,7 @@ class JobStatusHandler:
                     tool_name="ouroboros_job_status",
                 )
             )
+        view = _normalize_job_view(arguments.get("view"))
 
         try:
             snapshot = await self._job_manager.get_snapshot(job_id)
@@ -417,6 +496,11 @@ class JobStatusHandler:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_status"))
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
+        if view == "compact":
+            text = _render_compact_job_snapshot(snapshot, progress, include_message=False)
+        elif view == "summary":
+            text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
+
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
@@ -428,6 +512,7 @@ class JobStatusHandler:
                     "session_id": snapshot.links.session_id,
                     "execution_id": snapshot.links.execution_id,
                     "lineage_id": snapshot.links.lineage_id,
+                    "view": view,
                     **progress,
                 },
             )
@@ -474,6 +559,13 @@ class JobWaitHandler:
                     required=False,
                     default=30,
                 ),
+                MCPToolParameter(
+                    name="view",
+                    type=ToolInputType.STRING,
+                    description="'compact', 'summary' (default), or 'full'.",
+                    required=False,
+                    default=_DEFAULT_JOB_VIEW,
+                ),
             ),
         )
 
@@ -492,6 +584,7 @@ class JobWaitHandler:
 
         cursor = int(arguments.get("cursor", 0))
         timeout_seconds = int(arguments.get("timeout_seconds", 30))
+        view = _normalize_job_view(arguments.get("view"))
 
         try:
             snapshot, changed = await self._job_manager.wait_for_change(
@@ -504,7 +597,11 @@ class JobWaitHandler:
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
         if not changed:
-            text += "\n\nNo new job-level events during this wait window."
+            text = f"unchanged cursor={snapshot.cursor}"
+        elif view == "compact":
+            text = _render_compact_job_snapshot(snapshot, progress, include_message=False)
+        elif view == "summary":
+            text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
@@ -514,6 +611,7 @@ class JobWaitHandler:
                     "status": snapshot.status.value,
                     "cursor": snapshot.cursor,
                     "changed": changed,
+                    "view": view,
                     **progress,
                 },
             )

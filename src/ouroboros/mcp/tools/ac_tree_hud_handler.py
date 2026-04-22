@@ -62,6 +62,18 @@ _FALLBACK_ACTIVITY_LABELS = {
     "unavailable": "working",
 }
 
+_SUBTASK_STATUS_KEYS = ("completed", "executing", "pending", "failed")
+_DEFAULT_HUD_VIEW = "summary"
+_HUD_VIEW_ALIASES = {
+    "compact": "compact",
+    "brief": "compact",
+    "summary": "summary",
+    "default": "summary",
+    "tree": "tree",
+    "full": "tree",
+    "verbose": "tree",
+}
+
 
 def _coerce_int(value: object, default: int) -> int:
     """Return an integer when possible, otherwise a default."""
@@ -83,6 +95,14 @@ def _coerce_non_empty_string(value: object) -> str | None:
         if stripped:
             return stripped
     return None
+
+
+def _normalize_hud_view(value: object) -> str:
+    """Normalize requested HUD verbosity."""
+    raw_view = _coerce_non_empty_string(value)
+    if raw_view is None:
+        return _DEFAULT_HUD_VIEW
+    return _HUD_VIEW_ALIASES.get(raw_view.lower(), _DEFAULT_HUD_VIEW)
 
 
 def _coerce_children_ids(value: object) -> list[str]:
@@ -321,6 +341,99 @@ def _has_status_change_event(events: list[Any]) -> bool:
 def _has_tree_change_event(events: list[Any]) -> bool:
     """Return True when execution events may change the rendered AC tree."""
     return any(getattr(event, "type", None) in _TREE_CHANGE_EVENT_TYPES for event in events)
+
+
+def summarize_subtask_events(execution_events: object) -> dict[str, Any]:
+    """Summarize the latest known state of execution subtask events.
+
+    Top-level AC progress intentionally rolls up only after an AC finishes.
+    Long-running decomposed executions can therefore sit at ``0/N`` while many
+    Sub-ACs are already complete. This summary gives monitoring clients a
+    second, fine-grained progress signal without changing top-level AC counts.
+    """
+    if not isinstance(execution_events, list | tuple):
+        return {}
+
+    latest_by_id: dict[str, Mapping[str, Any]] = {}
+    order_by_id: dict[str, int] = {}
+
+    for order, event in enumerate(execution_events):
+        if getattr(event, "type", None) != "execution.subtask.updated":
+            continue
+
+        data = getattr(event, "data", None)
+        if not isinstance(data, Mapping):
+            continue
+
+        ac_index = _coerce_int(data.get("ac_index"), 0)
+        sub_task_index = _coerce_int(data.get("sub_task_index"), 0)
+        sub_task_id = _coerce_non_empty_string(data.get("sub_task_id"))
+        if sub_task_id is None:
+            if ac_index <= 0 or sub_task_index <= 0:
+                continue
+            sub_task_id = f"ac_{ac_index}_sub_{sub_task_index}"
+
+        latest_by_id[sub_task_id] = data
+        order_by_id[sub_task_id] = order
+
+    if not latest_by_id:
+        return {}
+
+    counts = dict.fromkeys(_SUBTASK_STATUS_KEYS, 0)
+    active: list[dict[str, Any]] = []
+
+    for sub_task_id, data in latest_by_id.items():
+        status = _normalize_status(data.get("status"))
+        counts[status] = counts.get(status, 0) + 1
+
+        if status == "executing":
+            active.append(
+                {
+                    "sub_task_id": sub_task_id,
+                    "ac_index": _coerce_int(data.get("ac_index"), 0),
+                    "sub_task_index": _coerce_int(data.get("sub_task_index"), 0),
+                    "content": _coerce_non_empty_string(data.get("content")) or sub_task_id,
+                    "status": status,
+                    "_order": order_by_id.get(sub_task_id, 0),
+                }
+            )
+
+    active.sort(key=lambda item: item.get("_order", 0), reverse=True)
+    for item in active:
+        item.pop("_order", None)
+
+    return {
+        "completed_count": counts.get("completed", 0),
+        "executing_count": counts.get("executing", 0),
+        "pending_count": counts.get("pending", 0),
+        "failed_count": counts.get("failed", 0),
+        "total_count": len(latest_by_id),
+        "active": active[:5],
+    }
+
+
+def format_subtask_progress_summary(summary: object) -> str | None:
+    """Format a compact Sub-AC progress summary for monitoring output."""
+    if not isinstance(summary, Mapping):
+        return None
+
+    total_count = _coerce_int(summary.get("total_count"), 0)
+    if total_count <= 0:
+        return None
+
+    completed_count = _coerce_int(summary.get("completed_count"), 0)
+    executing_count = _coerce_int(summary.get("executing_count"), 0)
+    pending_count = _coerce_int(summary.get("pending_count"), 0)
+    failed_count = _coerce_int(summary.get("failed_count"), 0)
+
+    parts = [f"{completed_count}/{total_count} complete"]
+    if executing_count > 0:
+        parts.append(f"{executing_count} working")
+    if pending_count > 0:
+        parts.append(f"{pending_count} pending")
+    if failed_count > 0:
+        parts.append(f"{failed_count} failed")
+    return " · ".join(parts)
 
 
 def _valid_tree_payload(value: object) -> bool:
@@ -607,6 +720,9 @@ def _compose_progress_data(
         _extract_tree_snapshot(progress_data),
         execution_events,
     )
+    subtask_summary = summarize_subtask_events(execution_events)
+    if subtask_summary:
+        composed["sub_ac_progress"] = subtask_summary
     return composed
 
 
@@ -619,6 +735,8 @@ def _tree_snapshot_changed(
         return True
     return _extract_tree_snapshot(previous_progress_data) != _extract_tree_snapshot(
         current_progress_data
+    ) or previous_progress_data.get("sub_ac_progress") != current_progress_data.get(
+        "sub_ac_progress"
     )
 
 
@@ -889,6 +1007,112 @@ def _format_footer(progress_data: Mapping[str, Any]) -> str | None:
     return " · ".join(parts)
 
 
+def _format_active_subtasks(progress_data: Mapping[str, Any], *, limit: int = 3) -> str | None:
+    """Format currently active Sub-AC IDs as a short monitoring hint."""
+    summary = progress_data.get("sub_ac_progress")
+    if not isinstance(summary, Mapping):
+        return None
+
+    active = summary.get("active")
+    if not isinstance(active, list | tuple):
+        return None
+
+    labels: list[str] = []
+    for item in active:
+        if not isinstance(item, Mapping):
+            continue
+        label = _coerce_non_empty_string(item.get("sub_task_id"))
+        if label:
+            labels.append(label)
+        if len(labels) >= limit:
+            break
+
+    if not labels:
+        return None
+    return ", ".join(labels)
+
+
+def _format_compact_hud(
+    *,
+    session_id: str,
+    execution_id: str,
+    session_status: str,
+    progress_data: Mapping[str, Any],
+    cursor: int | None,
+) -> str:
+    """Render the lowest-token HUD view for frequent polling."""
+    completed_count = _coerce_int(progress_data.get("completed_count"), 0)
+    total_count = _coerce_int(progress_data.get("total_count"), 0)
+    phase = _coerce_non_empty_string(progress_data.get("current_phase")) or "working"
+    subtask_summary = progress_data.get("sub_ac_progress")
+    subtask_total = (
+        _coerce_int(subtask_summary.get("total_count"), 0)
+        if isinstance(subtask_summary, Mapping)
+        else 0
+    )
+    subtask_completed = (
+        _coerce_int(subtask_summary.get("completed_count"), 0)
+        if isinstance(subtask_summary, Mapping)
+        else 0
+    )
+
+    parts = [
+        session_id,
+        session_status,
+        phase,
+        f"AC {completed_count}/{total_count}",
+    ]
+    if subtask_total > 0:
+        parts.append(f"Sub-AC {subtask_completed}/{subtask_total}")
+    if cursor is not None:
+        parts.append(f"cursor {cursor}")
+    return " | ".join(parts) + f"\n{execution_id}"
+
+
+def _format_summary_hud(
+    *,
+    session_id: str,
+    execution_id: str,
+    session_status: str,
+    progress_data: Mapping[str, Any],
+    cursor: int | None,
+) -> str:
+    """Render a small status card without the full AC tree."""
+    completed_count = _coerce_int(progress_data.get("completed_count"), 0)
+    total_count = _coerce_int(progress_data.get("total_count"), 0)
+    phase = _coerce_non_empty_string(progress_data.get("current_phase"))
+    subtask_progress = format_subtask_progress_summary(progress_data.get("sub_ac_progress"))
+
+    status_parts = [f"Status: {session_status}"]
+    if phase:
+        status_parts.append(f"Phase: {phase}")
+    status_parts.append(f"AC: {completed_count}/{total_count}")
+    if subtask_progress:
+        status_parts.append(f"Sub-AC: {subtask_progress}")
+
+    lines = [
+        f"Session: {session_id}",
+        f"Execution: {execution_id}",
+        " | ".join(status_parts),
+    ]
+
+    activity = _format_activity(
+        progress_data.get("activity"),
+        progress_data.get("activity_detail"),
+    )
+    if activity:
+        lines.append(f"Activity: {activity}")
+
+    active_subtasks = _format_active_subtasks(progress_data)
+    if active_subtasks:
+        lines.append(f"Active: {active_subtasks}")
+
+    if cursor is not None:
+        lines.append(f"Cursor: {cursor}")
+
+    return "\n".join(lines)
+
+
 def render_ac_tree_hud_markdown(
     *,
     session_id: str,
@@ -896,8 +1120,28 @@ def render_ac_tree_hud_markdown(
     session_status: str,
     progress_data: Mapping[str, Any],
     max_nodes: int = _DEFAULT_MAX_NODES,
+    view: str = "tree",
+    cursor: int | None = None,
 ) -> str:
     """Render a compact markdown HUD from workflow progress data."""
+    normalized_view = _normalize_hud_view(view)
+    if normalized_view == "compact":
+        return _format_compact_hud(
+            session_id=session_id,
+            execution_id=execution_id,
+            session_status=session_status,
+            progress_data=progress_data,
+            cursor=cursor,
+        )
+    if normalized_view == "summary":
+        return _format_summary_hud(
+            session_id=session_id,
+            execution_id=execution_id,
+            session_status=session_status,
+            progress_data=progress_data,
+            cursor=cursor,
+        )
+
     completed_count = _coerce_int(progress_data.get("completed_count"), 0)
     total_count = _coerce_int(progress_data.get("total_count"), 0)
     current_ac_index = _coerce_int(progress_data.get("current_ac_index"), 0) or None
@@ -919,6 +1163,9 @@ def render_ac_tree_hud_markdown(
         lines.append(f"Phase: {phase}")
 
     lines.append(f"Progress: {completed_count}/{total_count} AC complete")
+    subtask_progress = format_subtask_progress_summary(progress_data.get("sub_ac_progress"))
+    if subtask_progress:
+        lines.append(f"Sub-AC Progress: {subtask_progress}")
 
     activity = _format_activity(
         progress_data.get("activity"),
@@ -1004,8 +1251,9 @@ class ACTreeHUDHandler:
         return MCPToolDefinition(
             name="ouroboros_ac_tree_hud",
             description=(
-                "Return a compact, render-ready markdown snapshot of the live "
-                "acceptance-criteria tree for an Ouroboros session."
+                "Return a token-efficient live acceptance-criteria progress "
+                "snapshot for an Ouroboros session. Use view='tree' only when "
+                "the full AC tree is needed."
             ),
             parameters=(
                 MCPToolParameter(
@@ -1022,9 +1270,19 @@ class ACTreeHUDHandler:
                     default=0,
                 ),
                 MCPToolParameter(
+                    name="view",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Verbosity: 'compact' for one-line polling, 'summary' "
+                        "for the default short monitor, or 'tree' for full details."
+                    ),
+                    required=False,
+                    default=_DEFAULT_HUD_VIEW,
+                ),
+                MCPToolParameter(
                     name="max_nodes",
                     type=ToolInputType.INTEGER,
-                    description="Maximum nodes to render before truncation.",
+                    description="Maximum tree nodes to render when view='tree'.",
                     required=False,
                     default=_DEFAULT_MAX_NODES,
                 ),
@@ -1038,6 +1296,7 @@ class ACTreeHUDHandler:
         """Render the current AC tree HUD for a session."""
         session_id = _coerce_non_empty_string(arguments.get("session_id")) or ""
         cursor = max(0, _coerce_int(arguments.get("cursor"), 0))
+        view = _normalize_hud_view(arguments.get("view"))
         max_nodes = max(1, _coerce_int(arguments.get("max_nodes"), _DEFAULT_MAX_NODES))
 
         if not session_id:
@@ -1097,7 +1356,7 @@ class ACTreeHUDHandler:
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=f"No AC tree change since cursor {cursor}.",
+                                text=f"unchanged cursor={new_cursor}",
                             ),
                         ),
                         is_error=False,
@@ -1107,6 +1366,7 @@ class ACTreeHUDHandler:
                             "status": tracker.status.value,
                             "cursor": new_cursor,
                             "changed": False,
+                            "view": view,
                         },
                     )
                 )
@@ -1151,7 +1411,7 @@ class ACTreeHUDHandler:
                             content=(
                                 MCPContentItem(
                                     type=ContentType.TEXT,
-                                    text=f"No AC tree change since cursor {cursor}.",
+                                    text=f"unchanged cursor={new_cursor}",
                                 ),
                             ),
                             is_error=False,
@@ -1161,6 +1421,7 @@ class ACTreeHUDHandler:
                                 "status": tracker.status.value,
                                 "cursor": new_cursor,
                                 "changed": False,
+                                "view": view,
                             },
                         )
                     )
@@ -1171,6 +1432,8 @@ class ACTreeHUDHandler:
                 session_status=tracker.status.value,
                 progress_data=progress_data,
                 max_nodes=max_nodes,
+                view=view,
+                cursor=new_cursor,
             )
             return Result.ok(
                 MCPToolResult(
@@ -1184,6 +1447,7 @@ class ACTreeHUDHandler:
                         "changed": (
                             has_tree_change_event or has_status_change_event or cursor == 0
                         ),
+                        "view": view,
                     },
                 )
             )

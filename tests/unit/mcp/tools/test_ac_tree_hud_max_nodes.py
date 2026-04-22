@@ -118,7 +118,9 @@ async def test_handle_respects_max_nodes_override_for_large_top_level_tree(
     )
 
     handler = ACTreeHUDHandler(event_store=memory_event_store)
-    result = await handler.handle({"session_id": "sess_max_nodes", "cursor": 0, "max_nodes": 3})
+    result = await handler.handle(
+        {"session_id": "sess_max_nodes", "cursor": 0, "max_nodes": 3, "view": "tree"}
+    )
 
     assert result.is_ok
     markdown = result.value.text_content

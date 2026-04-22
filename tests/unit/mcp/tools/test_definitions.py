@@ -235,6 +235,79 @@ class TestSessionStatusHandler:
         assert result.value.meta["is_completed"] == (status_value == "completed")
         assert result.value.meta["is_failed"] == (status_value == "failed")
 
+    async def test_handle_includes_sub_ac_progress(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Session status should expose Sub-AC progress alongside AC progress."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-status-sub-ac",
+                data={
+                    "execution_id": "exec-status-sub-ac",
+                    "seed_id": "seed-status-sub-ac",
+                    "start_time": "2026-04-05T12:00:00+00:00",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec-status-sub-ac",
+                data={
+                    "session_id": "sess-status-sub-ac",
+                    "completed_count": 0,
+                    "total_count": 2,
+                    "current_phase": "Deliver",
+                    "acceptance_criteria": [
+                        {"index": 1, "content": "First parent", "status": "executing"},
+                        {"index": 2, "content": "Second parent", "status": "executing"},
+                    ],
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.subtask.updated",
+                aggregate_type="execution",
+                aggregate_id="exec-status-sub-ac",
+                data={
+                    "ac_index": 1,
+                    "sub_task_index": 1,
+                    "sub_task_id": "ac_1_sub_1",
+                    "content": "Child one",
+                    "status": "completed",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="execution.subtask.updated",
+                aggregate_type="execution",
+                aggregate_id="exec-status-sub-ac",
+                data={
+                    "ac_index": 1,
+                    "sub_task_index": 2,
+                    "sub_task_id": "ac_1_sub_2",
+                    "content": "Child two",
+                    "status": "executing",
+                },
+            )
+        )
+
+        handler = SessionStatusHandler(event_store=memory_event_store)
+        result = await handler.handle({"session_id": "sess-status-sub-ac"})
+
+        assert result.is_ok
+        assert "completed_count: 0" in result.value.text_content
+        assert "sub_ac_progress: 1/2 complete · 1 working" in result.value.text_content
+        assert result.value.meta["progress"]["sub_ac_total_count"] == 2
+
 
 class TestQueryEventsHandler:
     """Test QueryEventsHandler class."""
@@ -494,11 +567,13 @@ class TestAsyncJobHandlers:
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()
         assert handler.definition.name == "ouroboros_job_status"
+        param_names = {p.name for p in handler.definition.parameters}
+        assert param_names == {"job_id", "view"}
 
     def test_job_wait_definition_has_expected_params(self) -> None:
         handler = JobWaitHandler()
         param_names = {p.name for p in handler.definition.parameters}
-        assert param_names == {"job_id", "cursor", "timeout_seconds"}
+        assert param_names == {"job_id", "cursor", "timeout_seconds", "view"}
 
     def test_job_result_definition_name(self) -> None:
         handler = JobResultHandler()
@@ -507,7 +582,7 @@ class TestAsyncJobHandlers:
     def test_ac_tree_hud_definition_has_expected_params(self) -> None:
         handler = ACTreeHUDHandler()
         param_names = {p.name for p in handler.definition.parameters}
-        assert param_names == {"session_id", "cursor", "max_nodes"}
+        assert param_names == {"session_id", "cursor", "view", "max_nodes"}
 
     def test_cancel_job_definition_name(self) -> None:
         handler = CancelJobHandler()
