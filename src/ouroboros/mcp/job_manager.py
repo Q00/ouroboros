@@ -480,7 +480,7 @@ class JobManager:
 
         cancelled_tasks: list[asyncio.Task[Any]] = []
         task = self._tasks.get(job_id)
-        if task is not None and not task.done():
+        if snapshot.links.session_id is None and task is not None and not task.done():
             task.cancel()
             cancelled_tasks.append(task)
         runner_task = self._runner_tasks.get(job_id)
