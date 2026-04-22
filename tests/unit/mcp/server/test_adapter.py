@@ -315,11 +315,14 @@ class TestValidateTransport:
     def test_valid_lowercase(self):
         assert validate_transport("stdio") == "stdio"
         assert validate_transport("sse") == "sse"
+        assert validate_transport("streamable-http") == "streamable-http"
 
     def test_case_insensitive(self):
         assert validate_transport("SSE") == "sse"
         assert validate_transport("Stdio") == "stdio"
         assert validate_transport("sSe") == "sse"
+        assert validate_transport("STREAMABLE-HTTP") == "streamable-http"
+        assert validate_transport("streamable_http") == "streamable-http"
 
     def test_invalid_raises(self):
         with pytest.raises(ValueError, match="Invalid transport"):
@@ -332,6 +335,7 @@ class TestValidateTransport:
     def test_valid_transports_constant(self):
         assert "stdio" in VALID_TRANSPORTS
         assert "sse" in VALID_TRANSPORTS
+        assert "streamable-http" in VALID_TRANSPORTS
 
 
 class TestServeTransport:
@@ -403,6 +407,39 @@ class TestServeTransport:
             await adapter.serve(transport="sse", host="localhost", port=0)
 
         assert mock_fastmcp_cls.call_args.kwargs["port"] == 0
+
+    @pytest.mark.asyncio
+    async def test_streamable_http_passes_host_port_to_fastmcp(self):
+        """Verify host/port are forwarded to FastMCP for streamable HTTP."""
+        from unittest.mock import MagicMock, patch
+
+        mock_fastmcp_cls = MagicMock()
+        mock_instance = MagicMock()
+        mock_instance.tool = MagicMock(return_value=lambda f: f)
+        mock_instance.resource = MagicMock(return_value=lambda f: f)
+        mock_instance.run_streamable_http_async = AsyncMock()
+        mock_fastmcp_cls.return_value = mock_instance
+
+        adapter = MCPServerAdapter()
+
+        with (
+            patch(
+                "ouroboros.mcp.server.adapter.FastMCP",
+                mock_fastmcp_cls,
+                create=True,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"mcp.server.fastmcp": MagicMock(FastMCP=mock_fastmcp_cls)},
+            ),
+        ):
+            await adapter.serve(transport="streamable-http", host="127.0.0.1", port=9100)
+
+        mock_fastmcp_cls.assert_called_once()
+        call_kwargs = mock_fastmcp_cls.call_args
+        assert call_kwargs.kwargs["host"] == "127.0.0.1"
+        assert call_kwargs.kwargs["port"] == 9100
+        mock_instance.run_streamable_http_async.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):

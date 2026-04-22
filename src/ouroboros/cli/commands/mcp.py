@@ -185,7 +185,7 @@ async def _run_mcp_server(
     Args:
         host: Host to bind to.
         port: Port to bind to.
-        transport: Transport type (stdio or sse).
+        transport: Transport type (stdio, sse, or streamable-http).
         db_path: Optional path to EventStore database.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
@@ -202,7 +202,8 @@ async def _run_mcp_server(
         transport = validate_transport(transport)
     except ValueError:
         _stderr_console.print(
-            f"[red]Invalid transport {transport!r}. Must be 'stdio' or 'sse'.[/red]"
+            "[red]Invalid transport "
+            f"{transport!r}. Must be 'stdio', 'sse', or 'streamable-http'.[/red]"
         )
         raise typer.Exit(code=1)
 
@@ -285,7 +286,10 @@ async def _run_mcp_server(
     else:
         print_success(f"MCP Server starting on {transport}...")
         print_info(f"Registered {tool_count} tools")
-        print_info(f"Listening on {host}:{port}")
+        if transport == "streamable-http":
+            print_info(f"Listening on http://{host}:{port}/mcp")
+        else:
+            print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
 
     if _sandbox_network_disabled:
@@ -341,7 +345,7 @@ def serve(
         typer.Option(
             "--transport",
             "-t",
-            help="Transport type: stdio or sse.",
+            help="Transport type: stdio, sse, or streamable-http.",
         ),
     ] = "stdio",
     db: Annotated[
@@ -388,6 +392,9 @@ def serve(
 
         # Start with SSE transport on custom port
         ouroboros mcp serve --transport sse --port 9000
+
+        # Start with streamable HTTP transport for Codex CLI --url clients
+        ouroboros mcp serve --transport streamable-http --port 9000
 
         # Start with OpenCode runtime
         ouroboros mcp serve --runtime opencode
