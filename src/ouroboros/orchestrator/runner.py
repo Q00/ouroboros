@@ -1374,29 +1374,46 @@ class OrchestratorRunner:
         session_result = await self._session_repo.reconstruct_session(session_id)
         _terminal = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
         session_already_terminal = session_result.is_ok and session_result.value.status in _terminal
-        if not session_already_terminal:
-            cancel_result = await self._session_repo.mark_cancelled(
-                session_id,
-                reason="Cancellation detected during execution",
-                cancelled_by="runner",
-            )
-            if cancel_result is not None and cancel_result.is_err:
-                log.warning(
-                    "orchestrator.runner.mark_cancelled_failed",
+        if session_already_terminal:
+            terminal_status = session_result.value.status
+            final_message = f"Execution already {terminal_status.value}"
+            summary = {"terminal_status": terminal_status.value, **self._task_summary()}
+            if terminal_status == SessionStatus.CANCELLED:
+                summary["cancelled"] = True
+            return Result.ok(
+                OrchestratorResult(
+                    success=terminal_status == SessionStatus.COMPLETED,
                     session_id=session_id,
-                    error=str(cancel_result.error),
-                )
-
-            # Mirror cancellation into execution stream for TUI.
-            await self._event_store.append(
-                create_execution_terminal_event(
                     execution_id=execution_id,
-                    session_id=session_id,
-                    status="cancelled",
-                    error_message="Execution cancelled by external request",
+                    summary=summary,
                     messages_processed=messages_processed,
+                    final_message=final_message,
+                    duration_seconds=duration,
                 )
             )
+
+        cancel_result = await self._session_repo.mark_cancelled(
+            session_id,
+            reason="Cancellation detected during execution",
+            cancelled_by="runner",
+        )
+        if cancel_result is not None and cancel_result.is_err:
+            log.warning(
+                "orchestrator.runner.mark_cancelled_failed",
+                session_id=session_id,
+                error=str(cancel_result.error),
+            )
+
+        # Mirror cancellation into execution stream for TUI.
+        await self._event_store.append(
+            create_execution_terminal_event(
+                execution_id=execution_id,
+                session_id=session_id,
+                status="cancelled",
+                error_message="Execution cancelled by external request",
+                messages_processed=messages_processed,
+            )
+        )
 
         # Display cancellation notice
         self._console.print(

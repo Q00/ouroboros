@@ -792,7 +792,9 @@ class TestInFlightCancellationGraceful:
             result = await asyncio.wait_for(task, timeout=1)
 
         assert result.is_ok
-        assert result.value.success is False
+        assert result.value.success is True
+        assert result.value.summary["terminal_status"] == "completed"
+        assert "cancelled" not in result.value.summary
         mark_cancelled_mock.assert_not_awaited()
         terminal_events = [
             call.args[0]
