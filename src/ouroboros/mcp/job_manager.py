@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.heartbeat import is_holder_alive
+from ouroboros.orchestrator.heartbeat import is_holder_alive, is_owned_by_current_process
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
@@ -432,6 +432,7 @@ class JobManager:
 
         linked_session_repo: SessionRepository | None = None
         linked_session_started = False
+        linked_session_owned_by_current_process = False
         linked_session_terminal = False
         if snapshot.links.session_id:
             try:
@@ -460,12 +461,27 @@ class JobManager:
             except Exception:
                 linked_session_terminal = False
             linked_session_started = is_holder_alive(snapshot.links.session_id)
+            linked_session_owned_by_current_process = is_owned_by_current_process(
+                snapshot.links.session_id
+            )
 
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
         if snapshot.links.session_id:
             if not linked_session_terminal:
                 await request_cancellation(snapshot.links.session_id)
+                if linked_session_started and not linked_session_owned_by_current_process:
+                    repo = linked_session_repo or SessionRepository(self._event_store)
+                    cancel_result = await repo.mark_cancelled(
+                        snapshot.links.session_id,
+                        reason="Background job cancelled",
+                        cancelled_by="mcp_job_manager",
+                    )
+                    if cancel_result.is_err:
+                        raise ValueError(
+                            "Failed to mark linked session cancelled: "
+                            f"{cancel_result.error.message}"
+                        )
 
         cancelled_tasks: list[asyncio.Task[Any]] = []
         task = self._tasks.get(job_id)

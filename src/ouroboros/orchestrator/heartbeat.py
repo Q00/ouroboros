@@ -109,6 +109,15 @@ def release(session_id: str) -> None:
 
 def release_if_owned_by_current_process(session_id: str) -> bool:
     """Release a session lock only when the current process owns it."""
+    if not is_owned_by_current_process(session_id):
+        return False
+
+    release(session_id)
+    return True
+
+
+def is_owned_by_current_process(session_id: str) -> bool:
+    """Return True when the current process owns the session lock."""
     path = lock_path(session_id)
     try:
         content = path.read_text().strip()
@@ -131,7 +140,6 @@ def release_if_owned_by_current_process(session_id: str) -> bool:
         if current_start is not None and abs(current_start - recorded_start) > 2.0:
             return False
 
-    release(session_id)
     return True
 
 
