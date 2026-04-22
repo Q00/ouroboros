@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.events import create_execution_terminal_event
 from ouroboros.orchestrator.heartbeat import is_holder_alive
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
@@ -468,7 +469,7 @@ class JobManager:
         if snapshot.links.session_id:
             if not linked_session_terminal:
                 await request_cancellation(snapshot.links.session_id)
-                if linked_session_exists:
+                if linked_session_exists and linked_session_started:
                     repo = linked_session_repo or SessionRepository(self._event_store)
                     cancel_result = await repo.mark_cancelled(
                         snapshot.links.session_id,
@@ -479,6 +480,15 @@ class JobManager:
                         raise ValueError(
                             "Failed to mark linked session cancelled: "
                             f"{cancel_result.error.message}"
+                        )
+                    if snapshot.links.execution_id:
+                        await self._event_store.append(
+                            create_execution_terminal_event(
+                                execution_id=snapshot.links.execution_id,
+                                session_id=snapshot.links.session_id,
+                                status="cancelled",
+                                error_message="Background job cancelled",
+                            )
                         )
 
         cancelled_tasks: list[asyncio.Task[Any]] = []

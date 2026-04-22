@@ -394,10 +394,16 @@ class TestJobManager:
                 aggregate_id=session_id,
                 event_type="orchestrator.session.cancelled",
             )
+            execution_cancelled = await store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.terminal",
+            )
 
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert session_cancelled
             assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
+            assert execution_cancelled
+            assert execution_cancelled[-1].data["status"] == "cancelled"
         finally:
             lock_path(session_id).unlink(missing_ok=True)
             await clear_cancellation(session_id)
@@ -450,12 +456,18 @@ class TestJobManager:
                 aggregate_id=session_id,
                 event_type="orchestrator.session.cancelled",
             )
+            execution_cancelled = await store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.terminal",
+            )
 
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert runner_task.done() is True
             assert await is_cancellation_requested(session_id) is True
             assert session_cancelled
             assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
+            assert execution_cancelled
+            assert execution_cancelled[-1].data["status"] == "cancelled"
         finally:
             lock_path(session_id).unlink(missing_ok=True)
             await clear_cancellation(session_id)
@@ -522,7 +534,8 @@ class TestJobManager:
             assert runner_task.done() is True
             assert session_cancelled
             assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
-            assert not terminal_events
+            assert terminal_events
+            assert terminal_events[-1].data["status"] == "cancelled"
         finally:
             release_session_lock(session_id)
             await clear_cancellation(session_id)
