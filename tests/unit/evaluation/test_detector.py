@@ -321,6 +321,22 @@ class TestDotnetSubcommandAllowlist:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
+    def test_dotnet_subproject_path_accepted_without_root_marker(self, tmp_path: Path) -> None:
+        app = tmp_path / "src" / "App"
+        app.mkdir(parents=True)
+        (app / "App.csproj").write_text("<Project/>")
+        adapter = _FakeAdapter(response=json.dumps({"test": "dotnet test src/App/App.csproj"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_dotnet_subproject_path_must_exist(self, tmp_path: Path) -> None:
+        app = tmp_path / "src" / "App"
+        app.mkdir(parents=True)
+        (app / "App.csproj").write_text("<Project/>")
+        adapter = _FakeAdapter(response=json.dumps({"test": "dotnet test src/App/Missing.csproj"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
 
 class TestExecutablePathEscapes:
     """Relative-path escapes must be refused even when the basename is allowlisted."""
@@ -906,6 +922,26 @@ class TestToolchainSubcommandValidation:
         adapter = _FakeAdapter(response=json.dumps({"test": "cargo test --workspace"}))
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
+
+    def test_cargo_manifest_path_subproject_accepted_without_root_marker(
+        self, tmp_path: Path
+    ) -> None:
+        crate = tmp_path / "crates" / "demo"
+        crate.mkdir(parents=True)
+        (crate / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(
+            response=json.dumps({"test": "cargo test --manifest-path crates/demo/Cargo.toml"})
+        )
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_cargo_without_manifest_path_still_requires_root_marker(self, tmp_path: Path) -> None:
+        crate = tmp_path / "crates" / "demo"
+        crate.mkdir(parents=True)
+        (crate / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(response=json.dumps({"test": "cargo test"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
 
     def test_go_non_builtin_subcommand_dropped(self, tmp_path: Path) -> None:
         (tmp_path / "go.mod").write_text("module demo\n")

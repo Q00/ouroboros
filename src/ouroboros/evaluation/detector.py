@@ -236,6 +236,7 @@ _MONOREPO_SUBDIR_GLOBS: tuple[str, ...] = (
     "apps/*",
     "services/*",
     "crates/*",
+    "src/*",
 )
 # Cap on the number of subpath manifest entries forwarded to the LLM so a
 # wide monorepo cannot blow the prompt budget. Root manifests always land
@@ -664,7 +665,9 @@ def _verify_entry_point(
         return _uv_subcommand_is_available(working_dir, parts)
 
     if head == "cargo":
-        if not (working_dir / "Cargo.toml").is_file():
+        if not (working_dir / "Cargo.toml").is_file() and not _cargo_manifest_path_exists(
+            working_dir, parts
+        ):
             return False
         return _cargo_subcommand_is_available(parts)
 
@@ -1203,6 +1206,22 @@ def _cargo_subcommand_is_available(parts: list[str]) -> bool:
     if sub == "fmt":
         return "--check" in parts
     return sub in _CARGO_BUILTIN_SUBCOMMANDS
+
+
+def _cargo_manifest_path_exists(working_dir: Path, parts: list[str]) -> bool:
+    """True when ``--manifest-path`` points at an in-repo Cargo.toml."""
+
+    for i, token in enumerate(parts):
+        value: str | None = None
+        if token == "--manifest-path" and i + 1 < len(parts):
+            value = parts[i + 1]
+        elif token.startswith("--manifest-path="):
+            value = token.split("=", 1)[1]
+        if value is None:
+            continue
+        manifest = _resolve_within(working_dir, value)
+        return manifest is not None and manifest.name == "Cargo.toml" and manifest.is_file()
+    return False
 
 
 def _go_subcommand_is_builtin(parts: list[str]) -> bool:
@@ -1929,11 +1948,14 @@ _DOTNET_SAFE_SUBCOMMANDS: frozenset[str] = frozenset(
 )
 
 
+_DOTNET_PROJECT_SUFFIXES: tuple[str, ...] = (".csproj", ".sln", ".fsproj", ".vbproj")
+
+
 def _dotnet_project_markers_exist(working_dir: Path) -> bool:
     if (working_dir / "global.json").is_file():
         return True
     try:
-        for pattern in ("*.csproj", "*.sln", "*.fsproj", "*.vbproj"):
+        for pattern in (f"*{suffix}" for suffix in _DOTNET_PROJECT_SUFFIXES):
             if any(working_dir.glob(pattern)):
                 return True
     except OSError:
@@ -1941,13 +1963,32 @@ def _dotnet_project_markers_exist(working_dir: Path) -> bool:
     return False
 
 
-def _dotnet_validator(working_dir: Path, parts: list[str]) -> bool:
-    if not _dotnet_project_markers_exist(working_dir):
+def _dotnet_project_argument_exists(working_dir: Path, parts: list[str], subcommand: str) -> bool:
+    """True when a safe dotnet command names an in-repo project/solution file."""
+
+    try:
+        start = parts.index(subcommand) + 1
+    except ValueError:
         return False
+    for token in parts[start:]:
+        for candidate in _argument_path_candidates(token):
+            if not candidate.endswith(_DOTNET_PROJECT_SUFFIXES):
+                continue
+            path = _resolve_within(working_dir, candidate)
+            if path is not None and path.is_file():
+                return True
+    return False
+
+
+def _dotnet_validator(working_dir: Path, parts: list[str]) -> bool:
     sub = _first_positional(parts)
     if sub is None:
         return False
-    return sub in _DOTNET_SAFE_SUBCOMMANDS
+    if sub not in _DOTNET_SAFE_SUBCOMMANDS:
+        return False
+    return _dotnet_project_markers_exist(working_dir) or _dotnet_project_argument_exists(
+        working_dir, parts, sub
+    )
 
 
 # Runners whose behavior depends on project-local config files. Each entry
