@@ -802,6 +802,8 @@ class TestInFlightCancellationGraceful:
             if call.args and getattr(call.args[0], "type", "") == "execution.terminal"
         ]
         assert not [event for event in terminal_events if event.data.get("status") == "cancelled"]
+        assert terminal_events
+        assert terminal_events[-1].data["status"] == "completed"
 
     @pytest.mark.asyncio
     async def test_cancellation_mid_stream_preserves_partial_results(

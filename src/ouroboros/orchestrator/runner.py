@@ -1380,6 +1380,27 @@ class OrchestratorRunner:
             summary = {"terminal_status": terminal_status.value, **self._task_summary()}
             if terminal_status == SessionStatus.CANCELLED:
                 summary["cancelled"] = True
+            try:
+                execution_terminal_events = await self._event_store.query_events(
+                    aggregate_id=execution_id,
+                    event_type="execution.terminal",
+                    limit=1,
+                )
+            except Exception:
+                execution_terminal_events = []
+            if not execution_terminal_events:
+                await self._event_store.append(
+                    create_execution_terminal_event(
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        status=terminal_status.value,
+                        summary=summary if terminal_status == SessionStatus.COMPLETED else None,
+                        error_message=(
+                            final_message if terminal_status != SessionStatus.COMPLETED else None
+                        ),
+                        messages_processed=messages_processed,
+                    )
+                )
             return Result.ok(
                 OrchestratorResult(
                     success=terminal_status == SessionStatus.COMPLETED,

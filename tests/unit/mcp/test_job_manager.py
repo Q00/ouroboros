@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
@@ -10,7 +11,7 @@ from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
 from ouroboros.orchestrator.heartbeat import release as release_session_lock
 from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
 from ouroboros.orchestrator.session import SessionRepository
-from ouroboros.persistence.event_store import EventStore
+from ouroboros.persistence.event_store import EventStore, PersistenceError
 
 
 def _build_store(tmp_path) -> EventStore:
@@ -302,6 +303,48 @@ class TestJobManager:
             assert snapshot.status == JobStatus.CANCEL_REQUESTED
             assert await is_cancellation_requested(session_id) is False
             assert runner_task.done() is True
+        finally:
+            await clear_cancellation(session_id)
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_job_stops_task_when_linked_session_inspection_fails(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        session_id = "orch_inspection_fail_123"
+        execution_id = "exec_inspection_fail_123"
+        await clear_cancellation(session_id)
+
+        try:
+
+            async def _runner() -> MCPToolResult:
+                await asyncio.sleep(10)
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="inspection-fail-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
+            )
+            runner_task = manager._runner_tasks[started.job_id]
+
+            with patch.object(
+                store,
+                "query_events",
+                new=AsyncMock(side_effect=PersistenceError("query failed")),
+            ):
+                snapshot = await manager.cancel_job(started.job_id)
+            await asyncio.sleep(0)
+
+            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert runner_task.done() is True
+            assert await is_cancellation_requested(session_id) is False
         finally:
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)

@@ -434,28 +434,31 @@ class JobManager:
         linked_session_started = False
         linked_session_terminal = False
         if snapshot.links.session_id:
-            linked_session_repo = SessionRepository(self._event_store)
-            session_result = await linked_session_repo.reconstruct_session(
-                snapshot.links.session_id
-            )
-            terminal_events = await self._event_store.query_events(
-                aggregate_id=snapshot.links.session_id,
-                limit=10,
-            )
-            linked_session_terminal = session_result.is_ok and session_result.value.status in {
-                SessionStatus.COMPLETED,
-                SessionStatus.FAILED,
-                SessionStatus.CANCELLED,
-            }
-            linked_session_terminal = linked_session_terminal or any(
-                event.type
-                in {
-                    "orchestrator.session.completed",
-                    "orchestrator.session.failed",
-                    "orchestrator.session.cancelled",
+            try:
+                linked_session_repo = SessionRepository(self._event_store)
+                session_result = await linked_session_repo.reconstruct_session(
+                    snapshot.links.session_id
+                )
+                terminal_events = await self._event_store.query_events(
+                    aggregate_id=snapshot.links.session_id,
+                    limit=10,
+                )
+                linked_session_terminal = session_result.is_ok and session_result.value.status in {
+                    SessionStatus.COMPLETED,
+                    SessionStatus.FAILED,
+                    SessionStatus.CANCELLED,
                 }
-                for event in terminal_events
-            )
+                linked_session_terminal = linked_session_terminal or any(
+                    event.type
+                    in {
+                        "orchestrator.session.completed",
+                        "orchestrator.session.failed",
+                        "orchestrator.session.cancelled",
+                    }
+                    for event in terminal_events
+                )
+            except Exception:
+                linked_session_terminal = False
             linked_session_started = is_holder_alive(snapshot.links.session_id)
 
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
