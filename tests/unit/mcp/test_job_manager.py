@@ -353,7 +353,7 @@ class TestJobManager:
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert await is_cancellation_requested(session_id) is True
         finally:
-            release_session_lock(session_id)
+            lock_path(session_id).unlink(missing_ok=True)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
@@ -406,7 +406,7 @@ class TestJobManager:
             assert execution_cancelled
             assert execution_cancelled[-1].data["status"] == "cancelled"
         finally:
-            lock_path(session_id).unlink(missing_ok=True)
+            release_session_lock(session_id)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
@@ -470,7 +470,7 @@ class TestJobManager:
             assert execution_cancelled
             assert execution_cancelled[-1].data["status"] == "cancelled"
         finally:
-            lock_path(session_id).unlink(missing_ok=True)
+            release_session_lock(session_id)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
@@ -533,10 +533,8 @@ class TestJobManager:
             assert await is_cancellation_requested(session_id) is True
             assert runner_cancelled.is_set() is True
             assert runner_task.done() is True
-            assert session_cancelled
-            assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
-            assert terminal_events
-            assert terminal_events[-1].data["status"] == "cancelled"
+            assert not session_cancelled
+            assert not terminal_events
         finally:
             release_session_lock(session_id)
             await clear_cancellation(session_id)
@@ -562,7 +560,7 @@ class TestJobManager:
                 session_id=session_id,
             )
             assert create_result.is_ok
-            acquire_session_lock(session_id)
+            lock_path(session_id).write_text("1")
 
             async def _runner() -> MCPToolResult:
                 try:
@@ -595,7 +593,7 @@ class TestJobManager:
 
             assert runner_cancelled.is_set() is True
         finally:
-            release_session_lock(session_id)
+            lock_path(session_id).unlink(missing_ok=True)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()

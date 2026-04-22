@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.events import create_execution_terminal_event
-from ouroboros.orchestrator.heartbeat import is_holder_alive
+from ouroboros.orchestrator.heartbeat import is_holder_alive, is_owned_by_current_process
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
@@ -434,6 +434,7 @@ class JobManager:
         linked_session_repo: SessionRepository | None = None
         linked_session_exists = False
         linked_session_started = False
+        linked_session_owned_by_current_process = False
         linked_session_terminal = False
         if snapshot.links.session_id:
             linked_session_repo = SessionRepository(self._event_store)
@@ -463,6 +464,9 @@ class JobManager:
             except Exception:
                 pass
             linked_session_started = is_holder_alive(snapshot.links.session_id)
+            linked_session_owned_by_current_process = is_owned_by_current_process(
+                snapshot.links.session_id
+            )
 
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
@@ -470,7 +474,11 @@ class JobManager:
         if snapshot.links.session_id:
             if not linked_session_terminal:
                 await request_cancellation(snapshot.links.session_id)
-                should_persist_linked_cancel = linked_session_exists and linked_session_started
+                should_persist_linked_cancel = (
+                    linked_session_exists
+                    and linked_session_started
+                    and not linked_session_owned_by_current_process
+                )
 
         cancelled_tasks: list[asyncio.Task[Any]] = []
         task = self._tasks.get(job_id)
