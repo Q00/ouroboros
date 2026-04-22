@@ -49,6 +49,7 @@ INITIAL_CONTEXT_SUMMARY_REQUIRED = (
     "recorded yet. Ask the user to provide a concise summary before scoring or "
     "generating a seed.]"
 )
+PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE = "\n\n[Context truncated for prompt safety.]"
 
 
 class InterviewPerspective(StrEnum):
@@ -212,8 +213,21 @@ def prompt_safe_initial_context(state: InterviewState) -> str:
         return state.initial_context
     for round_data in reversed(state.rounds):
         if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
-            return round_data.user_response
+            return _truncate_prompt_safe_context(round_data.user_response)
     return INITIAL_CONTEXT_SUMMARY_REQUIRED
+
+
+def _truncate_prompt_safe_context(context: str) -> str:
+    """Cap prompt context while leaving an explicit truncation marker."""
+    if len(context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
+        return context
+
+    content_budget = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS - len(
+        PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE
+    )
+    if content_budget <= 0:
+        return context[:MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS]
+    return context[:content_budget] + PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE
 
 
 def initial_context_summary_missing(state: InterviewState) -> bool:

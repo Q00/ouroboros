@@ -8,6 +8,7 @@ import pytest
 
 from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
+    MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     InterviewEngine,
     InterviewRound,
     InterviewState,
@@ -445,6 +446,27 @@ class TestInterviewEngineAskNextQuestion:
         )
 
         assert prompt_safe_initial_context(state) == "Short project summary"
+
+    def test_prompt_safe_initial_context_caps_long_summary_round(self) -> None:
+        """Shared prompt-safe context helper caps oversized recorded summaries."""
+        state = InterviewState(
+            interview_id="test_long_summary_context",
+            initial_context=("A" * 4_000) + "ORIGINAL_TAIL",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response=("B" * 4_000) + "SUMMARY_TAIL",
+            )
+        )
+
+        prompt_context = prompt_safe_initial_context(state)
+
+        assert len(prompt_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+        assert "Context truncated for prompt safety" in prompt_context
+        assert "ORIGINAL_TAIL" not in prompt_context
+        assert "SUMMARY_TAIL" not in prompt_context
 
     @pytest.mark.asyncio
     async def test_long_history_stays_under_total_prompt_cap(self) -> None:
