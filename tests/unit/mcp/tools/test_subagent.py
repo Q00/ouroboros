@@ -398,6 +398,37 @@ class TestBuildInterviewSubagent:
         )
         assert "Python with FastAPI" in p.prompt
 
+    def test_answer_prompt_requires_seed_ready_guard(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Python with FastAPI",
+        )
+        assert "Do not treat ambiguity <= 0.2 as sufficient for closure" in p.prompt
+        assert "ownership/SSoT" in p.prompt
+        assert "declare ready if ambiguity <= 0.2" not in p.prompt
+
+    def test_answer_prompt_uses_seed_closer_as_guard_ssot(self, monkeypatch) -> None:
+        from ouroboros.agents import loader
+
+        def fake_load_agent_prompt(agent_name: str) -> str:
+            if agent_name == "socratic-interviewer":
+                return "SOCRATIC INTERVIEWER PROMPT"
+            if agent_name == "seed-closer":
+                return "CANONICAL SEED CLOSER PROMPT"
+            raise FileNotFoundError(agent_name)
+
+        monkeypatch.setattr(loader, "load_agent_prompt", fake_load_agent_prompt)
+
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Python with FastAPI",
+        )
+
+        assert "SOCRATIC INTERVIEWER PROMPT" in p.prompt
+        assert "CANONICAL SEED CLOSER PROMPT" in p.prompt
+
     def test_context_preserves_session_id(self) -> None:
         p = build_interview_subagent(
             session_id="sess-123",

@@ -381,10 +381,18 @@ def build_interview_subagent(
     from ouroboros.agents.loader import load_agent_prompt
 
     system_prompt = load_agent_prompt("socratic-interviewer")
+    seed_closer_prompt = load_agent_prompt("seed-closer")
 
     transcript_section = ""
     if transcript:
         transcript_section = f"\n## Conversation History\n{transcript}\n"
+
+    seed_ready_guard = f"""
+## Seed-ready Guard
+Before declaring ready, apply the canonical Seed Closer instructions below.
+Do not treat ambiguity <= 0.2 as sufficient for closure.
+
+{seed_closer_prompt}"""
 
     if action == "start" and initial_context:
         prompt = f"""{system_prompt}
@@ -395,6 +403,7 @@ def build_interview_subagent(
 
 Start a Socratic interview to clarify requirements for the following project idea.
 Ask probing questions to reduce ambiguity. Score ambiguity after each exchange.
+{seed_ready_guard}
 
 ## Initial Context
 {initial_context}
@@ -413,7 +422,8 @@ Begin the interview. Ask your first clarifying question."""
 
 Continue the Socratic interview. The user has answered your previous question.
 Analyze their answer, update your understanding, score current ambiguity,
-and ask the next clarifying question (or declare ready if ambiguity <= 0.2).
+and ask the next clarifying question or declare ready only after the Seed-ready Guard passes.
+{seed_ready_guard}
 
 ## Session ID
 {session_id}
@@ -433,6 +443,8 @@ Continue the interview."""
 Resume the Socratic interview for session {session_id}.
 Review the conversation history and continue from where we left off.
 {transcript_section}
+{seed_ready_guard}
+
 ## Action: {action}
 
 Continue the interview."""

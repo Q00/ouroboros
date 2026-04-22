@@ -215,10 +215,24 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
 7. **Repeat steps 2-6** until the user says "done" or MCP signals seed-ready.
 
-8. **Prefer stopping over over-interviewing**:
-   When scope, outputs, AC, and non-goals are clear, suggest `ooo seed`.
+8. **Seed-ready Acceptance Guard**:
+   When MCP signals seed-ready, do NOT relay completion blindly. Before
+   announcing completion or suggesting `ooo seed`, apply the canonical Seed
+   Closer criteria from `src/ouroboros/agents/seed-closer.md` as the single
+   source of truth for closure readiness. Run the check from the main session's
+   perspective, including any code, research, or brownfield context MCP did not
+   see.
 
-9. After completion, suggest the next step:
+   If any material decision remains unresolved, do not announce seed-ready.
+   If the local challenge finds a material gap, explicitly override the MCP
+   signal: `"MCP says seed-ready, but I am not accepting it yet because <gap>."`
+   Explain the gap briefly and ask the single highest-impact follow-up question,
+   routed through PATH 2 or PATH 3 as appropriate.
+
+9. **Prefer stopping over over-interviewing**:
+   When the Seed-ready Acceptance Guard passes, suggest `ooo seed`.
+
+10. After completion, suggest the next step:
    `📍 Next: ooo seed to crystallize these requirements into a specification`
 
 #### Dialectic Rhythm Guard
@@ -261,7 +275,7 @@ If the MCP tool is NOT available, fall back to agent-based interview:
    - Track multiple independent ambiguity threads
    - Revisit unresolved threads every few rounds
    - Do not let one detailed subtopic crowd out the rest of the original request
-7. Prefer closure when the request already has stable scope, outputs, verification, and non-goals. Ask whether to move to `ooo seed` rather than continuing to generate narrower questions.
+7. Prefer closure only after applying the Seed-ready Acceptance Guard above. Ask whether to move to `ooo seed` rather than continuing to generate narrower questions.
 8. Continue until the user says "done"
 9. Interview results live in conversation context (not persisted)
 10. After completion, suggest the next step in `📍 Next:` format:
@@ -280,6 +294,8 @@ If the MCP tool is NOT available, fall back to agent-based interview:
 - For high-confidence factual questions (PATH 1a), auto-confirm and notify the user
 - For all other questions, present to user as confirmation or direct question
 - You NEVER make decisions on behalf of the user — auto-confirm is for FACTS only
+- You are the final gate on MCP seed-ready signals: apply the canonical Seed
+  Closer criteria before suggesting `ooo seed`
 - The Dialectic Rhythm Guard prevents over-automation: after 3 consecutive
   non-user answers, the next question MUST go directly to the user
 
