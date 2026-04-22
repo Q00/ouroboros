@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.orchestrator.heartbeat import is_holder_alive
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
@@ -446,7 +447,6 @@ class JobManager:
                 SessionStatus.FAILED,
                 SessionStatus.CANCELLED,
             }
-            linked_session_started = session_result.is_ok
             linked_session_terminal = linked_session_terminal or any(
                 event.type
                 in {
@@ -456,6 +456,7 @@ class JobManager:
                 }
                 for event in terminal_events
             )
+            linked_session_started = is_holder_alive(snapshot.links.session_id)
 
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 

@@ -6,6 +6,8 @@ import asyncio
 
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
+from ouroboros.orchestrator.heartbeat import release as release_session_lock
 from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
@@ -260,6 +262,51 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_cancel_job_clears_precreated_unstarted_session_cancellation(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        session_id = "orch_precreated_123"
+        execution_id = "exec_precreated_123"
+        await clear_cancellation(session_id)
+
+        try:
+            await store.initialize()
+            repo = SessionRepository(store)
+            create_result = await repo.create_session(
+                execution_id=execution_id,
+                seed_id="seed_precreated_123",
+                session_id=session_id,
+            )
+            assert create_result.is_ok
+
+            async def _runner() -> MCPToolResult:
+                await asyncio.sleep(10)
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="precreated-session-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
+            )
+            runner_task = manager._runner_tasks[started.job_id]
+
+            snapshot = await manager.cancel_job(started.job_id)
+            await asyncio.sleep(0)
+
+            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert await is_cancellation_requested(session_id) is False
+            assert runner_task.done() is True
+        finally:
+            await clear_cancellation(session_id)
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_cancel_job_cancels_started_linked_runner_task(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
@@ -277,6 +324,7 @@ class TestJobManager:
                 session_id=session_id,
             )
             assert create_result.is_ok
+            acquire_session_lock(session_id)
 
             async def _runner() -> MCPToolResult:
                 try:
@@ -315,6 +363,7 @@ class TestJobManager:
             assert not session_cancelled
             assert not terminal_events
         finally:
+            release_session_lock(session_id)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
