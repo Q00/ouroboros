@@ -411,6 +411,52 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_cancel_job_persists_cross_process_cancel_when_reconstruct_fails(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        session_id = "orch_reconstruct_fail_123"
+        execution_id = "exec_reconstruct_fail_123"
+        await clear_cancellation(session_id)
+
+        try:
+            await store.initialize()
+            lock_path(session_id).write_text("1")
+
+            async def _runner() -> MCPToolResult:
+                await asyncio.sleep(10)
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="reconstruct-fail-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
+            )
+
+            with patch(
+                "ouroboros.mcp.job_manager.SessionRepository.reconstruct_session",
+                new=AsyncMock(return_value=Result.err(PersistenceError("replay failed"))),
+            ):
+                snapshot = await manager.cancel_job(started.job_id)
+            session_cancelled = await store.query_events(
+                aggregate_id=session_id,
+                event_type="orchestrator.session.cancelled",
+            )
+
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+            assert session_cancelled
+            assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
+        finally:
+            lock_path(session_id).unlink(missing_ok=True)
+            await clear_cancellation(session_id)
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_cancel_job_stops_task_when_linked_session_inspection_fails(
         self, tmp_path
     ) -> None:
