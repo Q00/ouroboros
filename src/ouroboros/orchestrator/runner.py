@@ -461,7 +461,9 @@ class OrchestratorRunner:
             execution_id: Execution ID to remove.
             session_id: Session ID to remove.
         """
-        from ouroboros.orchestrator.heartbeat import release as release_lock
+        from ouroboros.orchestrator.heartbeat import (
+            release_if_owned_by_current_process as release_lock,
+        )
 
         self._active_sessions.pop(execution_id, None)
         release_lock(session_id)
