@@ -214,6 +214,8 @@ def prompt_safe_initial_context(state: InterviewState) -> str:
     for round_data in reversed(state.rounds):
         if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
             return _truncate_prompt_safe_context(round_data.user_response)
+    if state.is_complete:
+        return _truncate_prompt_safe_context(state.initial_context)
     return INITIAL_CONTEXT_SUMMARY_REQUIRED
 
 

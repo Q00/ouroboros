@@ -468,6 +468,20 @@ class TestInterviewEngineAskNextQuestion:
         assert "ORIGINAL_TAIL" not in prompt_context
         assert "SUMMARY_TAIL" not in prompt_context
 
+    def test_prompt_safe_initial_context_caps_completed_legacy_context(self) -> None:
+        """Completed legacy interviews remain usable without a recorded summary."""
+        state = InterviewState(
+            interview_id="test_completed_legacy_context",
+            initial_context=("A" * 4_000) + "ORIGINAL_TAIL",
+            status=InterviewStatus.COMPLETED,
+        )
+
+        prompt_context = prompt_safe_initial_context(state)
+
+        assert len(prompt_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+        assert "Context truncated for prompt safety" in prompt_context
+        assert "ORIGINAL_TAIL" not in prompt_context
+
     @pytest.mark.asyncio
     async def test_long_history_stays_under_total_prompt_cap(self) -> None:
         """Later rounds trim retained history so the full request stays safe."""

@@ -426,8 +426,8 @@ class PMInterviewEngine:
 
         original_build = self._original_build_system_prompt
 
-        def _pm_build_system_prompt(state: InterviewState) -> str:
-            base = original_build(state)
+        def _pm_build_system_prompt(state: InterviewState, *args, **kwargs) -> str:
+            base = original_build(state, *args, **kwargs)
             return self._pm_steering + "\n\n" + base
 
         self.inner._build_system_prompt = _pm_build_system_prompt  # type: ignore[assignment]

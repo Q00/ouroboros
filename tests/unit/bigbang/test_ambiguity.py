@@ -26,6 +26,7 @@ from ouroboros.bigbang.interview import (
     INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewRound,
     InterviewState,
+    InterviewStatus,
 )
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError
@@ -422,6 +423,27 @@ class TestAmbiguityScorerScore:
         assert result.is_err
         assert "summary required" in result.error.message
         mock_adapter.complete.assert_not_called()
+
+    async def test_score_uses_truncated_context_for_completed_legacy_interview(self) -> None:
+        """Completed long-context interviews without summaries remain scoreable."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(create_valid_scoring_response()))
+        )
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_completed_large_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+            status=InterviewStatus.COMPLETED,
+        )
+
+        result = await scorer.score(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        prompt_content = "\n".join(message.content for message in messages)
+        assert "Context truncated for prompt safety" in prompt_content
+        assert "TAIL_MARKER" not in prompt_content
 
     async def test_score_provider_error_recovers_on_retry(self) -> None:
         """score recovers when provider error is transient."""
