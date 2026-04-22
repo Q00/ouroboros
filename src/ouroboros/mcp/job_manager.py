@@ -466,6 +466,8 @@ class JobManager:
         if snapshot.links.session_id:
             if not linked_session_terminal:
                 await request_cancellation(snapshot.links.session_id)
+            if linked_session_started:
+                return await self.get_snapshot(job_id)
 
         task = self._tasks.get(job_id)
         if task is not None and not task.done():

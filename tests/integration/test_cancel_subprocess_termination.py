@@ -10,8 +10,6 @@ import pytest
 
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
-from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
-from ouroboros.orchestrator.heartbeat import release as release_session_lock
 from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
 from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore
@@ -23,7 +21,7 @@ def _build_store(tmp_path: Path) -> EventStore:
 
 @pytest.mark.asyncio
 async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -> None:
-    """Started linked sessions may cancel the runner without synthesizing terminal state."""
+    """Precreated linked sessions stop local subprocesses without terminalizing sessions."""
     session_id = "orch_cancel_123"
     execution_id = "exec_cancel_123"
     await clear_cancellation(session_id)
@@ -65,7 +63,6 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
             session_id=session_id,
         )
         assert create_result.is_ok
-        acquire_session_lock(session_id)
 
         started = await manager.start_job(
             job_type="linked-session-process",
@@ -93,9 +90,8 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
         assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
         assert not cancellation_events
         assert not terminal_events
-        assert await is_cancellation_requested(session_id) is True
+        assert await is_cancellation_requested(session_id) is False
     finally:
-        release_session_lock(session_id)
         process = process_holder.get("process")
         if process is not None and process.returncode is None:
             process.kill()

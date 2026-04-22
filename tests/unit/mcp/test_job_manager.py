@@ -350,7 +350,9 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
-    async def test_cancel_job_cancels_started_linked_runner_task(self, tmp_path) -> None:
+    async def test_cancel_job_requests_cancellation_for_started_linked_runner(
+        self, tmp_path
+    ) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
         session_id = "orch_started_123"
@@ -389,9 +391,10 @@ class TestJobManager:
                 runner=_runner(),
                 links=JobLinks(session_id=session_id, execution_id=execution_id),
             )
+            runner_task = manager._runner_tasks[started.job_id]
 
             snapshot = await manager.cancel_job(started.job_id)
-            await asyncio.wait_for(runner_cancelled.wait(), timeout=1)
+            await asyncio.sleep(0.05)
             session_cancelled = await store.query_events(
                 aggregate_id=session_id,
                 event_type="orchestrator.session.cancelled",
@@ -403,6 +406,8 @@ class TestJobManager:
 
             assert snapshot.status == JobStatus.CANCEL_REQUESTED
             assert await is_cancellation_requested(session_id) is True
+            assert runner_cancelled.is_set() is False
+            assert runner_task.done() is False
             assert not session_cancelled
             assert not terminal_events
         finally:

@@ -1621,14 +1621,18 @@ class OrchestratorRunner:
 
                 return await self._execute_parallel(**parallel_kwargs)
         except asyncio.CancelledError:
-            if session_registered:
+            if session_registered and await is_cancellation_requested(tracker.session_id):
                 return await self._handle_cancellation(
                     session_id=tracker.session_id,
                     execution_id=exec_id,
                     messages_processed=0,
                     start_time=start_time,
                 )
-            await clear_cancellation(tracker.session_id)
+            self._cleanup_pre_execution_state(
+                exec_id,
+                tracker.session_id,
+                session_registered=session_registered,
+            )
             raise
         except Exception as e:
             self._cleanup_pre_execution_state(
@@ -1896,12 +1900,17 @@ class OrchestratorRunner:
             )
 
         except asyncio.CancelledError:
-            return await self._handle_cancellation(
-                session_id=tracker.session_id,
-                execution_id=exec_id,
-                messages_processed=messages_processed,
-                start_time=start_time,
-            )
+            if await is_cancellation_requested(tracker.session_id):
+                return await self._handle_cancellation(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                )
+            self._unregister_session(exec_id, tracker.session_id)
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            raise
         except Exception as e:
             log.exception(
                 "orchestrator.runner.execute_failed",
