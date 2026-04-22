@@ -33,12 +33,13 @@ from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
 
-_DEFAULT_JOB_VIEW = "summary"
+_DEFAULT_JOB_VIEW = "full"
+_JOB_EXECUTION_EVENT_LIMIT = 250
 _JOB_VIEW_ALIASES = {
     "compact": "compact",
     "brief": "compact",
     "summary": "summary",
-    "default": "summary",
+    "default": "full",
     "full": "full",
     "tree": "full",
     "verbose": "full",
@@ -324,13 +325,17 @@ async def _render_job_snapshot_inner(
     ]
 
     if snapshot.links.execution_id:
-        events = await event_store.replay("execution", snapshot.links.execution_id)
-        workflow_event = None
-        for event in events:
-            if event.type == "workflow.progress.updated":
-                workflow_event = event
+        recent_events = await event_store.query_events(
+            aggregate_id=snapshot.links.execution_id,
+            limit=_JOB_EXECUTION_EVENT_LIMIT,
+        )
+        events_chronological = list(reversed(recent_events))
+        workflow_event = next(
+            (event for event in recent_events if event.type == "workflow.progress.updated"),
+            None,
+        )
 
-        subtask_summary = summarize_subtask_events(events)
+        subtask_summary = summarize_subtask_events(events_chronological)
         subtask_progress = format_subtask_progress_summary(subtask_summary)
         if workflow_event is not None:
             data = workflow_event.data
@@ -364,7 +369,7 @@ async def _render_job_snapshot_inner(
                 lines.append(f"**Sub-AC Progress**: {subtask_progress}")
 
         subtasks: dict[str, tuple[str, str]] = {}
-        for event in reversed(events):
+        for event in recent_events:
             if event.type != "execution.subtask.updated":
                 continue
             sub_task_id = event.data.get("sub_task_id")
@@ -469,7 +474,7 @@ class JobStatusHandler:
                 MCPToolParameter(
                     name="view",
                     type=ToolInputType.STRING,
-                    description="'compact', 'summary' (default), or 'full'.",
+                    description="'full' (default), 'summary', or 'compact'.",
                     required=False,
                     default=_DEFAULT_JOB_VIEW,
                 ),
@@ -562,7 +567,7 @@ class JobWaitHandler:
                 MCPToolParameter(
                     name="view",
                     type=ToolInputType.STRING,
-                    description="'compact', 'summary' (default), or 'full'.",
+                    description="'full' (default), 'summary', or 'compact'.",
                     required=False,
                     default=_DEFAULT_JOB_VIEW,
                 ),
@@ -597,7 +602,10 @@ class JobWaitHandler:
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
         if not changed:
-            text = f"unchanged cursor={snapshot.cursor}"
+            if view in {"compact", "summary"}:
+                text = f"unchanged cursor={snapshot.cursor}"
+            else:
+                text += "\n\nNo new job-level events during this wait window."
         elif view == "compact":
             text = _render_compact_job_snapshot(snapshot, progress, include_message=False)
         elif view == "summary":

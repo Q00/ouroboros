@@ -63,12 +63,12 @@ _FALLBACK_ACTIVITY_LABELS = {
 }
 
 _SUBTASK_STATUS_KEYS = ("completed", "executing", "pending", "failed")
-_DEFAULT_HUD_VIEW = "summary"
+_DEFAULT_HUD_VIEW = "tree"
 _HUD_VIEW_ALIASES = {
     "compact": "compact",
     "brief": "compact",
     "summary": "summary",
-    "default": "summary",
+    "default": "tree",
     "tree": "tree",
     "full": "tree",
     "verbose": "tree",
@@ -103,6 +103,13 @@ def _normalize_hud_view(value: object) -> str:
     if raw_view is None:
         return _DEFAULT_HUD_VIEW
     return _HUD_VIEW_ALIASES.get(raw_view.lower(), _DEFAULT_HUD_VIEW)
+
+
+def _format_unchanged_hud_text(*, cursor: int, new_cursor: int, view: str) -> str:
+    """Return the unchanged text for the requested HUD verbosity."""
+    if view in {"compact", "summary"}:
+        return f"unchanged cursor={new_cursor}"
+    return f"No AC tree change since cursor {cursor}."
 
 
 def _coerce_children_ids(value: object) -> list[str]:
@@ -1251,9 +1258,8 @@ class ACTreeHUDHandler:
         return MCPToolDefinition(
             name="ouroboros_ac_tree_hud",
             description=(
-                "Return a token-efficient live acceptance-criteria progress "
-                "snapshot for an Ouroboros session. Use view='tree' only when "
-                "the full AC tree is needed."
+                "Return a render-ready markdown snapshot of the live "
+                "acceptance-criteria tree for an Ouroboros session."
             ),
             parameters=(
                 MCPToolParameter(
@@ -1273,8 +1279,8 @@ class ACTreeHUDHandler:
                     name="view",
                     type=ToolInputType.STRING,
                     description=(
-                        "Verbosity: 'compact' for one-line polling, 'summary' "
-                        "for the default short monitor, or 'tree' for full details."
+                        "Verbosity: 'tree' (default) for the full AC tree, "
+                        "'summary' for a short monitor, or 'compact' for one-line polling."
                     ),
                     required=False,
                     default=_DEFAULT_HUD_VIEW,
@@ -1356,7 +1362,11 @@ class ACTreeHUDHandler:
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=f"unchanged cursor={new_cursor}",
+                                text=_format_unchanged_hud_text(
+                                    cursor=cursor,
+                                    new_cursor=new_cursor,
+                                    view=view,
+                                ),
                             ),
                         ),
                         is_error=False,
@@ -1411,7 +1421,11 @@ class ACTreeHUDHandler:
                             content=(
                                 MCPContentItem(
                                     type=ContentType.TEXT,
-                                    text=f"unchanged cursor={new_cursor}",
+                                    text=_format_unchanged_hud_text(
+                                        cursor=cursor,
+                                        new_cursor=new_cursor,
+                                        view=view,
+                                    ),
                                 ),
                             ),
                             is_error=False,

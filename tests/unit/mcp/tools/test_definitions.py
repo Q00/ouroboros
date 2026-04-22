@@ -567,13 +567,17 @@ class TestAsyncJobHandlers:
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()
         assert handler.definition.name == "ouroboros_job_status"
-        param_names = {p.name for p in handler.definition.parameters}
+        params = {p.name: p for p in handler.definition.parameters}
+        param_names = set(params)
         assert param_names == {"job_id", "view"}
+        assert params["view"].default == "full"
 
     def test_job_wait_definition_has_expected_params(self) -> None:
         handler = JobWaitHandler()
-        param_names = {p.name for p in handler.definition.parameters}
+        params = {p.name: p for p in handler.definition.parameters}
+        param_names = set(params)
         assert param_names == {"job_id", "cursor", "timeout_seconds", "view"}
+        assert params["view"].default == "full"
 
     def test_job_result_definition_name(self) -> None:
         handler = JobResultHandler()
@@ -581,8 +585,10 @@ class TestAsyncJobHandlers:
 
     def test_ac_tree_hud_definition_has_expected_params(self) -> None:
         handler = ACTreeHUDHandler()
-        param_names = {p.name for p in handler.definition.parameters}
+        params = {p.name: p for p in handler.definition.parameters}
+        param_names = set(params)
         assert param_names == {"session_id", "cursor", "view", "max_nodes"}
+        assert params["view"].default == "tree"
 
     def test_cancel_job_definition_name(self) -> None:
         handler = CancelJobHandler()
