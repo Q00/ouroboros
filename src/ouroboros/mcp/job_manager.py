@@ -466,30 +466,11 @@ class JobManager:
 
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
+        should_persist_linked_cancel = False
         if snapshot.links.session_id:
             if not linked_session_terminal:
                 await request_cancellation(snapshot.links.session_id)
-                if linked_session_exists and linked_session_started:
-                    repo = linked_session_repo or SessionRepository(self._event_store)
-                    cancel_result = await repo.mark_cancelled(
-                        snapshot.links.session_id,
-                        reason="Background job cancelled",
-                        cancelled_by="mcp_job_manager",
-                    )
-                    if cancel_result.is_err:
-                        raise ValueError(
-                            "Failed to mark linked session cancelled: "
-                            f"{cancel_result.error.message}"
-                        )
-                    if snapshot.links.execution_id:
-                        await self._event_store.append(
-                            create_execution_terminal_event(
-                                execution_id=snapshot.links.execution_id,
-                                session_id=snapshot.links.session_id,
-                                status="cancelled",
-                                error_message="Background job cancelled",
-                            )
-                        )
+                should_persist_linked_cancel = linked_session_exists and linked_session_started
 
         cancelled_tasks: list[asyncio.Task[Any]] = []
         task = self._tasks.get(job_id)
@@ -502,6 +483,33 @@ class JobManager:
             cancelled_tasks.append(runner_task)
         if cancelled_tasks:
             await asyncio.wait(cancelled_tasks, timeout=5)
+        if snapshot.links.session_id and should_persist_linked_cancel:
+            repo = linked_session_repo or SessionRepository(self._event_store)
+            latest_session = await repo.reconstruct_session(snapshot.links.session_id)
+            latest_terminal = latest_session.is_ok and latest_session.value.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }
+            if not latest_terminal:
+                cancel_result = await repo.mark_cancelled(
+                    snapshot.links.session_id,
+                    reason="Background job cancelled",
+                    cancelled_by="mcp_job_manager",
+                )
+                if cancel_result.is_err:
+                    raise ValueError(
+                        f"Failed to mark linked session cancelled: {cancel_result.error.message}"
+                    )
+                if snapshot.links.execution_id:
+                    await self._event_store.append(
+                        create_execution_terminal_event(
+                            execution_id=snapshot.links.execution_id,
+                            session_id=snapshot.links.session_id,
+                            status="cancelled",
+                            error_message="Background job cancelled",
+                        )
+                    )
         if (
             snapshot.links.session_id
             and not linked_session_started

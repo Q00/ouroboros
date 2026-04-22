@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
@@ -536,6 +537,63 @@ class TestJobManager:
             assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
             assert terminal_events
             assert terminal_events[-1].data["status"] == "cancelled"
+        finally:
+            release_session_lock(session_id)
+            await clear_cancellation(session_id)
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_job_stops_task_when_persisting_linked_cancel_fails(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        session_id = "orch_mark_fail_123"
+        execution_id = "exec_mark_fail_123"
+        await clear_cancellation(session_id)
+        runner_cancelled = asyncio.Event()
+
+        try:
+            await store.initialize()
+            repo = SessionRepository(store)
+            create_result = await repo.create_session(
+                execution_id=execution_id,
+                seed_id="seed_mark_fail_123",
+                session_id=session_id,
+            )
+            assert create_result.is_ok
+            acquire_session_lock(session_id)
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    runner_cancelled.set()
+                    raise
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="mark-fail-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
+            )
+
+            with patch(
+                "ouroboros.mcp.job_manager.SessionRepository.mark_cancelled",
+                new=AsyncMock(return_value=Result.err(PersistenceError("write failed"))),
+            ):
+                try:
+                    await manager.cancel_job(started.job_id)
+                except ValueError as exc:
+                    assert "Failed to mark linked session cancelled" in str(exc)
+                else:
+                    raise AssertionError("cancel_job should fail when session cancel does")
+
+            assert runner_cancelled.is_set() is True
         finally:
             release_session_lock(session_id)
             await clear_cancellation(session_id)
