@@ -1422,6 +1422,91 @@ class TestWorkspaceScopedPMCommands:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
+    def test_workspace_filter_parent_escape_dropped(self, tmp_path: Path) -> None:
+        """Workspace filters must not resolve to sibling directories."""
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "package.json").write_text(json.dumps({"name": "root"}))
+        (other / "package.json").write_text(
+            json.dumps({"name": "other", "scripts": {"test": "echo escaped"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "pnpm --filter ../other test"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_package_json_workspace_glob_parent_escape_dropped(self, tmp_path: Path) -> None:
+        """Workspace globs must stay inside the repo root."""
+        repo = tmp_path / "repo"
+        other = tmp_path / "web"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "package.json").write_text(json.dumps({"name": "root", "workspaces": ["../*"]}))
+        (other / "package.json").write_text(
+            json.dumps({"name": "web", "scripts": {"test": "echo escaped"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "pnpm --filter web test"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_pnpm_workspace_yaml_glob_parent_escape_dropped(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        other = tmp_path / "web"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "package.json").write_text(json.dumps({"name": "root"}))
+        (repo / "pnpm-workspace.yaml").write_text("packages:\n  - '../*'\n")
+        (other / "package.json").write_text(
+            json.dumps({"name": "web", "scripts": {"test": "echo escaped"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "pnpm --filter web test"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_npm_prefix_parent_escape_dropped(self, tmp_path: Path) -> None:
+        """Path-retargeting flags must not execute outside the repo."""
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "package.json").write_text(
+            json.dumps({"name": "root", "scripts": {"test": "echo root"}})
+        )
+        (other / "package.json").write_text(
+            json.dumps({"name": "other", "scripts": {"test": "echo escaped"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "npm --prefix ../other test"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_yarn_cwd_parent_escape_dropped(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "package.json").write_text(
+            json.dumps({"name": "root", "scripts": {"test": "echo root"}})
+        )
+        (other / "package.json").write_text(
+            json.dumps({"name": "other", "scripts": {"test": "echo escaped"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "yarn --cwd=../other test"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_npm_prefix_inside_repo_validates_target_script(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        package = repo / "packages" / "web"
+        package.mkdir(parents=True)
+        (repo / "package.json").write_text(json.dumps({"name": "root"}))
+        (package / "package.json").write_text(
+            json.dumps({"name": "web", "scripts": {"test": "echo ok"}})
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "npm --prefix packages/web test"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is True
+
 
 class TestPoetryPyprojectLayouts:
     """Poetry dependency tables must be recognized as declared deps."""

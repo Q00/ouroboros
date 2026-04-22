@@ -565,11 +565,14 @@ def _verify_entry_point(
         return _package_json_has_script(working_dir, script_name)
 
     if head in {"npm", "pnpm", "yarn"}:
+        pm_working_dir = _node_pm_working_dir(working_dir, parts)
+        if pm_working_dir is None:
+            return False
         script_name = _node_script_name(head, parts)
         if script_name is None:
             return False
         workspace = _node_workspace_filter(head, parts)
-        return _node_workspace_has_script(working_dir, workspace, script_name)
+        return _node_workspace_has_script(pm_working_dir, workspace, script_name)
 
     if head == "npx":
         package = _npx_package(parts)
@@ -918,12 +921,31 @@ def _resolve_within(working_dir: Path, relative: str) -> Path | None:
     if relative.startswith(("/", "~")):
         return None
     candidate = (working_dir / relative).resolve()
-    root = working_dir.resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError:
+    if not _path_is_within(working_dir, candidate):
         return None
     return candidate
+
+
+def _path_is_within(working_dir: Path, candidate: Path) -> bool:
+    """Return True when ``candidate`` resolves inside ``working_dir``."""
+
+    root = working_dir.resolve()
+    try:
+        candidate.resolve().relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _relative_glob_stays_within(pattern: str) -> bool:
+    """Return False for workspace globs that can enumerate outside the repo."""
+
+    if pattern.startswith("~"):
+        return False
+    path = Path(pattern)
+    if path.is_absolute():
+        return False
+    return ".." not in path.parts
 
 
 def _uv_subcommand(parts: list[str]) -> str | None:
@@ -1356,6 +1378,8 @@ _NODE_PM_VALUE_FLAGS: frozenset[str] = frozenset(
     }
 )
 
+_NODE_PM_PATH_FLAGS: frozenset[str] = frozenset({"--cwd", "-C", "--prefix"})
+
 # Yarn ``workspace`` subcommand takes an explicit workspace *name* before the
 # script, so the validator needs to skip that name as well. This covers
 # ``yarn workspace <name> <script>`` and its ``workspaces`` variant.
@@ -1421,6 +1445,21 @@ def _strip_pm_flags(head: str, parts: list[str]) -> list[str]:
             i += 1
     out.extend(parts[i:])
     return out
+
+
+def _node_pm_working_dir(working_dir: Path, parts: list[str]) -> Path | None:
+    """Return the effective cwd for npm/pnpm/yarn, rejecting escapes."""
+
+    for i, token in enumerate(parts):
+        if token in _NODE_PM_PATH_FLAGS:
+            if i + 1 >= len(parts):
+                return None
+            return _resolve_within(working_dir, parts[i + 1])
+        for flag in _NODE_PM_PATH_FLAGS:
+            prefix = f"{flag}="
+            if token.startswith(prefix):
+                return _resolve_within(working_dir, token[len(prefix) :])
+    return working_dir
 
 
 def _node_script_name(head: str, parts: list[str]) -> str | None:
@@ -1530,8 +1569,8 @@ def _iter_workspace_package_dirs(working_dir: Path, name: str):
     ``package.json`` name can be inspected to confirm the match.
     """
     for relative in (name, f"packages/{name}", f"apps/{name}"):
-        candidate = working_dir / relative
-        if (candidate / "package.json").is_file():
+        candidate = _resolve_within(working_dir, relative)
+        if candidate is not None and (candidate / "package.json").is_file():
             yield candidate
     try:
         root_data = json.loads((working_dir / "package.json").read_text(encoding="utf-8"))
@@ -1559,11 +1598,15 @@ def _iter_workspace_package_dirs(working_dir: Path, name: str):
             pass
     seen: set[Path] = set()
     for pattern in globs:
+        if not _relative_glob_stays_within(pattern):
+            continue
         try:
             for candidate in working_dir.glob(pattern):
                 if not (candidate / "package.json").is_file():
                     continue
                 key = candidate.resolve()
+                if not _path_is_within(working_dir, key):
+                    continue
                 if key in seen:
                     continue
                 seen.add(key)
