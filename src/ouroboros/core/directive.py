@@ -1,20 +1,46 @@
-"""Directive vocabulary for control-plane decisions.
+"""Directive vocabulary for the Phase 2 control plane.
 
-This module defines the shared type used to describe "what should happen next"
-at any decision site across the Ouroboros workflow. Decision sites currently
-distributed across `evaluation/`, `evolution/`, `resilience/`, `orchestrator/`,
-and `observability/` will be migrated to this vocabulary in follow-up changes;
-this module adds only the type and its metadata, with no caller modifications.
+This module defines the shared value type that every decision site uses to
+describe "what should happen next." In the Agent OS framing introduced by
+the Phase-2 RFC, ``Directive`` members act as runtime-level syscalls: a
+small, stable alphabet through which decision sites (evaluator, evolver,
+resilience handlers, orchestrator, job manager) express control flow
+without each inventing its own signalling.
 
-Design notes:
-- The enum is additive. Each member has a deliberate precondition and effect.
-- Exactly two members are terminal: ``CANCEL`` and ``CONVERGE``. Every other
-  member implies the run continues.
-- The vocabulary is intentionally small. New directives are only added when an
-  existing one cannot cover the semantics without loss of meaning.
+Positioning within the Agent OS layers described by the RFC:
 
-See the control-plane RFC and the Directive introduction issue for rationale
-and the planned migration path.
+- Capability layer   — answers *what can this environment do?*
+- Policy layer       — answers *who may use which capability?*
+- **Directive layer  — answers what should happen next?*   (this module)*
+- Event journal      — answers *why did the system move?*  (paired with the
+                       ``control.directive.emitted`` event factory)
+
+Design invariants:
+
+- The enum is additive. Each member has a deliberate precondition and
+  effect; additions require a PR-level justification.
+- Exactly two members are terminal: ``CANCEL`` and ``CONVERGE``. Every
+  other member implies the run continues.
+- The vocabulary is intentionally small. New directives are introduced
+  only when an existing one cannot carry the semantics without loss.
+- Directives describe **workflow control**. They do not describe *capability
+  policy* (whether a tool is visible/executable). Those concerns stay in
+  the policy layer and in ``policy.*`` events.
+
+Migration posture (mapping, not replacement):
+
+Existing local enums — notably ``StepAction`` in the evolution loop, and
+the terminal branches in ``evaluation/`` and ``resilience/`` — do not
+disappear when this vocabulary lands. The first reference migration maps
+``StepAction`` onto ``Directive`` at the adapter boundary::
+
+    StepAction.STAGNATED  -> Directive.UNSTUCK
+    StepAction.CONVERGED  -> Directive.CONVERGE
+    StepAction.FAILED     -> Directive.RETRY  or Directive.CANCEL   (budget-dependent)
+
+Later migrations follow the same pattern so callers can be converted one
+at a time without flag days. This PR adds only the type and its
+invariants; no caller is modified here.
 """
 
 from __future__ import annotations
