@@ -3,9 +3,8 @@
 Provides an ``ouroboros_brownfield`` MCP tool for managing brownfield
 repository registrations in the SQLite database. Supports four actions:
 
-- **scan** — Scan home directory for git repos with GitHub origins and
-  register them in the DB. Optionally generates one-line descriptions
-  via a Frugal-tier LLM.
+- **scan** — Scan an explicit root (or a caller-provided default root) for git
+  repos/worktrees with an ``origin`` remote and register them in the DB.
 - **register** — Manually register a single repository by path.
 - **query** — List all registered repos or get the current default.
 - **set_default** — Set a registered repo as the default brownfield context.
@@ -73,7 +72,7 @@ class BrownfieldHandler:
 
     Manages brownfield repository registrations with action-based dispatch:
 
-    - ``scan`` — Walk ``~/`` for GitHub repos and register them.
+    - ``scan`` — Walk a caller-supplied root for repos with an ``origin`` remote and register them.
     - ``register`` — Manually register one repo.
     - ``query`` — List repos or fetch the default.
     - ``set_default`` — Set a repo as the default brownfield context.
@@ -91,7 +90,7 @@ class BrownfieldHandler:
             name=_TOOL_NAME,
             description=(
                 "Manage brownfield repository registrations. "
-                "Scan home directory for repos, register/query repos, "
+                "Scan a requested root for repos, register/query repos, "
                 "or set the default brownfield context for PM interviews."
             ),
             parameters=(
@@ -99,7 +98,7 @@ class BrownfieldHandler:
                     name="action",
                     type=ToolInputType.STRING,
                     description=(
-                        "Action to perform: 'scan' to discover repos from ~/,"
+                        "Action to perform: 'scan' to discover repos from a caller-provided root,"
                         " 'register' to add a single repo,"
                         " 'query' to list all repos or get default,"
                         " 'set_default' to toggle a repo's default flag"
@@ -158,7 +157,7 @@ class BrownfieldHandler:
                 MCPToolParameter(
                     name="scan_root",
                     type=ToolInputType.STRING,
-                    description=("Root directory for 'scan' action. Defaults to ~/."),
+                    description=("Root directory for 'scan' action. Caller chooses the scan root."),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -259,10 +258,10 @@ class BrownfieldHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Scan home directory for git repos and register them.
+        """Scan a caller-provided root for git repos and register them.
 
         Delegates to ``bigbang.brownfield.scan_and_register`` which handles
-        directory walking, GitHub origin filtering, LLM description generation,
+        directory walking, origin-remote filtering, LLM description generation,
         and DB upsert.
         """
         scan_root_str = arguments.get("scan_root")
@@ -271,7 +270,7 @@ class BrownfieldHandler:
         store = await self._get_store()
 
         # scan_and_register handles the full workflow:
-        # walk dirs → filter GitHub origins → generate descs → upsert
+        # walk dirs → filter origin remotes → generate descs → upsert
         repos = await scan_and_register(
             store=store,
             llm_adapter=None,  # No LLM in MCP context for now

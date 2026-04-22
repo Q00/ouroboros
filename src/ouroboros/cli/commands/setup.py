@@ -1330,7 +1330,7 @@ def setup(
 def scan() -> None:
     """Re-scan home directory and register new repos.
 
-    Scans ~/ for git repos with GitHub origins and updates the
+    Scans ~/ for git repos with configured origin remotes and updates the
     brownfield registry. Existing repos are preserved (upsert).
     """
     console.print("\n[bold cyan]Brownfield Scan[/]\n")

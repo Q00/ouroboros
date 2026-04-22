@@ -365,7 +365,6 @@ class TestBrownfieldHandlerDispatch:
         assert result.is_ok
         assert "scan" in result.value.text_content.lower()
 
-
 # ── Pagination tests ──────────────────────────────────────────────
 
 

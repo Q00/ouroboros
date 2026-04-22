@@ -11,6 +11,7 @@ import pytest
 from ouroboros.bigbang.brownfield import (
     _SKIP_DIRS,
     BrownfieldEntry,
+    _has_origin_remote,
     _has_github_origin,
     _read_readme_content,
     generate_desc,
@@ -68,8 +69,8 @@ class TestBrownfieldEntry:
 # ── _has_github_origin ─────────────────────────────────────────────
 
 
-class TestHasGithubOrigin:
-    """Tests for _has_github_origin helper."""
+class TestHasOriginRemote:
+    """Tests for origin-remote helpers."""
 
     def test_returns_true_for_github_origin(self, tmp_path: Path) -> None:
         # Create a real git repo with a GitHub origin
@@ -86,9 +87,10 @@ class TestHasGithubOrigin:
             ],
             capture_output=True,
         )
+        assert _has_origin_remote(tmp_path) is True
         assert _has_github_origin(tmp_path) is True
 
-    def test_returns_false_for_non_github_origin(self, tmp_path: Path) -> None:
+    def test_returns_true_for_non_github_origin(self, tmp_path: Path) -> None:
         subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
         subprocess.run(
             [
@@ -102,13 +104,16 @@ class TestHasGithubOrigin:
             ],
             capture_output=True,
         )
-        assert _has_github_origin(tmp_path) is False
+        assert _has_origin_remote(tmp_path) is True
+        assert _has_github_origin(tmp_path) is True
 
     def test_returns_false_for_no_origin(self, tmp_path: Path) -> None:
         subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+        assert _has_origin_remote(tmp_path) is False
         assert _has_github_origin(tmp_path) is False
 
     def test_returns_false_for_non_git_dir(self, tmp_path: Path) -> None:
+        assert _has_origin_remote(tmp_path) is False
         assert _has_github_origin(tmp_path) is False
 
 
@@ -118,8 +123,8 @@ class TestHasGithubOrigin:
 class TestScanHomeForRepos:
     """Tests for scan_home_for_repos."""
 
-    def test_finds_github_repos(self, tmp_path: Path) -> None:
-        # Create a repo with GitHub origin
+    def test_finds_repos_with_origin(self, tmp_path: Path) -> None:
+        # Create a repo with a non-GitHub origin
         repo = tmp_path / "my-project"
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
@@ -131,7 +136,7 @@ class TestScanHomeForRepos:
                 "remote",
                 "add",
                 "origin",
-                "git@github.com:user/my-project.git",
+                "https://dev.azure.com/org/project/_git/my-project",
             ],
             capture_output=True,
         )
@@ -141,14 +146,10 @@ class TestScanHomeForRepos:
         assert result[0]["path"] == str(repo.resolve())
         assert result[0]["name"] == "my-project"
 
-    def test_skips_non_github_repos(self, tmp_path: Path) -> None:
-        repo = tmp_path / "gitlab-proj"
+    def test_skips_repos_without_origin(self, tmp_path: Path) -> None:
+        repo = tmp_path / "local-proj"
         repo.mkdir()
         subprocess.run(["git", "init", str(repo)], capture_output=True)
-        subprocess.run(
-            ["git", "-C", str(repo), "remote", "add", "origin", "https://gitlab.com/user/repo.git"],
-            capture_output=True,
-        )
 
         result = scan_home_for_repos(tmp_path)
         assert len(result) == 0

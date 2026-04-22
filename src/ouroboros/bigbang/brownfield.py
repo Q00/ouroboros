@@ -4,7 +4,7 @@ Manages the global brownfield registry in ``~/.ouroboros/ouroboros.db``
 via :class:`~ouroboros.persistence.brownfield.BrownfieldStore`.
 
 Business-level operations:
-- Home directory scanning for git repos with GitHub origin
+- Home directory scanning for git repos with an ``origin`` remote
 - README/CLAUDE.md parsing for one-line description generation (Frugal model)
 - Async CRUD delegated to BrownfieldStore
 
@@ -76,14 +76,14 @@ _DESC_SYSTEM_PROMPT = (
 # ── Home directory scanning ────────────────────────────────────────
 
 
-def _has_github_origin(repo_path: Path) -> bool:
-    """Check whether a git repo has a remote origin containing github.com.
+def _has_origin_remote(repo_path: Path) -> bool:
+    """Check whether a git repo has a configured ``origin`` remote.
 
     Args:
         repo_path: Path to the repository root (parent of ``.git``).
 
     Returns:
-        True if any origin URL contains ``github.com``.
+        True if ``git remote get-url origin`` returns a non-empty URL.
     """
     try:
         result = subprocess.run(
@@ -92,20 +92,25 @@ def _has_github_origin(repo_path: Path) -> bool:
             text=True,
             timeout=5,
         )
-        return "github.com" in result.stdout
+        return result.returncode == 0 and bool(result.stdout.strip())
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
+
+
+def _has_github_origin(repo_path: Path) -> bool:
+    """Backward-compatible wrapper for callers using the old helper name."""
+    return _has_origin_remote(repo_path)
 
 
 def scan_home_for_repos(
     root: Path | None = None,
 ) -> list[dict[str, str]]:
-    """Walk the home directory to find git repositories with GitHub origins.
+    """Walk the home directory to find git repositories with an ``origin`` remote.
 
     Scanning rules:
     - Prune subdirectories once ``.git`` is found (no nested repos)
     - Skip hardcoded noise directories (node_modules, .venv, etc.)
-    - Only include repos whose origin remote contains ``github.com``
+    - Only include repos with a configured ``origin`` remote
 
     Args:
         root: Directory to start scanning. Defaults to ``~/``.
@@ -124,7 +129,7 @@ def scan_home_for_repos(
 
         # Check for .git directory
         if ".git" in dirnames:
-            if _has_github_origin(current):
+            if _has_origin_remote(current):
                 resolved = current.resolve()
                 repos.append({"path": str(resolved), "name": resolved.name})
                 log.debug("brownfield.scan.found", path=str(current))
@@ -240,7 +245,7 @@ async def scan_and_register(
 
     This is the main entry point for ``ooo setup`` brownfield scanning.
 
-    1. Walk ``~/`` to find git repos with GitHub origins.
+    1. Walk ``~/`` to find git repos with an ``origin`` remote.
     2. Bulk-insert all found repos with ``is_default=False`` and ``desc=""``.
     3. Set the first repo as default if no default exists.
 
@@ -335,7 +340,7 @@ async def register_repo(
     resolved_name = name or repo_path.name
     # Resolve only if the path exists on disk (avoids macOS /System/Volumes
     # prefix for non-existent paths in tests and cross-machine registrations).
-    canonical_path = str(repo_path.resolve()) if repo_path.exists() else str(repo_path)
+    canonical_path = str(repo_path.resolve()) if repo_path.exists() else path
 
     # Auto-generate description if not provided and LLM adapter is available
     if desc is None and llm_adapter is not None:
