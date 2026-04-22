@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
 
-from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
 from ouroboros.orchestrator.session import SessionRepository
-from ouroboros.persistence.event_store import EventStore, PersistenceError
+from ouroboros.persistence.event_store import EventStore
 
 
 def _build_store(tmp_path) -> EventStore:
@@ -200,11 +199,14 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
-    async def test_cancel_job_errors_when_linked_session_cancel_persist_fails(
+    async def test_cancel_job_requests_linked_session_cancellation_without_start_event(
         self, tmp_path
     ) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
+        session_id = "orch_pending_123"
+        execution_id = "exec_pending_123"
+        await clear_cancellation(session_id)
 
         try:
 
@@ -216,29 +218,88 @@ class TestJobManager:
                 )
 
             started = await manager.start_job(
-                job_type="persist-fail-test",
+                job_type="pending-session-test",
                 initial_message="queued",
                 runner=_runner(),
-                links=JobLinks(session_id="orch_fail_123", execution_id="exec_fail_123"),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
             )
 
-            failed = Result.err(PersistenceError("write failed"))
-            with patch(
-                "ouroboros.mcp.job_manager.SessionRepository.mark_cancelled",
-                new=AsyncMock(return_value=failed),
-            ):
-                try:
-                    await manager.cancel_job(started.job_id)
-                except ValueError as exc:
-                    assert "Failed to mark linked session cancelled" in str(exc)
-                else:
-                    raise AssertionError("cancel_job should fail when session cancel does")
-
+            snapshot = await manager.cancel_job(started.job_id)
+            session_cancelled = await store.query_events(
+                aggregate_id=session_id,
+                event_type="orchestrator.session.cancelled",
+            )
             terminal_events = await store.query_events(
-                aggregate_id="exec_fail_123",
+                aggregate_id=execution_id,
                 event_type="execution.terminal",
             )
+            runner_task = manager._runner_tasks[started.job_id]
+
+            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert await is_cancellation_requested(session_id) is True
+            assert not session_cancelled
+            assert not terminal_events
+            assert runner_task.done() is False
+        finally:
+            await clear_cancellation(session_id)
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_job_cancels_started_linked_runner_task(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        session_id = "orch_started_123"
+        execution_id = "exec_started_123"
+        await clear_cancellation(session_id)
+        runner_cancelled = asyncio.Event()
+
+        try:
+            await store.initialize()
+            repo = SessionRepository(store)
+            create_result = await repo.create_session(
+                execution_id=execution_id,
+                seed_id="seed_started_123",
+                session_id=session_id,
+            )
+            assert create_result.is_ok
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    runner_cancelled.set()
+                    return MCPToolResult(
+                        content=(MCPContentItem(type=ContentType.TEXT, text="cancelled"),),
+                        is_error=False,
+                    )
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="started-session-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
+            )
+
+            snapshot = await manager.cancel_job(started.job_id)
+            await asyncio.wait_for(runner_cancelled.wait(), timeout=1)
+            session_cancelled = await store.query_events(
+                aggregate_id=session_id,
+                event_type="orchestrator.session.cancelled",
+            )
+            terminal_events = await store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.terminal",
+            )
+
+            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert await is_cancellation_requested(session_id) is True
+            assert not session_cancelled
             assert not terminal_events
         finally:
+            await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
