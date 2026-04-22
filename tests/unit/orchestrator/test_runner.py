@@ -108,6 +108,13 @@ class TestBuildSystemPrompt:
         assert "completeness" in prompt
         assert "All requirements are met" in prompt
 
+    def test_includes_self_recovery_protocol(self, sample_seed: Seed) -> None:
+        """Run prompts should tell agents how to change strategy when stuck."""
+        prompt = build_system_prompt(sample_seed)
+        assert "Self-Recovery Protocol" in prompt
+        assert "spinning" in prompt
+        assert "no acceptance-criterion progress" in prompt
+
     def test_handles_empty_constraints(self) -> None:
         """Test handling seed with no constraints."""
         seed = Seed(
@@ -253,6 +260,77 @@ class TestOrchestratorRunner:
         assert result.value.success is True
         # Parallel executor: 3 ACs × 3 messages each = 9 total
         assert result.value.messages_processed == 9
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_retries_once_with_lateral_recovery_directive(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Sequential run failures should get one same-session lateral recovery retry."""
+        runtime_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="oc-session-recovery",
+            cwd="/tmp/project",
+            approval_mode="acceptEdits",
+        )
+        prompts: list[str] = []
+        resume_handles: list[RuntimeHandle | None] = []
+
+        async def mock_execute(prompt: str, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            prompts.append(prompt)
+            resume_handles.append(kwargs.get("resume_handle"))
+            if len(prompts) == 1:
+                yield AgentMessage(
+                    type="assistant",
+                    content="Trying the original path",
+                    resume_handle=runtime_handle,
+                )
+                yield AgentMessage(
+                    type="result",
+                    content="Tests still fail",
+                    data={"subtype": "error"},
+                    resume_handle=runtime_handle,
+                )
+                return
+
+            yield AgentMessage(
+                type="result",
+                content="[TASK_COMPLETE] Recovered",
+                data={"subtype": "success"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+        assert result.value.success is True
+        assert len(prompts) == 2
+        assert "Lateral Recovery Directive" in prompts[1]
+        assert "Selected persona: hacker" in prompts[1]
+        assert resume_handles[1] == runtime_handle
+
+        recovery_event = next(
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if getattr(call.args[0], "type", None) == "resilience.recovery.applied"
+        )
+        assert recovery_event.data["pattern"] == "spinning"
+        assert recovery_event.data["persona"] == "hacker"
 
     @pytest.mark.asyncio
     async def test_prepare_session_forwards_seed_goal(

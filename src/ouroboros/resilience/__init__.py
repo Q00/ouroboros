@@ -8,6 +8,7 @@ Components:
 - ExecutionHistory: Tracks execution state for detection
 - LateralThinker: Generates alternative approaches via personas
 - ThinkingPersona: 5 personas for lateral thinking
+- RecoveryPlanner: Chooses bounded in-run recovery directives
 - Events: Stagnation and lateral thinking event types
 
 Story 4.1: Stagnation Detection (4 Patterns)
@@ -33,6 +34,16 @@ from ouroboros.resilience.lateral import (
     LateralThinkingSucceededEvent,
     PersonaStrategy,
     ThinkingPersona,
+)
+from ouroboros.resilience.recovery import (
+    RecoveryAction,
+    RecoveryActionKind,
+    RecoveryPlanner,
+    RecoverySnapshot,
+    coerce_failed_attempt_personas,
+    create_recovery_applied_event,
+    get_run_recovery_protocol_prompt,
+    suggest_lateral_persona_for_pattern,
 )
 from ouroboros.resilience.stagnation import (
     DiminishingReturnsDetectedEvent,
@@ -64,4 +75,13 @@ __all__ = [
     "LateralThinkingSucceededEvent",
     "LateralThinkingFailedEvent",
     "AllPersonasExhaustedEvent",
+    # Recovery planning
+    "RecoveryAction",
+    "RecoveryActionKind",
+    "RecoveryPlanner",
+    "RecoverySnapshot",
+    "coerce_failed_attempt_personas",
+    "create_recovery_applied_event",
+    "get_run_recovery_protocol_prompt",
+    "suggest_lateral_persona_for_pattern",
 ]

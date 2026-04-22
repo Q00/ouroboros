@@ -1457,17 +1457,11 @@ class LateralThinkHandler:
                         )
                     )
 
-                excluded_personas: list[ThinkingPersona] = []
-                for attempt in failed_attempts:
-                    try:
-                        excluded_personas.append(ThinkingPersona(attempt.strip().lower()))
-                    except ValueError:
-                        continue
+                from ouroboros.resilience.recovery import suggest_lateral_persona_for_pattern
 
-                thinker = LateralThinker()
-                suggested = thinker.suggest_persona_for_pattern(
+                suggested = suggest_lateral_persona_for_pattern(
                     stagnation_pattern,
-                    exclude_personas=tuple(excluded_personas),
+                    failed_attempts=failed_attempts,
                 )
                 if suggested is None:
                     return Result.err(
