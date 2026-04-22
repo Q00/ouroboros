@@ -454,7 +454,8 @@ class TestJobManager:
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert runner_task.done() is True
             assert await is_cancellation_requested(session_id) is True
-            assert not session_cancelled
+            assert session_cancelled
+            assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
         finally:
             lock_path(session_id).unlink(missing_ok=True)
             await clear_cancellation(session_id)
@@ -519,7 +520,8 @@ class TestJobManager:
             assert await is_cancellation_requested(session_id) is True
             assert runner_cancelled.is_set() is True
             assert runner_task.done() is True
-            assert not session_cancelled
+            assert session_cancelled
+            assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
             assert not terminal_events
         finally:
             release_session_lock(session_id)
