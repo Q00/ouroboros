@@ -495,6 +495,30 @@ class TestSeedGeneratorInterviewContext:
 
         assert "Short project summary" in context
         assert "TAIL_MARKER" not in context
+        assert INITIAL_CONTEXT_SUMMARY_QUESTION not in context
+
+    def test_context_caps_oversized_initial_context_summary(self) -> None:
+        """_build_interview_context does not serialize oversized summary rounds raw."""
+        mock_adapter = AsyncMock()
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_large_summary",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response=("B" * 4_000) + "SUMMARY_TAIL",
+            )
+        )
+
+        context = generator._build_interview_context(state)
+
+        assert "Context truncated for prompt safety" in context
+        assert "RAW_TAIL" not in context
+        assert "SUMMARY_TAIL" not in context
+        assert INITIAL_CONTEXT_SUMMARY_QUESTION not in context
 
 
 class TestSeedGeneratorErrorHandling:
