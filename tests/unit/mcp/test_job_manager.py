@@ -302,10 +302,20 @@ class TestJobManager:
 
             snapshot = await manager.cancel_job(started.job_id)
             await asyncio.sleep(0)
+            session_cancelled = await store.query_events(
+                aggregate_id=session_id,
+                event_type="orchestrator.session.cancelled",
+            )
+            execution_cancelled = await store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.terminal",
+            )
 
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert await is_cancellation_requested(session_id) is False
             assert runner_task.done() is True
+            assert session_cancelled
+            assert execution_cancelled[-1].data["status"] == "cancelled"
         finally:
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
