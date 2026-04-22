@@ -746,6 +746,23 @@ class TestInFlightCancellationGraceful:
         assert terminal_events[-1].data["status"] == "cancelled"
 
     @pytest.mark.asyncio
+    async def test_startup_cancellation_checks_persisted_events(
+        self,
+        runner: OrchestratorRunner,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Startup cancellation sees cross-process persisted cancel events."""
+        from ouroboros.orchestrator.events import create_session_cancelled_event
+
+        mock_event_store.query_events = AsyncMock(
+            return_value=[
+                create_session_cancelled_event("sess_startup_cancel", "Cancelled elsewhere")
+            ]
+        )
+
+        assert await runner._check_startup_cancellation("sess_startup_cancel") is True
+
+    @pytest.mark.asyncio
     async def test_task_cancellation_preserves_existing_terminal_execution_state(
         self,
         runner: OrchestratorRunner,

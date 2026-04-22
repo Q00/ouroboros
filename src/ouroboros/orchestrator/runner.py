@@ -1336,6 +1336,24 @@ class OrchestratorRunner:
             )
             return False
 
+    async def _check_startup_cancellation(self, session_id: str) -> bool:
+        """Check cancellation before normal message-loop checkpoints exist."""
+        if await is_cancellation_requested(session_id):
+            return True
+        try:
+            events = await self._event_store.query_events(
+                aggregate_id=session_id,
+                event_type="orchestrator.session.cancelled",
+                limit=1,
+            )
+            return len(events) > 0
+        except Exception:
+            log.warning(
+                "orchestrator.runner.startup_cancellation_check_failed",
+                session_id=session_id,
+            )
+            return False
+
     async def _handle_cancellation(
         self,
         session_id: str,
@@ -1572,7 +1590,7 @@ class OrchestratorRunner:
             # Register session for cancellation tracking
             self._register_session(exec_id, tracker.session_id)
             session_registered = True
-            if await is_cancellation_requested(tracker.session_id):
+            if await self._check_startup_cancellation(tracker.session_id):
                 return await self._handle_cancellation(
                     session_id=tracker.session_id,
                     execution_id=exec_id,
