@@ -468,19 +468,23 @@ class TestInterviewEngineAskNextQuestion:
         assert "ORIGINAL_TAIL" not in prompt_context
         assert "SUMMARY_TAIL" not in prompt_context
 
-    def test_prompt_safe_initial_context_caps_completed_legacy_context(self) -> None:
-        """Completed legacy interviews remain usable without a recorded summary."""
+    @pytest.mark.asyncio
+    async def test_completed_long_context_requests_summary_recovery(self) -> None:
+        """Completed long-context interviews can still ask for the required summary."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
         state = InterviewState(
             interview_id="test_completed_legacy_context",
             initial_context=("A" * 4_000) + "ORIGINAL_TAIL",
             status=InterviewStatus.COMPLETED,
         )
 
-        prompt_context = prompt_safe_initial_context(state)
+        result = await engine.ask_next_question(state)
 
-        assert len(prompt_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
-        assert "Context truncated for prompt safety" in prompt_context
-        assert "ORIGINAL_TAIL" not in prompt_context
+        assert result.is_ok
+        assert result.value == INITIAL_CONTEXT_SUMMARY_QUESTION
+        mock_adapter.complete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_long_history_stays_under_total_prompt_cap(self) -> None:
@@ -644,6 +648,29 @@ class TestInterviewEngineRecordResponse:
 
         assert result.is_err
         assert isinstance(result.error, ValidationError)
+
+    @pytest.mark.asyncio
+    async def test_record_response_reopens_completed_long_context_for_summary(self) -> None:
+        """Completed long-context interviews can record the missing summary."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_completed_summary_repair",
+            initial_context=("A" * 4_000) + "ORIGINAL_TAIL",
+            status=InterviewStatus.COMPLETED,
+        )
+
+        result = await engine.record_response(
+            state,
+            user_response="Concise product summary",
+            question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+        )
+
+        assert result.is_ok
+        assert state.status == InterviewStatus.IN_PROGRESS
+        assert state.rounds[-1].question == INITIAL_CONTEXT_SUMMARY_QUESTION
+        assert prompt_safe_initial_context(state) == "Concise product summary"
 
     @pytest.mark.asyncio
     async def test_record_response_does_not_auto_complete(self) -> None:

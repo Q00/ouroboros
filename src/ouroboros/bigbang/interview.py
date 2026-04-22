@@ -168,18 +168,31 @@ class InterviewState(BaseModel):
         return self.status == InterviewStatus.COMPLETED
 
     @property
+    def needs_initial_context_summary(self) -> bool:
+        """True when oversized initial context has no recorded summary."""
+        if len(self.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
+            return False
+        return not any(
+            round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION
+            and bool(round_data.user_response)
+            for round_data in self.rounds
+        )
+
+    @property
     def can_reopen(self) -> bool:
         """True when a completed interview should be reopenable.
 
-        A completed interview is reopenable only when its stored ambiguity
-        score exceeds the seed-generation threshold — i.e. it was completed
-        prematurely and is now in a deadlock (can't generate seed, can't
-        resume).
+        A completed interview is reopenable when it is missing a required
+        long-context summary, or when its stored ambiguity score exceeds the
+        seed-generation threshold — i.e. it was completed prematurely and is
+        now in a deadlock (can't generate seed, can't resume).
         """
-        return (
-            self.is_complete
-            and self.ambiguity_score is not None
-            and self.ambiguity_score > self._SEED_READY_THRESHOLD
+        return self.is_complete and (
+            self.needs_initial_context_summary
+            or (
+                self.ambiguity_score is not None
+                and self.ambiguity_score > self._SEED_READY_THRESHOLD
+            )
         )
 
     def mark_updated(self) -> None:
@@ -214,8 +227,6 @@ def prompt_safe_initial_context(state: InterviewState) -> str:
     for round_data in reversed(state.rounds):
         if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
             return _truncate_prompt_safe_context(round_data.user_response)
-    if state.is_complete:
-        return _truncate_prompt_safe_context(state.initial_context)
     return INITIAL_CONTEXT_SUMMARY_REQUIRED
 
 
@@ -358,6 +369,9 @@ class InterviewEngine:
         Returns:
             Result containing the next question or error.
         """
+        if state.is_complete and state.needs_initial_context_summary:
+            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+
         if state.is_complete:
             return Result.err(
                 ValidationError(

@@ -280,34 +280,25 @@ class TestSeedGeneratorAmbiguityGating:
         assert "summary required" in result.error.message
 
     @pytest.mark.asyncio
-    async def test_generate_uses_truncated_context_for_completed_legacy_interview(
+    async def test_generate_requires_summary_for_completed_large_initial_context(
         self,
     ) -> None:
-        """Completed long-context interviews without summaries remain seedable."""
+        """Completed long-context interviews still enforce summary before seed generation."""
         mock_adapter = AsyncMock()
-        extraction_response = create_valid_extraction_response()
-        mock_adapter.complete = AsyncMock(
-            return_value=Result.ok(create_mock_completion_response(extraction_response))
-        )
         state = InterviewState(
             interview_id="test_completed_large_context",
             initial_context=("A" * 4_000) + "TAIL_MARKER",
             status=InterviewStatus.COMPLETED,
         )
         low_ambiguity = create_low_ambiguity_score()
+        generator = SeedGenerator(llm_adapter=mock_adapter)
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            generator = SeedGenerator(
-                llm_adapter=mock_adapter,
-                output_dir=Path(tmp_dir) / "seeds",
-            )
-            result = await generator.generate(state, low_ambiguity)
+        result = await generator.generate(state, low_ambiguity)
 
-        assert result.is_ok
-        messages = mock_adapter.complete.call_args[0][0]
-        prompt_content = "\n".join(message.content for message in messages)
-        assert "Context truncated for prompt safety" in prompt_content
-        assert "TAIL_MARKER" not in prompt_content
+        assert result.is_err
+        assert isinstance(result.error, ValidationError)
+        assert "summary required" in result.error.message
+        mock_adapter.complete.assert_not_called()
 
 
 class TestSeedGeneratorExtraction:
