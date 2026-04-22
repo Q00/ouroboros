@@ -207,7 +207,7 @@ class TestJobManager:
                 event_type="execution.terminal",
             )
 
-            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert await is_cancellation_requested(session_id) is False
             assert not session_cancelled
             assert not any(event.data.get("status") == "cancelled" for event in execution_cancelled)
@@ -253,7 +253,7 @@ class TestJobManager:
             )
             await asyncio.sleep(0)
 
-            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert await is_cancellation_requested(session_id) is False
             assert not session_cancelled
             assert not terminal_events
@@ -300,10 +300,57 @@ class TestJobManager:
             snapshot = await manager.cancel_job(started.job_id)
             await asyncio.sleep(0)
 
-            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert await is_cancellation_requested(session_id) is False
             assert runner_task.done() is True
         finally:
+            await clear_cancellation(session_id)
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_job_preserves_signal_when_runner_starts_during_cancel(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        session_id = "orch_start_race_123"
+        execution_id = "exec_start_race_123"
+        await clear_cancellation(session_id)
+
+        try:
+            await store.initialize()
+            repo = SessionRepository(store)
+            create_result = await repo.create_session(
+                execution_id=execution_id,
+                seed_id="seed_start_race_123",
+                session_id=session_id,
+            )
+            assert create_result.is_ok
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    acquire_session_lock(session_id)
+                    raise
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="start-race-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
+            )
+
+            snapshot = await manager.cancel_job(started.job_id)
+
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+            assert await is_cancellation_requested(session_id) is True
+        finally:
+            release_session_lock(session_id)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
@@ -342,7 +389,7 @@ class TestJobManager:
                 snapshot = await manager.cancel_job(started.job_id)
             await asyncio.sleep(0)
 
-            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert runner_task.done() is True
             assert await is_cancellation_requested(session_id) is False
         finally:
@@ -404,7 +451,7 @@ class TestJobManager:
                 event_type="execution.terminal",
             )
 
-            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert await is_cancellation_requested(session_id) is True
             assert runner_cancelled.is_set() is False
             assert runner_task.done() is False

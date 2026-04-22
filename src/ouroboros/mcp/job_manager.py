@@ -469,13 +469,22 @@ class JobManager:
             if linked_session_started:
                 return await self.get_snapshot(job_id)
 
+        cancelled_tasks: list[asyncio.Task[Any]] = []
         task = self._tasks.get(job_id)
         if task is not None and not task.done():
             task.cancel()
+            cancelled_tasks.append(task)
         runner_task = self._runner_tasks.get(job_id)
         if runner_task is not None and not runner_task.done():
             runner_task.cancel()
-        if snapshot.links.session_id and not linked_session_started:
+            cancelled_tasks.append(runner_task)
+        if cancelled_tasks:
+            await asyncio.wait(cancelled_tasks, timeout=5)
+        if (
+            snapshot.links.session_id
+            and not linked_session_started
+            and not is_holder_alive(snapshot.links.session_id)
+        ):
             await clear_cancellation(snapshot.links.session_id)
 
         return await self.get_snapshot(job_id)
