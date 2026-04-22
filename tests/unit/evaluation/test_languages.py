@@ -173,6 +173,18 @@ class TestBuildMechanicalConfigFromToml:
         config = build_mechanical_config(tmp_path)
         assert config.test_command is None
 
+    def test_path_escape_argument_in_toml_is_blocked(self, tmp_path: Path) -> None:
+        """Authored toml cannot point checks at sibling repos via arguments."""
+        (tmp_path / "repo").mkdir()
+        (tmp_path / "other").mkdir()
+        project = tmp_path / "repo"
+        (project / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        self._write_toml(project, 'test = "pytest ../other"\n')
+        config = build_mechanical_config(project)
+        assert config.test_command is None
+
     def test_toml_npm_install_is_blocked(self, tmp_path: Path) -> None:
         """npm install mutates state → must not become a Stage 1 command."""
         (tmp_path / "package.json").write_text('{"name": "demo"}')

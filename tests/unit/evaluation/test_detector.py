@@ -357,6 +357,87 @@ class TestExecutablePathEscapes:
         ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is False
 
+    def test_cargo_manifest_path_parent_escape_dropped(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        (other / "Cargo.toml").write_text('[package]\nname = "other"\n')
+        adapter = _FakeAdapter(
+            response=json.dumps({"test": "cargo test --manifest-path ../other/Cargo.toml"})
+        )
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_pytest_path_parent_escape_dropped(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest ../other"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_pytest_absolute_path_argument_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest /tmp/other"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_cargo_manifest_path_absolute_value_dropped(self, tmp_path: Path) -> None:
+        (tmp_path / "Cargo.toml").write_text('[package]\nname = "demo"\n')
+        adapter = _FakeAdapter(
+            response=json.dumps({"test": "cargo test --manifest-path=/tmp/Cargo.toml"})
+        )
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is False
+
+    def test_python_m_pytest_path_parent_escape_dropped(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        adapter = _FakeAdapter(response=json.dumps({"test": "python -m pytest ../other"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
+    def test_pytest_in_repo_path_argument_allowed(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        (tmp_path / "tests").mkdir()
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest tests -q"}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
+    def test_path_argument_symlink_escape_dropped(self, tmp_path: Path) -> None:
+        if not hasattr(Path, "symlink_to"):
+            pytest.skip("symlink support unavailable")
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        repo.mkdir()
+        other.mkdir()
+        (repo / "pyproject.toml").write_text(
+            '[project]\nname = "demo"\ndependencies = ["pytest>=8"]\n'
+        )
+        link = repo / "outside"
+        try:
+            link.symlink_to(other, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+        adapter = _FakeAdapter(response=json.dumps({"test": "pytest outside"}))
+        ok = _run(ensure_mechanical_toml(repo, adapter))
+        assert ok is False
+
 
 class TestFormatterCheckMode:
     """`cargo fmt` / `zig fmt` rewrite sources unless ``--check`` is set."""

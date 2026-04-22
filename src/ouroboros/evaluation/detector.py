@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil  # noqa: F401 — retained so tests can still patch ``detector.shutil.which``
 from typing import Literal
 
@@ -525,7 +525,62 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
     if "/" in raw_head and not (working_dir / raw_head).is_file():
         return False
 
+    if not _arguments_stay_within_repo(working_dir, parts[1:]):
+        return False
+
     return _verify_entry_point(working_dir, head, parts)
+
+
+def _arguments_stay_within_repo(working_dir: Path, args: list[str]) -> bool:
+    """Reject path-like arguments that can point outside ``working_dir``."""
+
+    for token in args:
+        for candidate in _argument_path_candidates(token):
+            if _path_argument_escapes_repo(working_dir, candidate):
+                return False
+    return True
+
+
+def _argument_path_candidates(token: str) -> tuple[str, ...]:
+    """Return raw argument values that could be interpreted as filesystem paths."""
+
+    if not token or token == "--":
+        return ()
+    if "=" in token:
+        value = token.split("=", 1)[1]
+        return (value,) if value else ()
+    return (token,)
+
+
+def _path_argument_escapes_repo(working_dir: Path, value: str) -> bool:
+    """Return True when an argument path is absolute or resolves outside repo."""
+
+    if not value or value == "--":
+        return False
+    if value.startswith("~"):
+        return True
+    path = Path(value)
+    if path.is_absolute() or PureWindowsPath(value).is_absolute():
+        return True
+    if ".." in path.parts or ".." in PureWindowsPath(value).parts:
+        return True
+    if _looks_like_path(working_dir, value):
+        candidate = (working_dir / value).resolve()
+        if not _path_is_within(working_dir, candidate):
+            return True
+    return False
+
+
+def _looks_like_path(working_dir: Path, value: str) -> bool:
+    """Heuristic for path-ish args; non-path flags and names are ignored."""
+
+    if value in {".", "./"}:
+        return True
+    if "/" in value or "\\" in value:
+        return True
+    if value.startswith("."):
+        return True
+    return (working_dir / value).exists()
 
 
 def _verify_entry_point(
