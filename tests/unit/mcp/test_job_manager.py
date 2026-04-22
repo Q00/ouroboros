@@ -225,6 +225,7 @@ class TestJobManager:
         session_id = "orch_pending_123"
         execution_id = "exec_pending_123"
         await clear_cancellation(session_id)
+        lock_path(session_id).unlink(missing_ok=True)
 
         try:
 
@@ -413,6 +414,15 @@ class TestJobManager:
         await clear_cancellation(session_id)
 
         try:
+            await store.initialize()
+            repo = SessionRepository(store)
+            create_result = await repo.create_session(
+                execution_id=execution_id,
+                seed_id="seed_inspection_fail_123",
+                session_id=session_id,
+            )
+            assert create_result.is_ok
+            lock_path(session_id).write_text("1")
 
             async def _runner() -> MCPToolResult:
                 await asyncio.sleep(10)
@@ -436,11 +446,17 @@ class TestJobManager:
             ):
                 snapshot = await manager.cancel_job(started.job_id)
             await asyncio.sleep(0)
+            session_cancelled = await store.query_events(
+                aggregate_id=session_id,
+                event_type="orchestrator.session.cancelled",
+            )
 
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert runner_task.done() is True
-            assert await is_cancellation_requested(session_id) is False
+            assert await is_cancellation_requested(session_id) is True
+            assert not session_cancelled
         finally:
+            lock_path(session_id).unlink(missing_ok=True)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
