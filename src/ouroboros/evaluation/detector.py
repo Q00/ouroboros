@@ -90,6 +90,7 @@ _MANIFEST_CANDIDATES: tuple[str, ...] = (
     "tsconfig.json",
     "build.xml",
     "WORKSPACE",
+    "WORKSPACE.bazel",
     "MODULE.bazel",
     "CMakeLists.txt",
     "noxfile.py",
@@ -526,16 +527,18 @@ def _command_is_valid(working_dir: Path, command: str) -> bool:
     if "/" in raw_head and not (working_dir / raw_head).is_file():
         return False
 
-    if not _arguments_stay_within_repo(working_dir, parts[1:]):
+    if not _arguments_stay_within_repo(working_dir, head, parts[1:]):
         return False
 
     return _verify_entry_point(working_dir, head, parts)
 
 
-def _arguments_stay_within_repo(working_dir: Path, args: list[str]) -> bool:
+def _arguments_stay_within_repo(working_dir: Path, head: str, args: list[str]) -> bool:
     """Reject path-like arguments that can point outside ``working_dir``."""
 
     for token in args:
+        if head == "bazel" and _is_bazel_label(token):
+            continue
         for candidate in _argument_path_candidates(token):
             if _path_argument_escapes_repo(working_dir, candidate):
                 return False
@@ -582,6 +585,12 @@ def _looks_like_path(working_dir: Path, value: str) -> bool:
     if value.startswith("."):
         return True
     return (working_dir / value).exists()
+
+
+def _is_bazel_label(value: str) -> bool:
+    """True for Bazel target labels such as ``//...`` or ``@repo//pkg:target``."""
+
+    return value.startswith("//") or (value.startswith("@") and "//" in value)
 
 
 def _verify_entry_point(

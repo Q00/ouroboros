@@ -1424,6 +1424,12 @@ class TestManifestCandidates:
             ok = _run(ensure_mechanical_toml(tmp_path, adapter))
         assert ok is True
 
+    def test_workspace_bazel_detects(self, tmp_path: Path) -> None:
+        (tmp_path / "WORKSPACE.bazel").write_text("# bazel workspace\n")
+        adapter = _FakeAdapter(response=json.dumps({"test": "bazel test //..."}))
+        ok = _run(ensure_mechanical_toml(tmp_path, adapter))
+        assert ok is True
+
 
 class TestPythonPackageManagerRun:
     """`poetry run <tool>` / `pdm run` / `hatch run` must validate the tool."""
