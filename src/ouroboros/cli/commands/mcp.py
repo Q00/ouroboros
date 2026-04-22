@@ -131,7 +131,13 @@ def _ensure_shell_env(*, timeout: float = 10.0) -> None:
         cmd = [shell, "-l", "-c", dump_cmd]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
         _stderr_console.print(f"[yellow]Warning: shell env load failed: {e}[/yellow]")
         return
