@@ -30,7 +30,7 @@ from ouroboros.orchestrator.runner import (
     is_cancellation_requested,
     request_cancellation,
 )
-from ouroboros.orchestrator.session import SessionTracker
+from ouroboros.orchestrator.session import SessionStatus, SessionTracker
 
 # =============================================================================
 # Fixtures
@@ -743,6 +743,63 @@ class TestInFlightCancellationGraceful:
         ]
         assert terminal_events
         assert terminal_events[-1].data["status"] == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_task_cancellation_preserves_existing_terminal_execution_state(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        sample_seed: Any,
+    ) -> None:
+        """Cancelling the wrapper after session terminal state does not emit cancelled terminal."""
+        stream_started = asyncio.Event()
+        tracker = SessionTracker.create(
+            "exec_terminal_cancel",
+            sample_seed.metadata.seed_id,
+            session_id="sess_terminal_cancel",
+        )
+        completed_tracker = tracker.with_status(SessionStatus.COMPLETED)
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            stream_started.set()
+            await asyncio.sleep(10)
+            yield AgentMessage(type="result", content="Done", data={"subtype": "success"})
+
+        mock_adapter.execute_task = mock_execute
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                new=AsyncMock(return_value=Result.ok(completed_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_cancelled",
+                new=AsyncMock(return_value=Result.ok(None)),
+            ) as mark_cancelled_mock,
+        ):
+            task = asyncio.create_task(
+                runner.execute_precreated_session(
+                    sample_seed,
+                    tracker,
+                    parallel=False,
+                )
+            )
+            await asyncio.wait_for(stream_started.wait(), timeout=1)
+            task.cancel()
+            result = await asyncio.wait_for(task, timeout=1)
+
+        assert result.is_ok
+        assert result.value.success is False
+        mark_cancelled_mock.assert_not_awaited()
+        terminal_events = [
+            call.args[0]
+            for call in mock_event_store.append.await_args_list
+            if call.args and getattr(call.args[0], "type", "") == "execution.terminal"
+        ]
+        assert not [event for event in terminal_events if event.data.get("status") == "cancelled"]
 
     @pytest.mark.asyncio
     async def test_cancellation_mid_stream_preserves_partial_results(

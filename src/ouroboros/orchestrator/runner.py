@@ -1373,7 +1373,8 @@ class OrchestratorRunner:
         # Only mark cancelled if not already in a terminal state
         session_result = await self._session_repo.reconstruct_session(session_id)
         _terminal = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
-        if session_result.is_ok and session_result.value.status not in _terminal:
+        session_already_terminal = session_result.is_ok and session_result.value.status in _terminal
+        if not session_already_terminal:
             cancel_result = await self._session_repo.mark_cancelled(
                 session_id,
                 reason="Cancellation detected during execution",
@@ -1386,16 +1387,16 @@ class OrchestratorRunner:
                     error=str(cancel_result.error),
                 )
 
-        # Mirror cancellation into execution stream for TUI.
-        await self._event_store.append(
-            create_execution_terminal_event(
-                execution_id=execution_id,
-                session_id=session_id,
-                status="cancelled",
-                error_message="Execution cancelled by external request",
-                messages_processed=messages_processed,
+            # Mirror cancellation into execution stream for TUI.
+            await self._event_store.append(
+                create_execution_terminal_event(
+                    execution_id=execution_id,
+                    session_id=session_id,
+                    status="cancelled",
+                    error_message="Execution cancelled by external request",
+                    messages_processed=messages_processed,
+                )
             )
-        )
 
         # Display cancellation notice
         self._console.print(
