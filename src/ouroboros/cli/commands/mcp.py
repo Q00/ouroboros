@@ -189,6 +189,7 @@ async def _run_mcp_server(
 
     from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
     from ouroboros.orchestrator.session import SessionRepository
+    from ouroboros.persistence.brownfield import BrownfieldStore
     from ouroboros.persistence.event_store import EventStore
 
     # Validate transport early, before any expensive startup work
@@ -203,8 +204,10 @@ async def _run_mcp_server(
     # Create EventStore with custom path if provided
     if db_path:
         event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
+        brownfield_store = BrownfieldStore(f"sqlite+aiosqlite:///{db_path}")
     else:
         event_store = EventStore()
+        brownfield_store = BrownfieldStore()
 
     cleanup_task: asyncio.Task[None] | None = None
 
@@ -214,6 +217,7 @@ async def _run_mcp_server(
     # handshake on startup (#304).
     try:
         await event_store.initialize()
+        await brownfield_store.initialize()
     except Exception as e:
         # Auto-cleanup is best-effort — don't prevent server from starting
         _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
@@ -258,6 +262,7 @@ async def _run_mcp_server(
         name="ouroboros-mcp",
         version="1.0.0",
         event_store=event_store,
+        brownfield_store=brownfield_store,
         runtime_backend=runtime_backend,
         llm_backend=llm_backend,
         mcp_bridge=mcp_bridge,

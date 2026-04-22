@@ -365,6 +365,16 @@ class TestBrownfieldHandlerDispatch:
         assert result.is_ok
         assert "scan" in result.value.text_content.lower()
 
+    @pytest.mark.asyncio
+    async def test_injected_store_initializes_once(self) -> None:
+        store = _make_store_stub(repos=[_REPO_A], default=_REPO_A)
+        handler = BrownfieldHandler(_store=store)
+
+        await handler.handle({"action": "query"})
+        await handler.handle({"action": "query"})
+
+        store.initialize.assert_awaited_once()
+
 
 # ── Pagination tests ──────────────────────────────────────────────
 

@@ -838,3 +838,132 @@ class TestCreateOuroborosServerOpenCodeMode:
             assert captured_modes.get(name), f"{name} was not constructed"
             assert all(backend == "opencode" for backend, _mode in captured_modes[name])
             assert all(mode == "plugin" for _backend, mode in captured_modes[name])
+
+
+class TestCreateOuroborosServerBrownfieldStore:
+    """Verify create_ouroboros_server() can share a brownfield store."""
+
+    def test_injected_store_is_shared_with_handler_and_owned_by_server(self):
+        """Shared brownfield stores should be injected and closed with the server."""
+        import contextlib
+        from unittest.mock import MagicMock, patch
+
+        captured_handler_kwargs: dict[str, object] = {}
+
+        class _BrownfieldHandler:
+            def __init__(self, **kwargs):
+                captured_handler_kwargs.update(kwargs)
+                self.definition = MagicMock(name="ouroboros_brownfield")
+
+        def _simple_mock_handler(name: str) -> type:
+            class _H:
+                def __init__(self, **kwargs):
+                    self.definition = MagicMock(name=name)
+
+            return _H
+
+        mock_event_store = MagicMock()
+        mock_event_store.initialize = MagicMock()
+        mock_brownfield_store = MagicMock()
+
+        patch_targets = {
+            "ouroboros.orchestrator.resolve_agent_runtime_backend": MagicMock(
+                return_value="claude"
+            ),
+            "ouroboros.orchestrator.create_agent_runtime": MagicMock(return_value=MagicMock()),
+            "ouroboros.providers.create_llm_adapter": MagicMock(return_value=MagicMock()),
+            "ouroboros.bigbang.interview.InterviewEngine": MagicMock(),
+            "ouroboros.bigbang.seed_generator.SeedGenerator": MagicMock(),
+            "ouroboros.evaluation.EvaluationPipeline": MagicMock(),
+            "ouroboros.evolution.loop.EvolutionaryLoop": MagicMock(),
+            "ouroboros.evolution.wonder.WonderEngine": MagicMock(),
+            "ouroboros.evolution.reflect.ReflectEngine": MagicMock(),
+            "ouroboros.verification.extractor.AssertionExtractor": MagicMock(),
+            "ouroboros.mcp.job_manager.JobManager": MagicMock(),
+            "ouroboros.mcp.tools.definitions.ExecuteSeedHandler": _simple_mock_handler(
+                "ouroboros_execute_seed"
+            ),
+            "ouroboros.mcp.tools.definitions.StartExecuteSeedHandler": _simple_mock_handler(
+                "ouroboros_start_execute_seed"
+            ),
+            "ouroboros.mcp.tools.definitions.SessionStatusHandler": _simple_mock_handler(
+                "ouroboros_session_status"
+            ),
+            "ouroboros.mcp.tools.definitions.JobStatusHandler": _simple_mock_handler(
+                "ouroboros_job_status"
+            ),
+            "ouroboros.mcp.tools.definitions.JobWaitHandler": _simple_mock_handler(
+                "ouroboros_job_wait"
+            ),
+            "ouroboros.mcp.tools.definitions.JobResultHandler": _simple_mock_handler(
+                "ouroboros_job_result"
+            ),
+            "ouroboros.mcp.tools.definitions.CancelJobHandler": _simple_mock_handler(
+                "ouroboros_cancel_job"
+            ),
+            "ouroboros.mcp.tools.definitions.QueryEventsHandler": _simple_mock_handler(
+                "ouroboros_query_events"
+            ),
+            "ouroboros.mcp.tools.definitions.GenerateSeedHandler": _simple_mock_handler(
+                "ouroboros_generate_seed"
+            ),
+            "ouroboros.mcp.tools.definitions.MeasureDriftHandler": _simple_mock_handler(
+                "ouroboros_measure_drift"
+            ),
+            "ouroboros.mcp.tools.definitions.InterviewHandler": _simple_mock_handler(
+                "ouroboros_interview"
+            ),
+            "ouroboros.mcp.tools.definitions.EvaluateHandler": _simple_mock_handler(
+                "ouroboros_evaluate"
+            ),
+            "ouroboros.mcp.tools.definitions.LateralThinkHandler": _simple_mock_handler(
+                "ouroboros_lateral_think"
+            ),
+            "ouroboros.mcp.tools.definitions.EvolveStepHandler": _simple_mock_handler(
+                "ouroboros_evolve_step"
+            ),
+            "ouroboros.mcp.tools.definitions.StartEvolveStepHandler": _simple_mock_handler(
+                "ouroboros_start_evolve_step"
+            ),
+            "ouroboros.mcp.tools.definitions.LineageStatusHandler": _simple_mock_handler(
+                "ouroboros_lineage_status"
+            ),
+            "ouroboros.mcp.tools.definitions.EvolveRewindHandler": _simple_mock_handler(
+                "ouroboros_evolve_rewind"
+            ),
+            "ouroboros.mcp.tools.definitions.ACDashboardHandler": _simple_mock_handler(
+                "ouroboros_ac_dashboard"
+            ),
+            "ouroboros.mcp.tools.definitions.ACTreeHUDHandler": _simple_mock_handler(
+                "ouroboros_ac_tree_hud"
+            ),
+            "ouroboros.mcp.tools.definitions.CancelExecutionHandler": _simple_mock_handler(
+                "ouroboros_cancel_execution"
+            ),
+            "ouroboros.mcp.tools.pm_handler.PMInterviewHandler": _simple_mock_handler(
+                "ouroboros_pm_interview"
+            ),
+            "ouroboros.mcp.tools.brownfield_handler.BrownfieldHandler": _BrownfieldHandler,
+            "ouroboros.mcp.tools.qa.QAHandler": _simple_mock_handler("ouroboros_qa"),
+            "ouroboros.mcp.tools.registry.ToolRegistry": MagicMock(),
+            "ouroboros.config.get_opencode_mode": MagicMock(return_value="subprocess"),
+            "ouroboros.config.get_clarification_model": MagicMock(return_value="test-model"),
+            "ouroboros.config.get_semantic_model": MagicMock(return_value="test-model"),
+            "ouroboros.config.get_wonder_model": MagicMock(return_value="test-model"),
+            "ouroboros.config.get_reflect_model": MagicMock(return_value="test-model"),
+            "ouroboros.config.get_assertion_extraction_model": MagicMock(return_value="test-model"),
+        }
+
+        with contextlib.ExitStack() as stack:
+            for target, mock_obj in patch_targets.items():
+                stack.enter_context(patch(target, mock_obj))
+
+            from ouroboros.mcp.server.adapter import create_ouroboros_server
+
+            server = create_ouroboros_server(
+                event_store=mock_event_store,
+                brownfield_store=mock_brownfield_store,
+            )
+
+        assert captured_handler_kwargs["_store"] is mock_brownfield_store
+        assert server._owned_resources == [mock_event_store, mock_brownfield_store]

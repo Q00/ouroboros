@@ -721,6 +721,7 @@ def create_ouroboros_server(
     auth_config: AuthConfig | None = None,
     rate_limit_config: RateLimitConfig | None = None,
     event_store: Any | None = None,
+    brownfield_store: Any | None = None,
     state_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
@@ -746,6 +747,8 @@ def create_ouroboros_server(
         auth_config: Optional authentication configuration.
         rate_limit_config: Optional rate limiting configuration.
         event_store: Optional EventStore instance. If not provided, creates default.
+        brownfield_store: Optional BrownfieldStore instance for shared brownfield
+            MCP access. If not provided, handlers create their own store.
         state_dir: Optional pathlib.Path for interview state directory.
                    If not provided, uses ``get_config_dir() / "data"``
                    (typically ``~/.ouroboros/data``).
@@ -1397,7 +1400,7 @@ def create_ouroboros_server(
             agent_runtime_backend=resolved_runtime_backend,
             opencode_mode=opencode_mode,
         ),
-        BrownfieldHandler(),
+        BrownfieldHandler(_store=brownfield_store),
         EvaluateHandler(
             event_store=event_store,
             llm_backend=llm_backend,
@@ -1450,6 +1453,8 @@ def create_ouroboros_server(
 
     # The server owns the shared event store lifecycle
     server.register_owned_resource(event_store)
+    if brownfield_store is not None:
+        server.register_owned_resource(brownfield_store)
 
     # Inject bridge into all BridgeAwareMixin handlers (loop-based auto-discovery)
     if mcp_bridge is not None:
