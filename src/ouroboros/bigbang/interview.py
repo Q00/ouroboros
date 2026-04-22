@@ -360,9 +360,7 @@ class InterviewEngine:
             initial_context=effective_initial_context,
         )
         preserve_prefix_messages = (
-            1
-            if len(effective_initial_context) > self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS
-            else 0
+            1 if len(effective_initial_context) > self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS else 0
         )
         conversation_history = self._trim_messages_to_budget(
             conversation_history,
