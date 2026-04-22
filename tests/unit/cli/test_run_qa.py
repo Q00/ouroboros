@@ -120,6 +120,14 @@ def test_resolve_max_parallel_workers_reads_env(monkeypatch: pytest.MonkeyPatch)
     assert _resolve_max_parallel_workers() == 5
 
 
+def test_resolve_max_parallel_workers_reads_config_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parallel worker caps should fall back to config when env override is absent."""
+    monkeypatch.delenv("OUROBOROS_MAX_PARALLEL_WORKERS", raising=False)
+
+    with patch("ouroboros.cli.commands.run.get_max_parallel_workers", return_value=5):
+        assert _resolve_max_parallel_workers() == 5
+
+
 @pytest.mark.asyncio
 async def test_run_orchestrator_passes_artifact_and_reference_to_qa(tmp_path: Path) -> None:
     """CLI QA should use the generated verification artifact and raw reference."""

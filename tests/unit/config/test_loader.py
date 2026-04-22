@@ -26,6 +26,7 @@ from ouroboros.config.loader import (
     get_dependency_analysis_model,
     get_double_diamond_model,
     get_llm_backend,
+    get_max_parallel_workers,
     get_llm_permission_mode,
     get_ontology_analysis_model,
     get_opencode_cli_path,
@@ -506,6 +507,25 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_agent_permission_mode(backend="opencode") == "bypassPermissions"
+
+    def test_get_max_parallel_workers_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for max parallel workers."""
+        monkeypatch.setenv("OUROBOROS_MAX_PARALLEL_WORKERS", "5")
+
+        assert get_max_parallel_workers() == 5
+
+    def test_get_max_parallel_workers_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent for max parallel workers."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(max_parallel_workers=5)
+                ),
+            ),
+        ):
+            assert get_max_parallel_workers() == 5
 
 
 class TestLLMHelperLookups:

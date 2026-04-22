@@ -17,6 +17,7 @@ from rich.console import Console
 import structlog
 import yaml
 
+from ouroboros.config.loader import get_max_parallel_workers
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
@@ -450,6 +451,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     inherited_tools=inherited_effective_tools,
                     task_workspace=workspace,
                     checkpoint_store=checkpoint_store,
+                    max_parallel_workers=get_max_parallel_workers(),
                 )
 
                 skip_qa = arguments.get("skip_qa", False)

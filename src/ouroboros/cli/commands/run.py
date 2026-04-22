@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.config.loader import get_max_parallel_workers
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.worktree import (
@@ -233,7 +234,7 @@ def _resolve_max_parallel_workers() -> int:
             env_value,
             source="OUROBOROS_MAX_PARALLEL_WORKERS",
         )
-    return 3
+    return get_max_parallel_workers()
 
 
 async def _initialize_mcp_manager(

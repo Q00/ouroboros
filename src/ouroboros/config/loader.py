@@ -472,6 +472,29 @@ def get_agent_permission_mode(backend: str | None = None) -> str:
         return "bypassPermissions" if _uses_opencode_backend(backend) else "acceptEdits"
 
 
+def get_max_parallel_workers() -> int:
+    """Get the default AC worker cap from environment variable or config.
+
+    Priority:
+        1. OUROBOROS_MAX_PARALLEL_WORKERS environment variable
+        2. config.yaml orchestrator.max_parallel_workers
+        3. built-in default (3)
+    """
+    env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
+    if env_value:
+        try:
+            parsed = int(env_value)
+        except ValueError:
+            return 3
+        return parsed if parsed > 0 else 3
+
+    try:
+        config = load_config()
+        return config.orchestrator.max_parallel_workers
+    except ConfigError:
+        return 3
+
+
 def get_codex_cli_path() -> str | None:
     """Get Codex CLI path from environment variable or config file.
 
