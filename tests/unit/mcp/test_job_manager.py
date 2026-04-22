@@ -160,14 +160,24 @@ class TestJobManager:
         finally:
             await store.close()
 
-    async def test_cancel_job_skips_linked_session_already_terminal(self, tmp_path) -> None:
+    async def test_cancel_job_stops_task_when_linked_session_already_terminal(
+        self, tmp_path
+    ) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
+        session_id = "orch_terminal_123"
+        execution_id = "exec_terminal_123"
+        await clear_cancellation(session_id)
+        runner_cancelled = asyncio.Event()
 
         try:
 
             async def _runner() -> MCPToolResult:
-                await asyncio.sleep(10)
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    runner_cancelled.set()
+                    raise
                 return MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
                     is_error=False,
@@ -177,25 +187,29 @@ class TestJobManager:
                 job_type="terminal-session-race",
                 initial_message="queued",
                 runner=_runner(),
-                links=JobLinks(session_id="orch_terminal_123", execution_id="exec_terminal_123"),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
             )
             repo = SessionRepository(store)
-            mark_result = await repo.mark_completed("orch_terminal_123")
+            mark_result = await repo.mark_completed(session_id)
             assert mark_result.is_ok
 
-            await manager.cancel_job(started.job_id)
+            snapshot = await manager.cancel_job(started.job_id)
+            await asyncio.wait_for(runner_cancelled.wait(), timeout=1)
             session_cancelled = await store.query_events(
-                aggregate_id="orch_terminal_123",
+                aggregate_id=session_id,
                 event_type="orchestrator.session.cancelled",
             )
             execution_cancelled = await store.query_events(
-                aggregate_id="exec_terminal_123",
+                aggregate_id=execution_id,
                 event_type="execution.terminal",
             )
 
+            assert snapshot.status == JobStatus.CANCEL_REQUESTED
+            assert await is_cancellation_requested(session_id) is False
             assert not session_cancelled
             assert not any(event.data.get("status") == "cancelled" for event in execution_cancelled)
         finally:
+            await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
             await store.close()
 
@@ -223,6 +237,7 @@ class TestJobManager:
                 runner=_runner(),
                 links=JobLinks(session_id=session_id, execution_id=execution_id),
             )
+            runner_task = manager._runner_tasks[started.job_id]
 
             snapshot = await manager.cancel_job(started.job_id)
             session_cancelled = await store.query_events(
@@ -233,13 +248,13 @@ class TestJobManager:
                 aggregate_id=execution_id,
                 event_type="execution.terminal",
             )
-            runner_task = manager._runner_tasks[started.job_id]
+            await asyncio.sleep(0)
 
             assert snapshot.status == JobStatus.CANCEL_REQUESTED
-            assert await is_cancellation_requested(session_id) is True
+            assert await is_cancellation_requested(session_id) is False
             assert not session_cancelled
             assert not terminal_events
-            assert runner_task.done() is False
+            assert runner_task.done() is True
         finally:
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)

@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.runner import request_cancellation
+from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 
@@ -431,6 +431,7 @@ class JobManager:
 
         linked_session_repo: SessionRepository | None = None
         linked_session_started = False
+        linked_session_terminal = False
         if snapshot.links.session_id:
             linked_session_repo = SessionRepository(self._event_store)
             session_result = await linked_session_repo.reconstruct_session(
@@ -446,7 +447,7 @@ class JobManager:
                 SessionStatus.CANCELLED,
             }
             linked_session_started = session_result.is_ok
-            if linked_session_terminal or any(
+            linked_session_terminal = linked_session_terminal or any(
                 event.type
                 in {
                     "orchestrator.session.completed",
@@ -454,18 +455,13 @@ class JobManager:
                     "orchestrator.session.cancelled",
                 }
                 for event in terminal_events
-            ):
-                return snapshot
+            )
 
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
         if snapshot.links.session_id:
-            await request_cancellation(snapshot.links.session_id)
-            if linked_session_started:
-                runner_task = self._runner_tasks.get(job_id)
-                if runner_task is not None and not runner_task.done():
-                    runner_task.cancel()
-            return await self.get_snapshot(job_id)
+            if not linked_session_terminal:
+                await request_cancellation(snapshot.links.session_id)
 
         task = self._tasks.get(job_id)
         if task is not None and not task.done():
@@ -473,6 +469,8 @@ class JobManager:
         runner_task = self._runner_tasks.get(job_id)
         if runner_task is not None and not runner_task.done():
             runner_task.cancel()
+        if snapshot.links.session_id and not linked_session_started:
+            await clear_cancellation(snapshot.links.session_id)
 
         return await self.get_snapshot(job_id)
 
