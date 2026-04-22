@@ -457,6 +457,8 @@ class PMInterviewEngine:
             return question_result
 
         question = question_result.value
+        if question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+            return Result.ok(question)
 
         # Classify the question
         context = self._build_interview_context(state)
@@ -980,7 +982,12 @@ class PMInterviewEngine:
         Returns:
             Result containing PMSeed or error.
         """
-        if not state.rounds:
+        substantive_rounds = [
+            round_data
+            for round_data in state.rounds
+            if round_data.question != INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response
+        ]
+        if not substantive_rounds:
             return Result.err(
                 ValidationError(
                     "Cannot generate PM seed from empty interview",

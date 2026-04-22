@@ -467,6 +467,25 @@ class TestAskNextQuestion:
         assert result.value == planning_q
 
     @pytest.mark.asyncio
+    async def test_initial_context_summary_question_bypasses_classification(
+        self, tmp_path: Path
+    ) -> None:
+        """Long-context recovery prompt is returned verbatim, not classified."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_summary_recovery",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        assert result.value == INITIAL_CONTEXT_SUMMARY_QUESTION
+        adapter.complete.assert_not_called()
+        assert engine.classifications == []
+
+    @pytest.mark.asyncio
     async def test_deferred_question_returned_to_user(self, tmp_path: Path) -> None:
         """DEV-only questions marked as defer_to_dev are returned to the user."""
         adapter = _make_adapter()
@@ -1021,6 +1040,30 @@ class TestPMSeedGeneration:
 
         result = await engine.generate_pm_seed(state)
         assert result.is_err
+
+    @pytest.mark.asyncio
+    async def test_summary_only_interview_returns_empty_error(self, tmp_path: Path) -> None:
+        """Synthetic summary recovery alone is not substantive PM interview content."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_summary_only_pm_seed",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            status=InterviewStatus.COMPLETED,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="Concise product summary",
+                ),
+            ],
+        )
+
+        result = await engine.generate_pm_seed(state)
+
+        assert result.is_err
+        assert "empty interview" in result.error.message
+        adapter.complete.assert_not_called()
 
 
 class TestSavePMSeed:
