@@ -477,6 +477,31 @@ class TestBuildInterviewSubagent:
         assert latest_answer in p.prompt
         assert "older context " * 20 not in p.prompt
 
+    def test_answer_prompt_compacts_multiline_latest_round_by_markers(self) -> None:
+        latest_question = (
+            "**Q7:** Should subscription control be server-side or client-side?\n"
+            "Please decide this before Seed generation."
+        )
+        transcript = (
+            "**Q6:** Previous question\n"
+            "**A6:** Previous answer\n\n"
+            f"{latest_question}\n"
+            f"**A7:** Server-side should own it.\n\n{'code line\\n' * 500}"
+        )
+
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Server-side should own it.",
+            transcript=transcript,
+        )
+
+        assert "**Q7:** Should subscription control be server-side or client-side?" in p.prompt
+        assert "Please decide this before Seed generation." in p.prompt
+        assert "**A7:** Server-side should own it." in p.prompt
+        assert "code line\n" * 100 not in p.prompt
+        assert len(p.prompt) < 5_000
+
     def test_answer_prompt_falls_back_when_seed_closer_summary_missing(self, monkeypatch) -> None:
         from ouroboros.agents import loader
 

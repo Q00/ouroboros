@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any
 
 import structlog
@@ -248,42 +249,73 @@ def _truncate_prompt_line(line: str, max_content_chars: int) -> str:
     return f"{prefix}{content[:max_content_chars]}... [truncated]"
 
 
-def _compact_latest_transcript_block(block: str) -> str:
-    """Preserve the latest transcript round as a unit while bounding long fields."""
-    compacted_lines: list[str] = []
-    for line in block.splitlines():
-        if line.startswith("**Q"):
-            compacted_lines.append(
-                _truncate_prompt_line(line, _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS)
-            )
-        elif line.startswith("**A"):
-            compacted_lines.append(
-                _truncate_prompt_line(line, _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS)
-            )
-        else:
-            compacted_lines.append(line)
-    return "\n".join(compacted_lines)
+_TRANSCRIPT_Q_MARKER_RE = re.compile(r"(?m)^\*\*Q\d+:\*\* ")
+_TRANSCRIPT_A_MARKER_RE = re.compile(r"(?m)^\*\*A\d+:\*\* ")
+
+
+def _compact_transcript_section(section: str, max_content_chars: int) -> str:
+    """Compact a marked Q/A section while preserving the marker."""
+    lines = section.splitlines()
+    if not lines:
+        return ""
+
+    marker = ":** "
+    first_line = lines[0]
+    if marker not in first_line:
+        return _truncate_tail(section, max_content_chars)
+
+    prefix, first_content = first_line.split(marker, 1)
+    prefix = f"{prefix}{marker}"
+    content_parts = [first_content, *lines[1:]]
+    content = "\n".join(content_parts).rstrip()
+    if len(content) <= max_content_chars:
+        return section
+    return f"{prefix}{content[:max_content_chars]}... [truncated]"
+
+
+def _compact_latest_transcript_round(round_text: str) -> str:
+    """Preserve the latest transcript round as Q/A sections while bounding content."""
+    answer_match = _TRANSCRIPT_A_MARKER_RE.search(round_text)
+    if answer_match is None:
+        return _compact_transcript_section(
+            round_text,
+            _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS,
+        )
+
+    question_section = round_text[: answer_match.start()].rstrip()
+    answer_section = round_text[answer_match.start() :].rstrip()
+    compacted_question = _compact_transcript_section(
+        question_section,
+        _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS,
+    )
+    compacted_answer = _compact_transcript_section(
+        answer_section,
+        _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS,
+    )
+    return f"{compacted_question}\n{compacted_answer}"
 
 
 def _compact_interview_transcript(transcript: str) -> str:
     """Compact transcript history without splitting the latest Q/A block."""
-    blocks = [block.strip() for block in transcript.split("\n\n") if block.strip()]
-    if not blocks:
-        return ""
-
-    if not any(line.startswith("**Q") for line in blocks[-1].splitlines()):
+    question_matches = list(_TRANSCRIPT_Q_MARKER_RE.finditer(transcript))
+    if not question_matches:
         return _truncate_tail(transcript, _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS)
 
-    latest_block = _compact_latest_transcript_block(blocks[-1])
-    previous = "\n\n".join(blocks[:-1])
+    latest_start = question_matches[-1].start()
+    latest_round = transcript[latest_start:].strip()
+    if not latest_round:
+        return ""
+
+    compacted_latest_round = _compact_latest_transcript_round(latest_round)
+    previous = transcript[:latest_start].strip()
     if not previous:
-        return latest_block
+        return compacted_latest_round
 
     previous_tail = _truncate_tail(
         previous,
         _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS,
     )
-    return f"{previous_tail}\n\n{latest_block}"
+    return f"{previous_tail}\n\n{compacted_latest_round}"
 
 
 def _load_seed_closer_summary() -> str:
