@@ -431,6 +431,41 @@ class TestAskNextQuestion:
         assert engine.classifications[0].category == QuestionCategory.DEVELOPMENT
 
     @pytest.mark.asyncio
+    async def test_pm_steering_wrapper_accepts_prompt_budget_kwargs(self, tmp_path: Path) -> None:
+        """PM prompt wrapper remains compatible with InterviewEngine prompt budgeting."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        planning_q = "Who are the target users?"
+
+        adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(_mock_completion(planning_q)),
+                Result.ok(
+                    _mock_completion(
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": planning_q,
+                                "reasoning": "Target users are a PM concern",
+                                "defer_to_dev": False,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+
+        state = InterviewState(
+            interview_id="test_pm_budget_kwargs",
+            initial_context=("A" * 3_489) + "TAIL_MARKER",
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        assert result.value == planning_q
+
+    @pytest.mark.asyncio
     async def test_deferred_question_returned_to_user(self, tmp_path: Path) -> None:
         """DEV-only questions marked as defer_to_dev are returned to the user."""
         adapter = _make_adapter()
