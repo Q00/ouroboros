@@ -1380,7 +1380,7 @@ class OrchestratorRunner:
                 reason="Cancellation detected during execution",
                 cancelled_by="runner",
             )
-            if cancel_result.is_err:
+            if cancel_result is not None and cancel_result.is_err:
                 log.warning(
                     "orchestrator.runner.mark_cancelled_failed",
                     session_id=session_id,
