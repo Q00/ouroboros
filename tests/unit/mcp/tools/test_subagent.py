@@ -446,6 +446,50 @@ class TestBuildInterviewSubagent:
         assert "T" * 1_000 not in p.prompt
         assert len(p.prompt) < 5_000
 
+    def test_answer_prompt_preserves_latest_transcript_round(self) -> None:
+        latest_question = "**Q7:** Should subscription control be server-side or client-side?"
+        latest_answer = "**A7:** Server-side should own the final decision."
+        transcript = (
+            f"**Q6:** {'older context ' * 80}\n"
+            f"**A6:** {'older answer ' * 80}\n\n"
+            f"{latest_question}\n{latest_answer}"
+        )
+
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Server-side should own the final decision.",
+            transcript=transcript,
+        )
+
+        assert latest_question in p.prompt
+        assert latest_answer in p.prompt
+        assert "older context " * 20 not in p.prompt
+
+    def test_answer_prompt_falls_back_when_seed_closer_summary_missing(self, monkeypatch) -> None:
+        from ouroboros.agents import loader
+
+        def fake_load_agent_prompt(agent_name: str) -> str:
+            if agent_name == "socratic-interviewer":
+                return "SOCRATIC INTERVIEWER PROMPT"
+            raise FileNotFoundError(agent_name)
+
+        def fake_load_agent_section(agent_name: str, section: str) -> str:
+            if agent_name == "seed-closer" and section == "YOUR APPROACH":
+                return "FALLBACK SEED CLOSER APPROACH"
+            raise KeyError(section)
+
+        monkeypatch.setattr(loader, "load_agent_prompt", fake_load_agent_prompt)
+        monkeypatch.setattr(loader, "load_agent_section", fake_load_agent_section)
+
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Python with FastAPI",
+        )
+
+        assert "FALLBACK SEED CLOSER APPROACH" in p.prompt
+
     def test_context_preserves_session_id(self) -> None:
         p = build_interview_subagent(
             session_id="sess-123",

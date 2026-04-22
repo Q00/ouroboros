@@ -47,7 +47,9 @@ from ouroboros.mcp.types import (
 log = structlog.get_logger(__name__)
 
 _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS = 600
-_INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_CHARS = 300
+_INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS = 200
+_INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS = 900
+_INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
 
 # ---------------------------------------------------------------------------
@@ -224,6 +226,74 @@ def _truncate_tail(text: str | None, max_chars: int) -> str:
     return "[truncated]\n" + text[-max_chars:]
 
 
+def _truncate_prompt_line(line: str, max_content_chars: int) -> str:
+    """Bound one formatted transcript line without losing its Q/A label."""
+    marker = ":** "
+    if marker not in line:
+        return line if len(line) <= max_content_chars else line[:max_content_chars] + "..."
+
+    prefix, content = line.split(marker, 1)
+    prefix = f"{prefix}{marker}"
+    if len(content) <= max_content_chars:
+        return line
+    return f"{prefix}{content[:max_content_chars]}... [truncated]"
+
+
+def _compact_latest_transcript_block(block: str) -> str:
+    """Preserve the latest transcript round as a unit while bounding long fields."""
+    compacted_lines: list[str] = []
+    for line in block.splitlines():
+        if line.startswith("**Q"):
+            compacted_lines.append(
+                _truncate_prompt_line(line, _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS)
+            )
+        elif line.startswith("**A"):
+            compacted_lines.append(
+                _truncate_prompt_line(line, _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS)
+            )
+        else:
+            compacted_lines.append(line)
+    return "\n".join(compacted_lines)
+
+
+def _compact_interview_transcript(transcript: str) -> str:
+    """Compact transcript history without splitting the latest Q/A block."""
+    blocks = [block.strip() for block in transcript.split("\n\n") if block.strip()]
+    if not blocks:
+        return ""
+
+    if not any(line.startswith("**Q") for line in blocks[-1].splitlines()):
+        return _truncate_tail(transcript, _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS)
+
+    latest_block = _compact_latest_transcript_block(blocks[-1])
+    previous = "\n\n".join(blocks[:-1])
+    if not previous:
+        return latest_block
+
+    previous_tail = _truncate_tail(
+        previous,
+        _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS,
+    )
+    return f"{previous_tail}\n\n{latest_block}"
+
+
+def _load_seed_closer_summary() -> str:
+    """Load the compact Seed Closer guard, tolerating older custom prompt overrides."""
+    from ouroboros.agents.loader import load_agent_section
+
+    try:
+        return load_agent_section("seed-closer", "CLOSURE GATE SUMMARY")
+    except (FileNotFoundError, KeyError):
+        try:
+            return _truncate_tail(load_agent_section("seed-closer", "YOUR APPROACH"), 900)
+        except (FileNotFoundError, KeyError):
+            return (
+                "- Do not treat ambiguity <= 0.2 as sufficient for closure.\n"
+                "- Do not close if unresolved decisions would materially change implementation.\n"
+                "- Ask the highest-impact follow-up question when a material gap remains."
+            )
+
+
 async def emit_subagent_dispatched_event(
     event_store: Any | None,
     *,
@@ -391,14 +461,14 @@ def build_interview_subagent(
         transcript: Full conversation history (Q&A pairs) for context
             continuity across subagent invocations.
     """
-    from ouroboros.agents.loader import load_agent_prompt, load_agent_section
+    from ouroboros.agents.loader import load_agent_prompt
 
     system_prompt = load_agent_prompt("socratic-interviewer")
-    seed_closer_summary = load_agent_section("seed-closer", "CLOSURE GATE SUMMARY")
+    seed_closer_summary = _load_seed_closer_summary()
 
     transcript_section = ""
     if transcript:
-        bounded_transcript = _truncate_tail(transcript, _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_CHARS)
+        bounded_transcript = _compact_interview_transcript(transcript)
         transcript_section = f"\n## Conversation History\n{bounded_transcript}\n"
 
     bounded_initial_context = _truncate_tail(
