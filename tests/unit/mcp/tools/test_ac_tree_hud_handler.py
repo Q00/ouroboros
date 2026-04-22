@@ -662,11 +662,11 @@ class TestACTreeHUDHandler:
         assert "├─ ● AC 1: First criterion" in tool_result.text_content
         assert "└─ ○ AC 3: Third criterion" in tool_result.text_content
 
-    async def test_handle_defaults_to_summary_view(
+    async def test_handle_defaults_to_tree_view(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """Default handler output should avoid rendering the full tree."""
+        """Omitting view should preserve the legacy full-tree handler output."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
@@ -701,10 +701,22 @@ class TestACTreeHUDHandler:
         result = await handler.handle({"session_id": "sess_default_summary", "cursor": 0})
 
         assert result.is_ok
-        assert result.value.meta["view"] == "summary"
-        assert "Status: running | Phase: deliver | AC: 1/3" in result.value.text_content
-        assert "Cursor: " in result.value.text_content
-        assert "◇ Acceptance Criteria" not in result.value.text_content
+        assert result.value.meta["view"] == "tree"
+        assert "Status: running" in result.value.text_content
+        assert "Phase: deliver" in result.value.text_content
+        assert "Progress: 1/3 AC complete" in result.value.text_content
+        assert "◇ Acceptance Criteria" in result.value.text_content
+        assert "├─ ● AC 1: First criterion" in result.value.text_content
+        assert "└─ ○ AC 2: Second criterion" in result.value.text_content
+
+        summary_result = await handler.handle(
+            {"session_id": "sess_default_summary", "cursor": 0, "view": "summary"}
+        )
+
+        assert summary_result.is_ok
+        assert summary_result.value.meta["view"] == "summary"
+        assert "Status: running | Phase: deliver | AC: 1/3" in summary_result.value.text_content
+        assert "◇ Acceptance Criteria" not in summary_result.value.text_content
 
     async def test_handle_renders_explicit_tree_with_fallback_activity_state(
         self,
@@ -833,11 +845,11 @@ class TestACTreeHUDHandler:
         assert "│  ├─ ● Child 1" in text
         assert "│  ├─ ◐ Child 2  [working]" in text
 
-    async def test_handle_returns_delta_one_liner_when_only_non_progress_events_are_new(
+    async def test_handle_preserves_tree_delta_text_when_only_non_progress_events_are_new(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """A newer cursor with no new progress event returns the compact unchanged line."""
+        """Default tree view should preserve the legacy unchanged response text."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
@@ -887,17 +899,17 @@ class TestACTreeHUDHandler:
 
         assert delta_result.is_ok
         tool_result = delta_result.value
-        assert tool_result.text_content == f"unchanged cursor={tool_result.meta['cursor']}"
+        assert tool_result.text_content == f"No AC tree change since cursor {initial_cursor}."
         assert tool_result.meta["session_id"] == "sess_delta"
         assert tool_result.meta["execution_id"] == "exec_delta"
         assert tool_result.meta["changed"] is False
         assert tool_result.meta["cursor"] > initial_cursor
 
-    async def test_handle_returns_delta_one_liner_when_no_events_arrive_after_cursor(
+    async def test_handle_returns_summary_delta_one_liner_when_no_events_arrive_after_cursor(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """An unchanged cursor returns the same compact delta line without a full rerender."""
+        """Explicit summary view may use the compact unchanged cursor line."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
@@ -929,12 +941,16 @@ class TestACTreeHUDHandler:
         )
 
         handler = ACTreeHUDHandler(event_store=memory_event_store)
-        initial_result = await handler.handle({"session_id": "sess_idle", "cursor": 0})
+        initial_result = await handler.handle(
+            {"session_id": "sess_idle", "cursor": 0, "view": "summary"}
+        )
 
         assert initial_result.is_ok
         initial_cursor = initial_result.value.meta["cursor"]
 
-        delta_result = await handler.handle({"session_id": "sess_idle", "cursor": initial_cursor})
+        delta_result = await handler.handle(
+            {"session_id": "sess_idle", "cursor": initial_cursor, "view": "summary"}
+        )
 
         assert delta_result.is_ok
         tool_result = delta_result.value
@@ -944,11 +960,11 @@ class TestACTreeHUDHandler:
         assert tool_result.meta["changed"] is False
         assert tool_result.meta["cursor"] == initial_cursor
 
-    async def test_handle_returns_delta_one_liner_when_new_progress_repeats_fallback_snapshot(
+    async def test_handle_preserves_tree_delta_text_when_new_progress_repeats_fallback_snapshot(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """Repeated fallback-only progress snapshots should collapse to the unchanged delta line."""
+        """Repeated fallback snapshots should not change default tree response contracts."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
@@ -1017,17 +1033,17 @@ class TestACTreeHUDHandler:
 
         assert delta_result.is_ok
         tool_result = delta_result.value
-        assert tool_result.text_content == f"unchanged cursor={tool_result.meta['cursor']}"
+        assert tool_result.text_content == f"No AC tree change since cursor {initial_cursor}."
         assert tool_result.meta["session_id"] == "sess_fallback_delta"
         assert tool_result.meta["execution_id"] == "exec_fallback_delta"
         assert tool_result.meta["changed"] is False
         assert tool_result.meta["cursor"] > initial_cursor
 
-    async def test_handle_returns_delta_one_liner_when_explicit_fallback_tree_repeats(
+    async def test_handle_preserves_tree_delta_text_when_explicit_fallback_tree_repeats(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """Repeated explicit-tree fallback states should not force a full rerender."""
+        """Repeated explicit-tree fallback states should keep tree unchanged text."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
@@ -1097,7 +1113,7 @@ class TestACTreeHUDHandler:
 
         assert delta_result.is_ok
         tool_result = delta_result.value
-        assert tool_result.text_content == f"unchanged cursor={tool_result.meta['cursor']}"
+        assert tool_result.text_content == f"No AC tree change since cursor {initial_cursor}."
         assert tool_result.meta["session_id"] == "sess_explicit_fallback_delta"
         assert tool_result.meta["execution_id"] == "exec_explicit_fallback_delta"
         assert tool_result.meta["changed"] is False

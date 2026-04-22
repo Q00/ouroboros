@@ -76,7 +76,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      session_id: <existing session ID>
    ```
 
-5. **Default monitoring stance: relay compact progress in the main session.**
+5. **Recommended monitoring stance: relay compact progress in the main session.**
 
    After IDs are returned, print only this short handoff:
 
@@ -87,7 +87,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    Execution ID: <execution_id>
 
    I will wait in low-token relay mode and report only meaningful state changes.
-   For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>, view="tree")`
+   For full details later: `ouroboros_ac_tree_hud(session_id=<session_id>)`
    ```
 
    Rationale: the main chat session must wait for MCP calls. Frequent full-tree
@@ -193,7 +193,7 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
    Use these targeted calls:
 
    ```
-   # Default short HUD, useful for a one-off check
+   # Explicit short HUD, useful for a one-off check
    Tool: ouroboros_ac_tree_hud
    Arguments:
      session_id: <session_id>
@@ -217,8 +217,9 @@ The Ouroboros MCP tools are often registered as **deferred tools** that must be 
      max_nodes: 30
    ```
 
-   Treat `unchanged cursor=<cursor>` as a no-op. Do not explain it to the user
-   unless they explicitly asked for heartbeat messages.
+   Treat `unchanged cursor=<cursor>` from explicit compact/summary views as a
+   no-op. Do not explain it to the user unless they explicitly asked for
+   heartbeat messages.
 
 8. **Fetch final result** with `ouroboros_job_result`:
    ```
