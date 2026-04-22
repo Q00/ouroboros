@@ -455,7 +455,7 @@ class TestInterviewEngineAskNextQuestion:
         engine = InterviewEngine(llm_adapter=mock_adapter)
         state = InterviewState(
             interview_id="test_long_history",
-            initial_context="X" * 3500,
+            initial_context=("X" * 3489) + "TAIL_MARKER",
         )
         for i in range(8):
             state.rounds.append(
@@ -470,7 +470,10 @@ class TestInterviewEngineAskNextQuestion:
 
         assert result.is_ok
         messages = mock_adapter.complete.call_args[0][0]
+        prompt_content = "\n".join(message.content for message in messages)
         assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert "Additional initial context omitted" in prompt_content
+        assert "TAIL_MARKER" in prompt_content
 
     @pytest.mark.asyncio
     async def test_ask_question_with_history(self) -> None:

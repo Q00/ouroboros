@@ -359,9 +359,15 @@ class InterviewEngine:
             state,
             initial_context=effective_initial_context,
         )
+        preserve_prefix_messages = (
+            1
+            if len(effective_initial_context) > self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS
+            else 0
+        )
         conversation_history = self._trim_messages_to_budget(
             conversation_history,
             max_chars=self._MAX_TOTAL_PROMPT_CHARS - self._MIN_SYSTEM_PROMPT_CHARS,
+            preserve_prefix_messages=preserve_prefix_messages,
         )
 
         # Generate next question
@@ -917,14 +923,35 @@ class InterviewEngine:
         messages: list[Message],
         *,
         max_chars: int,
+        preserve_prefix_messages: int = 0,
     ) -> list[Message]:
-        """Keep the newest conversation messages within a character budget."""
+        """Keep durable prefix messages plus newest conversation within a budget."""
         if sum(len(message.content) for message in messages) <= max_chars:
             return messages
 
+        prefix = messages[:preserve_prefix_messages]
+        remaining_messages = messages[preserve_prefix_messages:]
+        prefix_chars = sum(len(message.content) for message in prefix)
+        if prefix_chars >= max_chars:
+            retained_prefix: list[Message] = []
+            used_prefix_chars = 0
+            for message in prefix:
+                remaining = max_chars - used_prefix_chars
+                if remaining <= 0:
+                    break
+                if len(message.content) <= remaining:
+                    retained_prefix.append(message)
+                    used_prefix_chars += len(message.content)
+                else:
+                    retained_prefix.append(
+                        Message(role=message.role, content=message.content[:remaining])
+                    )
+                    break
+            return retained_prefix
+
         retained: list[Message] = []
-        used_chars = 0
-        for message in reversed(messages):
+        used_chars = prefix_chars
+        for message in reversed(remaining_messages):
             remaining = max_chars - used_chars
             if remaining <= 0:
                 break
@@ -934,7 +961,7 @@ class InterviewEngine:
             else:
                 retained.append(Message(role=message.role, content=message.content[-remaining:]))
                 break
-        return list(reversed(retained))
+        return [*prefix, *reversed(retained)]
 
     async def complete_interview(
         self, state: InterviewState
