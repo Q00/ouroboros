@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewEngine,
     InterviewRound,
     InterviewState,
@@ -667,6 +668,77 @@ class TestAskNextQuestion:
         assert result.output_type == ClassifierOutputType.DECIDE_LATER
         # Returned to user so they can choose to answer or defer
         assert result.question_for_pm == "How should we handle scaling?"
+
+
+class TestPMInterviewContext:
+    """Test PM interview context construction."""
+
+    def test_context_uses_prompt_safe_initial_context_and_skips_summary_round(
+        self, tmp_path: Path
+    ) -> None:
+        """PM contexts avoid raw oversized initial context and synthetic summary Q&A."""
+        engine = _make_engine(tmp_path=tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_large_context",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response=("B" * 4_000) + "SUMMARY_TAIL",
+                ),
+                InterviewRound(
+                    round_number=2,
+                    question="Who are the target users?",
+                    user_response="Small teams",
+                ),
+            ],
+        )
+
+        context = engine._build_interview_context(state)
+
+        assert "Context truncated for prompt safety" in context
+        assert "RAW_TAIL" not in context
+        assert "SUMMARY_TAIL" not in context
+        assert INITIAL_CONTEXT_SUMMARY_QUESTION not in context
+        assert "Who are the target users?" in context
+        assert "Small teams" in context
+
+
+class TestCheckCompletion:
+    """Test PM interview completion checks."""
+
+    @pytest.mark.asyncio
+    async def test_summary_round_does_not_count_toward_minimum_rounds(self, tmp_path: Path) -> None:
+        """Initial-context summary recovery is not a substantive PM answer."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_summary_round_count",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="Concise product summary",
+                ),
+                InterviewRound(
+                    round_number=2,
+                    question="Who are the users?",
+                    user_response="Small teams",
+                ),
+                InterviewRound(
+                    round_number=3,
+                    question="What problem do they have?",
+                    user_response="Tracking work",
+                ),
+            ],
+        )
+
+        result = await engine.check_completion(state)
+
+        assert result is None
+        adapter.complete.assert_not_called()
 
 
 class TestRecordResponse:

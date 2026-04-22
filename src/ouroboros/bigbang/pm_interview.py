@@ -29,9 +29,11 @@ from ouroboros.bigbang.brownfield import (
 )
 from ouroboros.bigbang.explore import CodebaseExplorer, format_explore_results
 from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
+    prompt_safe_initial_context,
 )
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
 from ouroboros.bigbang.question_classifier import (
@@ -882,8 +884,13 @@ class PMInterviewEngine:
             Dict with completion metadata if the interview should end,
             or ``None`` if the interview should continue.
         """
-        # Count only answered rounds (exclude the pending unanswered round)
-        answered_rounds = sum(1 for r in state.rounds if r.user_response is not None)
+        # Count only substantive answered rounds (exclude pending and synthetic
+        # initial-context summary recovery rounds).
+        answered_rounds = sum(
+            1
+            for r in state.rounds
+            if r.user_response is not None and r.question != INITIAL_CONTEXT_SUMMARY_QUESTION
+        )
 
         # ── Ambiguity check (only after minimum rounds) ────────────────
         if answered_rounds < MIN_ROUNDS_BEFORE_EARLY_EXIT:
@@ -1101,9 +1108,11 @@ class PMInterviewEngine:
         Returns:
             Formatted context string.
         """
-        parts = [f"Initial Context: {state.initial_context}"]
+        parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
         for round_data in state.rounds:
+            if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+                continue
             parts.append(f"\nQ: {round_data.question}")
             if round_data.user_response:
                 parts.append(f"A: {round_data.user_response}")
