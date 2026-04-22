@@ -441,7 +441,7 @@ class TestJobManager:
             runner_task = manager._runner_tasks[started.job_id]
 
             snapshot = await manager.cancel_job(started.job_id)
-            await asyncio.sleep(0.05)
+            await asyncio.wait_for(runner_cancelled.wait(), timeout=1)
             session_cancelled = await store.query_events(
                 aggregate_id=session_id,
                 event_type="orchestrator.session.cancelled",
@@ -453,8 +453,8 @@ class TestJobManager:
 
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
             assert await is_cancellation_requested(session_id) is True
-            assert runner_cancelled.is_set() is False
-            assert runner_task.done() is False
+            assert runner_cancelled.is_set() is True
+            assert runner_task.done() is True
             assert not session_cancelled
             assert not terminal_events
         finally:

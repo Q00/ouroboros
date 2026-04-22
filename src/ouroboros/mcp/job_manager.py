@@ -466,8 +466,6 @@ class JobManager:
         if snapshot.links.session_id:
             if not linked_session_terminal:
                 await request_cancellation(snapshot.links.session_id)
-            if linked_session_started:
-                return await self.get_snapshot(job_id)
 
         cancelled_tasks: list[asyncio.Task[Any]] = []
         task = self._tasks.get(job_id)
