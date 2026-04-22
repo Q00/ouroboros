@@ -440,15 +440,11 @@ class JobManager:
                 aggregate_id=snapshot.links.session_id,
                 limit=10,
             )
-            linked_session_terminal = (
-                session_result.is_ok
-                and session_result.value.status
-                in {
-                    SessionStatus.COMPLETED,
-                    SessionStatus.FAILED,
-                    SessionStatus.CANCELLED,
-                }
-            )
+            linked_session_terminal = session_result.is_ok and session_result.value.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }
             linked_session_started = session_result.is_ok
             if linked_session_terminal or any(
                 event.type
