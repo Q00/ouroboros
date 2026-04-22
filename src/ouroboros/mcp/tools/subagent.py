@@ -46,6 +46,10 @@ from ouroboros.mcp.types import (
 
 log = structlog.get_logger(__name__)
 
+_INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS = 600
+_INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_CHARS = 300
+_INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
+
 # ---------------------------------------------------------------------------
 # SubagentPayload dataclass
 # ---------------------------------------------------------------------------
@@ -209,6 +213,15 @@ def should_dispatch_via_plugin(
         return False
     mode = (opencode_mode or "").strip().lower()
     return mode == "plugin"
+
+
+def _truncate_tail(text: str | None, max_chars: int) -> str:
+    """Keep prompt inputs bounded while preserving the most recent context."""
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return "[truncated]\n" + text[-max_chars:]
 
 
 async def emit_subagent_dispatched_event(
@@ -378,21 +391,28 @@ def build_interview_subagent(
         transcript: Full conversation history (Q&A pairs) for context
             continuity across subagent invocations.
     """
-    from ouroboros.agents.loader import load_agent_prompt
+    from ouroboros.agents.loader import load_agent_prompt, load_agent_section
 
     system_prompt = load_agent_prompt("socratic-interviewer")
-    seed_closer_prompt = load_agent_prompt("seed-closer")
+    seed_closer_summary = load_agent_section("seed-closer", "CLOSURE GATE SUMMARY")
 
     transcript_section = ""
     if transcript:
-        transcript_section = f"\n## Conversation History\n{transcript}\n"
+        bounded_transcript = _truncate_tail(transcript, _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_CHARS)
+        transcript_section = f"\n## Conversation History\n{bounded_transcript}\n"
+
+    bounded_initial_context = _truncate_tail(
+        initial_context,
+        _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS,
+    )
+    bounded_answer = _truncate_tail(answer, _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS)
 
     seed_ready_guard = f"""
 ## Seed-ready Guard
-Before declaring ready, apply the canonical Seed Closer instructions below.
+Before declaring ready, apply the canonical Seed Closer closure gate summary.
 Do not treat ambiguity <= 0.2 as sufficient for closure.
 
-{seed_closer_prompt}"""
+{seed_closer_summary}"""
 
     if action == "start" and initial_context:
         prompt = f"""{system_prompt}
@@ -406,7 +426,7 @@ Ask probing questions to reduce ambiguity. Score ambiguity after each exchange.
 {seed_ready_guard}
 
 ## Initial Context
-{initial_context}
+{bounded_initial_context}
 
 ## Session ID
 {session_id}
@@ -429,7 +449,7 @@ and ask the next clarifying question or declare ready only after the Seed-ready 
 {session_id}
 {transcript_section}
 ## User's Latest Answer
-{answer}
+{bounded_answer}
 
 Continue the interview."""
 

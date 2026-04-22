@@ -414,11 +414,15 @@ class TestBuildInterviewSubagent:
         def fake_load_agent_prompt(agent_name: str) -> str:
             if agent_name == "socratic-interviewer":
                 return "SOCRATIC INTERVIEWER PROMPT"
-            if agent_name == "seed-closer":
-                return "CANONICAL SEED CLOSER PROMPT"
             raise FileNotFoundError(agent_name)
 
+        def fake_load_agent_section(agent_name: str, section: str) -> str:
+            if agent_name == "seed-closer" and section == "CLOSURE GATE SUMMARY":
+                return "CANONICAL SEED CLOSER SUMMARY"
+            raise KeyError(section)
+
         monkeypatch.setattr(loader, "load_agent_prompt", fake_load_agent_prompt)
+        monkeypatch.setattr(loader, "load_agent_section", fake_load_agent_section)
 
         p = build_interview_subagent(
             session_id="sess-123",
@@ -427,7 +431,20 @@ class TestBuildInterviewSubagent:
         )
 
         assert "SOCRATIC INTERVIEWER PROMPT" in p.prompt
-        assert "CANONICAL SEED CLOSER PROMPT" in p.prompt
+        assert "CANONICAL SEED CLOSER SUMMARY" in p.prompt
+
+    def test_answer_prompt_bounds_large_transcript_and_answer(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="A" * 5_000,
+            transcript="T" * 5_000,
+        )
+
+        assert "[truncated]" in p.prompt
+        assert "A" * 1_000 not in p.prompt
+        assert "T" * 1_000 not in p.prompt
+        assert len(p.prompt) < 5_000
 
     def test_context_preserves_session_id(self) -> None:
         p = build_interview_subagent(
