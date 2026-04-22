@@ -16,6 +16,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "EventPayload": ("ouroboros.core.types", "EventPayload"),
     "CostUnits": ("ouroboros.core.types", "CostUnits"),
     "DriftScore": ("ouroboros.core.types", "DriftScore"),
+    # Control-plane directive vocabulary
+    "Directive": ("ouroboros.core.directive", "Directive"),
     # Errors
     "OuroborosError": ("ouroboros.core.errors", "OuroborosError"),
     "ProviderError": ("ouroboros.core.errors", "ProviderError"),
