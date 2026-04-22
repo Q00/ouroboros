@@ -390,6 +390,17 @@ class TestBuildInterviewSubagent:
         )
         assert "Build a REST API" in p.prompt
 
+    def test_start_prompt_bounds_initial_context_from_head(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="start",
+            initial_context="PRIMARY GOAL: Build a REST API. " + ("details " * 1_000),
+        )
+        assert "PRIMARY GOAL: Build a REST API." in p.prompt
+        assert "[truncated]" in p.prompt
+        assert "details " * 200 not in p.prompt
+        assert len(p.prompt) < 5_000
+
     def test_answer_prompt_includes_answer(self) -> None:
         p = build_interview_subagent(
             session_id="sess-123",

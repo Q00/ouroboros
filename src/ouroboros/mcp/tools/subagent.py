@@ -226,6 +226,15 @@ def _truncate_tail(text: str | None, max_chars: int) -> str:
     return "[truncated]\n" + text[-max_chars:]
 
 
+def _truncate_head(text: str | None, max_chars: int) -> str:
+    """Keep prompt inputs bounded while preserving the opening context."""
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n[truncated]"
+
+
 def _truncate_prompt_line(line: str, max_content_chars: int) -> str:
     """Bound one formatted transcript line without losing its Q/A label."""
     marker = ":** "
@@ -471,7 +480,7 @@ def build_interview_subagent(
         bounded_transcript = _compact_interview_transcript(transcript)
         transcript_section = f"\n## Conversation History\n{bounded_transcript}\n"
 
-    bounded_initial_context = _truncate_tail(
+    bounded_initial_context = _truncate_head(
         initial_context,
         _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS,
     )
