@@ -1065,6 +1065,32 @@ class TestPMSeedGeneration:
         assert "empty interview" in result.error.message
         adapter.complete.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_large_context_without_summary_returns_summary_required(
+        self, tmp_path: Path
+    ) -> None:
+        """PM seed generation enforces the long-context summary requirement."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_seed_missing_summary",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            status=InterviewStatus.COMPLETED,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="Who are the target users?",
+                    user_response="Small teams",
+                ),
+            ],
+        )
+
+        result = await engine.generate_pm_seed(state)
+
+        assert result.is_err
+        assert "summary required" in result.error.message
+        adapter.complete.assert_not_called()
+
 
 class TestSavePMSeed:
     """Test PMSeed persistence."""

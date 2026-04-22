@@ -33,6 +33,7 @@ from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
     InterviewEngine,
     InterviewState,
+    initial_context_summary_missing,
     prompt_safe_initial_context,
 )
 from ouroboros.bigbang.pm_seed import PMSeed, UserStory
@@ -1000,6 +1001,15 @@ class PMInterviewEngine:
                 ValidationError(
                     "Cannot generate PM seed from incomplete interview — complete the interview first",
                     field="is_complete",
+                )
+            )
+
+        if initial_context_summary_missing(state):
+            return Result.err(
+                ValidationError(
+                    "Initial context summary required before PM seed generation",
+                    field="initial_context",
+                    details={"interview_id": state.interview_id},
                 )
             )
 
