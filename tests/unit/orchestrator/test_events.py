@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ouroboros.orchestrator.capabilities import build_capability_graph
 from ouroboros.orchestrator.events import (
+    create_ac_postmortem_captured_event,
     create_policy_capabilities_evaluated_event,
     create_progress_event,
     create_session_cancelled_event,
@@ -14,6 +15,10 @@ from ouroboros.orchestrator.events import (
     create_task_completed_event,
     create_task_started_event,
     create_tool_called_event,
+)
+from ouroboros.orchestrator.level_context import (
+    ACContextSummary,
+    ACPostmortem,
 )
 from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 from ouroboros.orchestrator.policy import (
@@ -319,3 +324,80 @@ class TestEventAggregateTypes:
 
         for event in events:
             assert event.aggregate_type == "session"
+
+
+class TestPostmortemCapturedEvent:
+    """Tests for execution.ac.postmortem.captured event."""
+
+    def _mk_pm(self, *, status: str = "pass") -> ACPostmortem:
+        summary = ACContextSummary(
+            ac_index=2,
+            ac_content="Add JWT auth",
+            success=(status == "pass"),
+            files_modified=("src/auth.py",),
+        )
+        return ACPostmortem(
+            summary=summary,
+            diff_summary=" src/auth.py | 42 +++",
+            invariants_established=("AUTH_HEADER required",),
+            status=status,  # type: ignore[arg-type]
+            duration_seconds=1.5,
+        )
+
+    def test_basic_event_shape(self) -> None:
+        event = create_ac_postmortem_captured_event(
+            session_id="sess_1",
+            ac_index=2,
+            ac_id="ac_2",
+            postmortem=self._mk_pm(),
+            execution_id="exec_1",
+            retry_attempt=0,
+        )
+        assert event.type == "execution.ac.postmortem.captured"
+        assert event.aggregate_type == "execution"
+        assert event.aggregate_id == "ac_2"
+        assert event.data["session_id"] == "sess_1"
+        assert event.data["execution_id"] == "exec_1"
+        assert event.data["ac_index"] == 2
+        assert event.data["retry_attempt"] == 0
+        assert event.data["status"] == "pass"
+        assert "timestamp" in event.data
+
+    def test_postmortem_payload_round_trippable(self) -> None:
+        from ouroboros.orchestrator.level_context import deserialize_postmortem_chain
+
+        event = create_ac_postmortem_captured_event(
+            session_id="sess_1",
+            ac_index=2,
+            ac_id="ac_2",
+            postmortem=self._mk_pm(),
+        )
+        # The serialized single postmortem should round-trip via the
+        # chain deserializer without loss.
+        chain = deserialize_postmortem_chain([event.data["postmortem"]])
+        assert len(chain.postmortems) == 1
+        pm = chain.postmortems[0]
+        assert pm.summary.ac_content == "Add JWT auth"
+        assert pm.invariants_established == ("AUTH_HEADER required",)
+        assert pm.diff_summary == " src/auth.py | 42 +++"
+        assert pm.status == "pass"
+
+    def test_retry_attempt_captured(self) -> None:
+        event = create_ac_postmortem_captured_event(
+            session_id="sess_1",
+            ac_index=2,
+            ac_id="ac_2",
+            postmortem=self._mk_pm(status="fail"),
+            retry_attempt=3,
+        )
+        assert event.data["retry_attempt"] == 3
+        assert event.data["status"] == "fail"
+
+    def test_execution_id_optional(self) -> None:
+        event = create_ac_postmortem_captured_event(
+            session_id="sess_1",
+            ac_index=0,
+            ac_id="ac_0",
+            postmortem=self._mk_pm(),
+        )
+        assert "execution_id" not in event.data

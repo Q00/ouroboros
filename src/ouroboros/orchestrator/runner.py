@@ -23,6 +23,7 @@ import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import uuid4
 
@@ -225,9 +226,43 @@ async def get_pending_cancellations() -> frozenset[str]:
 # =============================================================================
 
 
+# Max bytes of CLAUDE.md content injected into the system prompt. Bounds
+# prompt growth on projects with very large guidance files while still
+# covering typical project CLAUDE.md sizes.
+_MAX_CLAUDE_MD_CHARS = 10_000
+
+
+def _load_claude_md_snapshot(workspace_root: str | None) -> str:
+    """Read CLAUDE.md from the workspace root and return a bounded snapshot.
+
+    Returns an empty string when the file is absent, unreadable, or the
+    workspace root is None. Callers concatenate unconditionally.
+
+    Snapshot semantics: callers are expected to read this exactly once per
+    execution and reuse the string across all ACs in that run — this keeps
+    the system prefix stable for prompt-cache hits and avoids mid-run drift
+    if the user edits CLAUDE.md while the loop is running.
+    """
+    if not workspace_root:
+        return ""
+    try:
+        candidate = Path(workspace_root) / "CLAUDE.md"
+        if not candidate.is_file():
+            return ""
+        content = candidate.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if len(content) > _MAX_CLAUDE_MD_CHARS:
+        content = content[:_MAX_CLAUDE_MD_CHARS].rstrip() + "\n\n…(truncated)"
+    return content
+
+
 def build_system_prompt(
     seed: Seed,
     strategy: ExecutionStrategy | None = None,
+    *,
+    include_claude_md: bool = False,
+    workspace_root: str | None = None,
 ) -> str:
     """Build system prompt from seed specification.
 
@@ -235,6 +270,12 @@ def build_system_prompt(
         seed: Seed to extract system prompt from.
         strategy: Execution strategy for prompt customization.
             If None, uses strategy from seed.task_type.
+        include_claude_md: When True, read CLAUDE.md from ``workspace_root``
+            and prepend a "## Project Guidance" section to the prompt.
+            Default False so existing parallel-mode callers produce a
+            byte-identical prompt to pre-feature behavior.
+        workspace_root: Directory to resolve CLAUDE.md against when
+            ``include_claude_md`` is True. Ignored otherwise.
 
     Returns:
         System prompt string.
@@ -278,7 +319,18 @@ IMPORTANT: You are extending existing code, NOT creating a new project.
     ac_tracking = get_ac_tracking_prompt()
     strategy_fragment = strategy.get_system_prompt_fragment()
 
-    return f"""{strategy_fragment}
+    claude_md_section = ""
+    if include_claude_md:
+        snapshot = _load_claude_md_snapshot(workspace_root)
+        if snapshot:
+            claude_md_section = (
+                "## Project Guidance (CLAUDE.md)\n"
+                "The following is the project's CLAUDE.md, pinned at run start.\n"
+                "Treat it as authoritative unless overridden by Goal or Constraints.\n\n"
+                f"{snapshot}\n\n"
+            )
+
+    return f"""{claude_md_section}{strategy_fragment}
 
 ## Goal
 {seed.goal}
@@ -1425,6 +1477,7 @@ class OrchestratorRunner:
         session_id: str | None = None,
         parallel: bool = True,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        mode: str | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed via Claude Agent.
 
@@ -1436,10 +1489,14 @@ class OrchestratorRunner:
             seed: Seed specification to execute.
             execution_id: Optional execution ID. Generated if not provided.
             session_id: Optional session ID to preallocate for external tracking.
-            parallel: Enable parallel AC execution. When True, independent ACs
-                     run concurrently. Default: True (parallel execution).
+            parallel: Legacy flag. Kept for backward compatibility. When
+                ``mode`` is None, True maps to "parallel" and False to the
+                degenerate single-call path. Prefer ``mode`` in new code.
             externally_satisfied_acs: Top-level ACs already satisfied by the
                 current working tree and therefore skipped for re-execution.
+            mode: Execution mode. One of "parallel" (default), or
+                "compounding" (serial per-AC loop with postmortem chain).
+                When None, derived from ``parallel``.
 
         Returns:
             Result containing OrchestratorResult on success.
@@ -1452,6 +1509,7 @@ class OrchestratorRunner:
             "seed": seed,
             "tracker": session_result.value,
             "parallel": parallel,
+            "mode": mode,
         }
         if externally_satisfied_acs:
             execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
@@ -1508,10 +1566,22 @@ class OrchestratorRunner:
         tracker: SessionTracker,
         parallel: bool = True,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        mode: str | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute a seed using an already-persisted orchestrator session."""
         exec_id = tracker.execution_id
         start_time = datetime.now(UTC)
+
+        # Resolve execution mode. Explicit ``mode`` wins; else derive from
+        # the legacy ``parallel`` flag so existing callers keep working.
+        resolved_mode = mode or ("parallel" if parallel else "parallel_degenerate")
+        if resolved_mode not in {"parallel", "compounding", "parallel_degenerate"}:
+            return Result.err(
+                OrchestratorError(
+                    message=f"Unknown execution mode: {resolved_mode!r}",
+                    details={"mode": resolved_mode},
+                )
+            )
 
         # Control console logging based on debug mode
         from ouroboros.observability.logging import set_console_logging
@@ -1524,6 +1594,7 @@ class OrchestratorRunner:
             session_id=tracker.session_id,
             seed_id=seed.metadata.seed_id,
             goal=seed.goal[:100],
+            mode=resolved_mode,
         )
         session_registered = False
 
@@ -1532,9 +1603,24 @@ class OrchestratorRunner:
             self._register_session(exec_id, tracker.session_id)
             session_registered = True
 
-            # Build prompts with strategy
+            # Build prompts with strategy. In compounding mode pin CLAUDE.md
+            # into the system prefix so per-AC sessions inherit project
+            # guidance (Claude-CLI auto-load doesn't apply to SDK sessions).
             strategy = get_strategy(seed.task_type)
-            system_prompt = build_system_prompt(seed, strategy=strategy)
+            if resolved_mode == "compounding":
+                workspace_root = (
+                    self._task_workspace.worktree_path
+                    if self._task_workspace is not None
+                    else self._effective_cwd()
+                )
+                system_prompt = build_system_prompt(
+                    seed,
+                    strategy=strategy,
+                    include_claude_md=True,
+                    workspace_root=workspace_root,
+                )
+            else:
+                system_prompt = build_system_prompt(seed, strategy=strategy)
             task_prompt = build_task_prompt(seed, strategy=strategy)
 
             # Get merged tools (strategy tools + MCP tools if configured)
@@ -1559,8 +1645,10 @@ class OrchestratorRunner:
                 activity_map=strategy.get_activity_map(),
             )
 
-            # Check for parallel execution mode
-            if parallel and len(seed.acceptance_criteria) > 1:
+            # Dispatch to the staged executor (parallel or serial compounding).
+            # Both modes share dependency analysis and result synthesis — the
+            # only difference is which executor class runs the staged plan.
+            if resolved_mode in {"parallel", "compounding"} and len(seed.acceptance_criteria) > 1:
                 parallel_kwargs: dict[str, Any] = {
                     "seed": seed,
                     "exec_id": exec_id,
@@ -1569,6 +1657,7 @@ class OrchestratorRunner:
                     "tool_catalog": tool_catalog,
                     "system_prompt": system_prompt,
                     "start_time": start_time,
+                    "mode": resolved_mode,
                 }
                 if externally_satisfied_acs:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
@@ -1900,6 +1989,7 @@ class OrchestratorRunner:
         system_prompt: str,
         start_time: datetime,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
+        mode: str = "parallel",
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed with parallel AC execution.
 
@@ -1979,18 +2069,36 @@ class OrchestratorRunner:
                 f"  Stage {stage.stage_number}: ACs {[idx + 1 for idx in stage.ac_indices]}"
             )
 
-        # Execute in parallel
-        parallel_executor = ParallelACExecutor(
-            adapter=self._adapter,
-            event_store=self._event_store,
-            console=self._console,
-            enable_decomposition=self._enable_decomposition,
-            max_concurrent=self._max_parallel_workers,
-            max_decomposition_depth=self._max_decomposition_depth,
-            inherited_runtime_handle=self._inherited_runtime_handle,
-            task_cwd=self._effective_cwd(),
-            checkpoint_store=self._checkpoint_store,
-        )
+        # Instantiate the staged executor. For "compounding" mode, use the
+        # serial subclass that threads a rolling postmortem chain between
+        # ACs; for "parallel", keep the classic concurrent-within-level
+        # executor. Both share dependency analysis and result synthesis.
+        if mode == "compounding":
+            from ouroboros.orchestrator.serial_executor import SerialCompoundingExecutor
+
+            parallel_executor: ParallelACExecutor = SerialCompoundingExecutor(
+                adapter=self._adapter,
+                event_store=self._event_store,
+                console=self._console,
+                enable_decomposition=self._enable_decomposition,
+                max_concurrent=1,  # serial: never fan out
+                max_decomposition_depth=self._max_decomposition_depth,
+                inherited_runtime_handle=self._inherited_runtime_handle,
+                task_cwd=self._effective_cwd(),
+                checkpoint_store=self._checkpoint_store,
+            )
+        else:
+            parallel_executor = ParallelACExecutor(
+                adapter=self._adapter,
+                event_store=self._event_store,
+                console=self._console,
+                enable_decomposition=self._enable_decomposition,
+                max_concurrent=self._max_parallel_workers,
+                max_decomposition_depth=self._max_decomposition_depth,
+                inherited_runtime_handle=self._inherited_runtime_handle,
+                task_cwd=self._effective_cwd(),
+                checkpoint_store=self._checkpoint_store,
+            )
 
         # Check for cancellation before starting parallel execution
         if await self._check_cancellation(tracker.session_id):
@@ -2001,16 +2109,28 @@ class OrchestratorRunner:
                 start_time=start_time,
             )
 
-        parallel_result = await parallel_executor.execute_parallel(
-            seed=seed,
-            execution_plan=execution_plan,
-            session_id=tracker.session_id,
-            execution_id=exec_id,
-            tools=merged_tools,
-            tool_catalog=tool_catalog.tools,
-            system_prompt=system_prompt,
-            externally_satisfied_acs=externally_satisfied_acs,
-        )
+        if mode == "compounding":
+            parallel_result = await parallel_executor.execute_serial(  # type: ignore[attr-defined]
+                seed=seed,
+                execution_plan=execution_plan,
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                tools=merged_tools,
+                tool_catalog=tool_catalog.tools,
+                system_prompt=system_prompt,
+                externally_satisfied_acs=externally_satisfied_acs,
+            )
+        else:
+            parallel_result = await parallel_executor.execute_parallel(
+                seed=seed,
+                execution_plan=execution_plan,
+                session_id=tracker.session_id,
+                execution_id=exec_id,
+                tools=merged_tools,
+                tool_catalog=tool_catalog.tools,
+                system_prompt=system_prompt,
+                externally_satisfied_acs=externally_satisfied_acs,
+            )
 
         # Check for cancellation after parallel execution
         if await self._check_cancellation(tracker.session_id):
@@ -2039,7 +2159,8 @@ class OrchestratorRunner:
         execution_summary = {
             "goal": seed.goal,
             "acceptance_criteria_count": len(seed.acceptance_criteria),
-            "parallel_execution": True,
+            "parallel_execution": mode == "parallel",
+            "execution_mode": mode,
             "success_count": parallel_result.success_count,
             "externally_satisfied_count": parallel_result.externally_satisfied_count,
             "satisfied_count": (

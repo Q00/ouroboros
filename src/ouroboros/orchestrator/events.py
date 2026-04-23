@@ -24,6 +24,7 @@ from typing import Any
 
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.capabilities import CapabilityDescriptor, CapabilityGraph
+from ouroboros.orchestrator.level_context import ACPostmortem, serialize_postmortem_chain
 from ouroboros.orchestrator.policy import PolicyContext, PolicyDecision
 
 
@@ -605,6 +606,75 @@ def create_drift_measured_event(
     )
 
 
+def create_ac_postmortem_captured_event(
+    session_id: str,
+    ac_index: int,
+    ac_id: str,
+    postmortem: ACPostmortem,
+    *,
+    execution_id: str | None = None,
+    retry_attempt: int = 0,
+) -> BaseEvent:
+    """Create postmortem captured event for serial compounding execution.
+
+    Emitted after an AC finishes (pass, fail, or partial) in serial
+    compounding mode. The payload carries the full serialized postmortem
+    so the chain can be reconstructed on resume without re-deriving from
+    tool events.
+
+    The event is keyed on the AC's ``ac_id`` so downstream consumers can
+    query ``execution.ac.postmortem.captured`` events by AC id + retry
+    attempt to rebuild a chain state.
+
+    Args:
+        session_id: Parent session id.
+        ac_index: 0-based AC index (top-level).
+        ac_id: AC identifier string ("ac_0" / "sub_ac_1_0" style).
+        postmortem: Captured postmortem artifact to persist.
+        execution_id: Optional parent execution id for cross-referencing.
+        retry_attempt: Retry attempt number (0 for first attempt).
+
+    Returns:
+        BaseEvent for the postmortem capture.
+    """
+    # Reuse the chain serializer for a single postmortem — it emits a list
+    # so we can index [0] deterministically. Keeps one code path for
+    # serialization whether we persist one or many postmortems.
+    serialized_list = serialize_postmortem_chain(
+        _chain_of_one(postmortem),
+    )
+    serialized = serialized_list[0] if serialized_list else {}
+    data: dict[str, Any] = {
+        "session_id": session_id,
+        "ac_index": ac_index,
+        "ac_id": ac_id,
+        "retry_attempt": retry_attempt,
+        "status": postmortem.status,
+        "postmortem": serialized,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    if execution_id is not None:
+        data["execution_id"] = execution_id
+    return BaseEvent(
+        type="execution.ac.postmortem.captured",
+        aggregate_type="execution",
+        aggregate_id=ac_id,
+        data=data,
+    )
+
+
+def _chain_of_one(postmortem: ACPostmortem):
+    """Wrap a single postmortem in a PostmortemChain for serialization reuse.
+
+    Separated so import order stays clean: ``PostmortemChain`` lives with
+    the dataclass, but the import is colocated with the event factory that
+    actually needs it.
+    """
+    from ouroboros.orchestrator.level_context import PostmortemChain
+
+    return PostmortemChain(postmortems=(postmortem,))
+
+
 def create_execution_terminal_event(
     execution_id: str,
     session_id: str,
@@ -644,6 +714,7 @@ def create_execution_terminal_event(
 
 
 __all__ = [
+    "create_ac_postmortem_captured_event",
     "create_ac_stall_detected_event",
     "create_drift_measured_event",
     "create_execution_terminal_event",

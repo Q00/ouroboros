@@ -186,6 +186,22 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    name="mode",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Execution mode: 'parallel' (default) runs independent "
+                        "ACs concurrently within each dependency level; "
+                        "'compounding' runs ACs strictly one at a time, "
+                        "carrying a rolling postmortem (files changed, "
+                        "invariants, gotchas) from each AC into the next. "
+                        "Compounding mode also pins CLAUDE.md into the "
+                        "system prompt."
+                    ),
+                    required=False,
+                    default="parallel",
+                    enum=("parallel", "compounding"),
+                ),
             ),
         )
 
@@ -267,6 +283,14 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         session_id = session_id or session_id_override
         model_tier = arguments.get("model_tier", "medium")
         max_iterations = arguments.get("max_iterations", 10)
+        execution_mode = arguments.get("mode", "parallel")
+        if execution_mode not in {"parallel", "compounding"}:
+            return Result.err(
+                MCPToolError(
+                    f"Invalid mode {execution_mode!r}: expected 'parallel' or 'compounding'.",
+                    tool_name="ouroboros_execute_seed",
+                )
+            )
         if not is_resume and session_id is None:
             session_id = f"orch_{uuid4().hex[:12]}"
 
@@ -513,6 +537,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     _session_repo: SessionRepository = session_repo,
                     _event_store: EventStore = event_store,
                     _owns_event_store: bool = owns_event_store,
+                    _mode: str = execution_mode,
                 ) -> None:
                     try:
                         if _resume_existing:
@@ -522,6 +547,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                                 seed=_seed,
                                 tracker=_tracker,
                                 parallel=get_parallel_default(),
+                                mode=_mode if _mode != "parallel" else None,
                             )
                         if result.is_err:
                             log.error(

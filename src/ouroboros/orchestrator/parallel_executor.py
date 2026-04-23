@@ -2126,6 +2126,7 @@ class ParallelACExecutor:
         is_sub_ac: bool = False,
         parent_ac_index: int | None = None,
         sub_ac_index: int | None = None,
+        context_override: str | None = None,
     ) -> ACExecutionResult:
         """Execute a single AC via the sole recursive AC execution entry point.
 
@@ -2232,6 +2233,7 @@ class ParallelACExecutor:
                             is_sub_ac=child_is_sub_ac,
                             parent_ac_index=ac_index if child_is_sub_ac else None,
                             sub_ac_index=idx if child_is_sub_ac else None,
+                            context_override=context_override,
                         )
                     except BaseException as e:
                         if isinstance(e, anyio.get_cancelled_exc_class()):
@@ -2339,6 +2341,7 @@ class ParallelACExecutor:
                 parent_ac_index=parent_ac_index,
                 sub_ac_index=sub_ac_index,
                 complexity=atomic_complexity,
+                context_override=context_override,
             )
             if atomic_result.error != _STALL_SENTINEL:
                 if decomposition_depth_warning:
@@ -2914,6 +2917,7 @@ Respond with ONLY the JSON object, nothing else.
         tool_catalog: tuple[MCPToolDefinition, ...] | None = None,
         execution_counters: dict[str, int] | None = None,
         complexity: Complexity = "normal",
+        context_override: str | None = None,
     ) -> ACExecutionResult:
         """Execute an atomic AC directly via Claude Agent.
 
@@ -2942,8 +2946,12 @@ Respond with ONLY the JSON object, nothing else.
             label = f"AC {ac_index + 1}"
             indent = "  "
 
-        # Build context section from previous levels
-        context_section = build_context_prompt(level_contexts or [])
+        # Build context section from previous levels, or use the serial-mode
+        # override (compounding postmortem chain) when supplied by a subclass.
+        if context_override is not None:
+            context_section = context_override
+        else:
+            context_section = build_context_prompt(level_contexts or [])
 
         retry_section = ""
         if retry_attempt > 0:

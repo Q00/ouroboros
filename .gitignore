@@ -129,3 +129,7 @@ docs/code-surface-inventory.yaml
 docs/code-surface-lookup.yaml
 docs/cli-inventory.yaml
 
+# Runtime evaluation artifact written by the evaluation MCP handler
+# (see src/ouroboros/mcp/tools/evaluation_handlers.py)
+.ouroboros_eval_artifact.md
+

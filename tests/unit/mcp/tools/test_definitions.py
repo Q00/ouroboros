@@ -97,6 +97,27 @@ class TestExecuteSeedHandler:
         assert "session_id" in param_names
         assert "model_tier" in param_names
         assert "max_iterations" in param_names
+        assert "mode" in param_names
+
+    def test_mode_parameter_enumerates_parallel_and_compounding(self) -> None:
+        """The mode parameter must advertise both execution modes."""
+        handler = ExecuteSeedHandler()
+        mode_param = next(
+            (p for p in handler.definition.parameters if p.name == "mode"),
+            None,
+        )
+        assert mode_param is not None
+        assert mode_param.default == "parallel"
+        assert mode_param.enum == ("parallel", "compounding")
+
+    async def test_handle_rejects_invalid_mode(self) -> None:
+        """Invalid mode values are rejected before any execution."""
+        handler = ExecuteSeedHandler()
+        result = await handler.handle(
+            {"seed_content": "goal: x", "mode": "bogus"}
+        )
+        assert result.is_err
+        assert "Invalid mode" in str(result.error)
 
     def test_definition_excludes_internal_delegation_parameters(self) -> None:
         """Internal parent-session propagation must not change the public tool schema."""

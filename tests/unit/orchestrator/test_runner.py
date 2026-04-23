@@ -123,6 +123,63 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(seed)
         assert "None" in prompt or "Constraints" in prompt
 
+    def test_claude_md_disabled_by_default_preserves_prompt(
+        self, sample_seed: Seed, tmp_path: Any
+    ) -> None:
+        """Absence of include_claude_md must yield a CLAUDE.md-free prompt.
+
+        Regression guard: parallel-mode callers (which never pass
+        include_claude_md) must see a byte-identical prompt to the
+        pre-feature behavior, even if a CLAUDE.md file is present in
+        the workspace.
+        """
+        (tmp_path / "CLAUDE.md").write_text("SHOULD NOT APPEAR IN PROMPT")
+        prompt_default = build_system_prompt(sample_seed)
+        prompt_explicit_off = build_system_prompt(
+            sample_seed, include_claude_md=False, workspace_root=str(tmp_path)
+        )
+        assert "SHOULD NOT APPEAR IN PROMPT" not in prompt_default
+        assert "SHOULD NOT APPEAR IN PROMPT" not in prompt_explicit_off
+        assert "Project Guidance" not in prompt_default
+        assert prompt_default == prompt_explicit_off
+
+    def test_claude_md_injected_when_enabled(
+        self, sample_seed: Seed, tmp_path: Any
+    ) -> None:
+        (tmp_path / "CLAUDE.md").write_text("# Project Rules\nUse pydantic v2 only.")
+        prompt = build_system_prompt(
+            sample_seed, include_claude_md=True, workspace_root=str(tmp_path)
+        )
+        assert "## Project Guidance (CLAUDE.md)" in prompt
+        assert "Use pydantic v2 only." in prompt
+        assert sample_seed.goal in prompt  # original content still present
+
+    def test_claude_md_missing_file_yields_empty_section(
+        self, sample_seed: Seed, tmp_path: Any
+    ) -> None:
+        # No CLAUDE.md in workspace → no Project Guidance section emitted.
+        prompt = build_system_prompt(
+            sample_seed, include_claude_md=True, workspace_root=str(tmp_path)
+        )
+        assert "Project Guidance" not in prompt
+
+    def test_claude_md_none_workspace_safe(self, sample_seed: Seed) -> None:
+        # include_claude_md=True + workspace_root=None must not raise.
+        prompt = build_system_prompt(sample_seed, include_claude_md=True, workspace_root=None)
+        assert "Project Guidance" not in prompt
+
+    def test_claude_md_truncated_when_large(
+        self, sample_seed: Seed, tmp_path: Any
+    ) -> None:
+        giant = "x" * 20_000
+        (tmp_path / "CLAUDE.md").write_text(giant)
+        prompt = build_system_prompt(
+            sample_seed, include_claude_md=True, workspace_root=str(tmp_path)
+        )
+        assert "…(truncated)" in prompt
+        # The full 20KB input must not appear verbatim.
+        assert giant not in prompt
+
 
 class TestBuildTaskPrompt:
     """Tests for build_task_prompt function."""
@@ -317,6 +374,7 @@ class TestOrchestratorRunner:
             seed=sample_seed,
             tracker=tracker,
             parallel=True,
+            mode=None,
         )
 
     @pytest.mark.asyncio

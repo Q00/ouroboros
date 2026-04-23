@@ -10,13 +10,20 @@ from ouroboros.orchestrator.level_context import (
     _MAX_FILE_SIZE_BYTES,
     _MAX_FILES_FOR_API,
     ACContextSummary,
+    ACPostmortem,
     LevelContext,
+    POSTMORTEM_DEFAULT_K_FULL,
+    POSTMORTEM_DEFAULT_TOKEN_BUDGET,
+    PostmortemChain,
     _build_public_api_summary,
     _extract_public_api,
     build_context_prompt,
+    build_postmortem_chain_prompt,
     deserialize_level_contexts,
+    deserialize_postmortem_chain,
     extract_level_context,
     serialize_level_contexts,
+    serialize_postmortem_chain,
 )
 
 
@@ -798,3 +805,330 @@ class TestPromptTextWithPublicApi:
         assert "Public API" not in text
         assert "Result:" in text
         assert "Migration applied" in text
+
+
+# --- Serial compounding: ACPostmortem / PostmortemChain tests ---
+
+
+def _mk_pm(
+    idx: int,
+    content: str = "",
+    *,
+    status: str = "pass",
+    files: tuple[str, ...] = (),
+    tools: tuple[str, ...] = (),
+    invariants: tuple[str, ...] = (),
+    gotchas: tuple[str, ...] = (),
+    qa_suggestions: tuple[str, ...] = (),
+    diff_summary: str = "",
+    tool_trace_digest: str = "",
+    retry_attempts: int = 0,
+    duration: float = 0.0,
+) -> ACPostmortem:
+    summary = ACContextSummary(
+        ac_index=idx,
+        ac_content=content or f"AC {idx + 1} task description",
+        success=(status == "pass"),
+        tools_used=tools,
+        files_modified=files,
+    )
+    return ACPostmortem(
+        summary=summary,
+        diff_summary=diff_summary,
+        tool_trace_digest=tool_trace_digest,
+        gotchas=gotchas,
+        qa_suggestions=qa_suggestions,
+        invariants_established=invariants,
+        retry_attempts=retry_attempts,
+        status=status,  # type: ignore[arg-type]
+        duration_seconds=duration,
+    )
+
+
+class TestACPostmortem:
+    def test_defaults(self) -> None:
+        pm = _mk_pm(0)
+        assert pm.status == "pass"
+        assert pm.retry_attempts == 0
+        assert pm.gotchas == ()
+        assert pm.invariants_established == ()
+        assert pm.sub_postmortems == ()
+
+    def test_is_frozen(self) -> None:
+        pm = _mk_pm(0)
+        with pytest.raises((AttributeError, Exception)):
+            pm.status = "fail"  # type: ignore[misc]
+
+    def test_digest_pass_with_invariants(self) -> None:
+        pm = _mk_pm(
+            2,
+            content="Add JWT auth",
+            files=("auth.py", "middleware.py"),
+            invariants=("AUTH_HEADER required", "JWT expiry=15m"),
+        )
+        digest = pm.to_digest()
+        assert "AC 3 [pass]" in digest
+        assert "Add JWT auth" in digest
+        assert "auth.py" in digest
+        assert "AUTH_HEADER required" in digest
+        assert "JWT expiry=15m" in digest
+
+    def test_digest_fail_prefers_gotcha_over_invariants(self) -> None:
+        pm = _mk_pm(
+            0,
+            content="Add auth",
+            status="fail",
+            files=("auth.py",),
+            invariants=("IGNORED_INVARIANT",),
+            gotchas=("JWT lib assumes UTC", "secondary gotcha"),
+        )
+        digest = pm.to_digest()
+        assert "[fail]" in digest
+        assert "JWT lib assumes UTC" in digest
+        # For failed ACs, gotcha replaces invariants in the digest
+        assert "IGNORED_INVARIANT" not in digest
+
+    def test_digest_truncates_long_content(self) -> None:
+        long_content = "x" * 500
+        pm = _mk_pm(0, content=long_content)
+        digest = pm.to_digest()
+        assert "..." in digest
+        assert len(digest) < 500
+
+    def test_digest_collapses_many_files(self) -> None:
+        pm = _mk_pm(0, files=tuple(f"f{i}.py" for i in range(10)))
+        digest = pm.to_digest()
+        assert "+7 more" in digest
+
+    def test_full_text_includes_all_sections(self) -> None:
+        pm = _mk_pm(
+            0,
+            content="Add auth",
+            files=("auth.py",),
+            tools=("Edit", "Write"),
+            invariants=("INV1",),
+            gotchas=("GOTCHA1",),
+            qa_suggestions=("SUGGEST1",),
+            diff_summary=" auth.py | 42 +++",
+            tool_trace_digest="Edit auth.py (ok)",
+            retry_attempts=2,
+            duration=1.5,
+        )
+        text = pm.to_full_text()
+        assert "AC 1" in text
+        assert "retried 2x" in text
+        assert "1.5s" in text
+        assert "Add auth" in text
+        assert "auth.py" in text
+        assert "Edit, Write" in text
+        assert "INV1" in text
+        assert "GOTCHA1" in text
+        assert "SUGGEST1" in text
+        assert " auth.py | 42 +++" in text
+        assert "Edit auth.py (ok)" in text
+
+
+class TestPostmortemChain:
+    def test_empty_chain_renders_empty(self) -> None:
+        assert PostmortemChain().to_prompt_text() == ""
+        assert build_postmortem_chain_prompt(PostmortemChain()) == ""
+
+    def test_append_is_immutable(self) -> None:
+        c0 = PostmortemChain()
+        c1 = c0.append(_mk_pm(0))
+        assert c0.postmortems == ()
+        assert len(c1.postmortems) == 1
+
+    def test_cumulative_invariants_deduplicated_in_order(self) -> None:
+        chain = PostmortemChain(
+            postmortems=(
+                _mk_pm(0, invariants=("A", "B")),
+                _mk_pm(1, invariants=("B", "C")),
+                _mk_pm(2, invariants=("A", "D")),
+            )
+        )
+        assert chain.cumulative_invariants() == ("A", "B", "C", "D")
+
+    def test_recent_rendered_full_older_rendered_digest(self) -> None:
+        pms = tuple(
+            _mk_pm(
+                i,
+                content=f"task_{i}",
+                invariants=(f"INV_{i}",),
+                diff_summary=f"diff_marker_{i}",
+            )
+            for i in range(5)
+        )
+        chain = PostmortemChain(postmortems=pms)
+        text = chain.to_prompt_text(k_full=2, token_budget=100_000)
+        # Full form appears for the last 2 → their diff_summary is in text.
+        assert "diff_marker_3" in text
+        assert "diff_marker_4" in text
+        # Older 3 are digests only — diff content should NOT appear.
+        assert "diff_marker_0" not in text
+        assert "diff_marker_1" not in text
+        assert "diff_marker_2" not in text
+        # Digest markers visible for older entries.
+        assert "AC 1 [pass]" in text
+        assert "AC 3 [pass]" in text
+        # Invariants from all 5 appear once in cumulative block.
+        for i in range(5):
+            assert f"INV_{i}" in text
+
+    def test_k_full_zero_renders_all_as_digests(self) -> None:
+        pms = tuple(
+            _mk_pm(i, content=f"task_{i}", diff_summary=f"diff_marker_{i}")
+            for i in range(3)
+        )
+        chain = PostmortemChain(postmortems=pms)
+        text = chain.to_prompt_text(k_full=0, token_budget=100_000)
+        for i in range(3):
+            assert f"diff_marker_{i}" not in text  # no full forms
+            assert f"AC {i + 1}" in text  # digests present
+
+    def test_over_budget_drops_oldest_digests_first(self) -> None:
+        # Build a chain where digests are plentiful but cheap; budget tight.
+        old_pms = tuple(_mk_pm(i, content=f"older_ac_{i}") for i in range(10))
+        recent_pms = tuple(
+            _mk_pm(10 + i, content=f"recent_ac_{i}", invariants=(f"RECENT_INV_{i}",))
+            for i in range(2)
+        )
+        chain = PostmortemChain(postmortems=old_pms + recent_pms)
+
+        # Very tight budget: must drop oldest digests while keeping recent full forms + invariants.
+        text = chain.to_prompt_text(k_full=2, token_budget=50)
+
+        # Recent full forms and their invariants must survive.
+        assert "recent_ac_0" in text
+        assert "recent_ac_1" in text
+        assert "RECENT_INV_0" in text
+        assert "RECENT_INV_1" in text
+        # Oldest digests should have been dropped preferentially.
+        assert "older_ac_0" not in text
+
+    def test_budget_preserves_invariants_block(self) -> None:
+        chain = PostmortemChain(
+            postmortems=(
+                _mk_pm(0, invariants=("MUST_SURVIVE",)),
+                _mk_pm(1, content="current"),
+            )
+        )
+        text = chain.to_prompt_text(k_full=1, token_budget=100)
+        assert "MUST_SURVIVE" in text
+
+    def test_default_constants_exported(self) -> None:
+        assert POSTMORTEM_DEFAULT_K_FULL >= 1
+        assert POSTMORTEM_DEFAULT_TOKEN_BUDGET > 0
+
+
+class TestPostmortemSerialization:
+    def test_empty_chain_roundtrip(self) -> None:
+        chain = PostmortemChain()
+        assert serialize_postmortem_chain(chain) == []
+        assert deserialize_postmortem_chain([]).postmortems == ()
+
+    def test_full_roundtrip_preserves_all_fields(self) -> None:
+        original = PostmortemChain(
+            postmortems=(
+                _mk_pm(
+                    0,
+                    content="Add auth",
+                    status="pass",
+                    files=("auth.py", "middleware.py"),
+                    tools=("Edit", "Write"),
+                    invariants=("AUTH_HEADER required",),
+                    diff_summary=" auth.py | 42 +++",
+                    tool_trace_digest="Edit auth.py (ok)",
+                    duration=1.5,
+                ),
+                _mk_pm(
+                    1,
+                    content="Add tests",
+                    status="fail",
+                    files=("tests/test_auth.py",),
+                    gotchas=("Missing fixture",),
+                    qa_suggestions=("Add conftest.py",),
+                    retry_attempts=2,
+                ),
+            )
+        )
+        data = serialize_postmortem_chain(original)
+        # JSON-serializable shape: list of dicts.
+        assert isinstance(data, list)
+        assert all(isinstance(d, dict) for d in data)
+
+        restored = deserialize_postmortem_chain(data)
+        assert len(restored.postmortems) == 2
+
+        a, b = restored.postmortems
+        assert a.summary.ac_index == 0
+        assert a.summary.ac_content == "Add auth"
+        assert a.summary.files_modified == ("auth.py", "middleware.py")
+        assert a.invariants_established == ("AUTH_HEADER required",)
+        assert a.diff_summary == " auth.py | 42 +++"
+        assert a.duration_seconds == 1.5
+        assert a.status == "pass"
+
+        assert b.status == "fail"
+        assert b.gotchas == ("Missing fixture",)
+        assert b.qa_suggestions == ("Add conftest.py",)
+        assert b.retry_attempts == 2
+
+    def test_deserialize_tolerates_missing_fields(self) -> None:
+        minimal = [{"summary": {"ac_index": 0, "ac_content": "x", "success": True}}]
+        chain = deserialize_postmortem_chain(minimal)
+        assert len(chain.postmortems) == 1
+        pm = chain.postmortems[0]
+        assert pm.status == "pass"
+        assert pm.gotchas == ()
+        assert pm.retry_attempts == 0
+
+    def test_deserialize_invalid_status_defaults_to_pass(self) -> None:
+        chain = deserialize_postmortem_chain(
+            [{"summary": {"ac_index": 0, "ac_content": "x", "success": True},
+              "status": "bogus"}]
+        )
+        assert chain.postmortems[0].status == "pass"
+
+    def test_deserialize_skips_bad_entries_without_crashing(self) -> None:
+        # One bad entry (summary is not a dict) should be skipped silently.
+        data = [
+            {"summary": {"ac_index": 0, "ac_content": "ok", "success": True}},
+            {"summary": "not a dict"},
+        ]
+        chain = deserialize_postmortem_chain(data)
+        # The good entry should still round-trip; the bad one may be skipped
+        # or coerced to defaults — behavior-tolerant assertion.
+        assert len(chain.postmortems) >= 1
+        assert chain.postmortems[0].summary.ac_content == "ok"
+
+
+class TestBuildPostmortemChainPrompt:
+    def test_honors_env_k_full(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OUROBOROS_POSTMORTEM_FULL_K", "0")
+        chain = PostmortemChain(
+            postmortems=(_mk_pm(0, content="the_task", diff_summary="FULL_MARKER"),)
+        )
+        text = build_postmortem_chain_prompt(chain)
+        # K=0 → rendered as digest only, full diff_summary absent.
+        assert "FULL_MARKER" not in text
+        assert "AC 1" in text
+
+    def test_honors_env_token_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OUROBOROS_POSTMORTEM_TOKEN_BUDGET", "50")
+        chain = PostmortemChain(
+            postmortems=tuple(_mk_pm(i, content=f"older_{i}") for i in range(8))
+            + (_mk_pm(8, content="current", invariants=("KEEP_ME",)),)
+        )
+        text = build_postmortem_chain_prompt(chain)
+        # Budget pressure should drop oldest digests; invariants survive.
+        assert "KEEP_ME" in text
+        assert "older_0" not in text
+
+    def test_ignores_bad_env_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OUROBOROS_POSTMORTEM_FULL_K", "not-a-number")
+        monkeypatch.setenv("OUROBOROS_POSTMORTEM_TOKEN_BUDGET", "also-bad")
+        chain = PostmortemChain(postmortems=(_mk_pm(0),))
+        # Should fall back to defaults without raising.
+        text = build_postmortem_chain_prompt(chain)
+        assert text  # non-empty for a non-empty chain

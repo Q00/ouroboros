@@ -309,6 +309,7 @@ async def _run_orchestrator(
     runtime_backend: str | None = None,
     max_decomposition_depth: int | None = None,
     skip_completed: str | None = None,
+    mode: str | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
@@ -323,6 +324,8 @@ async def _run_orchestrator(
         runtime_backend: Optional orchestrator runtime backend override.
         max_decomposition_depth: Optional recursive decomposition depth cap override.
         skip_completed: Optional path to a marker file for already-satisfied ACs.
+        mode: Execution mode override ("parallel" | "compounding"). When set,
+            takes precedence over the ``parallel`` flag.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
@@ -433,7 +436,12 @@ async def _run_orchestrator(
         else:
             if debug:
                 print_info("Starting new orchestrator execution...")
-            if parallel:
+            if mode == "compounding":
+                print_info(
+                    "Compounding mode: ACs run strictly serially; each AC "
+                    "sees a postmortem of every prior AC"
+                )
+            elif parallel:
                 print_info("Parallel mode: independent ACs will run concurrently")
             else:
                 print_info("Sequential mode: ACs will run one at a time")
@@ -442,6 +450,7 @@ async def _run_orchestrator(
                 "execution_id": execution_id,
                 "session_id": session_id_for_run,
                 "parallel": parallel,
+                "mode": mode,
             }
             if externally_satisfied_acs:
                 execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
@@ -567,6 +576,18 @@ def workflow(
             help="Execute ACs sequentially instead of in parallel (default: parallel).",
         ),
     ] = False,
+    compounding: Annotated[
+        bool,
+        typer.Option(
+            "--compounding",
+            help=(
+                "Run ACs strictly one at a time with compounding context: each "
+                "AC reads a postmortem of every prior AC (files changed, "
+                "invariants, gotchas). Halts on first failure after retries. "
+                "Pins CLAUDE.md into the system prompt for every AC."
+            ),
+        ),
+    ] = False,
     runtime: Annotated[
         AgentRuntimeBackend | None,
         typer.Option(
@@ -653,6 +674,16 @@ def workflow(
         print_warning("--mcp-config requires --orchestrator flag. Enabling orchestrator mode.")
         orchestrator = True
 
+    # --compounding and --sequential are mutually exclusive. They mean
+    # different things: --compounding runs a curated per-AC loop with a
+    # rolling postmortem chain, while --sequential (legacy) just disables
+    # the parallel executor's fan-out.
+    if compounding and sequential:
+        print_error("--compounding and --sequential are mutually exclusive; pick one.")
+        raise typer.Exit(1)
+
+    execution_mode = "compounding" if compounding else None
+
     if orchestrator or resume_session:
         # Orchestrator mode
         if resume_session and not orchestrator:
@@ -673,6 +704,7 @@ def workflow(
                     runtime_backend=runtime.value if runtime else None,
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
+                    mode=execution_mode,
                 )
             )
         except (ValueError, NotImplementedError) as e:

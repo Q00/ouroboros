@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import os
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ouroboros.observability.logging import get_logger
 
@@ -39,6 +39,43 @@ _MAX_PUBLIC_API_CHARS = 500
 _MAX_FILE_SIZE_BYTES = 1_048_576
 # Maximum number of files to process for public API summary
 _MAX_FILES_FOR_API = 20
+
+# --- Postmortem primitives (serial compounding execution) ---
+# Default number of most-recent postmortems rendered in full form.
+POSTMORTEM_DEFAULT_K_FULL = 3
+# Default token budget for the rendered postmortem chain section.
+POSTMORTEM_DEFAULT_TOKEN_BUDGET = 8000
+# Rough chars-per-token heuristic used for budget estimation.
+_POSTMORTEM_CHARS_PER_TOKEN = 4
+# Max chars of AC content shown in a digest line.
+_POSTMORTEM_DIGEST_CONTENT_CHARS = 60
+# Max chars retained in diff_summary (guards against huge git diff --stat output).
+_POSTMORTEM_MAX_DIFF_CHARS = 2000
+# Max chars retained in tool_trace_digest (guards against pathological traces).
+_POSTMORTEM_MAX_TRACE_CHARS = 1500
+
+PostmortemStatus = Literal["pass", "fail", "partial"]
+
+
+def _ensure_tuple_or_none(value: Any) -> tuple[Any, ...]:
+    """Convert a value to a tuple, handling strings specially to avoid char-tuples.
+
+    Args:
+        value: The value to convert to a tuple.
+
+    Returns:
+        - Empty tuple if value is None
+        - tuple(value) if value is already a list or tuple
+        - (value,) if value is a string (wraps the whole string)
+        - (value,) otherwise
+    """
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    if isinstance(value, str):
+        return (value,)
+    return (value,)
 
 
 def _extract_public_api(file_path: str, workspace_root: str) -> list[str]:
@@ -400,7 +437,7 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
                 conflicts = tuple(
                     FileConflict(
                         file_path=fc.get("file_path", ""),
-                        ac_indices=tuple(fc.get("ac_indices", ())),
+                        ac_indices=_ensure_tuple_or_none(fc.get("ac_indices", ())),
                         resolved=fc.get("resolved", False),
                         resolution_description=fc.get("resolution_description", ""),
                     )
@@ -410,8 +447,8 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
                     level_number=rd.get("level_number", 0),
                     conflicts_detected=conflicts,
                     review_summary=rd.get("review_summary", ""),
-                    fixes_applied=tuple(rd.get("fixes_applied", ())),
-                    warnings_for_next_level=tuple(rd.get("warnings_for_next_level", ())),
+                    fixes_applied=_ensure_tuple_or_none(rd.get("fixes_applied", ())),
+                    warnings_for_next_level=_ensure_tuple_or_none(rd.get("warnings_for_next_level", ())),
                     duration_seconds=rd.get("duration_seconds", 0.0),
                     session_id=rd.get("session_id"),
                 )
@@ -430,8 +467,8 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
                         ac_index=ac.get("ac_index", 0),
                         ac_content=ac.get("ac_content", ""),
                         success=ac.get("success", False),
-                        tools_used=tuple(ac.get("tools_used", ())),
-                        files_modified=tuple(ac.get("files_modified", ())),
+                        tools_used=_ensure_tuple_or_none(ac.get("tools_used", ())),
+                        files_modified=_ensure_tuple_or_none(ac.get("files_modified", ())),
                         key_output=ac.get("key_output", ""),
                         public_api=ac.get("public_api", ""),
                     )
@@ -452,11 +489,305 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
     return result
 
 
+# --- Serial compounding: per-AC postmortem artifact and rolling chain ---
+
+
+@dataclass(frozen=True, slots=True)
+class ACPostmortem:
+    """Per-AC postmortem carried forward as compounding context.
+
+    Composition over inheritance: wraps an ``ACContextSummary`` (the facts
+    extractable from tool events) and adds fields specific to compounding
+    execution (diff, gotchas, QA suggestions, invariants, retry count,
+    status, duration, native session id).
+
+    Keeping this distinct from ``ACContextSummary`` means the parallel-mode
+    prompt and checkpoint paths are byte-identical when serial mode is not
+    in use — only the serial executor constructs these.
+    """
+
+    summary: ACContextSummary
+    diff_summary: str = ""
+    tool_trace_digest: str = ""
+    gotchas: tuple[str, ...] = field(default_factory=tuple)
+    qa_suggestions: tuple[str, ...] = field(default_factory=tuple)
+    invariants_established: tuple[str, ...] = field(default_factory=tuple)
+    retry_attempts: int = 0
+    status: PostmortemStatus = "pass"
+    duration_seconds: float = 0.0
+    ac_native_session_id: str | None = None
+    sub_postmortems: tuple["ACPostmortem", ...] = field(default_factory=tuple)
+
+    def to_digest(self) -> str:
+        """Render a one-line digest for compressed display in the chain.
+
+        Format: ``AC {n} [{status}]: {content} — files: a,b (+K more) | invariants: X, Y``
+        For non-passing ACs, the first gotcha is appended instead of invariants
+        when present, since gotchas are the anti-repeat signal.
+        """
+        s = self.summary
+        content = s.ac_content[:_POSTMORTEM_DIGEST_CONTENT_CHARS].rstrip()
+        if len(s.ac_content) > _POSTMORTEM_DIGEST_CONTENT_CHARS:
+            content += "..."
+        parts = [f"AC {s.ac_index + 1} [{self.status}]: {content}"]
+
+        if s.files_modified:
+            head = ", ".join(s.files_modified[:3])
+            extra = len(s.files_modified) - 3
+            files = head + (f" (+{extra} more)" if extra > 0 else "")
+            parts.append(f"files: {files}")
+
+        if self.status != "pass" and self.gotchas:
+            parts.append(f"gotcha: {self.gotchas[0]}")
+        elif self.invariants_established:
+            inv_head = "; ".join(self.invariants_established[:2])
+            extra_inv = len(self.invariants_established) - 2
+            inv = inv_head + (f" (+{extra_inv} more)" if extra_inv > 0 else "")
+            parts.append(f"invariants: {inv}")
+
+        return " | ".join(parts)
+
+    def to_full_text(self) -> str:
+        """Render the full postmortem for the in-prompt 'recent' window."""
+        s = self.summary
+        lines: list[str] = [
+            f"### AC {s.ac_index + 1} [{self.status}]"
+            f"{' (retried ' + str(self.retry_attempts) + 'x)' if self.retry_attempts else ''}"
+            f"{' (' + f'{self.duration_seconds:.1f}' + 's)' if self.duration_seconds else ''}",
+            f"**Task:** {s.ac_content}",
+        ]
+        if s.files_modified:
+            files = ", ".join(s.files_modified[:10])
+            if len(s.files_modified) > 10:
+                files += f" (+{len(s.files_modified) - 10} more)"
+            lines.append(f"**Files modified:** {files}")
+        if s.tools_used:
+            lines.append(f"**Tools used:** {', '.join(s.tools_used)}")
+        if self.diff_summary:
+            lines.append("**Diff summary:**")
+            lines.append("```")
+            lines.append(self.diff_summary[:_POSTMORTEM_MAX_DIFF_CHARS])
+            lines.append("```")
+        if self.tool_trace_digest:
+            lines.append(
+                f"**Tool trace:** {self.tool_trace_digest[:_POSTMORTEM_MAX_TRACE_CHARS]}"
+            )
+        if self.invariants_established:
+            lines.append("**Invariants established:**")
+            lines.extend(f"- {inv}" for inv in self.invariants_established)
+        if self.gotchas:
+            lines.append("**Gotchas:**")
+            lines.extend(f"- {g}" for g in self.gotchas)
+        if self.qa_suggestions:
+            lines.append("**QA suggestions:**")
+            lines.extend(f"- {q}" for q in self.qa_suggestions)
+        if s.public_api:
+            lines.append(f"**Public API:** {s.public_api}")
+        if s.key_output:
+            lines.append(f"**Result:** {s.key_output}")
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class PostmortemChain:
+    """Rolling chain of per-AC postmortems for compounding execution.
+
+    Rendering policy: the most recent ``k_full`` entries render in full; older
+    entries render as one-line digests. An always-kept "Established Invariants"
+    block accumulates every AC's invariants (deduplicated, insertion order).
+    Under ``token_budget`` pressure, oldest digest lines are dropped first;
+    full forms and the invariants block are preserved.
+    """
+
+    postmortems: tuple[ACPostmortem, ...] = field(default_factory=tuple)
+
+    def append(self, postmortem: ACPostmortem) -> "PostmortemChain":
+        """Return a new chain with ``postmortem`` appended (immutable)."""
+        return PostmortemChain(postmortems=self.postmortems + (postmortem,))
+
+    def cumulative_invariants(self) -> tuple[str, ...]:
+        """Deduplicated invariants across all ACs, in insertion order."""
+        seen: dict[str, None] = {}
+        for pm in self.postmortems:
+            for inv in pm.invariants_established:
+                if inv not in seen:
+                    seen[inv] = None
+        return tuple(seen)
+
+    def to_prompt_text(
+        self,
+        *,
+        k_full: int = POSTMORTEM_DEFAULT_K_FULL,
+        token_budget: int = POSTMORTEM_DEFAULT_TOKEN_BUDGET,
+    ) -> str:
+        """Render the chain as a markdown section for user-turn injection.
+
+        Args:
+            k_full: Number of most-recent postmortems to render in full form.
+                Remaining older postmortems render as one-line digests.
+            token_budget: Approximate token budget for the section. When the
+                rendered text exceeds ``token_budget * 4`` characters, oldest
+                digest lines are progressively dropped. Full forms and the
+                invariants block are always preserved.
+
+        Returns:
+            The formatted section, or an empty string if the chain is empty.
+        """
+        if not self.postmortems:
+            return ""
+
+        char_budget = max(0, token_budget) * _POSTMORTEM_CHARS_PER_TOKEN
+
+        # Full form: last k_full entries. Digests: everything older.
+        if k_full <= 0:
+            full_entries: tuple[ACPostmortem, ...] = ()
+            digest_entries: tuple[ACPostmortem, ...] = self.postmortems
+        else:
+            split = max(0, len(self.postmortems) - k_full)
+            digest_entries = self.postmortems[:split]
+            full_entries = self.postmortems[split:]
+
+        invariants = self.cumulative_invariants()
+
+        def _render(digests: tuple[ACPostmortem, ...]) -> str:
+            sections: list[str] = ["## Prior AC Postmortems (Compounding Context)"]
+            if invariants:
+                sections.append("### Established Invariants (cumulative)")
+                sections.extend(f"- {inv}" for inv in invariants)
+            if digests:
+                sections.append("### Earlier ACs (digests)")
+                sections.extend(f"- {pm.to_digest()}" for pm in digests)
+            if full_entries:
+                sections.append("### Recent ACs (full postmortems)")
+                sections.extend(pm.to_full_text() for pm in full_entries)
+            return "\n".join(sections)
+
+        text = _render(digest_entries)
+        if char_budget <= 0 or len(text) <= char_budget:
+            return text
+
+        # Over budget: drop oldest digests progressively until we fit or run out.
+        remaining = list(digest_entries)
+        while remaining and len(text) > char_budget:
+            remaining.pop(0)
+            text = _render(tuple(remaining))
+
+        if len(text) > char_budget:
+            log.warning(
+                "postmortem_chain.over_budget",
+                rendered_chars=len(text),
+                char_budget=char_budget,
+                full_count=len(full_entries),
+                invariants_count=len(invariants),
+            )
+        return text
+
+
+def build_postmortem_chain_prompt(
+    chain: PostmortemChain,
+    *,
+    k_full: int | None = None,
+    token_budget: int | None = None,
+) -> str:
+    """Build the "Prior AC Postmortems" section for the user-turn prompt.
+
+    Thin wrapper around :meth:`PostmortemChain.to_prompt_text` that honors the
+    ``OUROBOROS_POSTMORTEM_FULL_K`` and ``OUROBOROS_POSTMORTEM_TOKEN_BUDGET``
+    env overrides when arguments are not supplied. Returns an empty string for
+    an empty chain so callers can concatenate unconditionally.
+    """
+    if k_full is None:
+        env_k = os.environ.get("OUROBOROS_POSTMORTEM_FULL_K")
+        try:
+            k_full = int(env_k) if env_k is not None else POSTMORTEM_DEFAULT_K_FULL
+        except ValueError:
+            k_full = POSTMORTEM_DEFAULT_K_FULL
+    if token_budget is None:
+        env_b = os.environ.get("OUROBOROS_POSTMORTEM_TOKEN_BUDGET")
+        try:
+            token_budget = (
+                int(env_b) if env_b is not None else POSTMORTEM_DEFAULT_TOKEN_BUDGET
+            )
+        except ValueError:
+            token_budget = POSTMORTEM_DEFAULT_TOKEN_BUDGET
+    return chain.to_prompt_text(k_full=k_full, token_budget=token_budget)
+
+
+def serialize_postmortem_chain(chain: PostmortemChain) -> list[dict[str, Any]]:
+    """Serialize a postmortem chain for checkpoint / event storage.
+
+    Uses ``dataclasses.asdict`` for the full nested tree; tuples become lists
+    via standard asdict behavior. Safe to JSON-encode.
+    """
+    return [asdict(pm) for pm in chain.postmortems]
+
+
+def _deserialize_postmortem(d: dict[str, Any]) -> ACPostmortem:
+    """Reconstruct an ACPostmortem from a dict, tolerating missing fields."""
+    summary_dict = d.get("summary") or {}
+    summary = ACContextSummary(
+        ac_index=summary_dict.get("ac_index", 0),
+        ac_content=summary_dict.get("ac_content", ""),
+        success=summary_dict.get("success", False),
+        tools_used=_ensure_tuple_or_none(summary_dict.get("tools_used", ())),
+        files_modified=_ensure_tuple_or_none(summary_dict.get("files_modified", ())),
+        key_output=summary_dict.get("key_output", ""),
+        public_api=summary_dict.get("public_api", ""),
+    )
+    status_value = d.get("status", "pass")
+    if status_value not in ("pass", "fail", "partial"):
+        status_value = "pass"
+    sub_raw = d.get("sub_postmortems") or ()
+    sub: list[ACPostmortem] = []
+    for entry in sub_raw:
+        if isinstance(entry, dict):
+            try:
+                sub.append(_deserialize_postmortem(entry))
+            except Exception as e:
+                log.warning("postmortem.deserialize.sub_skipped", error=str(e))
+    return ACPostmortem(
+        summary=summary,
+        diff_summary=d.get("diff_summary", ""),
+        tool_trace_digest=d.get("tool_trace_digest", ""),
+        gotchas=_ensure_tuple_or_none(d.get("gotchas", ())),
+        qa_suggestions=_ensure_tuple_or_none(d.get("qa_suggestions", ())),
+        invariants_established=_ensure_tuple_or_none(d.get("invariants_established", ())),
+        retry_attempts=d.get("retry_attempts", 0),
+        status=status_value,  # type: ignore[arg-type]
+        duration_seconds=d.get("duration_seconds", 0.0),
+        ac_native_session_id=d.get("ac_native_session_id"),
+        sub_postmortems=tuple(sub),
+    )
+
+
+def deserialize_postmortem_chain(data: list[dict[str, Any]]) -> PostmortemChain:
+    """Reconstruct a postmortem chain from serialized form.
+
+    Tolerant of missing/extra fields for forward/backward schema compatibility,
+    mirroring the pattern in :func:`deserialize_level_contexts`.
+    """
+    postmortems: list[ACPostmortem] = []
+    for d in data or ():
+        try:
+            postmortems.append(_deserialize_postmortem(d))
+        except Exception as e:
+            log.warning("postmortem_chain.deserialize.entry_skipped", error=str(e))
+    return PostmortemChain(postmortems=tuple(postmortems))
+
+
 __all__ = [
     "ACContextSummary",
+    "ACPostmortem",
     "LevelContext",
+    "POSTMORTEM_DEFAULT_K_FULL",
+    "POSTMORTEM_DEFAULT_TOKEN_BUDGET",
+    "PostmortemChain",
+    "PostmortemStatus",
     "build_context_prompt",
+    "build_postmortem_chain_prompt",
     "deserialize_level_contexts",
+    "deserialize_postmortem_chain",
     "extract_level_context",
     "serialize_level_contexts",
+    "serialize_postmortem_chain",
 ]
