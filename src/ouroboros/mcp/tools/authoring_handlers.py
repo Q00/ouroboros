@@ -1487,7 +1487,30 @@ class InterviewHandler:
                         # Ambiguity too high — refuse completion. Keep any
                         # pending round in place so the user can still
                         # answer it directly.
-                        await engine.save_state(state)
+                        #
+                        # Persistence is load-bearing on this branch too:
+                        # ``_score_interview_state(reset_on_failure=True)``
+                        # may have just cleared a stale ``completion_candidate_streak``
+                        # in memory. If the save silently fails, the next
+                        # request reloads the pre-reset streak from disk
+                        # and a single qualifying signal can finalize the
+                        # interview, violating the two-signal contract #405
+                        # was opened to enforce. Treat a save failure as a
+                        # hard error, mirroring the shortfall branch.
+                        refuse_save_result = await engine.save_state(state)
+                        if refuse_save_result.is_err:
+                            log.error(
+                                "mcp.tool.interview.save_failed_on_ambiguity_gate",
+                                session_id=session_id,
+                                error=str(refuse_save_result.error),
+                            )
+                            return Result.err(
+                                MCPToolError(
+                                    "Failed to persist stale-streak reset: "
+                                    f"{refuse_save_result.error}",
+                                    tool_name="ouroboros_interview",
+                                )
+                            )
                         return self._ambiguity_gate_response(
                             session_id,
                             exit_score,

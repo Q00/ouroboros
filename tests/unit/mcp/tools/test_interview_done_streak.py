@@ -413,6 +413,82 @@ class TestInterviewDoneStreakAndShortfall:
         mock_engine.complete_interview.assert_not_called()
         mock_engine.save_state.assert_awaited()
 
+    async def test_ambiguity_gate_persist_failure_surfaces_error_not_swallowed(self) -> None:
+        """Pinned: stale-streak reset on the ambiguity-gate branch must durably land.
+
+        Design-note regression for the ouroboros-agent[bot] BLOCKING finding
+        on 227f4cb. The explicit-done path calls ``_score_interview_state(
+        advance_streak=False, reset_on_failure=True)`` which may clear an
+        existing ``completion_candidate_streak`` in memory. If the subsequent
+        ``save_state()`` silently fails, the next request reloads the
+        pre-reset streak from disk and one new qualifying signal finalizes
+        the interview after only a single post-reset confirmation — the
+        exact two-signal violation PR #428 exists to prevent.
+
+        The refuse branch must therefore surface persist failures as a hard
+        error, mirroring the shortfall branch's contract.
+        """
+        from ouroboros.core.errors import ValidationError
+
+        handler = InterviewHandler(llm_adapter=MagicMock())
+        handler._emit_event = AsyncMock()
+        state = InterviewState(
+            interview_id="sess-428-refuse-persist",
+            completion_candidate_streak=1,  # stale from an earlier qualifying signal
+            ambiguity_score=None,  # forces the live rescore path
+            ambiguity_breakdown=None,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="Pending closure question?",
+                    user_response=None,
+                )
+            ],
+        )
+
+        weak_score = create_mock_live_ambiguity_score(0.55, seed_ready=False)
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(weak_score))
+
+        save_failure = Result.err(
+            ValidationError(
+                "disk full",
+                details={"interview_id": "sess-428-refuse-persist"},
+            )
+        )
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.complete_interview = AsyncMock()
+        mock_engine.save_state = AsyncMock(return_value=save_failure)
+        mock_engine.ask_next_question = AsyncMock()
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
+                return_value=mock_scorer,
+            ),
+        ):
+            result = await handler.handle(
+                {"session_id": "sess-428-refuse-persist", "answer": "done"}
+            )
+
+        # MUST NOT return the normal "Cannot complete yet" / ambiguity-gate
+        # response — that would leave the stale streak on disk and violate
+        # the two-signal contract on the next request.
+        assert result.is_err, (
+            "Ambiguity-gate refuse branch must surface save_state failures as "
+            "an error, not swallow them behind the normal refuse response."
+        )
+        assert result.error.tool_name == "ouroboros_interview"
+        assert "persist" in str(result.error).lower()
+        mock_engine.save_state.assert_called()
+        mock_engine.complete_interview.assert_not_called()
+        mock_engine.ask_next_question.assert_not_called()
+
     async def test_explicit_done_shortfall_preserves_pending_round(self) -> None:
         """Regression for #405 follow-up: shortfall must not pop the pending round.
 
