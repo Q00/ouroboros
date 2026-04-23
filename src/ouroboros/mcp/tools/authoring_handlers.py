@@ -156,6 +156,21 @@ def _count_answered_rounds(state: InterviewState) -> int:
     return sum(1 for round_data in state.rounds if round_data.user_response is not None)
 
 
+def _reset_stale_completion_streak(state: InterviewState) -> None:
+    """Invalidate any accrued completion streak.
+
+    Single source of truth for the "stale streak invalidation" rule
+    shared by every path that observes a non-qualifying signal (scorer
+    error, weak live rescore, non-qualifying normal answer). Keeping the
+    reset in one helper makes the two-signal completion contract
+    stateless across flows: a stored streak only survives a signal that
+    was itself qualifying.
+    """
+    if state.completion_candidate_streak != 0:
+        state.completion_candidate_streak = 0
+        state.mark_updated()
+
+
 def _update_completion_candidate_streak(
     state: InterviewState,
     score: AmbiguityScore,
@@ -165,7 +180,7 @@ def _update_completion_candidate_streak(
     if qualifies:
         state.completion_candidate_streak += 1
     else:
-        state.completion_candidate_streak = 0
+        _reset_stale_completion_streak(state)
     return qualifies
 
 
@@ -762,8 +777,33 @@ class InterviewHandler:
         self,
         llm_adapter: LLMAdapter,
         state: InterviewState,
+        *,
+        advance_streak: bool = True,
+        reset_on_failure: bool = True,
     ) -> AmbiguityScore | None:
-        """Calculate and cache the latest ambiguity snapshot for interview routing."""
+        """Calculate and cache the latest ambiguity snapshot for interview routing.
+
+        The streak update is controlled by two orthogonal flags so callers
+        can disable the qualifying-score increment without also disabling
+        the failure/non-qualifying invalidation — a requirement of the
+        explicit ``done`` branch, which owns the increment itself but still
+        relies on the scorer to reset a stale streak when the live rescore
+        is weak or fails.
+
+        Args:
+            advance_streak: When ``True`` (default) a qualifying score
+                bumps ``state.completion_candidate_streak`` by one. Set to
+                ``False`` on paths that own the increment themselves (the
+                explicit ``done`` branch) so the streak is not double-
+                bumped between this helper and the caller.
+            reset_on_failure: When ``True`` (default) a scorer error or a
+                non-qualifying score clears any existing streak — the
+                single shared "stale-streak invalidation" rule across all
+                explicit-done and normal-answer flows. Only pass ``False``
+                if a caller needs to observe the current streak across a
+                transient scoring failure without losing it; in practice
+                no live caller does.
+        """
         scorer = AmbiguityScorer(
             llm_adapter=llm_adapter,
             model=get_clarification_model(self.llm_backend),
@@ -772,9 +812,8 @@ class InterviewHandler:
         score_result = await scorer.score(state)
         if score_result.is_err:
             state.clear_stored_ambiguity()
-            if state.completion_candidate_streak != 0:
-                state.completion_candidate_streak = 0
-                state.mark_updated()
+            if reset_on_failure:
+                _reset_stale_completion_streak(state)
             log.warning(
                 "mcp.tool.interview.live_ambiguity_failed",
                 interview_id=state.interview_id,
@@ -783,7 +822,19 @@ class InterviewHandler:
             return None
 
         score = score_result.value
-        _update_completion_candidate_streak(state, score)
+        qualifies = qualifies_for_seed_completion(
+            score,
+            is_brownfield=state.is_brownfield,
+        )
+        if advance_streak:
+            # Standard routing: single helper owns both bump-on-qualify
+            # and reset-on-fail so the two are never out of sync.
+            _update_completion_candidate_streak(state, score)
+        elif reset_on_failure and not qualifies:
+            # Explicit-done path (or any caller that owns the increment):
+            # we still MUST share the stale-streak reset contract so a
+            # weak rescore cannot let a stored streak survive.
+            _reset_stale_completion_streak(state)
         state.store_ambiguity(
             score=score.overall_score,
             breakdown=score.breakdown.model_dump(mode="json"),
@@ -1311,8 +1362,16 @@ class InterviewHandler:
                 # If answer provided, record it first
                 if answer:
                     if _is_interview_completion_signal(answer):
-                        if state.rounds and state.rounds[-1].user_response is None:
-                            state.rounds.pop()
+                        # Remember whether a round is awaiting an answer so we
+                        # can pop it only on the branches that actually end
+                        # the interview. Shortfall/refusal paths keep the
+                        # pending question around so the user's next plain
+                        # answer lands on a live round instead of either
+                        # crashing ("no questions have been asked yet") or
+                        # attaching to a stale, already-answered round.
+                        has_pending_round = bool(
+                            state.rounds and state.rounds[-1].user_response is None
+                        )
                         # Gate: check ambiguity before completing.
                         # Stored score first; live scoring as fallback.
                         exit_score = _load_state_ambiguity_score(state)
@@ -1324,18 +1383,110 @@ class InterviewHandler:
                                 is_brownfield=state.is_brownfield,
                             )
                         ):
-                            exit_score = await self._score_interview_state(llm_adapter, state)
+                            # Own the streak advance in this branch; the
+                            # scorer must not double-bump it. See #405.
+                            # ``reset_on_failure=True`` keeps the shared
+                            # stale-streak invalidation contract even
+                            # though this branch disables the qualifying-
+                            # score increment.
+                            exit_score = await self._score_interview_state(
+                                llm_adapter,
+                                state,
+                                advance_streak=False,
+                                reset_on_failure=True,
+                            )
                         if exit_score is not None and qualifies_for_seed_completion(
                             exit_score,
                             is_brownfield=state.is_brownfield,
                         ):
-                            return await self._complete_interview_response(
-                                engine,
-                                state,
-                                session_id,
-                                exit_score,
+                            # Explicit 'done' with a qualifying score counts
+                            # as an implicit stability signal — advance the
+                            # streak so repeated 'done' inputs can progress
+                            # instead of looping on the same message forever.
+                            # See: https://github.com/Q00/ouroboros/issues/405
+                            if state.completion_candidate_streak < AUTO_COMPLETE_STREAK_REQUIRED:
+                                state.completion_candidate_streak += 1
+                                state.mark_updated()
+                            if state.completion_candidate_streak >= AUTO_COMPLETE_STREAK_REQUIRED:
+                                # We are about to finalize the interview —
+                                # drop the pending 'done' round so it does
+                                # not leak into the saved transcript.
+                                if has_pending_round:
+                                    state.rounds.pop()
+                                return await self._complete_interview_response(
+                                    engine,
+                                    state,
+                                    session_id,
+                                    exit_score,
+                                )
+                            # Streak advanced but still short of the
+                            # threshold — persist the advance and invite the
+                            # user to confirm again or answer the pending
+                            # question. The pending round is intentionally
+                            # preserved so "answer another question to
+                            # update the score" remains truthful.
+                            #
+                            # Persistence is load-bearing on this branch:
+                            # the next 'done' must see the advanced streak
+                            # or the user is stuck looping from 0 forever.
+                            # Treat a save failure as a hard error rather
+                            # than returning the "almost there" success
+                            # message with an un-persisted streak.
+                            # See #405 follow-up design note on 3c2531d.
+                            shortfall_save_result = await engine.save_state(state)
+                            if shortfall_save_result.is_err:
+                                log.error(
+                                    "mcp.tool.interview.save_failed_on_shortfall",
+                                    session_id=session_id,
+                                    error=str(shortfall_save_result.error),
+                                )
+                                return Result.err(
+                                    MCPToolError(
+                                        "Failed to persist completion streak "
+                                        f"advance: {shortfall_save_result.error}",
+                                        tool_name="ouroboros_interview",
+                                    )
+                                )
+                            streak_shortfall = (
+                                AUTO_COMPLETE_STREAK_REQUIRED - state.completion_candidate_streak
                             )
-                        # Ambiguity too high — refuse completion
+                            answer_hint = (
+                                "or answer the pending question to update the score."
+                                if has_pending_round
+                                else "or resume without an answer to receive another question."
+                            )
+                            return Result.ok(
+                                MCPToolResult(
+                                    content=(
+                                        MCPContentItem(
+                                            type=ContentType.TEXT,
+                                            text=(
+                                                f"Ambiguity looks low "
+                                                f"(score={exit_score.overall_score:.2f}). "
+                                                f"Stability check: "
+                                                f"{state.completion_candidate_streak}"
+                                                f"/{AUTO_COMPLETE_STREAK_REQUIRED}. "
+                                                f"Type 'done' once more to confirm "
+                                                f"({streak_shortfall} more signal(s) needed), "
+                                                f"{answer_hint}"
+                                            ),
+                                        ),
+                                    ),
+                                    is_error=False,
+                                    meta={
+                                        "session_id": session_id,
+                                        "ambiguity_score": exit_score.overall_score,
+                                        "seed_ready": False,
+                                        "completion_candidate_streak": (
+                                            state.completion_candidate_streak
+                                        ),
+                                        "streak_required": AUTO_COMPLETE_STREAK_REQUIRED,
+                                    },
+                                )
+                            )
+                        # Ambiguity too high — refuse completion. Keep any
+                        # pending round in place so the user can still
+                        # answer it directly.
                         await engine.save_state(state)
                         return self._ambiguity_gate_response(
                             session_id,
