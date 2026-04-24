@@ -121,8 +121,8 @@ class TestHermesCliRuntime:
         assert runtime.runtime_backend == "hermes_cli"
         assert runtime.working_directory == "/tmp/project"
         assert runtime.permission_mode == "default"
-        assert runtime._startup_output_timeout_seconds == 180.0
-        assert runtime._stdout_idle_timeout_seconds == 600.0
+        assert runtime._startup_output_timeout_seconds == 600.0
+        assert runtime._stdout_idle_timeout_seconds == 900.0
 
     def test_constructor_accepts_llm_backend(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", llm_backend="opencode")
@@ -155,8 +155,8 @@ class TestHermesCliRuntime:
         ):
             runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
 
-        assert runtime._startup_output_timeout_seconds == 180.0
-        assert runtime._stdout_idle_timeout_seconds == 600.0
+        assert runtime._startup_output_timeout_seconds == 600.0
+        assert runtime._stdout_idle_timeout_seconds == 900.0
 
     def test_research_tasks_get_web_capable_toolsets_by_default(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")

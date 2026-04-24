@@ -105,8 +105,8 @@ class HermesCliRuntime(AgentRuntime):
     _display_name = "Hermes CLI"
     _process_shutdown_timeout_seconds = 5.0
     _max_ouroboros_depth = 5
-    _startup_output_timeout_seconds = 180.0
-    _stdout_idle_timeout_seconds = 600.0
+    _startup_output_timeout_seconds = 600.0
+    _stdout_idle_timeout_seconds = 900.0
     _max_stderr_lines = 512
     _default_research_toolsets = ("web", "browser", "terminal", "file")
 
@@ -459,6 +459,18 @@ class HermesCliRuntime(AgentRuntime):
 
         if self._model:
             args.extend(["--model", self._model])
+
+        log.info(
+            f"{self._log_namespace}.launching",
+            cli_path=self._cli_path,
+            cwd=self._cwd,
+            provider=self._provider,
+            model=self._model,
+            toolsets=configured_toolsets,
+            startup_timeout_seconds=self._startup_output_timeout_seconds,
+            stdout_idle_timeout_seconds=self._stdout_idle_timeout_seconds,
+            resume=bool(handle and handle.native_session_id),
+        )
 
         args.extend(["-q", full_prompt])
 
