@@ -232,13 +232,24 @@ reused across ACs.
 
 ## Open questions
 
-Worth revisiting before or during the next milestones:
+Extracted to a dedicated brainstorming doc — each question is ground-truthed with
+file:line references, options priced in LOC, and a priority/sequencing matrix:
 
-1. **Should `--compounding` also imply `--no-decomposition` or keep decomposition on by default?** Decomposition turns one AC into sub-ACs; in serial mode they already run sequentially within the parent. Current design keeps decomposition on. If sub-AC postmortems should be first-class chain members (not just aggregated into parent), the rendering policy needs an update.
-2. **Are per-AC git commits the right diff-capture default or an opt-in?** Committing to the user's worktree on every AC is surprising. `git stash create` gives a HEAD-free snapshot but is less discoverable. Current lean: opt-in via `--commit-per-ac`.
-3. **What's the right `invariants_established` extraction interface?** Two options: (a) post-AC meta-prompt asking the agent to list invariants; (b) tag convention `[[INVARIANT: ...]]` that the agent emits inline during work. (a) is cleaner but costs an extra call per AC; (b) is free but requires agent discipline.
-4. **Should failed-QA retries be capped by a separate `--max-qa-retries` or share the existing stall-retry count?** Different failure classes; probably separate.
-5. **How does `ooo evolve` interact with compounding runs?** Does each AC trigger a micro-evolve, or only end-of-run? Scope gets blurry.
+**[docs/brainstorm/serial-compounding-open-questions.md](../brainstorm/serial-compounding-open-questions.md)**
+
+Summary of decisions (full reasoning in the brainstorm doc):
+
+| # | Question | Decision | Phase |
+|---|---|---|---|
+| Q1 | Sub-postmortems handling | **B-prime** — flatten in prompt, preserve structure in serialized state | 1.5 (AC-2 of dogfood) |
+| Q2 | Diff capture backend | Defer — event-based `files_modified` covers 70% | 2 |
+| Q3 | `invariants_established` extraction | **C-plus** — tag `[[INVARIANT: ...]]` + Haiku verifier + reliability score | 1.5 (AC-3 of dogfood) |
+| Q4 | Inline QA + retry semantics | Defer to M7 (inline QA not wired yet) | 2 |
+| Q5 | `ooo evolve` integration | End-of-run hint only; defer auto-trigger | Defer |
+| Q6 | Resume + chain | **B then C** split — Q6.1 end-of-run artifact, Q6.2 per-AC checkpoint + agent-adjudicated resume | 1.5 (AC-1 + AC-4 of dogfood) |
+| Q7 | Budget-overflow event | **Bundle into Q6.2** | 1.5 |
+
+**Phase-1.5 plan:** 4 ACs, ~460 LOC, executed as a compounding dogfood run in order **Q6.1 → Q1 → Q3 → Q6.2+Q7**. See the brainstorm doc's "Execution plan" section for AC scopes and success criteria.
 
 ---
 
