@@ -43,6 +43,7 @@ def create_agent_runtime(
     *,
     backend: str | None = None,
     permission_mode: str | None = None,
+    provider: str | None = None,
     model: str | None = None,
     cli_path: str | Path | None = None,
     cwd: str | Path | None = None,
@@ -99,6 +100,7 @@ def create_agent_runtime(
 
         return HermesCliRuntime(
             cli_path=cli_path or get_hermes_cli_path(),
+            provider=provider,
             **runtime_kwargs,
         )
 

@@ -114,6 +114,7 @@ class HermesCliRuntime(AgentRuntime):
         *,
         cli_path: str | Path | None = None,
         permission_mode: str | None = None,
+        provider: str | None = None,
         model: str | None = None,
         cwd: str | Path | None = None,
         skills_dir: str | Path | None = None,
@@ -122,6 +123,7 @@ class HermesCliRuntime(AgentRuntime):
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._permission_mode = permission_mode or "default"
+        self._provider = provider
         self._model = model
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
         self._skills_dir = Path(skills_dir).expanduser() if skills_dir else None
@@ -390,6 +392,9 @@ class HermesCliRuntime(AgentRuntime):
 
         # Use quiet mode for programmatic output
         args.extend(["-Q", "--source", "tool"])
+
+        if self._provider:
+            args.extend(["--provider", self._provider])
 
         if self._model:
             args.extend(["--model", self._model])

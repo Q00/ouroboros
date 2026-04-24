@@ -126,6 +126,10 @@ class TestHermesCliRuntime:
         runtime = HermesCliRuntime(cli_path="hermes", llm_backend="opencode")
         assert runtime._llm_backend == "opencode"
 
+    def test_constructor_accepts_provider(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", provider="gemini")
+        assert runtime._provider == "gemini"
+
     def test_runtime_does_not_expose_local_dispatch_parser_helpers(self) -> None:
         """Dispatch parsing and metadata resolution live in the shared router."""
         obsolete_helpers = {
@@ -459,6 +463,32 @@ class TestHermesCliRuntime:
         dispatcher.assert_not_awaited()
         mock_exec.assert_called_once()
         mock_warning.assert_not_called()
+        assert messages[-1].content == "Hermes fallback completed"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_passes_provider_to_hermes_cli(self) -> None:
+        runtime = HermesCliRuntime(
+            cli_path="hermes",
+            provider="gemini",
+            model="gemini-2.0-flash",
+            cwd="/tmp/project",
+        )
+        process = _FakeProcess("Hermes fallback completed\nsession_id: 20260413_120000_deadbeef\n")
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            messages = [message async for message in runtime.execute_task("do the thing")]
+
+        mock_exec.assert_called_once()
+        args = mock_exec.call_args.args
+        assert args[:2] == ("hermes", "chat")
+        assert "--provider" in args
+        assert args[args.index("--provider") + 1] == "gemini"
+        assert "--model" in args
+        assert args[args.index("--model") + 1] == "gemini-2.0-flash"
+        assert args.index("--provider") < args.index("--model")
         assert messages[-1].content == "Hermes fallback completed"
 
     @pytest.mark.asyncio

@@ -194,6 +194,8 @@ class TestCreateAgentRuntime:
             runtime = create_agent_runtime(
                 backend="hermes",
                 permission_mode="acceptEdits",
+                provider="gemini",
+                model="gemini-2.0-flash",
                 cwd="/tmp/project",
                 llm_backend="codex",
             )
@@ -201,6 +203,8 @@ class TestCreateAgentRuntime:
         assert isinstance(runtime, HermesCliRuntime)
         assert runtime._cli_path == "/tmp/hermes"
         assert runtime._cwd == "/tmp/project"
+        assert runtime._provider == "gemini"
+        assert runtime._model == "gemini-2.0-flash"
         assert runtime._skill_dispatcher is mock_dispatcher
         assert runtime._llm_backend == "codex"
 
