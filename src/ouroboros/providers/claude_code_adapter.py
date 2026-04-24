@@ -725,6 +725,9 @@ class ClaudeCodeAdapter:
             raise
         except Exception as exc:
             stderr_tail = "\n".join(stderr_lines[-20:]) if stderr_lines else ""
+            error_message = f"Claude Agent SDK request failed: {exc}"
+            if stderr_tail and "Check stderr output for details" in str(exc):
+                error_message = f"{error_message}\nstderr tail:\n{stderr_tail}"
             log.exception(
                 "claude_code_adapter.sdk_request_failed",
                 error=str(exc),
@@ -736,7 +739,7 @@ class ClaudeCodeAdapter:
             )
             return Result.err(
                 ProviderError(
-                    message=f"Claude Agent SDK request failed: {exc}",
+                    message=error_message,
                     details={
                         "error_type": type(exc).__name__,
                         "session_id": session_id,

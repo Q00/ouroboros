@@ -22,7 +22,12 @@ from ouroboros.bigbang.ambiguity import (
     get_next_milestone,
     is_ready_for_seed,
 )
-from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
+    InterviewRound,
+    InterviewState,
+    InterviewStatus,
+)
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -403,6 +408,39 @@ class TestAmbiguityScorerScore:
         # Should have retried 3 times
         assert mock_adapter.complete.call_count == 3
 
+    async def test_score_requires_summary_for_large_initial_context(self) -> None:
+        """score fails explicitly when long initial_context has no summary."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_large_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+
+        result = await scorer.score(state)
+
+        assert result.is_err
+        assert "summary required" in result.error.message
+        mock_adapter.complete.assert_not_called()
+
+    async def test_score_requires_summary_for_completed_large_initial_context(self) -> None:
+        """Completed long-context interviews still enforce summary before scoring."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_completed_large_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+            status=InterviewStatus.COMPLETED,
+        )
+
+        result = await scorer.score(state)
+
+        assert result.is_err
+        assert "summary required" in result.error.message
+        mock_adapter.complete.assert_not_called()
+
     async def test_score_provider_error_recovers_on_retry(self) -> None:
         """score recovers when provider error is transient."""
         mock_adapter = MagicMock()
@@ -614,6 +652,51 @@ class TestAmbiguityScorerBuildInterviewContext:
         assert "A: Answer 1" in context
         assert "Q: Question 2?" in context
         assert "A: Answer 2" in context
+
+    def test_context_uses_prompt_safe_initial_context_summary(self) -> None:
+        """_build_interview_context avoids oversized raw initial_context."""
+        mock_adapter = MagicMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_large_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Short project summary",
+            )
+        )
+
+        context = scorer._build_interview_context(state)
+
+        assert "Short project summary" in context
+        assert "TAIL_MARKER" not in context
+        assert INITIAL_CONTEXT_SUMMARY_QUESTION not in context
+
+    def test_context_caps_oversized_initial_context_summary(self) -> None:
+        """_build_interview_context does not serialize oversized summary rounds raw."""
+        mock_adapter = MagicMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_large_summary",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response=("B" * 4_000) + "SUMMARY_TAIL",
+            )
+        )
+
+        context = scorer._build_interview_context(state)
+
+        assert "Context truncated for prompt safety" in context
+        assert "RAW_TAIL" not in context
+        assert "SUMMARY_TAIL" not in context
+        assert INITIAL_CONTEXT_SUMMARY_QUESTION not in context
 
 
 class TestAmbiguityScorerParseResponse:

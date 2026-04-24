@@ -7,10 +7,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
+    MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS,
     InterviewEngine,
     InterviewRound,
     InterviewState,
     InterviewStatus,
+    prompt_safe_initial_context,
 )
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
@@ -336,6 +339,183 @@ class TestInterviewEngineAskNextQuestion:
         assert "Build a task manager" in system_message.content
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("context_length", [2500, 3500])
+    async def test_long_initial_context_stays_below_cli_failure_cap(
+        self, context_length: int
+    ) -> None:
+        """Long initial_context is split so the system prompt stays below 3500 chars."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        async def _complete(messages, _config):
+            total_prompt_chars = sum(len(message.content) for message in messages)
+            if total_prompt_chars > engine._MAX_TOTAL_PROMPT_CHARS:
+                return Result.err(
+                    ProviderError(
+                        "Command failed with exit code 1. Check stderr output for details"
+                    )
+                )
+            return Result.ok(create_mock_completion_response())
+
+        mock_adapter.complete = AsyncMock(side_effect=_complete)
+        state = InterviewState(
+            interview_id=f"test_long_context_{context_length}",
+            initial_context="X" * context_length,
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
+        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert "Initial context continues in the first user message" in messages[0].content
+        assert messages[1].role == MessageRole.USER
+        assert "Additional initial context omitted" in messages[1].content
+
+    @pytest.mark.asyncio
+    async def test_long_initial_context_overflow_remains_after_first_round(self) -> None:
+        """Overflow initial_context remains present in later stateless requests."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_long_context_round_2",
+            initial_context="X" * 3500,
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question="What is the main goal?",
+                user_response="Ship the feature",
+            )
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        assert len(messages[0].content) <= engine._MAX_SYSTEM_PROMPT_CHARS
+        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert messages[1].role == MessageRole.USER
+        assert "Additional initial context omitted" in messages[1].content
+
+    @pytest.mark.asyncio
+    async def test_very_long_initial_context_is_rejected_before_prompting(self) -> None:
+        """Persisted long initial_context asks for a summary instead of failing."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        initial_context = ("A" * 49_990) + "TAIL_MARKER"
+        state = InterviewState(
+            interview_id="test_very_long_context",
+            initial_context=initial_context,
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        assert result.value == INITIAL_CONTEXT_SUMMARY_QUESTION
+        mock_adapter.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_start_accepts_very_long_initial_context_for_summary_recovery(self) -> None:
+        """start_interview remains backward-compatible with security limits."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        result = await engine.start_interview(("A" * 4_000) + "TAIL_MARKER")
+
+        assert result.is_ok
+        assert result.value.initial_context.endswith("TAIL_MARKER")
+
+    def test_prompt_safe_initial_context_uses_summary_round(self) -> None:
+        """Shared prompt-safe context helper uses the recorded user summary."""
+        state = InterviewState(
+            interview_id="test_summary_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Short project summary",
+            )
+        )
+
+        assert prompt_safe_initial_context(state) == "Short project summary"
+
+    def test_prompt_safe_initial_context_caps_long_summary_round(self) -> None:
+        """Shared prompt-safe context helper caps oversized recorded summaries."""
+        state = InterviewState(
+            interview_id="test_long_summary_context",
+            initial_context=("A" * 4_000) + "ORIGINAL_TAIL",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response=("B" * 4_000) + "SUMMARY_TAIL",
+            )
+        )
+
+        prompt_context = prompt_safe_initial_context(state)
+
+        assert len(prompt_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+        assert "Context truncated for prompt safety" in prompt_context
+        assert "ORIGINAL_TAIL" not in prompt_context
+        assert "SUMMARY_TAIL" not in prompt_context
+
+    @pytest.mark.asyncio
+    async def test_completed_long_context_requests_summary_recovery(self) -> None:
+        """Completed long-context interviews can still ask for the required summary."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_completed_legacy_context",
+            initial_context=("A" * 4_000) + "ORIGINAL_TAIL",
+            status=InterviewStatus.COMPLETED,
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        assert result.value == INITIAL_CONTEXT_SUMMARY_QUESTION
+        mock_adapter.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_long_history_stays_under_total_prompt_cap(self) -> None:
+        """Later rounds trim retained history so the full request stays safe."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock(return_value=Result.ok(create_mock_completion_response()))
+
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_long_history",
+            initial_context=("X" * 3489) + "TAIL_MARKER",
+        )
+        for i in range(8):
+            state.rounds.append(
+                InterviewRound(
+                    round_number=i + 1,
+                    question=f"What detail matters next? {i}",
+                    user_response="Y" * 800,
+                )
+            )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        messages = mock_adapter.complete.call_args[0][0]
+        prompt_content = "\n".join(message.content for message in messages)
+        assert sum(len(message.content) for message in messages) <= engine._MAX_TOTAL_PROMPT_CHARS
+        assert "Additional initial context omitted" in prompt_content
+        assert "TAIL_MARKER" in prompt_content
+
+    @pytest.mark.asyncio
     async def test_ask_question_with_history(self) -> None:
         """ask_next_question includes conversation history."""
         mock_adapter = MagicMock()
@@ -468,6 +648,29 @@ class TestInterviewEngineRecordResponse:
 
         assert result.is_err
         assert isinstance(result.error, ValidationError)
+
+    @pytest.mark.asyncio
+    async def test_record_response_reopens_completed_long_context_for_summary(self) -> None:
+        """Completed long-context interviews can record the missing summary."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_completed_summary_repair",
+            initial_context=("A" * 4_000) + "ORIGINAL_TAIL",
+            status=InterviewStatus.COMPLETED,
+        )
+
+        result = await engine.record_response(
+            state,
+            user_response="Concise product summary",
+            question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+        )
+
+        assert result.is_ok
+        assert state.status == InterviewStatus.IN_PROGRESS
+        assert state.rounds[-1].question == INITIAL_CONTEXT_SUMMARY_QUESTION
+        assert prompt_safe_initial_context(state) == "Concise product summary"
 
     @pytest.mark.asyncio
     async def test_record_response_does_not_auto_complete(self) -> None:
@@ -1023,7 +1226,7 @@ class TestSystemPromptBrownfield:
         assert "### architect" in prompt
 
     def test_system_prompt_hard_cap_enforced(self) -> None:
-        """Final prompt must never exceed _MAX_SYSTEM_PROMPT_CHARS (4800)."""
+        """Final prompt must never exceed _MAX_SYSTEM_PROMPT_CHARS (3500)."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
@@ -1037,10 +1240,10 @@ class TestSystemPromptBrownfield:
 
         prompt = engine._build_system_prompt(state)
 
-        assert len(prompt) <= 4800
+        assert len(prompt) <= engine._MAX_SYSTEM_PROMPT_CHARS
 
     def test_system_prompt_cap_when_header_and_panel_exceed_budget(self) -> None:
-        """Cap holds even when dynamic_header + perspective_panel alone exceed 4800."""
+        """Cap holds even when dynamic_header + perspective_panel alone exceed 3500."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
@@ -1055,4 +1258,4 @@ class TestSystemPromptBrownfield:
 
         prompt = engine._build_system_prompt(state)
 
-        assert len(prompt) <= 4800
+        assert len(prompt) <= engine._MAX_SYSTEM_PROMPT_CHARS

@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from ouroboros.evaluation.mechanical import CommandResult, MechanicalConfig
-from ouroboros.evaluation.verification_artifacts import build_verification_artifacts
+from ouroboros.evaluation.verification_artifacts import (
+    _auto_detect_mechanical_toml,
+    build_verification_artifacts,
+)
 
 
 def _git_diff_side_effect(command: tuple[str, ...]) -> str:
@@ -452,3 +455,222 @@ class TestBuildVerificationArtifacts:
         assert second_manifest["execution_id"] == "lin_test-gen-3"
         assert first_manifest["artifact_key"] == second_manifest["artifact_key"]
         assert first_manifest["artifact_run_id"] != second_manifest["artifact_run_id"]
+
+
+class TestAutoDetectIntegration:
+    """`build_verification_artifacts` must author mechanical.toml when missing."""
+
+    @pytest.mark.asyncio
+    async def test_auto_detect_runs_when_toml_absent(self, tmp_path: Path) -> None:
+        """When no toml exists, ensure_mechanical_toml is invoked with the provided adapter."""
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+        called: dict[str, object] = {}
+
+        async def fake_ensure(
+            working_dir: Path,
+            adapter: object,
+            *,
+            backend: object = None,
+            **_: object,
+        ) -> bool:
+            called["working_dir"] = working_dir
+            called["adapter"] = adapter
+            called["backend"] = backend
+            return True
+
+        sentinel_adapter = object()
+        with patch(
+            "ouroboros.evaluation.verification_artifacts.ensure_mechanical_toml",
+            side_effect=fake_ensure,
+        ):
+            await _auto_detect_mechanical_toml(workdir, sentinel_adapter, "codex")  # type: ignore[arg-type]
+
+        assert called["working_dir"] == workdir
+        assert called["adapter"] is sentinel_adapter
+        assert called["backend"] == "codex"
+
+    @pytest.mark.asyncio
+    async def test_auto_detect_uses_default_adapter_when_none_supplied(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Callers that do not thread an adapter still get Stage 1 coverage."""
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+        default_adapter = object()
+        ensure_calls: list[tuple[Path, object, object]] = []
+
+        async def fake_ensure(
+            working_dir: Path,
+            adapter: object,
+            *,
+            backend: object = None,
+            **_: object,
+        ) -> bool:
+            ensure_calls.append((working_dir, adapter, backend))
+            return True
+
+        with (
+            patch(
+                "ouroboros.providers.factory.create_llm_adapter",
+                return_value=default_adapter,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.ensure_mechanical_toml",
+                side_effect=fake_ensure,
+            ),
+        ):
+            await _auto_detect_mechanical_toml(workdir, None)
+
+        assert ensure_calls == [(workdir, default_adapter, None)]
+
+    @pytest.mark.asyncio
+    async def test_auto_detect_swallows_adapter_construction_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """If the default adapter cannot be built, detect is silently skipped."""
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+
+        def boom(**_: object) -> object:
+            raise RuntimeError("no backend configured")
+
+        ensure_calls: list[tuple[Path, object, object]] = []
+
+        async def fake_ensure(
+            working_dir: Path,
+            adapter: object,
+            *,
+            backend: object = None,
+            **_: object,
+        ) -> bool:
+            ensure_calls.append((working_dir, adapter, backend))
+            return True
+
+        with (
+            patch(
+                "ouroboros.providers.factory.create_llm_adapter",
+                side_effect=boom,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.ensure_mechanical_toml",
+                side_effect=fake_ensure,
+            ),
+        ):
+            await _auto_detect_mechanical_toml(workdir, None)
+
+        assert ensure_calls == []  # never invoked
+
+    @pytest.mark.asyncio
+    async def test_build_skips_auto_detect_when_toml_exists(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Pre-authored toml short-circuits the detector call entirely."""
+        workdir = tmp_path / "project"
+        (workdir / ".ouroboros").mkdir(parents=True)
+        (workdir / ".ouroboros" / "mechanical.toml").write_text('test = "pytest -q"\n')
+
+        ensure_mock = AsyncMock(return_value=True)
+        config = MechanicalConfig(
+            test_command=("pytest", "-q"),
+            timeout_seconds=30,
+            working_dir=workdir,
+        )
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            if command and command[0] == "git":
+                return CommandResult(0, _git_diff_side_effect(command), "")
+            return CommandResult(0, "ok\n", "")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.ensure_mechanical_toml",
+                new=ensure_mock,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            await build_verification_artifacts(
+                "exec-1",
+                "some output",
+                workdir,
+            )
+
+        ensure_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_git_state_captured_before_detector_authors_toml(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Detector must not pollute the captured git diff with its own toml."""
+        workdir = tmp_path / "project"
+        workdir.mkdir()
+
+        sequence: list[str] = []
+
+        async def fake_git(
+            working_dir: Path,  # noqa: ARG001
+            artifact_dir: Path,  # noqa: ARG001
+        ) -> tuple[tuple[str, ...], str, str, bool, str | None]:
+            sequence.append("git_state")
+            return ((), "", "", True, None)
+
+        async def fake_detect(
+            working_dir: Path,  # noqa: ARG001
+            adapter: object,  # noqa: ARG001
+            llm_backend: object = None,  # noqa: ARG001
+        ) -> None:
+            sequence.append("detect")
+
+        config = MechanicalConfig(timeout_seconds=30, working_dir=workdir)
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts._capture_git_state",
+                side_effect=fake_git,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts._auto_detect_mechanical_toml",
+                side_effect=fake_detect,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.has_mechanical_toml",
+                return_value=False,
+            ),
+        ):
+            await build_verification_artifacts(
+                "exec-ordering",
+                "execution output",
+                workdir,
+            )
+
+        assert sequence == ["git_state", "detect"], (
+            "git state must be captured before the detector writes .ouroboros/mechanical.toml"
+        )

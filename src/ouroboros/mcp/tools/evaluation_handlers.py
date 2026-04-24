@@ -333,10 +333,12 @@ class EvaluateHandler:
                     name="working_dir",
                     type=ToolInputType.STRING,
                     description=(
-                        "Project working directory for language auto-detection of Stage 1 "
-                        "mechanical verification commands. Auto-detects language from marker "
-                        "files (build.zig, Cargo.toml, go.mod, package.json, etc.). "
-                        "Supports .ouroboros/mechanical.toml for custom overrides."
+                        "Project root used to resolve Stage 1 mechanical verification "
+                        "commands. Commands are read from .ouroboros/mechanical.toml; "
+                        "when the file is missing, the evaluator makes one AI detect "
+                        "call that inspects manifests (package.json, pyproject.toml, "
+                        "Cargo.toml, Makefile, ...) and authors the toml. Stage 1 "
+                        "skips every check when no toml is produced — it never guesses."
                     ),
                     required=False,
                 ),
@@ -363,6 +365,8 @@ class EvaluateHandler:
             PipelineConfig,
             SemanticConfig,
             build_mechanical_config,
+            ensure_mechanical_toml,
+            has_mechanical_toml,
         )
 
         session_id = arguments.get("session_id")
@@ -533,6 +537,24 @@ class EvaluateHandler:
                 )
                 artifact_bundle = None
 
+            # Stage 1 trusts .ouroboros/mechanical.toml only. When the file is
+            # absent we run the AI detector once to author it — silent
+            # best-effort, so a failed detect simply leaves Stage 1 empty and
+            # the pipeline falls through to Stage 2 instead of phantom-failing
+            # on hardcoded preset guesses.
+            if not has_mechanical_toml(working_dir):
+                try:
+                    await ensure_mechanical_toml(
+                        working_dir,
+                        llm_adapter,
+                        backend=self.llm_backend,
+                    )
+                except Exception as exc:  # noqa: BLE001 — detector must never break eval
+                    log.warning(
+                        "mcp.tool.evaluate.detect_failed",
+                        working_dir=str(working_dir),
+                        error=str(exc),
+                    )
             mechanical_config = build_mechanical_config(working_dir)
             config = PipelineConfig(
                 mechanical=mechanical_config,
@@ -1231,6 +1253,21 @@ class LateralThinkHandler:
                     ),
                 ),
                 MCPToolParameter(
+                    name="stagnation_pattern",
+                    type=ToolInputType.STRING,
+                    description=(
+                        "Detected stagnation pattern used to suggest a persona when "
+                        "persona is omitted."
+                    ),
+                    required=False,
+                    enum=(
+                        "spinning",
+                        "oscillation",
+                        "no_drift",
+                        "diminishing_returns",
+                    ),
+                ),
+                MCPToolParameter(
                     name="personas",
                     type=ToolInputType.ARRAY,
                     description=(
@@ -1270,6 +1307,7 @@ class LateralThinkHandler:
             Result containing lateral thinking prompt(s) or error.
         """
         from ouroboros.resilience.lateral import LateralThinker, ThinkingPersona
+        from ouroboros.resilience.stagnation import StagnationPattern
 
         problem_context = arguments.get("problem_context")
         if not problem_context:
@@ -1294,7 +1332,18 @@ class LateralThinkHandler:
 
         # --- Parallel multi-persona dispatch path ---
         explicit_list = arguments.get("personas")
-        persona_arg = arguments.get("persona", "contrarian")
+        raw_persona_arg = arguments.get("persona")
+        if explicit_list or raw_persona_arg is None:
+            persona_arg = ""
+        else:
+            persona_arg = str(raw_persona_arg).strip()
+            if not persona_arg:
+                return Result.err(
+                    MCPToolError(
+                        "persona cannot be blank",
+                        tool_name="ouroboros_lateral_think",
+                    )
+                )
         dispatch_all = persona_arg == "all"
 
         if explicit_list or dispatch_all:
@@ -1413,6 +1462,43 @@ class LateralThinkHandler:
             )
 
         # --- Single-persona path ---
+        if not persona_arg:
+            stagnation_pattern_arg = arguments.get("stagnation_pattern")
+            if stagnation_pattern_arg:
+                try:
+                    stagnation_pattern = StagnationPattern(str(stagnation_pattern_arg))
+                except ValueError:
+                    return Result.err(
+                        MCPToolError(
+                            (
+                                f"Invalid stagnation_pattern: {stagnation_pattern_arg}. "
+                                "Must be one of: spinning, oscillation, no_drift, "
+                                "diminishing_returns"
+                            ),
+                            tool_name="ouroboros_lateral_think",
+                        )
+                    )
+
+                from ouroboros.resilience.recovery import suggest_lateral_persona_for_pattern
+
+                suggested = suggest_lateral_persona_for_pattern(
+                    stagnation_pattern,
+                    failed_attempts=failed_attempts,
+                )
+                if suggested is None:
+                    return Result.err(
+                        MCPToolError(
+                            (
+                                "No available lateral thinking persona remains after "
+                                "applying failed_attempts exclusions"
+                            ),
+                            tool_name="ouroboros_lateral_think",
+                        )
+                    )
+                persona_arg = suggested.value
+            else:
+                persona_arg = ThinkingPersona.CONTRARIAN.value
+
         try:
             persona = ThinkingPersona(persona_arg)
         except ValueError:

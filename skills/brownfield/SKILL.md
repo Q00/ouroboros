@@ -14,9 +14,10 @@ ooo brownfield                # Scan repos and set defaults
 ooo brownfield scan           # Scan only (no default selection)
 ooo brownfield defaults       # Show current defaults
 ooo brownfield set 6,18,19   # Set defaults by repo numbers
+ooo brownfield detect [path]  # Author mechanical.toml via one AI call
 ```
 
-**Trigger keywords:** "brownfield", "scan repos", "default repos", "brownfield scan"
+**Trigger keywords:** "brownfield", "scan repos", "default repos", "brownfield scan", "mechanical detect"
 
 ---
 
@@ -167,3 +168,37 @@ Arguments: { "action": "set_defaults", "indices": "<indices>" }
 ```
 
 Show confirmation with updated defaults.
+
+---
+
+### Subcommand: `detect [path]`
+
+Runs one AI call against the target directory (defaults to the user's cwd)
+and writes `.ouroboros/mechanical.toml` with validated lint / build / test /
+static / coverage commands. Stage 1 of evaluation reads this file verbatim,
+so the toml is the authoritative Stage 1 contract — no hardcoded language
+presets exist anymore.
+
+Ouroboros auto-runs this detect the first time `ouroboros_evaluate` is
+invoked without a toml present, so most users never need to call it
+directly. Run it explicitly when:
+
+- you want to pre-author the toml before the first evaluate,
+- you moved to a new build tool and want to refresh (`--force`),
+- you want to review/edit the commands before Stage 1 trusts them.
+
+**Implementation:** invoke the CLI via Bash.
+
+```
+uvx --from ouroboros-ai ouroboros detect [path]
+# or, if already installed:
+ouroboros detect [path] [--force]
+```
+
+Then print the resulting `.ouroboros/mechanical.toml` contents so the user
+can confirm the proposed commands or hand-edit them.
+
+If detect reports "could not propose any verifiable commands", surface the
+reason (no manifests found, LLM unavailable, every proposal dropped) and
+suggest the user write a minimal toml by hand — any single entry like
+`test = "pytest -q"` is enough to opt back in to Stage 1 for that check.

@@ -685,9 +685,7 @@ class TestErrorDiagnostics:
 
     @pytest.mark.asyncio
     async def test_sdk_exception_includes_stderr_in_details(self) -> None:
-        """SDK exception captures stderr lines in error details."""
-        import subprocess
-
+        """SDK exception captures stderr lines in error details and message."""
         adapter = ClaudeCodeAdapter()
         config = CompletionConfig(model="claude-sonnet-4-6")
 
@@ -706,7 +704,7 @@ class TestErrorDiagnostics:
                 captured_stderr["fn"]("fatal: SDK process died")
             if False:
                 yield
-            raise subprocess.CalledProcessError(1, "claude")
+            raise RuntimeError("Command failed with exit code 1. Check stderr output for details")
 
         sdk_module = _make_sdk_mock(mock_options_cls, MagicMock(side_effect=failing_query))
 
@@ -722,6 +720,8 @@ class TestErrorDiagnostics:
         assert result.is_err
         assert "stderr" in result.error.details
         assert "connection refused" in result.error.details["stderr"]
+        assert "stderr tail:" in result.error.message
+        assert "fatal: SDK process died" in result.error.message
 
     @pytest.mark.asyncio
     async def test_cancelled_error_is_not_swallowed(self) -> None:
