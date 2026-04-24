@@ -121,6 +121,8 @@ class TestHermesCliRuntime:
         assert runtime.runtime_backend == "hermes_cli"
         assert runtime.working_directory == "/tmp/project"
         assert runtime.permission_mode == "default"
+        assert runtime._startup_output_timeout_seconds == 180.0
+        assert runtime._stdout_idle_timeout_seconds == 600.0
 
     def test_constructor_accepts_llm_backend(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", llm_backend="opencode")
@@ -129,6 +131,49 @@ class TestHermesCliRuntime:
     def test_constructor_accepts_provider(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", provider="gemini")
         assert runtime._provider == "gemini"
+
+    def test_timeout_defaults_can_be_overridden_with_env(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS": "240",
+                "OUROBOROS_HERMES_STDOUT_IDLE_TIMEOUT_SECONDS": "900",
+            },
+        ):
+            runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+
+        assert runtime._startup_output_timeout_seconds == 240.0
+        assert runtime._stdout_idle_timeout_seconds == 900.0
+
+    def test_invalid_timeout_env_values_fall_back_to_defaults(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS": "nope",
+                "OUROBOROS_HERMES_STDOUT_IDLE_TIMEOUT_SECONDS": "0",
+            },
+        ):
+            runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+
+        assert runtime._startup_output_timeout_seconds == 180.0
+        assert runtime._stdout_idle_timeout_seconds == 600.0
+
+    def test_research_tasks_get_web_capable_toolsets_by_default(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        assert (
+            runtime._configured_toolsets("Create a source-backed evidence ledger", None)
+            == "web,browser,terminal,file"
+        )
+
+    def test_toolsets_can_be_overridden_with_env(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        with patch.dict(os.environ, {"OUROBOROS_HERMES_TOOLSETS": "web, terminal"}):
+            assert runtime._configured_toolsets("plain coding task", None) == "web,terminal"
+
+    def test_toolsets_can_be_disabled_with_env(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        with patch.dict(os.environ, {"OUROBOROS_HERMES_TOOLSETS": ""}):
+            assert runtime._configured_toolsets("research evidence", None) is None
 
     def test_runtime_does_not_expose_local_dispatch_parser_helpers(self) -> None:
         """Dispatch parsing and metadata resolution live in the shared router."""
@@ -490,6 +535,41 @@ class TestHermesCliRuntime:
         assert args[args.index("--model") + 1] == "gemini-2.0-flash"
         assert args.index("--provider") < args.index("--model")
         assert messages[-1].content == "Hermes fallback completed"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_passes_research_toolsets_to_hermes_cli(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        process = _FakeProcess("Hermes fallback completed\nsession_id: 20260413_120000_deadbeef\n")
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            messages = [
+                message
+                async for message in runtime.execute_task(
+                    "Research source URLs and produce an evidence ledger"
+                )
+            ]
+
+        mock_exec.assert_called_once()
+        args = mock_exec.call_args.args
+        assert "--toolsets" in args
+        assert args[args.index("--toolsets") + 1] == "web,browser,terminal,file"
+        assert messages[-1].content == "Hermes fallback completed"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_omits_toolsets_for_plain_coding_task(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        process = _FakeProcess("Hermes fallback completed\nsession_id: 20260413_120000_deadbeef\n")
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            _ = [message async for message in runtime.execute_task("Refactor this module")]
+
+        assert "--toolsets" not in mock_exec.call_args.args
 
     @pytest.mark.asyncio
     async def test_execute_task_maps_interview_argument_to_initial_context(

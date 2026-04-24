@@ -105,9 +105,10 @@ class HermesCliRuntime(AgentRuntime):
     _display_name = "Hermes CLI"
     _process_shutdown_timeout_seconds = 5.0
     _max_ouroboros_depth = 5
-    _startup_output_timeout_seconds = 60.0
-    _stdout_idle_timeout_seconds = 300.0
+    _startup_output_timeout_seconds = 180.0
+    _stdout_idle_timeout_seconds = 600.0
     _max_stderr_lines = 512
+    _default_research_toolsets = ("web", "browser", "terminal", "file")
 
     def __init__(
         self,
@@ -129,6 +130,14 @@ class HermesCliRuntime(AgentRuntime):
         self._skills_dir = Path(skills_dir).expanduser() if skills_dir else None
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._startup_output_timeout_seconds = self._env_float(
+            "OUROBOROS_HERMES_STARTUP_TIMEOUT_SECONDS",
+            self._startup_output_timeout_seconds,
+        )
+        self._stdout_idle_timeout_seconds = self._env_float(
+            "OUROBOROS_HERMES_STDOUT_IDLE_TIMEOUT_SECONDS",
+            self._stdout_idle_timeout_seconds,
+        )
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
         log.info(
@@ -165,6 +174,18 @@ class HermesCliRuntime(AgentRuntime):
             return configured
 
         return shutil.which(self._default_cli_name) or self._default_cli_name
+
+    @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        """Read a positive float from the environment, falling back safely."""
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
 
     def _build_child_env(self) -> dict[str, str]:
         """Build an isolated environment for child runtime processes."""
@@ -206,6 +227,42 @@ class HermesCliRuntime(AgentRuntime):
             cwd=self._cwd,
             updated_at=datetime.now(UTC).isoformat(),
         )
+
+    def _configured_toolsets(self, prompt: str, system_prompt: str | None) -> str | None:
+        """Return Hermes CLI toolsets for tasks that need stronger tooling.
+
+        Ouroboros implementation subtasks can be domain-research heavy, but the
+        Hermes runtime previously launched the CLI without an explicit toolset
+        selection. Depending on user config, this could leave child agents with a
+        coding-shaped catalog (Read/Write/Edit/Bash) even when the AC asks for
+        web discovery. Keep the default behavior configurable while providing a
+        safe heuristic for research/data-acquisition prompts.
+        """
+        explicit = os.environ.get("OUROBOROS_HERMES_TOOLSETS")
+        if explicit is not None:
+            cleaned = ",".join(part.strip() for part in explicit.split(",") if part.strip())
+            return cleaned or None
+
+        text = f"{system_prompt or ''}\n{prompt}".lower()
+        research_markers = (
+            "research",
+            "discover",
+            "discovery",
+            "evidence",
+            "source link",
+            "source-backed",
+            "cite",
+            "citation",
+            "web",
+            "url",
+            "pdf",
+            "broker",
+            "quote form",
+            "market scan",
+        )
+        if any(marker in text for marker in research_markers):
+            return ",".join(self._default_research_toolsets)
+        return None
 
     def _compose_prompt(
         self,
@@ -392,6 +449,10 @@ class HermesCliRuntime(AgentRuntime):
 
         # Use quiet mode for programmatic output
         args.extend(["-Q", "--source", "tool"])
+
+        configured_toolsets = self._configured_toolsets(prompt, system_prompt)
+        if configured_toolsets:
+            args.extend(["--toolsets", configured_toolsets])
 
         if self._provider:
             args.extend(["--provider", self._provider])

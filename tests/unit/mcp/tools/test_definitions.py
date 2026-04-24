@@ -125,6 +125,104 @@ class TestExecuteSeedHandler:
         assert handler.agent_runtime_backend == "opencode"
         assert handler.llm_backend == "opencode"
 
+    def test_resolve_runtime_model_selection_maps_model_tier_to_provider_model(self) -> None:
+        """Execution model tiers resolve to the tier's first provider/model pair."""
+        handler = ExecuteSeedHandler(agent_runtime_backend="hermes")
+
+        with patch("ouroboros.mcp.tools.execution_handlers.load_config") as mock_load_config:
+            mock_load_config.return_value.economics.tiers = {
+                "standard": MagicMock(
+                    models=[MagicMock(provider="gemini", model="gemini-2.0-flash")]
+                )
+            }
+
+            selection = handler._resolve_runtime_model_selection("medium")
+
+        assert selection == {"provider": "gemini", "model": "gemini-2.0-flash"}
+
+    def test_resolve_runtime_model_selection_normalizes_hermes_provider_names(self) -> None:
+        """Hermes runtime receives Hermes provider names for aliased tier providers."""
+        handler = ExecuteSeedHandler(agent_runtime_backend="hermes")
+
+        with patch("ouroboros.mcp.tools.execution_handlers.load_config") as mock_load_config:
+            mock_load_config.return_value.economics.tiers = {
+                "frugal": MagicMock(models=[MagicMock(provider="codex", model="gpt-5.5")]),
+                "frontier": MagicMock(
+                    models=[MagicMock(provider="google", model="gemini-2.0-flash")]
+                ),
+            }
+
+            small = handler._resolve_runtime_model_selection("small")
+            large = handler._resolve_runtime_model_selection("large")
+
+        assert small == {"provider": "openai-codex", "model": "gpt-5.5"}
+        assert large == {"provider": "gemini", "model": "gemini-2.0-flash"}
+
+    async def test_handle_passes_model_tier_selection_to_agent_runtime(self) -> None:
+        """Execution handler forwards tier provider/model selection into runtime construction."""
+        handler = ExecuteSeedHandler(agent_runtime_backend="hermes", llm_backend="codex")
+        seed_content = """
+goal: Write provider marker
+acceptance_criteria:
+  - Write the marker
+constraints: []
+ontology_schema:
+  name: ProviderMarker
+  description: Provider marker domain
+  fields: []
+metadata:
+  seed_id: provider_marker_test
+  ambiguity_score: 0.1
+"""
+
+        with (
+            patch.object(
+                handler,
+                "_resolve_runtime_model_selection",
+                return_value={"provider": "xai", "model": "grok-3-mini"},
+            ),
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.maybe_prepare_task_workspace",
+                return_value=None,
+            ),
+            patch("ouroboros.mcp.tools.execution_handlers.EventStore") as mock_event_store_cls,
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.CheckpointStore"
+            ) as mock_checkpoint_store_cls,
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.SessionRepository"
+            ) as mock_session_repo_cls,
+            patch(
+                "ouroboros.mcp.tools.execution_handlers.create_agent_runtime"
+            ) as mock_create_runtime,
+            patch("ouroboros.mcp.tools.execution_handlers.OrchestratorRunner") as mock_runner_cls,
+        ):
+            mock_store = mock_event_store_cls.return_value
+            mock_store.initialize = AsyncMock()
+            mock_store.close = AsyncMock()
+            mock_checkpoint_store_cls.return_value.initialize = MagicMock()
+            mock_session_repo_cls.return_value.get_tracker = AsyncMock(return_value=None)
+            mock_tracker = MagicMock()
+            mock_tracker.session_id = "orch_test"
+            mock_tracker.progress = {}
+            mock_runner = mock_runner_cls.return_value
+            mock_runner.prepare_session = AsyncMock(return_value=Result.ok(mock_tracker))
+            mock_runner.execute_precreated_session = AsyncMock(
+                return_value=Result.ok(SimpleNamespace(success=True))
+            )
+            mock_create_runtime.return_value.runtime_backend = "hermes_cli"
+
+            result = await handler.handle(
+                {"seed_content": seed_content, "model_tier": "large", "skip_qa": True},
+                synchronous=True,
+                session_id_override="orch_test",
+            )
+
+        assert result.is_ok
+        mock_create_runtime.assert_called_once()
+        assert mock_create_runtime.call_args.kwargs["provider"] == "xai"
+        assert mock_create_runtime.call_args.kwargs["model"] == "grok-3-mini"
+
 
 class TestSessionStatusHandler:
     """Test SessionStatusHandler class."""

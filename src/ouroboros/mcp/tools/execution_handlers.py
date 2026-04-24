@@ -17,6 +17,7 @@ from rich.console import Console
 import structlog
 import yaml
 
+from ouroboros.config import load_config
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
@@ -182,6 +183,39 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 ),
             ),
         )
+
+    def _resolve_runtime_model_selection(self, model_tier: object) -> dict[str, str]:
+        """Resolve a public model_tier argument to runtime provider/model kwargs."""
+        tier_aliases = {
+            "small": "frugal",
+            "medium": "standard",
+            "large": "frontier",
+            "frugal": "frugal",
+            "standard": "standard",
+            "frontier": "frontier",
+        }
+        tier_name = tier_aliases.get(str(model_tier or "medium").strip().lower(), "standard")
+
+        try:
+            tier = load_config().economics.tiers.get(tier_name)
+        except Exception:
+            return {}
+
+        if tier is None or not tier.models:
+            return {}
+
+        selected = tier.models[0]
+        provider = selected.provider.strip()
+        model = selected.model.strip()
+        if not provider or not model:
+            return {}
+        if str(self.agent_runtime_backend or "").strip().lower() in {"hermes", "hermes_cli"}:
+            provider = {
+                "codex": "openai-codex",
+                "codex_cli": "openai-codex",
+                "google": "gemini",
+            }.get(provider.lower(), provider)
+        return {"provider": provider, "model": model}
 
     async def handle(
         self,
@@ -414,10 +448,12 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     if inherited_runtime_handle and inherited_runtime_handle.approval_mode
                     else None
                 )
+                runtime_model_selection = self._resolve_runtime_model_selection(model_tier)
                 agent_adapter = create_agent_runtime(
                     backend=self.agent_runtime_backend,
                     cwd=Path(workspace.effective_cwd) if workspace else resolved_cwd,
                     llm_backend=self.llm_backend,
+                    **runtime_model_selection,
                     **(
                         {"permission_mode": delegated_permission_mode}
                         if delegated_permission_mode
