@@ -627,7 +627,7 @@ ouroboros mcp serve [OPTIONS]
 |--------|-------------|
 | `-h, --host TEXT` | Host to bind to (default: localhost) |
 | `-p, --port INTEGER` | Port to bind to (default: 8080) |
-| `-t, --transport TEXT` | Transport type: `stdio`, `sse`, or `streamable-http` (default: stdio). Note: `http` remains a *client* transport alias for bridging upstream MCP servers via `mcp_servers.yaml`. |
+| `-t, --transport TEXT` | Transport type: `stdio`, `sse`, or `streamable-http` (default: stdio). Note: `http` is only a client config alias for outbound MCP connections and is NOT a valid serve transport. |
 | `--db TEXT` | Path to the EventStore database file |
 | `--runtime TEXT` | Agent runtime backend for orchestrator-driven tools (`claude`, `codex`, `opencode`). Affects which tool variants are instantiated |
 | `--llm-backend TEXT` | LLM backend for interview/seed/evaluation tools (`claude_code`, `litellm`, `codex`, `opencode`). Affects which tool variants are instantiated |
@@ -650,6 +650,10 @@ ouroboros mcp serve --runtime codex --llm-backend codex
 # Start on specific host
 ouroboros mcp serve --host 0.0.0.0 --port 8080 --transport sse
 ```
+
+For serving with streamable HTTP, use `streamable-http`, not `http`. `http` is accepted only in MCP client configuration as a compatibility alias for dialing another server's streamable HTTP endpoint; `mcp serve` uses the precise protocol name so users do not confuse it with a generic HTTP API. Streamable HTTP clients should connect to `http://<host>:<port>/mcp`.
+
+FastMCP caveats: Network serving uses the MCP SDK's FastMCP server. The streamable HTTP path is FastMCP's default `/mcp`. Authentication and rate limiting configured on `MCPServerAdapter` are rejected for FastMCP transports because FastMCP does not pass credentials or stable client identity to handlers; protect `0.0.0.0` binds with normal network controls.
 
 **Startup behavior:**
 

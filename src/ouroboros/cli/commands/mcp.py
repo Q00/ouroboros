@@ -207,6 +207,8 @@ async def _run_mcp_server(
         )
         raise typer.Exit(code=1)
 
+    _console_out = _stderr_console if transport == "stdio" else Console()
+
     # Create EventStore with custom path if provided
     if db_path:
         event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
@@ -223,7 +225,7 @@ async def _run_mcp_server(
         await event_store.initialize()
     except Exception as e:
         # Auto-cleanup is best-effort — don't prevent server from starting
-        _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+        _console_out.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
     else:
         repo = SessionRepository(event_store)
 
@@ -231,12 +233,12 @@ async def _run_mcp_server(
             try:
                 cancelled = await repo.cancel_orphaned_sessions()
                 if cancelled:
-                    _stderr_console.print(
+                    _console_out.print(
                         f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
                     )
             except Exception as e:
                 # Auto-cleanup is best-effort — don't prevent server startup
-                _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+                _console_out.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
 
         cleanup_task = asyncio.create_task(
             _run_startup_cleanup(),
@@ -251,11 +253,11 @@ async def _run_mcp_server(
         try:
             results = await mcp_bridge.connect()
             connected = sum(1 for r in results.values() if r.is_ok)
-            _stderr_console.print(
+            _console_out.print(
                 f"[blue]MCP Bridge: {connected}/{len(results)} upstream server(s) connected[/blue]"
             )
         except Exception as e:
-            _stderr_console.print(f"[yellow]MCP Bridge connection failed: {e}[/yellow]")
+            _console_out.print(f"[yellow]MCP Bridge connection failed: {e}[/yellow]")
             mcp_bridge = None
 
     # Create server with all tools pre-registered via dependency injection.
@@ -274,7 +276,6 @@ async def _run_mcp_server(
 
     # Detect Codex seatbelt sandbox and warn about network restrictions.
     _sandbox_network_disabled = os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
-    _console_out = _stderr_console if transport == "stdio" else Console()
 
     if transport == "stdio":
         # In stdio mode, stdout is the JSON-RPC channel.

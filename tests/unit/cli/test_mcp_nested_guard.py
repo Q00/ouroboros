@@ -53,3 +53,26 @@ def test_serve_sets_nested_env_var(monkeypatch):
 
     # _OUROBOROS_NESTED should have been set to "1" before asyncio.run was called
     assert captured_env.get("_OUROBOROS_NESTED") == "1"
+
+
+def test_serve_defaults_to_port_8080_when_port_omitted(monkeypatch):
+    """mcp serve should pass port 8080 when --port is omitted."""
+    monkeypatch.delenv("_OUROBOROS_NESTED", raising=False)
+
+    mock_run_mcp_server = AsyncMock()
+
+    with patch(
+        "ouroboros.cli.commands.mcp._run_mcp_server",
+        new=mock_run_mcp_server,
+    ):
+        result = runner.invoke(app, ["serve", "--transport", "streamable-http"])
+
+    assert result.exit_code == 0
+    mock_run_mcp_server.assert_awaited_once_with(
+        "localhost",
+        8080,
+        "streamable-http",
+        None,
+        None,
+        None,
+    )

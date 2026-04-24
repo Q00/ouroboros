@@ -442,6 +442,34 @@ class TestServeTransport:
         mock_instance.run_streamable_http_async.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_streamable_http_real_fastmcp_exposes_mcp_path(self) -> None:
+        """Real FastMCP streamable HTTP serving exposes the advertised /mcp path."""
+        from unittest.mock import patch
+
+        pytest.importorskip("mcp.server.fastmcp")
+        pytest.importorskip("uvicorn")
+
+        served = SimpleNamespace(config=None)
+
+        async def capture_serve(server, *args, **kwargs) -> None:
+            served.config = server.config
+
+        adapter = MCPServerAdapter()
+
+        with patch("uvicorn.Server.serve", new=capture_serve):
+            await adapter.serve(transport="streamable-http", host="127.0.0.1", port=9100)
+
+        assert served.config is not None
+        assert served.config.host == "127.0.0.1"
+        assert served.config.port == 9100
+
+        fastmcp = adapter._mcp_server
+        assert fastmcp.settings.streamable_http_path == "/mcp"
+
+        route_paths = {getattr(route, "path", None) for route in served.config.app.routes}
+        assert "/mcp" in route_paths
+
+    @pytest.mark.asyncio
     async def test_fastmcp_path_enforces_security(self):
         """FastMCP tool wrapper routes through call_tool to enforce security checks."""
         from unittest.mock import MagicMock, patch
