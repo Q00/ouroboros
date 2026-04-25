@@ -2,16 +2,34 @@
 
 This module provides:
 - CheckpointData: Data model for checkpoint state
-- CheckpointStore: Save/load checkpoints with integrity validation
+- CheckpointStore: Save/load/delete checkpoints with integrity validation
+- CompoundingCheckpointState: Typed payload for serial-compounding mode checkpoints
 - Recovery logic with rollback support (max 3 levels per NFR11)
 - PeriodicCheckpointer: Background task for automatic checkpointing
+
+Compounding-mode checkpoint payload schema
+------------------------------------------
+When used by ``SerialCompoundingExecutor``, the ``CheckpointData.state`` dict
+carries exactly these keys::
+
+    {
+        "last_completed_ac_index": int,    # 0-based index of last successful AC
+        "postmortem_chain": list[dict],    # serialize_postmortem_chain() output
+        "mode": "compounding",             # literal sentinel
+    }
+
+Use :class:`CompoundingCheckpointState` to create/validate this payload without
+relying on raw dict access.
+
+[[INVARIANT: CompoundingCheckpointState.mode is always the literal "compounding"]]
+[[INVARIANT: CheckpointStore.delete removes all rollback levels for a seed_id]]
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -23,6 +41,97 @@ from typing import Any
 from ouroboros.core.errors import PersistenceError
 from ouroboros.core.file_lock import file_lock as _file_lock
 from ouroboros.core.types import Result
+
+
+# ---------------------------------------------------------------------------
+# Compounding-mode typed payload
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CompoundingCheckpointState:
+    """Typed payload for serial-compounding mode per-AC checkpoints.
+
+    This is stored verbatim in ``CheckpointData.state`` and can round-trip
+    through JSON serialization / deserialization.
+
+    Attributes:
+        last_completed_ac_index: 0-based index of the last AC that completed
+            successfully.  The *next* AC to run is ``last_completed_ac_index + 1``.
+        postmortem_chain: The serialized :class:`PostmortemChain` as returned by
+            :func:`~ouroboros.orchestrator.level_context.serialize_postmortem_chain`.
+            Stored as a list of dicts so no import cycle is introduced here.
+        mode: Literal sentinel ``"compounding"`` — asserts which executor wrote
+            the checkpoint.
+        partial_failing_ac_index: When set, the 0-based index of a decomposed AC
+            that failed after some of its sub-ACs completed.  Used by the sub-
+            postmortem resume path to identify which AC to resume and at which
+            sub-AC boundary.  ``None`` when no partial sub-AC state exists.
+        partial_failing_ac_sub_postmortems: Serialized sub-postmortems for the
+            completed sub-ACs of the partially-failed AC indicated by
+            ``partial_failing_ac_index``.  Each entry is a dict produced by
+            :func:`~ouroboros.orchestrator.level_context.serialize_postmortem_chain`
+            for a single sub-AC postmortem.  ``None`` when not applicable.
+
+    [[INVARIANT: CompoundingCheckpointState.mode is always the literal "compounding"]]
+    [[INVARIANT: partial_failing_ac_index is set only for decomposed ACs with sub_results]]
+    """
+
+    last_completed_ac_index: int
+    postmortem_chain: list[dict[str, Any]]
+    # Optional: partial sub-AC progress for a failing decomposed AC.
+    # Both fields are always set together (both None or both non-None).
+    partial_failing_ac_index: int | None = None
+    partial_failing_ac_sub_postmortems: list[dict[str, Any]] | None = None
+    mode: str = field(default="compounding", init=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a JSON-serializable dict suitable for ``CheckpointData.state``."""
+        d: dict[str, Any] = {
+            "last_completed_ac_index": self.last_completed_ac_index,
+            "postmortem_chain": self.postmortem_chain,
+            "mode": self.mode,
+        }
+        if self.partial_failing_ac_index is not None:
+            d["partial_failing_ac_index"] = self.partial_failing_ac_index
+            d["partial_failing_ac_sub_postmortems"] = (
+                self.partial_failing_ac_sub_postmortems or []
+            )
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CompoundingCheckpointState":
+        """Reconstruct from a dict stored in ``CheckpointData.state``.
+
+        Args:
+            data: Dict with compounding state keys.
+
+        Returns:
+            ``CompoundingCheckpointState`` instance.
+
+        Raises:
+            ValueError: If required keys are absent or ``mode`` is not
+                ``"compounding"``.
+        """
+        if data.get("mode") != "compounding":
+            raise ValueError(
+                f"Expected mode='compounding', got mode={data.get('mode')!r}"
+            )
+        if "last_completed_ac_index" not in data:
+            raise ValueError("Missing required key 'last_completed_ac_index'")
+        # Parse optional partial sub-AC fields.
+        partial_ac_index: int | None = None
+        partial_sub_pms: list[dict[str, Any]] | None = None
+        if "partial_failing_ac_index" in data and data["partial_failing_ac_index"] is not None:
+            partial_ac_index = int(data["partial_failing_ac_index"])
+            partial_sub_pms = list(data.get("partial_failing_ac_sub_postmortems") or [])
+        obj = cls(
+            last_completed_ac_index=int(data["last_completed_ac_index"]),
+            postmortem_chain=list(data.get("postmortem_chain") or []),
+            partial_failing_ac_index=partial_ac_index,
+            partial_failing_ac_sub_postmortems=partial_sub_pms,
+        )
+        return obj
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,6 +509,64 @@ class CheckpointStore:
             if current_path.exists():
                 next_path = self._get_checkpoint_path(seed_id, level + 1)
                 os.replace(current_path, next_path)
+
+    def delete(self, seed_id: str) -> Result[None, PersistenceError]:
+        """Delete all checkpoint files for *seed_id*, including rollback levels.
+
+        After a successful delete, :meth:`load` for the same seed_id will
+        return an error.  This method is idempotent — calling it when no
+        checkpoint exists returns :meth:`~ouroboros.core.types.Result.ok`.
+
+        Args:
+            seed_id: Seed identifier whose checkpoints should be removed.
+
+        Returns:
+            ``Result.ok(None)`` on success, ``Result.err(PersistenceError)``
+            if a file exists but cannot be deleted.
+
+        [[INVARIANT: CheckpointStore.delete removes all rollback levels for a seed_id]]
+        """
+        try:
+            for level in range(self.MAX_ROLLBACK_DEPTH + 1):
+                path = self._get_checkpoint_path(seed_id, level)
+                if path.exists():
+                    path.unlink()
+            return Result.ok(None)
+        except Exception as e:
+            return Result.err(
+                PersistenceError(
+                    f"Failed to delete checkpoint: {e}",
+                    operation="delete",
+                    details={"seed_id": seed_id},
+                )
+            )
+
+    # ------------------------------------------------------------------
+    # Convenience aliases for callers that prefer write / read semantics.
+    # The underlying implementation is identical to save / load.
+    # ------------------------------------------------------------------
+
+    def write(self, checkpoint: CheckpointData) -> Result[None, PersistenceError]:
+        """Alias for :meth:`save` — write checkpoint to disk.
+
+        Args:
+            checkpoint: Checkpoint data to persist.
+
+        Returns:
+            ``Result.ok(None)`` on success.
+        """
+        return self.save(checkpoint)
+
+    def read(self, seed_id: str) -> Result[CheckpointData, PersistenceError]:
+        """Alias for :meth:`load` — read latest valid checkpoint from disk.
+
+        Args:
+            seed_id: Seed identifier to read checkpoint for.
+
+        Returns:
+            ``Result.ok(CheckpointData)`` on success.
+        """
+        return self.load(seed_id)
 
     def _get_checkpoint_path(self, seed_id: str, level: int = 0) -> Path:
         """Get file path for checkpoint at specific rollback level.

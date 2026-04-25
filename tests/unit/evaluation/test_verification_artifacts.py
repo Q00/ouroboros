@@ -26,6 +26,12 @@ def _git_diff_side_effect(command: tuple[str, ...]) -> str:
             " tests/unit/test_example.py | 8 ++++++++\n"
             " 2 files changed, 10 insertions(+), 2 deletions(-)\n"
         )
+    if command[:3] == ("git", "log", "--oneline"):
+        # Test fixture: empty recent-history capture by default. Tests that
+        # exercise committed-history rendering supply their own side_effect.
+        return ""
+    if command[:2] == ("git", "show"):
+        return ""
     raise AssertionError(f"Unexpected git command: {command}")
 
 
@@ -194,6 +200,10 @@ class TestBuildVerificationArtifacts:
                 )
             if command[:3] == ("git", "diff", "--stat"):
                 return CommandResult(0, " 3 files changed, 8 insertions(+)\n", "")
+            if command[:3] == ("git", "log", "--oneline"):
+                return CommandResult(0, "", "")
+            if command[:2] == ("git", "show"):
+                return CommandResult(0, "", "")
             if "pytest" in command:
                 return CommandResult(0, "1 passed in 0.10s\n", "")
             raise AssertionError(f"Unexpected command: {command}")
@@ -249,6 +259,10 @@ class TestBuildVerificationArtifacts:
                 return CommandResult(0, " M src/ouroboros/example.py\0", "")
             if command[:3] == ("git", "diff", "--stat"):
                 return CommandResult(0, " src/ouroboros/example.py | 2 +-\n", "")
+            if command[:3] == ("git", "log", "--oneline"):
+                return CommandResult(0, "", "")
+            if command[:2] == ("git", "show"):
+                return CommandResult(0, "", "")
             if "ruff" in command:
                 return CommandResult(0, "All checks passed!\nGenerated coverage.xml\n", "")
             raise AssertionError(f"Unexpected command: {command}")
@@ -302,6 +316,10 @@ class TestBuildVerificationArtifacts:
             if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
                 return CommandResult(128, "", "fatal: not a git repository\n")
             if command[:3] == ("git", "diff", "--stat"):
+                return CommandResult(128, "", "fatal: not a git repository\n")
+            if command[:3] == ("git", "log", "--oneline"):
+                return CommandResult(128, "", "fatal: not a git repository\n")
+            if command[:2] == ("git", "show"):
                 return CommandResult(128, "", "fatal: not a git repository\n")
             if "ruff" in command:
                 return CommandResult(0, "All checks passed!\n", "")
@@ -455,6 +473,270 @@ class TestBuildVerificationArtifacts:
         assert second_manifest["execution_id"] == "lin_test-gen-3"
         assert first_manifest["artifact_key"] == second_manifest["artifact_key"]
         assert first_manifest["artifact_run_id"] != second_manifest["artifact_run_id"]
+
+
+class TestCommittedHistoryCapture:
+    """The QA artifact must surface committed work even when the worktree is clean.
+
+    Compounding-mode regression: ``SerialCompoundingExecutor`` commits per AC,
+    so by QA time the worktree shows zero unstaged/staged changes.  Without
+    capturing the recent commit log, the QA judge sees ``"(no changed files
+    detected)"`` and concludes nothing happened — masking the real work.
+    """
+
+    @pytest.mark.asyncio
+    async def test_recent_commits_surface_when_worktree_is_clean(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Clean worktree + recent commits → 'see Recent Commits below' note + log section."""
+        config = MechanicalConfig(timeout_seconds=30, working_dir=tmp_path)
+
+        recent_log = (
+            "98c4a15 test(serial): Sub-AC 3 — truncation event\n"
+            "ee3adf7 feat(serial-executor): monolithic agent-adjudicated resume (Q6.2)\n"
+            "59ed412 feat(serial-executor): sub-postmortem resume path\n"
+            "2af4075 feat(cli): add --resume flag to ooo run --compounding\n"
+        )
+        head_show = (
+            "98c4a15c3c93336cf69248455fb5fa13d34b3e2\n"
+            "test(serial): Sub-AC 3 — truncation event\n"
+            "\n"
+            "Keithm\n"
+            "Sat Apr 25 06:01:00 2026 +0000\n"
+            "\n"
+            " src/ouroboros/orchestrator/serial_executor.py | 4 +++-\n"
+            " 1 file changed, 3 insertions(+), 1 deletion(-)\n"
+        )
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            # Worktree is clean → status/diff capture nothing.
+            if command[:3] == ("git", "status", "--short"):
+                return CommandResult(0, "", "")
+            if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
+                return CommandResult(0, "", "")
+            if command[:3] == ("git", "diff", "--stat"):
+                return CommandResult(0, "", "")
+            # …but recent commits exist on the branch.
+            if command[:3] == ("git", "log", "--oneline"):
+                return CommandResult(0, recent_log, "")
+            if command[:2] == ("git", "show"):
+                return CommandResult(0, head_show, "")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            artifacts = await build_verification_artifacts("exec_clean_with_log", "done", tmp_path)
+
+        # Compact artifact: no longer says the harshly misleading "no changed
+        # files detected" — instead surfaces the committed work.
+        assert "(no changed files detected)" not in artifacts.artifact
+        assert "see Recent Commits below" in artifacts.artifact
+        assert "## Recent Commits" in artifacts.artifact
+        assert "98c4a15 test(serial): Sub-AC 3 — truncation event" in artifacts.artifact
+        assert "## HEAD Commit Diff Stat" in artifacts.artifact
+        assert "1 file changed" in artifacts.artifact
+
+        # Reference artifact echoes the raw captures for the QA judge to dig in.
+        # Pull _RECENT_LOG_LIMIT from the module so this assertion stays in
+        # sync with any future tweak to the constant.
+        from ouroboros.evaluation.verification_artifacts import _RECENT_LOG_LIMIT
+
+        assert f"## git log --oneline -n {_RECENT_LOG_LIMIT}" in artifacts.reference
+        assert "## git show --stat HEAD" in artifacts.reference
+
+        # Manifest persists raw history evidence for downstream tooling.
+        manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
+        assert manifest["history_available"] is True
+        assert manifest["history_error"] is None
+        assert len(manifest["recent_commits"]) == 4
+        assert manifest["recent_commits"][0].startswith("98c4a15")
+
+        # Public dataclass surface includes the parsed commits.
+        assert len(artifacts.recent_commits) == 4
+
+    @pytest.mark.asyncio
+    async def test_uncommitted_changes_still_surfaced_alongside_recent_commits(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """When BOTH dirty state and recent commits exist, both are reported."""
+        config = MechanicalConfig(timeout_seconds=30, working_dir=tmp_path)
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            if command and command[0] == "git":
+                if command[:3] == ("git", "status", "--short"):
+                    return CommandResult(0, " M src/ouroboros/example.py\n", "")
+                if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
+                    return CommandResult(0, " M src/ouroboros/example.py\0", "")
+                if command[:3] == ("git", "diff", "--stat"):
+                    return CommandResult(0, " src/ouroboros/example.py | 2 +-\n", "")
+                if command[:3] == ("git", "log", "--oneline"):
+                    return CommandResult(0, "abc1234 feat: shipped feature\n", "")
+                if command[:2] == ("git", "show"):
+                    return CommandResult(0, "abc1234\nfeat: shipped feature\n", "")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            artifacts = await build_verification_artifacts("exec_dirty_and_log", "done", tmp_path)
+
+        # Dirty file should still appear; the new committed-history note must
+        # NOT replace it (changed_files takes precedence in the bullet section).
+        assert "src/ouroboros/example.py" in artifacts.artifact
+        assert "see Recent Commits below" not in artifacts.artifact
+        # …but the recent commits section is still rendered for context.
+        assert "## Recent Commits" in artifacts.artifact
+        assert "abc1234 feat: shipped feature" in artifacts.artifact
+
+    @pytest.mark.asyncio
+    async def test_head_show_stat_renders_without_recent_log(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A successful HEAD show with empty log (e.g. shallow clone) still renders.
+
+        Edge case: ``git log --oneline`` returns nothing but ``git show HEAD``
+        succeeds. Before the fix, the HEAD diff stat was nested under the
+        ``recent_commits`` block and got dropped — now it renders independently.
+        """
+        config = MechanicalConfig(timeout_seconds=30, working_dir=tmp_path)
+
+        head_show = (
+            "deadbeefdeadbeefdeadbeef\n"
+            "feat: shallow-only HEAD\n"
+            "\n"
+            "Keithm\n"
+            "\n"
+            " src/foo.py | 1 +\n"
+        )
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            if command[:3] == ("git", "status", "--short"):
+                return CommandResult(0, "", "")
+            if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
+                return CommandResult(0, "", "")
+            if command[:3] == ("git", "diff", "--stat"):
+                return CommandResult(0, "", "")
+            if command[:3] == ("git", "log", "--oneline"):
+                # Shallow clone: log unavailable / empty.
+                return CommandResult(0, "", "")
+            if command[:2] == ("git", "show"):
+                return CommandResult(0, head_show, "")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            artifacts = await build_verification_artifacts("exec_show_no_log", "done", tmp_path)
+
+        # Recent Commits section should NOT appear (no log).
+        assert "## Recent Commits" not in artifacts.artifact
+        # HEAD diff stat must still render — that's the whole point of the fix.
+        assert "## HEAD Commit Diff Stat" in artifacts.artifact
+        assert "src/foo.py | 1 +" in artifacts.artifact
+
+    @pytest.mark.asyncio
+    async def test_history_capture_failure_is_non_fatal(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A failing log/show capture must not fail the artifact build."""
+        config = MechanicalConfig(timeout_seconds=30, working_dir=tmp_path)
+
+        async def fake_run_command(
+            command: tuple[str, ...],
+            timeout: int,  # noqa: ARG001
+            working_dir: Path | None = None,  # noqa: ARG001
+        ) -> CommandResult:
+            if command[:3] == ("git", "status", "--short"):
+                return CommandResult(0, "", "")
+            if command[:4] == ("git", "status", "--porcelain=v1", "-z"):
+                return CommandResult(0, "", "")
+            if command[:3] == ("git", "diff", "--stat"):
+                return CommandResult(0, "", "")
+            if command[:3] == ("git", "log", "--oneline"):
+                return CommandResult(128, "", "fatal: bad object\n")
+            if command[:2] == ("git", "show"):
+                return CommandResult(128, "", "fatal: ambiguous argument 'HEAD'\n")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        artifact_root = tmp_path / "artifact-store"
+        with (
+            patch(
+                "ouroboros.evaluation.verification_artifacts._ARTIFACT_BASE_DIR",
+                artifact_root,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.build_mechanical_config",
+                return_value=config,
+            ),
+            patch(
+                "ouroboros.evaluation.verification_artifacts.run_command",
+                new=AsyncMock(side_effect=fake_run_command),
+            ),
+        ):
+            artifacts = await build_verification_artifacts("exec_history_fail", "done", tmp_path)
+
+        # No commits surfaced; original "no changed files detected" returns
+        # because there's nothing to suggest otherwise.
+        assert "(no changed files detected)" in artifacts.artifact
+        assert "## Recent Commits" not in artifacts.artifact
+        assert artifacts.recent_commits == ()
+
+        manifest = json.loads(Path(artifacts.manifest_path).read_text(encoding="utf-8"))
+        assert manifest["history_available"] is False
+        assert manifest["history_error"] is not None
 
 
 class TestAutoDetectIntegration:

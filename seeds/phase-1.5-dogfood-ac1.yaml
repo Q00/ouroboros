@@ -1,0 +1,103 @@
+# Phase-1.5 Dogfood Seed — AC-1 only (incremental de-risk run)
+#
+# This is a single-AC slice of seeds/phase-1.5-dogfood.yaml. Run it FIRST to
+# verify the compounding machinery (worktree, branch, postmortem capture,
+# invariant-tag emission, commit-per-AC, artifact generation) before
+# committing to the full 4-AC chain.
+#
+# After this succeeds, merge the orch_<id> branch back into
+# feat/phase-1.5-compounding-dogfood, then run the full seed with
+# `--skip-completed` pointing at a marker that lists AC 1 as done:
+#
+#   seeds/phase-1.5-dogfood.completed-ac1.yaml:
+#     completed_acs:
+#       - index: 1
+#         reason: "Shipped in prior incremental run; artifact + tests merged."
+#         commit: "<merge commit sha>"
+#
+# Then:
+#   ooo run workflow seeds/phase-1.5-dogfood.yaml --compounding \
+#     --skip-completed seeds/phase-1.5-dogfood.completed-ac1.yaml
+#
+# Full reasoning:
+#   docs/brainstorm/serial-compounding-open-questions.md
+
+goal: "Implement the Q6.1 end-of-run chain artifact for Ouroboros serial compounding mode: serialize the PostmortemChain to docs/brainstorm/chain-<session>-<timestamp>.md at end of every run (success, failure, or partial), with an OUROBOROS_CHAIN_ARTIFACT_DIR override. This is the standalone first slice of phase-1.5; the remaining three ACs will run in a follow-up invocation."
+
+constraints:
+  - "Python 3.10+ (matches existing codebase)"
+  - "Keep the full existing test suite green (`uv run pytest` before committing)"
+  - "Add new unit tests for the new behavior"
+  - "Parallel mode (`mode='parallel'`) must remain byte-identical to pre-change — guarded by existing tests in tests/unit/orchestrator/test_parallel_executor*.py"
+  - "context_override=None path must stay untouched"
+  - "No changes to external APIs (CLI flags may be added; existing flags unchanged)"
+  - "Emit at least one [[INVARIANT: ...]] tag in the final output so later ACs (in the follow-up run) can demonstrate Q3's extractor on real data"
+  - "Commit the work with a conventional-commit message (feat scope) before returning"
+  - "Before starting, read docs/brainstorm/serial-compounding-open-questions.md for full context on the Q6.1 decision"
+
+acceptance_criteria:
+  - |
+    AC-1 (Q6.1) — End-of-run postmortem chain serialization
+
+    Implement end-of-run chain serialization in `SerialCompoundingExecutor.execute_serial`.
+
+    REQUIREMENTS:
+    - After the execution loop completes (whether success, failure, or partial), serialize the
+      `PostmortemChain` to a human-readable markdown file at
+      `docs/brainstorm/chain-<session_id>-<YYYYMMDD-HHMMSS>.md`.
+    - Use the EXISTING `serialize_postmortem_chain` function in `level_context.py:716+` as the data
+      source. Do NOT invent a new serialization format. Render it as markdown (not JSON):
+        ## AC <id> [<status>]
+        - Files modified: ...
+        - Gotchas: ...
+        - Public API changes: ...
+    - The artifact is produced for both successful runs AND failed/partial runs — the whole point is
+      that even a crashed run leaves an inspectable chain.
+    - The path `docs/brainstorm/` must exist. Create it defensively if missing (`Path.mkdir(parents=True, exist_ok=True)`).
+    - Add env var `OUROBOROS_CHAIN_ARTIFACT_DIR` (default `docs/brainstorm`) to let power users redirect.
+    - Do NOT add this behavior to parallel mode. Keep it scoped to `SerialCompoundingExecutor`.
+
+    TESTS (required):
+    - A unit test in `tests/unit/orchestrator/test_serial_executor.py` that runs a 2-AC compounding
+      flow with a stub executor and asserts the artifact file is written with expected content structure.
+    - A test that asserts the artifact is still written when execution fails mid-chain (fail_fast=True
+      with one AC failing).
+
+    GOTCHAS TO NOTE FOR FUTURE ACs:
+    - `[[INVARIANT: end-of-run chain artifact exists in docs/brainstorm/chain-*.md]]`
+    - `[[INVARIANT: OUROBOROS_CHAIN_ARTIFACT_DIR env var controls artifact location]]`
+
+ontology_schema:
+  name: "SerialCompoundingPhase1_5_AC1"
+  description: "Narrowed ontology for the AC-1-only incremental run"
+  fields:
+    - name: "PostmortemChain"
+      field_type: "entity"
+      description: "Ordered sequence of ACPostmortem with token-budget-aware rendering"
+    - name: "ACPostmortem"
+      field_type: "entity"
+      description: "Per-AC record including files_modified, gotchas, and invariants_established"
+    - name: "chain_artifact"
+      field_type: "artifact"
+      description: "Human-readable markdown file written at end of each run to docs/brainstorm/chain-*.md"
+    - name: "serializer"
+      field_type: "service"
+      description: "serialize_postmortem_chain function in level_context.py"
+
+evaluation_principles:
+  - name: "backward_compatibility"
+    description: "Parallel mode behavior must remain byte-identical. `context_override=None` path untouched. All existing tests pass."
+  - name: "test_coverage"
+    description: "New behavior covered by unit tests in tests/unit/orchestrator/test_serial_executor.py."
+  - name: "invariant_emission"
+    description: "Emit at least one [[INVARIANT: ...]] tag so the follow-up AC-3 extractor can demonstrate on real data."
+  - name: "artifact_correctness"
+    description: "Artifact is written for success, failure, and partial runs. Uses existing serializer, not a new format."
+
+metadata:
+  seed_id: "phase-1.5-dogfood-ac1"
+  parent_seed: "phase-1.5-dogfood"
+  ambiguity_score: 0.15
+  expected_decomposition_depth: 0
+  source_brainstorm: "docs/brainstorm/serial-compounding-open-questions.md"
+  execution_mode_required: "compounding"

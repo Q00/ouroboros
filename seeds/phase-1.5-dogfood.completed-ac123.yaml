@@ -1,0 +1,20 @@
+# Marker file for `--skip-completed` after the second dogfood run.
+# AC-1, AC-2, and AC-3 all fully shipped + tests green.
+# AC-4 had 5 commits land but was missing the agent-adjudication
+# "DECISION: continue|restart" prompt path — third run does that piece.
+#
+# Resume on AC-4 only:
+#   uv run ouroboros run workflow seeds/phase-1.5-dogfood.yaml \
+#     --compounding \
+#     --skip-completed seeds/phase-1.5-dogfood.completed-ac123.yaml
+
+completed_acs:
+  - ac: 1
+    reason: "Q6.1 end-of-run chain artifact shipped in cc53363; 6 unit tests in TestChainArtifact green; chain artifacts visible under docs/brainstorm/."
+    commit: "cc533631c3c93336cf69248455fb5fa13d34b3e2"
+  - ac: 2
+    reason: "Q1 B-prime sub_postmortems flatten-in-prompt + preserve-in-state shipped in 3cff129. Round-trip + nested rendering tests green."
+    commit: "3cff12923a52da9dfdb39ee0a1aaaee98e389ace"
+  - ac: 3
+    reason: "Q3 C-plus invariants extractor + Haiku verifier + reliability render gate shipped across 0bfbc35..527ddd8 (7 commits). Lifecycle, contradiction, and threshold tests green."
+    commit: "527ddd8"

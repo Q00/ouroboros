@@ -59,6 +59,25 @@ class VerificationArtifacts:
     runs: tuple[VerificationRunArtifact, ...] = ()
     git_state_available: bool = True
     git_state_error: str | None = None
+    recent_commits: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedHistoryCapture:
+    """Captured commits and HEAD diff stat in the working dir.
+
+    The post-execution QA harness historically only inspected uncommitted
+    state via ``git status``/``git diff``. In compounding mode the executor
+    commits per AC, so by QA time the worktree is clean and the harness
+    reports "(no changed files detected)" — masking real work. This capture
+    surfaces recent commits and HEAD's diff stat alongside the dirty-state
+    captures so the QA judge can see committed evidence.
+    """
+
+    recent_log: str
+    head_show_stat: str
+    available: bool
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +268,56 @@ async def _capture_git_state(
     return changed_files, git_status, git_diff_stat, git_state_available, git_state_error
 
 
+_RECENT_LOG_LIMIT = 30
+
+
+def _parse_recent_commits(git_log_oneline: str) -> tuple[str, ...]:
+    """Split a ``git log --oneline`` capture into a tuple of commit lines.
+
+    Empty output yields ``()``; surrounding whitespace is stripped per line.
+    """
+    return tuple(line for line in (raw.strip() for raw in git_log_oneline.splitlines()) if line)
+
+
+async def _capture_committed_history(
+    working_dir: Path, artifact_dir: Path
+) -> CommittedHistoryCapture:
+    """Capture recent commit log + HEAD diff stat for the QA evidence path.
+
+    Both outputs land alongside the ``git status``/``git diff`` captures in
+    ``artifact_dir`` so the manifest preserves raw evidence. ``available`` is
+    ``False`` when *both* captures fail (typical in non-repo or bare-tree
+    cases); a single capture failing surfaces ``error`` but keeps the rest.
+    """
+    log_capture = await _capture_git_command(
+        ("git", "log", "--oneline", "--no-decorate", "-n", str(_RECENT_LOG_LIMIT)),
+        working_dir,
+        artifact_dir / "git-log-recent.txt",
+    )
+    show_capture = await _capture_git_command(
+        ("git", "show", "--stat", "--no-color", "--format=%H%n%s%n%n%an%n%ad", "HEAD"),
+        working_dir,
+        artifact_dir / "git-show-head.txt",
+    )
+    available = log_capture.available or show_capture.available
+    error = next(
+        (
+            capture.error
+            for capture in (log_capture, show_capture)
+            if capture.error
+        ),
+        None,
+    )
+    recent_log = log_capture.text if log_capture.available else ""
+    head_show_stat = show_capture.text if show_capture.available else ""
+    return CommittedHistoryCapture(
+        recent_log=recent_log,
+        head_show_stat=head_show_stat,
+        available=available,
+        error=error,
+    )
+
+
 def _render_run_summary(run: VerificationRunArtifact) -> list[str]:
     lines = [
         f"### {run.check_type.upper()} [{'PASS' if run.passed else 'FAIL'}]",
@@ -272,6 +341,8 @@ def _render_compact_artifact(
     git_state_available: bool,
     git_state_error: str | None,
     runs: tuple[VerificationRunArtifact, ...],
+    history: CommittedHistoryCapture,
+    recent_commits: tuple[str, ...],
 ) -> str:
     integrated_run = next((run for run in runs if run.is_integrated), None)
     lines = [
@@ -288,10 +359,18 @@ def _render_compact_artifact(
         "## Repository Changes",
     ]
 
-    if changed_files:
+    has_changed_files = bool(changed_files)
+    if has_changed_files:
         lines.extend(f"- {path}" for path in changed_files)
     elif not git_state_available:
         lines.append("- (git state unavailable)")
+    elif recent_commits:
+        # Workdir is clean BUT recent commits exist — typical for compounding
+        # mode where each AC commits its own work. Tell the QA judge so it
+        # doesn't conclude "no work was done".
+        lines.append(
+            "- (working tree clean; see Recent Commits below for committed work)"
+        )
     else:
         lines.append("- (no changed files detected)")
 
@@ -299,6 +378,22 @@ def _render_compact_artifact(
         lines.extend(["", "## Diff Stat", git_diff_stat])
     elif git_state_error:
         lines.extend(["", "## Git State", git_state_error])
+
+    if recent_commits:
+        lines.extend(
+            [
+                "",
+                "## Recent Commits",
+                f"(last {len(recent_commits)} on HEAD; oldest at bottom)",
+                *[f"- {commit}" for commit in recent_commits],
+            ]
+        )
+
+    # HEAD diff stat is independent of recent_commits: when the log capture
+    # fails but the show capture succeeds (e.g. extremely shallow clones),
+    # the stat should still appear so the QA judge sees real change evidence.
+    if history.head_show_stat:
+        lines.extend(["", "## HEAD Commit Diff Stat", history.head_show_stat])
 
     for run in runs:
         lines.extend(["", *_render_run_summary(run)])
@@ -330,6 +425,7 @@ def _render_reference(
     git_state_available: bool,
     git_state_error: str | None,
     runs: tuple[VerificationRunArtifact, ...],
+    history: CommittedHistoryCapture,
 ) -> str:
     lines = [
         "# Raw Verification Evidence",
@@ -356,6 +452,18 @@ def _render_reference(
         lines.extend(["", "## git status --short", git_status])
     if git_diff_stat:
         lines.extend(["", "## git diff --stat --find-renames", git_diff_stat])
+    if history.recent_log:
+        lines.extend(
+            ["", f"## git log --oneline -n {_RECENT_LOG_LIMIT}", history.recent_log]
+        )
+    if history.head_show_stat:
+        lines.extend(["", "## git show --stat HEAD", history.head_show_stat])
+    # Surface any history-capture error (log OR show capture failure), even when
+    # the other capture succeeded.  Partial-success cases would otherwise hide
+    # the error from the QA judge — which is exactly the visibility hole the
+    # whole capture path is meant to close.
+    if history.error:
+        lines.extend(["", "## Committed History Error", history.error])
 
     for run in runs:
         lines.extend(
@@ -424,6 +532,12 @@ async def build_verification_artifacts(
         git_state_error,
     ) = await _capture_git_state(working_dir, artifact_dir)
 
+    # Also capture committed history. In compounding mode the executor commits
+    # per AC, so by QA time the worktree is clean and the dirty-state captures
+    # above show "no changes". Recent commit log + HEAD diff stat surface that
+    # work to the QA judge regardless of clean-tree state.
+    history = await _capture_committed_history(working_dir, artifact_dir)
+
     if not has_mechanical_toml(working_dir):
         await _auto_detect_mechanical_toml(working_dir, llm_adapter, llm_backend)
 
@@ -467,6 +581,7 @@ async def build_verification_artifacts(
         )
 
     rendered_runs = tuple(runs)
+    recent_commits = _parse_recent_commits(history.recent_log)
     manifest = {
         "execution_id": execution_id,
         "artifact_key": artifact_location.artifact_key,
@@ -476,6 +591,9 @@ async def build_verification_artifacts(
         "changed_files": list(changed_files),
         "git_state_available": git_state_available,
         "git_state_error": git_state_error,
+        "recent_commits": list(recent_commits),
+        "history_available": history.available,
+        "history_error": history.error,
         "runs": [asdict(run) for run in rendered_runs],
         "has_integrated_verification": any(run.is_integrated for run in rendered_runs),
     }
@@ -491,6 +609,8 @@ async def build_verification_artifacts(
         git_state_available,
         git_state_error,
         rendered_runs,
+        history,
+        recent_commits,
     )
     reference = _render_reference(
         execution_id,
@@ -503,6 +623,7 @@ async def build_verification_artifacts(
         git_state_available,
         git_state_error,
         rendered_runs,
+        history,
     )
 
     return VerificationArtifacts(
@@ -514,4 +635,5 @@ async def build_verification_artifacts(
         runs=rendered_runs,
         git_state_available=git_state_available,
         git_state_error=git_state_error,
+        recent_commits=recent_commits,
     )

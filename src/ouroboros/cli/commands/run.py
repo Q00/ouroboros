@@ -12,8 +12,11 @@ from typing import TYPE_CHECKING, Annotated, Any
 from uuid import uuid4
 
 import click
+import structlog
 import typer
 import yaml
+
+log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -167,6 +170,114 @@ def _resolve_max_decomposition_depth(seed_data: dict[str, Any], cli_value: int |
     return DEFAULT_MAX_DECOMPOSITION_DEPTH
 
 
+def _load_seed_id_from_yaml(seed_file: Path) -> str | None:
+    """Extract the seed_id from a seed YAML file without full model parsing.
+
+    Used for early validation (e.g., checking checkpoint existence) before
+    the full :func:`Seed.from_dict` parse happens inside ``_run_orchestrator``.
+
+    Applies the same file-size DoS guard as :func:`_load_seed_from_yaml` so a
+    pathological seed file can't bypass the size check by being read via this
+    early-probe path.
+
+    Returns:
+        ``seed_id`` string when present, ``None`` on any error or if the field
+        is absent / empty (including the size-guard failure case).
+    """
+    try:
+        file_size = seed_file.stat().st_size
+        is_valid, _err = InputValidator.validate_seed_file_size(file_size)
+        if not is_valid:
+            return None
+        with open(seed_file) as _f:
+            _data = yaml.safe_load(_f)
+        return ((_data or {}).get("metadata") or {}).get("seed_id") or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _validate_compounding_resume_not_fresh_seed(
+    seed_id: str,
+    compounding_resume_session_id: str | None,
+    checkpoint_store: "Any | None" = None,
+) -> str | None:
+    """Return an error message if ``--compounding --resume`` targets a fresh seed.
+
+    Enforces the mutual exclusivity rule: if the user supplies
+    ``--compounding --resume <id>``, a compounding checkpoint for this
+    ``seed_id`` **must** already exist.  Using ``--resume`` with a brand-new
+    seed that has never been run in compounding mode is contradictory —
+    there is no prior chain to rehydrate.
+
+    Returns:
+        ``None`` when the combination is valid (no error), or a human-readable
+        error message string when the seed is "fresh" (no checkpoint found).
+
+    Skips validation (returns ``None``) when:
+
+    - ``compounding_resume_session_id`` is ``None`` — user is not resuming.
+    - The default checkpoint directory does not exist — fresh installation with
+      no prior runs; we fail-open so new users aren't blocked.
+    - ``checkpoint_store`` raises any exception — fail-open (don't block the run).
+
+    Args:
+        seed_id: Seed identifier to look up in the checkpoint store.
+        compounding_resume_session_id: The ``--resume`` value; ``None`` means
+            the user is not requesting a checkpoint resume.
+        checkpoint_store: Injected store for testing.  When ``None``, the
+            function constructs a :class:`~ouroboros.persistence.checkpoint.CheckpointStore`
+            backed by ``~/.ouroboros/data/checkpoints``.  Pass a mock store in
+            unit tests to avoid touching the real filesystem.
+
+    [[INVARIANT: _validate_compounding_resume_not_fresh_seed returns None when checkpoint dir absent]]
+    [[INVARIANT: --compounding --resume with no prior checkpoint raises an error not a silent fresh run]]
+    """
+    if compounding_resume_session_id is None:
+        return None  # Not resuming; nothing to check.
+
+    if checkpoint_store is None:
+        from ouroboros.persistence.checkpoint import CheckpointStore as _CS
+
+        default_path = Path.home() / ".ouroboros" / "data" / "checkpoints"
+        if not default_path.exists():
+            # Fresh environment — no checkpoints possible; skip validation
+            # so new users aren't blocked by the guard.
+            return None
+        try:
+            checkpoint_store = _CS(base_path=default_path)
+            checkpoint_store.initialize()
+        except Exception:  # noqa: BLE001
+            return None  # Can't set up store; fail open.
+
+    try:
+        load_result = checkpoint_store.load(seed_id)
+        if load_result.is_err:
+            return (
+                f"Cannot resume: no compounding checkpoint found for seed '{seed_id}'. "
+                "The seed has not been run in compounding mode before, or its "
+                "checkpoint has been deleted. "
+                "To start a fresh compounding run, omit --resume."
+            )
+        # A checkpoint exists, but it might belong to a different mode (e.g. the
+        # seed was previously run in parallel mode and produced a non-compounding
+        # checkpoint).  CompoundingCheckpointState always stamps state["mode"] =
+        # "compounding"; reject anything else with the same user-facing message
+        # so --resume only resumes compounding runs.
+        checkpoint = load_result.value
+        state = getattr(checkpoint, "state", None) or {}
+        if state.get("mode") != "compounding":
+            return (
+                f"Cannot resume: no compounding checkpoint found for seed '{seed_id}'. "
+                "The seed has not been run in compounding mode before, or its "
+                "checkpoint has been deleted. "
+                "To start a fresh compounding run, omit --resume."
+            )
+    except Exception:  # noqa: BLE001
+        return None  # Store error; fail open.
+
+    return None  # Compounding checkpoint found; valid to resume.
+
+
 def _load_skip_completed_markers(
     marker_path: str | None,
     *,
@@ -310,12 +421,13 @@ async def _run_orchestrator(
     max_decomposition_depth: int | None = None,
     skip_completed: str | None = None,
     mode: str | None = None,
+    compounding_resume_session_id: str | None = None,
 ) -> None:
     """Run workflow via orchestrator mode.
 
     Args:
         seed_file: Path to seed YAML file.
-        resume_session: Optional session ID to resume.
+        resume_session: Optional session ID to resume (orchestrator-level).
         mcp_config: Optional path to MCP config file.
         mcp_tool_prefix: Prefix for MCP tool names.
         debug: Show verbose logs and agent thinking.
@@ -326,6 +438,10 @@ async def _run_orchestrator(
         skip_completed: Optional path to a marker file for already-satisfied ACs.
         mode: Execution mode override ("parallel" | "compounding"). When set,
             takes precedence over the ``parallel`` flag.
+        compounding_resume_session_id: When set alongside ``mode="compounding"``,
+            passed through to ``execute_serial`` as ``resume_session_id`` so
+            checkpoint-based resume kicks in.  Mutually exclusive with
+            ``skip_completed``.
     """
     from ouroboros.core.seed import Seed
     from ouroboros.orchestrator import OrchestratorRunner, create_agent_runtime
@@ -363,6 +479,11 @@ async def _run_orchestrator(
         print_info(f"Max parallel workers: {resolved_max_parallel_workers}")
         if externally_satisfied_acs:
             print_info(f"Externally satisfied ACs: {len(externally_satisfied_acs)}")
+        if compounding_resume_session_id:
+            print_info(
+                f"Compounding resume: will load checkpoint for session "
+                f"{compounding_resume_session_id}"
+            )
 
     # Initialize MCP manager if config provided
     mcp_manager = None
@@ -415,6 +536,21 @@ async def _run_orchestrator(
         backend=runtime_backend,
         cwd=Path(workspace.effective_cwd) if workspace else project_dir,
     )
+
+    # Set up checkpoint store for compounding mode so per-AC checkpoints are
+    # written and checkpoint-based resume works end-to-end from the CLI.
+    # Failures are silenced (best-effort) so a broken checkpoint path never
+    # prevents a fresh compounding run from starting.
+    _cli_checkpoint_store = None
+    if mode == "compounding":
+        try:
+            from ouroboros.persistence.checkpoint import CheckpointStore as _CheckpointStore
+
+            _cli_checkpoint_store = _CheckpointStore()  # default ~/.ouroboros/data/checkpoints
+            _cli_checkpoint_store.initialize()
+        except Exception:  # noqa: BLE001
+            _cli_checkpoint_store = None
+
     runner = OrchestratorRunner(
         adapter,
         event_store,
@@ -425,11 +561,13 @@ async def _run_orchestrator(
         task_workspace=workspace,
         max_decomposition_depth=resolved_max_decomposition_depth,
         max_parallel_workers=resolved_max_parallel_workers,
+        checkpoint_store=_cli_checkpoint_store,
     )
 
     # Execute
     try:
-        if resume_session:
+        if resume_session and not compounding_resume_session_id:
+            # Orchestrator-level session resume (non-compounding path).
             if debug:
                 print_info(f"Resuming session: {resume_session}")
             result = await runner.resume_session(resume_session, seed)
@@ -437,10 +575,16 @@ async def _run_orchestrator(
             if debug:
                 print_info("Starting new orchestrator execution...")
             if mode == "compounding":
-                print_info(
-                    "Compounding mode: ACs run strictly serially; each AC "
-                    "sees a postmortem of every prior AC"
-                )
+                if compounding_resume_session_id:
+                    print_info(
+                        f"Compounding resume: continuing from checkpoint "
+                        f"(session {compounding_resume_session_id})"
+                    )
+                else:
+                    print_info(
+                        "Compounding mode: ACs run strictly serially; each AC "
+                        "sees a postmortem of every prior AC"
+                    )
             elif parallel:
                 print_info("Parallel mode: independent ACs will run concurrently")
             else:
@@ -454,6 +598,8 @@ async def _run_orchestrator(
             }
             if externally_satisfied_acs:
                 execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+            if compounding_resume_session_id is not None:
+                execute_kwargs["resume_session_id"] = compounding_resume_session_id
             result = await runner.execute_seed(**execute_kwargs)
 
         # Handle result
@@ -684,6 +830,49 @@ def workflow(
 
     execution_mode = "compounding" if compounding else None
 
+    # When --compounding and --resume are combined, the resume ID is used for
+    # checkpoint-based compounding resume (passed as resume_session_id to
+    # execute_serial).  This is mutually exclusive with plain orchestrator
+    # session resume: --compounding --resume never calls runner.resume_session().
+    compounding_resume: str | None = resume_session if compounding else None
+    # For the orchestrator-level session resume path, only use resume_session
+    # when NOT in compounding mode (compounding handles its own checkpoint resume).
+    orchestrator_resume: str | None = resume_session if not compounding else None
+
+    # Mutual exclusivity: --compounding --resume + --skip-completed don't mix.
+    # Checkpoint resume already handles AC-skipping; warn and ignore --skip-completed.
+    if compounding_resume and skip_completed:
+        print_warning(
+            "--skip-completed is ignored when using --compounding --resume "
+            "(checkpoint resume already handles AC skipping)."
+        )
+        skip_completed = None
+
+    # (b) Mutual exclusivity: --compounding --resume must reference a seed that was
+    # already run.  Providing --resume with a fresh seed path (one that has no prior
+    # compounding checkpoint) is contradictory and will never produce correct results.
+    if compounding_resume:
+        _seed_id_for_validation = _load_seed_id_from_yaml(seed_file)
+        if _seed_id_for_validation:
+            _resume_error = _validate_compounding_resume_not_fresh_seed(
+                _seed_id_for_validation, compounding_resume
+            )
+            if _resume_error:
+                print_error(_resume_error)
+                raise typer.Exit(1)
+        else:
+            # Skipping the fresh-seed guard. _load_seed_id_from_yaml returns
+            # None when the YAML is unreadable or has no metadata.seed_id; the
+            # downstream Seed.from_dict parse in _run_orchestrator will surface
+            # the real error if the file is structurally bad. Log so a
+            # maintainer chasing "why didn't my --resume reject this seed?" can
+            # find the breadcrumb.
+            log.debug(
+                "cli.run.compounding_resume.fresh_seed_validation_skipped",
+                seed_file=str(seed_file),
+                reason="_load_seed_id_from_yaml returned None (no metadata.seed_id or unreadable)",
+            )
+
     if orchestrator or resume_session:
         # Orchestrator mode
         if resume_session and not orchestrator:
@@ -695,7 +884,7 @@ def workflow(
             asyncio.run(
                 _run_orchestrator(
                     seed_file,
-                    resume_session,
+                    orchestrator_resume,
                     mcp_config,
                     mcp_tool_prefix,
                     debug,
@@ -705,6 +894,7 @@ def workflow(
                     max_decomposition_depth=max_decomposition_depth,
                     skip_completed=skip_completed,
                     mode=execution_mode,
+                    compounding_resume_session_id=compounding_resume,
                 )
             )
         except (ValueError, NotImplementedError) as e:
@@ -740,4 +930,8 @@ def resume(
         print_info("Would resume most recent execution")
 
 
-__all__ = ["app"]
+__all__ = [
+    "app",
+    "_validate_compounding_resume_not_fresh_seed",
+    "_load_seed_id_from_yaml",
+]

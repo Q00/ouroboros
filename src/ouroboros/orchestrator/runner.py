@@ -271,6 +271,7 @@ def build_system_prompt(
     *,
     include_claude_md: bool = False,
     workspace_root: str | None = None,
+    include_invariant_instructions: bool = False,
 ) -> str:
     """Build system prompt from seed specification.
 
@@ -284,6 +285,11 @@ def build_system_prompt(
             byte-identical prompt to pre-feature behavior.
         workspace_root: Directory to resolve CLAUDE.md against when
             ``include_claude_md`` is True. Ignored otherwise.
+        include_invariant_instructions: When True, append an "## Invariant
+            declarations" section instructing the agent to emit
+            ``[[INVARIANT: ...]]`` tags for facts future ACs can rely on.
+            Default False so existing callers (parallel mode, tests) produce
+            a byte-identical prompt to pre-feature behavior.
 
     Returns:
         System prompt string.
@@ -339,6 +345,31 @@ IMPORTANT: You are extending existing code, NOT creating a new project.
                 f"{snapshot}\n\n"
             )
 
+    invariant_section = ""
+    if include_invariant_instructions:
+        invariant_section = """
+## Invariant declarations
+
+During your work you may identify facts that future acceptance criteria can rely
+on — for example, a new API contract, a schema constraint, or a verified
+invariant about the codebase state.  Record each such fact with the following
+tag, placed inline in your normal output text:
+
+    [[INVARIANT: <concise claim, ≤ 200 chars>]]
+
+Rules:
+- Use double square brackets exactly as shown; single brackets are ignored.
+- One claim per tag; multiple tags are allowed per AC.
+- Keep each claim ≤ 200 characters (longer text is silently truncated by the
+  parser).
+- Do NOT use nested square brackets inside the claim text.
+- Only emit tags for facts you have actually verified, not aspirations.
+- [[INVARIANT: NOT <prior claim>]] demotes a contradicted invariant.
+
+These tags are parsed and scored after your run; only high-reliability
+invariants (score ≥ 0.7) are injected into future ACs' prompts.
+"""
+
     return f"""{claude_md_section}{strategy_fragment}
 
 ## Goal
@@ -352,7 +383,7 @@ IMPORTANT: You are extending existing code, NOT creating a new project.
 
 {ac_tracking}
 
-{recovery_protocol}"""
+{recovery_protocol}{invariant_section}"""
 
 
 def build_task_prompt(
@@ -1489,6 +1520,7 @@ class OrchestratorRunner:
         parallel: bool = True,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
         mode: str | None = None,
+        resume_session_id: str | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed via Claude Agent.
 
@@ -1508,6 +1540,9 @@ class OrchestratorRunner:
             mode: Execution mode. One of "parallel" (default), or
                 "compounding" (serial per-AC loop with postmortem chain).
                 When None, derived from ``parallel``.
+            resume_session_id: When ``mode`` is "compounding", pass this ID
+                to ``execute_serial`` so it can load a saved checkpoint and
+                skip already-completed ACs.  Ignored for other modes.
 
         Returns:
             Result containing OrchestratorResult on success.
@@ -1524,6 +1559,8 @@ class OrchestratorRunner:
         }
         if externally_satisfied_acs:
             execute_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+        if resume_session_id is not None:
+            execute_kwargs["resume_session_id"] = resume_session_id
 
         return await self.execute_precreated_session(**execute_kwargs)
 
@@ -1578,8 +1615,21 @@ class OrchestratorRunner:
         parallel: bool = True,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
         mode: str | None = None,
+        resume_session_id: str | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
-        """Execute a seed using an already-persisted orchestrator session."""
+        """Execute a seed using an already-persisted orchestrator session.
+
+        Args:
+            seed: Seed specification to execute.
+            tracker: Pre-created session tracker from :meth:`prepare_session`.
+            parallel: Legacy parallel flag (see :meth:`execute_seed`).
+            externally_satisfied_acs: ACs already satisfied externally.
+            mode: Execution mode ("parallel" | "compounding").
+            resume_session_id: When ``mode`` is "compounding", forwarded to
+                :meth:`SerialCompoundingExecutor.execute_serial` as
+                ``resume_session_id`` so checkpoint-based resume works.
+                Ignored for non-compounding modes.
+        """
         exec_id = tracker.execution_id
         start_time = datetime.now(UTC)
 
@@ -1629,6 +1679,7 @@ class OrchestratorRunner:
                     strategy=strategy,
                     include_claude_md=True,
                     workspace_root=workspace_root,
+                    include_invariant_instructions=True,
                 )
             else:
                 system_prompt = build_system_prompt(seed, strategy=strategy)
@@ -1672,6 +1723,12 @@ class OrchestratorRunner:
                 }
                 if externally_satisfied_acs:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
+                # Thread resume_session_id through to the compounding executor.
+                # Without this, the compounding branch of _execute_parallel would
+                # NameError at runtime (the variable is referenced there but
+                # never bound in scope).
+                if resume_session_id is not None:
+                    parallel_kwargs["resume_session_id"] = resume_session_id
 
                 return await self._execute_parallel(**parallel_kwargs)
         except Exception as e:
@@ -2088,6 +2145,7 @@ class OrchestratorRunner:
         start_time: datetime,
         externally_satisfied_acs: dict[int, dict[str, Any]] | None = None,
         mode: str = "parallel",
+        resume_session_id: str | None = None,
     ) -> Result[OrchestratorResult, OrchestratorError]:
         """Execute seed with parallel AC execution.
 
@@ -2208,15 +2266,20 @@ class OrchestratorRunner:
             )
 
         if mode == "compounding":
+            _serial_kwargs: dict[str, Any] = {
+                "seed": seed,
+                "execution_plan": execution_plan,
+                "session_id": tracker.session_id,
+                "execution_id": exec_id,
+                "tools": merged_tools,
+                "tool_catalog": tool_catalog.tools,
+                "system_prompt": system_prompt,
+                "externally_satisfied_acs": externally_satisfied_acs,
+            }
+            if resume_session_id is not None:
+                _serial_kwargs["resume_session_id"] = resume_session_id
             parallel_result = await parallel_executor.execute_serial(  # type: ignore[attr-defined]
-                seed=seed,
-                execution_plan=execution_plan,
-                session_id=tracker.session_id,
-                execution_id=exec_id,
-                tools=merged_tools,
-                tool_catalog=tool_catalog.tools,
-                system_prompt=system_prompt,
-                externally_satisfied_acs=externally_satisfied_acs,
+                **_serial_kwargs
             )
         else:
             parallel_result = await parallel_executor.execute_parallel(
@@ -2248,6 +2311,7 @@ class OrchestratorRunner:
         final_message = render_parallel_completion_message(
             parallel_result,
             len(seed.acceptance_criteria),
+            mode=mode,
         )
         verification_report = render_parallel_verification_report(
             parallel_result,
@@ -2288,10 +2352,15 @@ class OrchestratorRunner:
                 execution_summary,
             )
 
+            _completion_title = (
+                "[green]Compounding Execution Completed[/green]"
+                if mode == "compounding"
+                else "[green]Parallel Execution Completed[/green]"
+            )
             self._console.print(
                 Panel(
                     Text(final_message, style="green"),
-                    title="[green]Parallel Execution Completed[/green]",
+                    title=_completion_title,
                     border_style="green",
                 )
             )

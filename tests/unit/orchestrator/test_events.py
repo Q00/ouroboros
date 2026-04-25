@@ -6,6 +6,7 @@ from ouroboros.orchestrator.capabilities import build_capability_graph
 from ouroboros.orchestrator.events import (
     create_ac_postmortem_captured_event,
     create_policy_capabilities_evaluated_event,
+    create_postmortem_chain_truncated_event,
     create_progress_event,
     create_session_cancelled_event,
     create_session_completed_event,
@@ -19,6 +20,7 @@ from ouroboros.orchestrator.events import (
 from ouroboros.orchestrator.level_context import (
     ACContextSummary,
     ACPostmortem,
+    Invariant,
 )
 from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 from ouroboros.orchestrator.policy import (
@@ -339,7 +341,7 @@ class TestPostmortemCapturedEvent:
         return ACPostmortem(
             summary=summary,
             diff_summary=" src/auth.py | 42 +++",
-            invariants_established=("AUTH_HEADER required",),
+            invariants_established=(Invariant(text="AUTH_HEADER required"),),
             status=status,  # type: ignore[arg-type]
             duration_seconds=1.5,
         )
@@ -378,7 +380,8 @@ class TestPostmortemCapturedEvent:
         assert len(chain.postmortems) == 1
         pm = chain.postmortems[0]
         assert pm.summary.ac_content == "Add JWT auth"
-        assert pm.invariants_established == ("AUTH_HEADER required",)
+        assert len(pm.invariants_established) == 1
+        assert pm.invariants_established[0].text == "AUTH_HEADER required"
         assert pm.diff_summary == " src/auth.py | 42 +++"
         assert pm.status == "pass"
 
@@ -401,3 +404,90 @@ class TestPostmortemCapturedEvent:
             postmortem=self._mk_pm(),
         )
         assert "execution_id" not in event.data
+
+
+class TestPostmortemChainTruncatedEvent:
+    """Tests for execution.postmortem_chain.truncated event (Q7).
+
+    Verifies that create_postmortem_chain_truncated_event mirrors the
+    create_ac_postmortem_captured_event factory pattern: aggregate_type="execution",
+    aggregate_id=execution_id, and all truncation-count fields present.
+
+    [[INVARIANT: event type is execution.postmortem_chain.truncated]]
+    [[INVARIANT: Truncation event uses aggregate_type execution, keyed on execution_id]]
+    """
+
+    def _call(self, **overrides) -> object:
+        """Helper to construct the event with sensible defaults."""
+        kwargs = {
+            "session_id": "sess_trunc",
+            "execution_id": "exec_trunc",
+            "dropped_count": 3,
+            "char_budget": 8000,
+            "rendered_chars": 7500,
+            "full_forms_preserved": 2,
+            "cumulative_invariants_preserved": 5,
+        }
+        kwargs.update(overrides)
+        return create_postmortem_chain_truncated_event(**kwargs)
+
+    def test_event_type(self) -> None:
+        """Event type must be execution.postmortem_chain.truncated."""
+        event = self._call()
+        assert event.type == "execution.postmortem_chain.truncated"
+
+    def test_aggregate_mirrors_postmortem_captured_pattern(self) -> None:
+        """aggregate_type must be 'execution', aggregate_id must be execution_id.
+
+        Mirrors create_ac_postmortem_captured_event which also uses
+        aggregate_type='execution' keyed on the execution unit id.
+        """
+        event = self._call(execution_id="exec_42")
+        assert event.aggregate_type == "execution"
+        assert event.aggregate_id == "exec_42"
+
+    def test_all_truncation_fields_present(self) -> None:
+        """All truncation-count fields appear in event data."""
+        event = self._call(
+            dropped_count=7,
+            char_budget=16000,
+            rendered_chars=14200,
+            full_forms_preserved=3,
+            cumulative_invariants_preserved=11,
+        )
+        assert event.data["dropped_count"] == 7
+        assert event.data["char_budget"] == 16000
+        assert event.data["rendered_chars"] == 14200
+        assert event.data["full_forms_preserved"] == 3
+        assert event.data["cumulative_invariants_preserved"] == 11
+
+    def test_session_and_execution_ids_in_data(self) -> None:
+        """Both session_id and execution_id appear in the data payload."""
+        event = self._call(session_id="sess_99", execution_id="exec_99")
+        assert event.data["session_id"] == "sess_99"
+        assert event.data["execution_id"] == "exec_99"
+
+    def test_timestamp_present(self) -> None:
+        """A timestamp field is emitted (ISO-8601 string)."""
+        event = self._call()
+        assert "timestamp" in event.data
+        # Should be parseable as an ISO-8601 datetime
+        from datetime import datetime
+
+        datetime.fromisoformat(event.data["timestamp"])
+
+    def test_zero_dropped_count_valid(self) -> None:
+        """The factory accepts dropped_count=0 as a valid input — constructor-level
+        validation, not runtime emission. At runtime, the level_context truncation
+        gate only invokes the callback (and thus this factory) when dropped_count
+        is strictly positive; this test simply asserts the factory itself does
+        not reject zero, in case a future caller passes the value verbatim.
+        """
+        event = self._call(dropped_count=0, rendered_chars=7999)
+        assert event.data["dropped_count"] == 0
+        assert event.type == "execution.postmortem_chain.truncated"
+
+    def test_zero_invariants_preserved_valid(self) -> None:
+        """cumulative_invariants_preserved=0 when no above-threshold invariants exist."""
+        event = self._call(cumulative_invariants_preserved=0)
+        assert event.data["cumulative_invariants_preserved"] == 0

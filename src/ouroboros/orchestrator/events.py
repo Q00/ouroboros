@@ -663,6 +663,60 @@ def create_ac_postmortem_captured_event(
     )
 
 
+def create_postmortem_chain_truncated_event(
+    session_id: str,
+    execution_id: str,
+    *,
+    dropped_count: int,
+    char_budget: int,
+    rendered_chars: int,
+    full_forms_preserved: int,
+    cumulative_invariants_preserved: int,
+) -> BaseEvent:
+    """Create postmortem chain truncated event (Q7).
+
+    Emitted alongside ``log.warning("postmortem_chain.over_budget", ...)``
+    in :meth:`PostmortemChain.to_prompt_text` when the rendered chain
+    still exceeds the character budget after dropping all digest entries.
+    Coexists with the log line — does not replace it.
+
+    The event type ``"execution.postmortem_chain.truncated"`` is queryable
+    via ``ouroboros_query_events``, enabling after-the-fact debugging of
+    "why did AC-12 seem to forget AC-3's gotcha?" scenarios.
+
+    Args:
+        session_id: Parent session id.
+        execution_id: Parent execution id.
+        dropped_count: Number of digest-form postmortems dropped to fit the budget.
+        char_budget: Character budget in effect (``token_budget * 4``).
+        rendered_chars: Actual character count of the rendered text after dropping.
+        full_forms_preserved: Number of full-form postmortem entries preserved.
+        cumulative_invariants_preserved: Number of invariants rendered in the
+            "Established Invariants" section (above-threshold only).
+
+    Returns:
+        BaseEvent for the truncation.
+
+    [[INVARIANT: Truncation event emitted alongside log.warning, not replacing it]]
+    [[INVARIANT: event type is execution.postmortem_chain.truncated]]
+    """
+    return BaseEvent(
+        type="execution.postmortem_chain.truncated",
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data={
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "dropped_count": dropped_count,
+            "char_budget": char_budget,
+            "rendered_chars": rendered_chars,
+            "full_forms_preserved": full_forms_preserved,
+            "cumulative_invariants_preserved": cumulative_invariants_preserved,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
 def _chain_of_one(postmortem: ACPostmortem):
     """Wrap a single postmortem in a PostmortemChain for serialization reuse.
 
@@ -673,6 +727,103 @@ def _chain_of_one(postmortem: ACPostmortem):
     from ouroboros.orchestrator.level_context import PostmortemChain
 
     return PostmortemChain(postmortems=(postmortem,))
+
+
+def create_sub_postmortem_resume_event(
+    session_id: str,
+    execution_id: str,
+    *,
+    ac_index: int,
+    sub_acs_completed: int,
+    resume_from_sub_ac: int,
+) -> BaseEvent:
+    """Create sub-postmortem resume event (Q6.2 sub-postmortem path).
+
+    Emitted when a resume run detects that the failing AC had sub-postmortems
+    from a prior partial decomposition (B-prime, AC-2).  The event records the
+    AC boundary decision so downstream consumers can trace why a particular
+    sub-AC was the starting point.
+
+    The event coexists with the log line emitted by the serial executor and
+    does NOT replace it.
+
+    Args:
+        session_id: Parent session id.
+        execution_id: Parent execution id.
+        ac_index: 0-based index of the AC being resumed.
+        sub_acs_completed: Number of sub-ACs that were already completed in
+            the prior partial run.
+        resume_from_sub_ac: 0-based index of the first sub-AC that still needs
+            to be executed (= sub_acs_completed, since sub-ACs are 0-indexed).
+
+    Returns:
+        BaseEvent for the sub-postmortem resume decision.
+
+    [[INVARIANT: sub-postmortem resume event type is execution.serial.resume.sub_postmortem_boundary]]
+    [[INVARIANT: resume_from_sub_ac == sub_acs_completed (no gaps, boundary is first incomplete sub-AC)]]
+    """
+    return BaseEvent(
+        type="execution.serial.resume.sub_postmortem_boundary",
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data={
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "ac_index": ac_index,
+            "sub_acs_completed": sub_acs_completed,
+            "resume_from_sub_ac": resume_from_sub_ac,
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def create_monolithic_resume_adjudicated_event(
+    session_id: str,
+    execution_id: str,
+    *,
+    ac_index: int,
+    decision: str,
+    raw_response_preview: str,
+) -> BaseEvent:
+    """Create monolithic resume adjudication event (Q6.2 monolithic path).
+
+    Emitted when a resume run encounters a monolithic (non-decomposed) failing
+    AC and the agent is invoked to decide whether to continue from the
+    interrupted state or restart from the top.
+
+    The decision is stored as ``"continue"`` or ``"restart"`` — both values
+    are equally valid outcomes; neither indicates an error.
+
+    The event coexists with the log line emitted by the serial executor and
+    does NOT replace it.
+
+    Args:
+        session_id: Parent session id.
+        execution_id: Parent execution id.
+        ac_index: 0-based index of the AC being adjudicated.
+        decision: Agent's decision — ``"continue"`` or ``"restart"``.
+        raw_response_preview: First 200 chars of the agent's raw response
+            (for diagnostics).
+
+    Returns:
+        BaseEvent for the adjudication decision.
+
+    [[INVARIANT: monolithic resume adjudication event type is execution.serial.resume.monolithic_adjudicated]]
+    [[INVARIANT: decision field is always "continue" or "restart" (never None or empty)]]
+    """
+    return BaseEvent(
+        type="execution.serial.resume.monolithic_adjudicated",
+        aggregate_type="execution",
+        aggregate_id=execution_id,
+        data={
+            "session_id": session_id,
+            "execution_id": execution_id,
+            "ac_index": ac_index,
+            "decision": decision,
+            "raw_response_preview": raw_response_preview[:200],
+            "timestamp": datetime.now(UTC).isoformat(),
+        },
+    )
 
 
 def create_execution_terminal_event(
@@ -715,6 +866,9 @@ def create_execution_terminal_event(
 
 __all__ = [
     "create_ac_postmortem_captured_event",
+    "create_monolithic_resume_adjudicated_event",
+    "create_postmortem_chain_truncated_event",
+    "create_sub_postmortem_resume_event",
     "create_ac_stall_detected_event",
     "create_drift_measured_event",
     "create_execution_terminal_event",

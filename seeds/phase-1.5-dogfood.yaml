@@ -1,0 +1,279 @@
+# Phase-1.5 Dogfood Seed — Compounding-on-Compounding
+#
+# Uses Ouroboros's own serial compounding mode to build its next four improvements:
+#   AC-1 (Q6.1) → end-of-run chain serialization
+#   AC-2 (Q1)   → flatten sub-postmortems + preserve in serialized state (B-prime)
+#   AC-3 (Q3)   → [[INVARIANT: ...]] tag parser + Haiku verifier + reliability score (C-plus)
+#   AC-4 (Q6.2 + Q7) → per-AC checkpoint + agent-adjudicated resume + truncation event
+#
+# Full reasoning, options considered, and coupling notes:
+#   docs/brainstorm/serial-compounding-open-questions.md
+#
+# Run with:
+#   ooo run workflow seeds/phase-1.5-dogfood.yaml --compounding
+#
+# Environment:
+#   export OUROBOROS_POSTMORTEM_FULL_K=3        # keep last 3 ACs in full form
+#   export OUROBOROS_POSTMORTEM_TOKEN_BUDGET=8000
+
+goal: "Implement phase-1.5 improvements to Ouroboros serial compounding: end-of-run chain artifact, sub-postmortem preservation (B-prime), [[INVARIANT]] tag extraction with Haiku verifier and reliability scoring (C-plus), per-AC checkpoint with agent-adjudicated resume, and postmortem-chain truncation event. The four ACs must be executed in order and each must build on the prior AC's postmortem."
+
+constraints:
+  - "Python 3.10+ (matches existing codebase)"
+  - "Every AC must keep the full existing test suite green (`uv run pytest` before committing)"
+  - "Every AC must add new unit tests for the new behavior it introduces"
+  - "Parallel mode (`mode='parallel'`) must remain byte-identical to pre-change — guarded by existing tests in tests/unit/orchestrator/test_parallel_executor*.py"
+  - "context_override=None path must stay untouched"
+  - "No changes to external APIs (CLI flags may be added; existing flags unchanged)"
+  - "Every AC must emit at least one [[INVARIANT: ...]] tag in its final output, so later ACs can demonstrate Q3's extraction working on real data (even before AC-3 ships, the tags are harmless markers)"
+  - "Every AC must commit its work with a conventional-commit message (feat/fix/docs/test scope) before returning"
+  - "Before starting, read docs/brainstorm/serial-compounding-open-questions.md for full context on the decisions already made"
+
+acceptance_criteria:
+  - |
+    AC-1 (Q6.1) — End-of-run postmortem chain serialization
+
+    Implement end-of-run chain serialization in `SerialCompoundingExecutor.execute_serial`.
+
+    REQUIREMENTS:
+    - After the execution loop completes (whether success, failure, or partial), serialize the
+      `PostmortemChain` to a human-readable markdown file at
+      `docs/brainstorm/chain-<session_id>-<YYYYMMDD-HHMMSS>.md`.
+    - Use the EXISTING `serialize_postmortem_chain` function in `level_context.py:716+` as the data
+      source. Do NOT invent a new serialization format. Render it as markdown (not JSON):
+        ## AC <id> [<status>]
+        - Files modified: ...
+        - Gotchas: ...
+        - Public API changes: ...
+    - The artifact is produced for both successful runs AND failed/partial runs — the whole point is
+      that even a crashed run leaves an inspectable chain.
+    - The path `docs/brainstorm/` must exist. Create it defensively if missing (`Path.mkdir(parents=True, exist_ok=True)`).
+    - Add env var `OUROBOROS_CHAIN_ARTIFACT_DIR` (default `docs/brainstorm`) to let power users redirect.
+    - Do NOT add this behavior to parallel mode. Keep it scoped to `SerialCompoundingExecutor`.
+
+    TESTS (required):
+    - A unit test in `tests/unit/orchestrator/test_serial_executor.py` that runs a 2-AC compounding
+      flow with a stub executor and asserts the artifact file is written with expected content structure.
+    - A test that asserts the artifact is still written when execution fails mid-chain (fail_fast=True
+      with one AC failing).
+
+    GOTCHAS TO NOTE FOR FUTURE ACs:
+    - `[[INVARIANT: end-of-run chain artifact exists in docs/brainstorm/chain-*.md]]`
+    - `[[INVARIANT: OUROBOROS_CHAIN_ARTIFACT_DIR env var controls artifact location]]`
+
+  - |
+    AC-2 (Q1, B-prime) — Flatten sub-postmortems in prompt rendering, preserve in serialized state
+
+    Fix silent sub-postmortem discard in `SerialCompoundingExecutor._build_postmortem_from_result`
+    (currently at `src/ouroboros/orchestrator/serial_executor.py:344-408`).
+
+    CONTEXT (verified in code audit): `ACResult.sub_postmortems: tuple[ACPostmortem, ...]` already
+    exists (`parallel_executor.py:519`) and is populated when decomposition fires. Serial executor
+    currently IGNORES this field, losing all sub-AC work from the chain.
+
+    REQUIREMENTS:
+    - Add field to `ACPostmortem` in `level_context.py:~510`:
+        sub_postmortems: tuple["ACPostmortem", ...] = ()
+      (Recursive forward reference — use quotes.)
+    - In `SerialCompoundingExecutor._build_postmortem_from_result`, when `result.sub_postmortems` is
+      non-empty:
+        * FLATTEN into the parent's digest: concat all sub `files_modified`, merge sub `gotchas`,
+          union sub `public_api_changes` into the parent ACPostmortem fields.
+        * ALSO preserve the full `sub_postmortems` tuple on the parent ACPostmortem (the new field
+          above) so serialize_postmortem_chain captures the structure.
+    - `PostmortemChain.to_prompt_text()` rendering MUST NOT emit sub_postmortems — the flat view
+      stays for the prompt. Add an explicit test that asserts nested content doesn't appear in the
+      rendered prompt.
+    - `serialize_postmortem_chain` / `deserialize_postmortem_chain` must round-trip the
+      sub_postmortems field.
+
+    TESTS (required):
+    - Sub-postmortem files/gotchas appear flattened in parent's rendered prompt.
+    - sub_postmortems tuple survives serialize/deserialize round-trip.
+    - to_prompt_text() does NOT render nested AC entries (no "Sub-AC 3.1" headers).
+    - Existing tests in `tests/unit/orchestrator/test_serial_executor.py` and `test_level_context.py`
+      still pass unchanged.
+
+    GOTCHAS TO NOTE:
+    - `[[INVARIANT: ACPostmortem.sub_postmortems preserves structure in serialized chain]]`
+    - `[[INVARIANT: to_prompt_text flattens sub-AC data; never emits nested entries]]`
+    - `[[INVARIANT: parent digest fields are unions of its own plus sub-postmortem fields]]`
+
+  - |
+    AC-3 (Q3, C-plus) — [[INVARIANT: ...]] tag parser + Haiku verifier + reliability/occurrence score
+
+    Extract the core compounding primitive: invariants that compound across ACs.
+
+    SCHEMA CHANGE:
+    - Define new type in `level_context.py`:
+        @dataclass(frozen=True)
+        class Invariant:
+            text: str
+            reliability: float  # 0.0 - 1.0 from verifier
+            occurrences: int     # bumps on re-declaration
+            first_seen_ac_id: str
+    - Change ACPostmortem.invariants_established from `tuple[str, ...]` to `tuple[Invariant, ...]`.
+      Update existing tests and call sites.
+
+    PARSER:
+    - New function `extract_invariant_tags(messages: list[Message]) -> list[str]` in level_context.py.
+    - Regex: `r"\[\[INVARIANT:\s*([^\]]+)\]\]"` — single-line, matches greedy-avoiding right bracket.
+    - Strip whitespace, cap each tag at 200 chars (defensively truncate longer).
+
+    HAIKU VERIFIER:
+    - New function `verify_invariants(tags, ac_trace, files_modified) -> list[tuple[str, float]]`
+      in serial_executor.py.
+    - Calls Haiku via the existing adapter infrastructure — reuse the same dispatch pattern
+      `get_mechanical_detector_model` uses in `config/loader.py:921`.
+    - New config helper `get_invariant_verifier_model()` defaulting to `claude-haiku-4-5`.
+    - Prompt template: "Given this AC's work trace [...] and files modified [...], for each
+      invariant below, return a reliability score 0.0-1.0 indicating whether the work actually
+      supports the claim. Respond with JSON array of {text, score}."
+    - Inline (blocking), not async — scores must be final before AC-N+1 starts.
+
+    CHAIN MERGE LOGIC:
+    - New method `PostmortemChain.merge_invariants(new: list[Invariant], source_ac_id: str)`:
+        * Normalized-string equality for "same invariant" (lower, strip, collapse whitespace).
+          Do NOT use semantic similarity yet (over-engineering for phase 1).
+        * Same-text new invariant → occurrences += 1, reliability = mean(old, new).
+        * Contradiction detection: literal prefix "NOT " or "not " check against stored text.
+          Contradicted invariant → drop it (do not re-add the negation, just remove the prior).
+        * Brand-new invariant → append with reliability=new_score, occurrences=1, first_seen_ac_id.
+
+    RENDER GATE:
+    - In `PostmortemChain.to_prompt_text()` (around line 654-656), filter invariants:
+        threshold = float(os.getenv("OUROBOROS_INVARIANT_MIN_RELIABILITY", "0.7"))
+        rendered = [i for i in all_invariants if i.reliability >= threshold]
+    - Below-threshold invariants are STILL stored in the chain state (for debugging) but do not
+      appear in downstream ACs' prompts.
+
+    SYSTEM PROMPT UPDATE:
+    - Find the compounding system prompt builder (`build_system_prompt` with include_claude_md).
+    - Add a section:
+        ## Invariant declarations
+        When your work establishes a fact future ACs can rely on, emit it inline as:
+          [[INVARIANT: <short claim, ≤200 chars>]]
+        Multiple tags per AC are allowed. Be specific: "API routes are behind auth" beats
+        "auth is done". The next AC's context budget rewards concrete facts.
+
+    TESTS (required):
+    - Parser regex: multiple tags, tags with punctuation, malformed tags rejected.
+    - Merge logic: new / re-declared (occurrence bump) / contradicted (drop) / threshold filter.
+    - Round-trip: Invariant serializes and deserializes with scores preserved.
+    - Integration test with a stub Haiku call that asserts the inline-blocking flow.
+    - Backward-compat: verifies existing `invariants_established = ()` consumers don't break.
+
+    GOTCHAS TO NOTE:
+    - `[[INVARIANT: invariants_established is now tuple[Invariant, ...] not tuple[str, ...]]]`
+    - `[[INVARIANT: OUROBOROS_INVARIANT_MIN_RELIABILITY defaults 0.7; below-threshold hidden but stored]]`
+    - `[[INVARIANT: Haiku verifier runs inline per AC before chain advances]]`
+    - `[[INVARIANT: Contradiction detection uses literal NOT-prefix; no semantic matching yet]]`
+
+  - |
+    AC-4 (Q6.2 + Q7) — Per-AC checkpoint + agent-adjudicated resume + chain-truncation event
+
+    Two bundled scopes sharing the `events.py` seam.
+
+    Q6.2 — Per-completed-AC checkpoint with agent-adjudicated resume:
+
+    - In `SerialCompoundingExecutor.execute_serial`, after each successfully completed AC, write
+      a checkpoint via the existing `CheckpointStore` abstraction (`persistence/checkpoint.py`).
+      Payload in `CheckpointData.state`:
+        {
+          "last_completed_ac_index": N,
+          "postmortem_chain": <serialized>,
+          "mode": "compounding",
+        }
+    - Add `resume_session_id: str | None = None` to `execute_serial`. When provided:
+        1. Load checkpoint.
+        2. `deserialize_postmortem_chain` into the in-memory chain.
+        3. Skip ACs 0..last_completed_ac_index.
+        4. Start execution at index last_completed_ac_index + 1 ("the failing AC").
+    - Failing-AC resume semantics (ADJUDICATED BY AGENT, not heuristic):
+        * If the failing AC's partial state includes sub_postmortems (from AC-2's B-prime
+          preservation): resume at last-completed-sub-AC boundary (skip completed subs, start
+          next).
+        * If monolithic (no sub_postmortems): invoke the agent with a specially-crafted prompt
+          that includes the original AC text PLUS the pre-crash event trace PLUS a decision
+          instruction: "You were interrupted mid-way. Decide (a) continue from where you left
+          off or (b) restart this AC from the top. State your decision on the first line as
+          'DECISION: continue' or 'DECISION: restart', then proceed."
+        * Log the agent's decision as an event.
+    - CLI: add `--resume <session_id>` to `ooo run --compounding`. Mutually exclusive with
+      starting a fresh seed (error if both a new seed path and --resume are provided).
+
+    Q7 — Postmortem chain truncation event:
+
+    - In `level_context.py:~676` (the `log.warning("postmortem_chain.over_budget", ...)` site),
+      alongside the log, emit a new event:
+        create_postmortem_chain_truncated_event(
+            session_id=..., execution_id=...,
+            dropped_count=..., char_budget=..., rendered_chars=...,
+            full_forms_preserved=..., cumulative_invariants_preserved=...,
+        )
+    - Factory lives in `events.py` alongside `create_ac_postmortem_captured_event`. Mirror that
+      pattern exactly.
+    - Event type string: "execution.postmortem_chain.truncated".
+
+    TESTS (required, Q6.2):
+    - Fresh run writes a checkpoint after each successful AC.
+    - Resume with partial checkpoint skips completed ACs, rehydrates chain identically.
+    - Resume of failing AC with sub_postmortems starts at next sub-AC (uses AC-2's preservation).
+    - Resume of failing AC without sub_postmortems invokes the agent-adjudication prompt; both
+      DECISION: continue and DECISION: restart paths exercised.
+    - --resume flag is mutually exclusive with fresh seed path.
+
+    TESTS (required, Q7):
+    - Oversize-chain scenario emits exactly one truncation event with correct counts.
+    - Event roundtrips through event store.
+    - No event emitted when chain fits within budget.
+
+    GOTCHAS TO NOTE:
+    - `[[INVARIANT: Per-AC checkpoint writes after successful AC only, not on failure]]`
+    - `[[INVARIANT: Resume agent-adjudication uses DECISION: continue|restart first-line protocol]]`
+    - `[[INVARIANT: Truncation event emitted alongside log.warning, not replacing it]]`
+
+ontology_schema:
+  name: "SerialCompoundingPhase1_5"
+  description: "Domain of the serial compounding dogfood run — types, artifacts, and invariants"
+  fields:
+    - name: "ACPostmortem"
+      field_type: "entity"
+      description: "Per-AC record including files_modified, gotchas, sub_postmortems, and invariants_established"
+    - name: "PostmortemChain"
+      field_type: "entity"
+      description: "Ordered sequence of ACPostmortem with token-budget-aware rendering and invariant merging"
+    - name: "Invariant"
+      field_type: "entity"
+      description: "Fact established by an AC with text, reliability score, occurrence count, and source AC id"
+    - name: "CheckpointData"
+      field_type: "entity"
+      description: "Persisted state enabling resume; schema-flexible state dict"
+    - name: "tag_parser"
+      field_type: "service"
+      description: "Regex-based [[INVARIANT: ...]] extractor"
+    - name: "haiku_verifier"
+      field_type: "service"
+      description: "Cheap-model reliability scorer for extracted invariants"
+    - name: "chain_artifact"
+      field_type: "artifact"
+      description: "Human-readable markdown file written at end of each run to docs/brainstorm/chain-*.md"
+
+evaluation_principles:
+  - name: "compounding_fidelity"
+    description: "Each AC's final message must reference at least one fact established by a prior AC's postmortem. If AC-N could be executed without the chain, compounding isn't doing anything."
+  - name: "backward_compatibility"
+    description: "Parallel mode behavior must remain byte-identical. `context_override=None` path untouched. All existing tests pass."
+  - name: "test_per_ac"
+    description: "Every AC adds new unit tests covering its new behavior. No AC ships production code without tests."
+  - name: "invariant_emission"
+    description: "Every AC must emit at least one [[INVARIANT: ...]] tag in its final output. Even before AC-3 ships the extractor, the tags serve as visible markers for manual review."
+  - name: "observability"
+    description: "New event types follow the existing factory pattern in events.py. Log lines and events coexist; events don't replace logs."
+
+metadata:
+  seed_id: "phase-1.5-dogfood"
+  ambiguity_score: 0.2
+  expected_decomposition_depth: 1
+  source_brainstorm: "docs/brainstorm/serial-compounding-open-questions.md"
+  execution_mode_required: "compounding"

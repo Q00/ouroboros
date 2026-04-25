@@ -932,6 +932,30 @@ def get_mechanical_detector_model(backend: str | None = None) -> str:
     return get_assertion_extraction_model(backend=backend)
 
 
+def get_invariant_verifier_model(backend: str | None = None) -> str:
+    """Resolve the model used by the [[INVARIANT]] Haiku verifier (Q3 / C-plus).
+
+    Dispatch pattern mirrors :func:`get_mechanical_detector_model`:
+
+    1. ``OUROBOROS_INVARIANT_VERIFIER_MODEL`` env var override.
+    2. Falls back to :func:`get_assertion_extraction_model` which resolves
+       ``OuroborosConfig.evaluation.assertion_extraction_model`` with a
+       backend-safe fallback to ``"claude-haiku-4-5-20251001"`` for
+       Anthropic backends and ``"default"`` for Codex/OpenCode backends.
+
+    Args:
+        backend: Optional backend hint (e.g. ``"codex"``, ``"opencode"``).
+            When ``None``, no backend-specific routing is applied.
+
+    Returns:
+        Model identifier string suitable for :class:`~ouroboros.providers.base.CompletionConfig`.
+    """
+    env_model = os.environ.get("OUROBOROS_INVARIANT_VERIFIER_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return get_assertion_extraction_model(backend=backend)
+
+
 def get_consensus_models(backend: str | None = None) -> tuple[str, ...]:
     """Get consensus stage model roster from environment variable or config."""
     env_models = os.environ.get("OUROBOROS_CONSENSUS_MODELS", "").strip()

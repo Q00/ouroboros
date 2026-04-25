@@ -4,6 +4,7 @@ from ouroboros.persistence.brownfield import BrownfieldRepo, BrownfieldStore
 from ouroboros.persistence.checkpoint import (
     CheckpointData,
     CheckpointStore,
+    CompoundingCheckpointState,
     PeriodicCheckpointer,
     RecoveryManager,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "BrownfieldStore",
     "CheckpointData",
     "CheckpointStore",
+    "CompoundingCheckpointState",
     "EventStore",
     "PeriodicCheckpointer",
     "PhaseTransaction",

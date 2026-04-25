@@ -133,3 +133,8 @@ docs/cli-inventory.yaml
 # (see src/ouroboros/mcp/tools/evaluation_handlers.py)
 .ouroboros_eval_artifact.md
 
+# End-of-run postmortem chain artifacts written by SerialCompoundingExecutor
+# (see src/ouroboros/orchestrator/serial_executor.py write_chain_artifact)
+# These are per-session inspection files, not permanent project documentation.
+docs/brainstorm/chain-*.md
+

@@ -1,0 +1,14 @@
+# Marker file for `--skip-completed` on the phase-1.5 dogfood seed.
+# AC-1 (Q6.1 chain artifact) shipped in commit cc53363 on
+# feat/phase-1.5-compounding-dogfood. Use this with the FULL seed to
+# resume on AC-2 (Q1 sub-postmortems B-prime) with prior in-tree state
+# treated as satisfied:
+#
+#   uv run ouroboros run workflow seeds/phase-1.5-dogfood.yaml \
+#     --compounding \
+#     --skip-completed seeds/phase-1.5-dogfood.completed-ac1.yaml
+
+completed_acs:
+  - ac: 1
+    reason: "Q6.1 end-of-run chain artifact shipped in cc53363; 6 unit tests in TestChainArtifact green; 5 chain artifacts already produced under docs/brainstorm/."
+    commit: "cc533631c3c93336cf69248455fb5fa13d34b3e2"

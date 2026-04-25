@@ -26,6 +26,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelACExecutor,
     ParallelExecutionResult,
     StageExecutionOutcome,
+    render_parallel_completion_message,
     render_parallel_verification_report,
 )
 
@@ -3537,3 +3538,56 @@ class TestParallelACExecutor:
         assert result.runtime_handle is not None
         assert result.runtime_handle.native_session_id == resume_handle.native_session_id
         assert result.runtime_handle.metadata == resume_handle.metadata
+
+
+class TestRenderParallelCompletionMessageMode:
+    """The completion headline reflects execution mode.
+
+    Compounding mode advertises ``"Compounding Execution Complete"`` so the
+    operator-facing summary doesn't misreport the mode the run used. The
+    default (mode=None) keeps the historical ``"Parallel Execution Complete"``
+    so non-compounding callers and existing snapshots are byte-stable.
+    """
+
+    @staticmethod
+    def _empty_result() -> ParallelExecutionResult:
+        return ParallelExecutionResult(
+            results=(),
+            success_count=0,
+            failure_count=0,
+            externally_satisfied_count=0,
+            skipped_count=0,
+            blocked_count=0,
+            invalid_count=0,
+            stages=(),
+            reconciled_level_contexts=(),
+            total_messages=0,
+            total_duration_seconds=0.0,
+        )
+
+    def test_default_mode_keeps_parallel_headline(self) -> None:
+        message = render_parallel_completion_message(self._empty_result(), 0)
+        assert message.startswith("Parallel Execution Complete")
+        assert "Compounding" not in message.splitlines()[0]
+
+    def test_explicit_none_mode_keeps_parallel_headline(self) -> None:
+        message = render_parallel_completion_message(self._empty_result(), 0, mode=None)
+        assert message.startswith("Parallel Execution Complete")
+
+    def test_compounding_mode_uses_compounding_headline(self) -> None:
+        message = render_parallel_completion_message(
+            self._empty_result(), 0, mode="compounding"
+        )
+        assert message.startswith("Compounding Execution Complete")
+        assert "Parallel Execution Complete" not in message.splitlines()[0]
+
+    def test_unknown_mode_falls_back_to_parallel_headline(self) -> None:
+        # Defensive: any value other than the literal "compounding" must not
+        # silently relabel as compounding — keeps the safer historical label.
+        message = render_parallel_completion_message(
+            self._empty_result(), 0, mode="parallel"
+        )
+        assert message.startswith("Parallel Execution Complete")
+
+        message = render_parallel_completion_message(self._empty_result(), 0, mode="")
+        assert message.startswith("Parallel Execution Complete")

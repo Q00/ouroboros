@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import os
 import re
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 from ouroboros.observability.logging import get_logger
@@ -40,6 +41,13 @@ _MAX_FILE_SIZE_BYTES = 1_048_576
 # Maximum number of files to process for public API summary
 _MAX_FILES_FOR_API = 20
 
+# --- Invariant tag extraction (Q3 / C-plus) ---
+# Canonical regex for [[INVARIANT: <text>]] tags.  Double-bracket delimiter is
+# intentionally strict so any accidental single-bracket text is ignored.
+_INVARIANT_TAG_RE = re.compile(r"\[\[INVARIANT:\s*([^\]]+)\]\]", re.IGNORECASE)
+# Maximum characters per extracted invariant text (matches Q3 spec: ~200 chars).
+_MAX_INVARIANT_TEXT_CHARS = 200
+
 # --- Postmortem primitives (serial compounding execution) ---
 # Default number of most-recent postmortems rendered in full form.
 POSTMORTEM_DEFAULT_K_FULL = 3
@@ -53,6 +61,11 @@ _POSTMORTEM_DIGEST_CONTENT_CHARS = 60
 _POSTMORTEM_MAX_DIFF_CHARS = 2000
 # Max chars retained in tool_trace_digest (guards against pathological traces).
 _POSTMORTEM_MAX_TRACE_CHARS = 1500
+# Default minimum reliability score for invariants to appear in the prompt chain.
+# Below-threshold invariants are captured and stored in the serialized chain
+# but are hidden from downstream ACs' prompt context.
+# Override with OUROBOROS_INVARIANT_MIN_RELIABILITY env var.
+POSTMORTEM_DEFAULT_INVARIANT_MIN_RELIABILITY = 0.7
 
 PostmortemStatus = Literal["pass", "fail", "partial"]
 
@@ -493,6 +506,78 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
 
 
 @dataclass(frozen=True, slots=True)
+class Invariant:
+    """A fact established by an AC that compounds into future ACs.
+
+    Attributes:
+        text: The invariant claim (≤200 chars).
+        reliability: Score 0.0–1.0 from the Haiku verifier (default 1.0 until
+            the verifier runs; set to 1.0 for manually-emitted tags that have
+            not yet been verified).
+        occurrences: How many times this invariant has been (re-)declared
+            across ACs. Bumped on each re-declaration; used to rank invariants.
+        first_seen_ac_id: The AC id string where this invariant was first
+            established. Empty string when the source AC has no id.
+        is_contradicted: True when a literal NOT-prefix contradiction was
+            detected during ``merge_invariants``.  A contradicted invariant
+            gets ``reliability=0.0`` and is excluded from trusted invariant
+            summaries.  See :meth:`PostmortemChain.merge_invariants`.
+    """
+
+    text: str
+    reliability: float = 1.0
+    occurrences: int = 1
+    first_seen_ac_id: str = ""
+    is_contradicted: bool = False
+
+    def __str__(self) -> str:  # noqa: D105
+        return self.text
+
+
+def _deserialize_invariant(item: Any) -> "Invariant":
+    """Reconstruct an Invariant from a serialized form.
+
+    Handles two formats for backward compatibility:
+    - Legacy string: ``"AUTH_HEADER required"`` → ``Invariant(text=...)``
+    - New dict: ``{"text": "...", "reliability": 0.9, ...}``
+    """
+    if isinstance(item, str):
+        return Invariant(text=item)
+    if isinstance(item, dict):
+        return Invariant(
+            text=item.get("text", ""),
+            reliability=float(item.get("reliability", 1.0)),
+            occurrences=int(item.get("occurrences", 1)),
+            first_seen_ac_id=item.get("first_seen_ac_id", ""),
+            is_contradicted=bool(item.get("is_contradicted", False)),
+        )
+    # Fallback: coerce unknown types to string
+    return Invariant(text=str(item))
+
+
+def _contradiction_counterpart_key(key: str) -> str | None:
+    """Return the normalized key that would contradict ``key``, or None.
+
+    A contradiction pair consists of a claim and its literal NOT-prefix
+    negation (case-insensitive, whitespace-collapsed):
+
+    - ``"x holds"`` ↔ ``"not x holds"``
+    - ``"not auth required"`` ↔ ``"auth required"``
+
+    Only the "NOT " (four-character) prefix is recognized as the negation
+    marker.  Returns the counterpart key string if the pair exists; returns
+    ``None`` when no counterpart can be formed.
+
+    [[INVARIANT: NOT-prefix contradiction uses four-char "not " sentinel only]]
+    """
+    _NOT_PREFIX = "not "
+    if key.startswith(_NOT_PREFIX):
+        base = key[len(_NOT_PREFIX):]
+        return base if base else None
+    return _NOT_PREFIX + key
+
+
+@dataclass(frozen=True, slots=True)
 class ACPostmortem:
     """Per-AC postmortem carried forward as compounding context.
 
@@ -511,19 +596,38 @@ class ACPostmortem:
     tool_trace_digest: str = ""
     gotchas: tuple[str, ...] = field(default_factory=tuple)
     qa_suggestions: tuple[str, ...] = field(default_factory=tuple)
-    invariants_established: tuple[str, ...] = field(default_factory=tuple)
+    invariants_established: tuple[Invariant, ...] = field(default_factory=tuple)
     retry_attempts: int = 0
     status: PostmortemStatus = "pass"
     duration_seconds: float = 0.0
     ac_native_session_id: str | None = None
     sub_postmortems: tuple["ACPostmortem", ...] = field(default_factory=tuple)
 
-    def to_digest(self) -> str:
+    def to_digest(
+        self,
+        *,
+        min_reliability: float = 0.0,
+        contradicted_keys: "frozenset[str] | None" = None,
+    ) -> str:
         """Render a one-line digest for compressed display in the chain.
 
         Format: ``AC {n} [{status}]: {content} — files: a,b (+K more) | invariants: X, Y``
         For non-passing ACs, the first gotcha is appended instead of invariants
         when present, since gotchas are the anti-repeat signal.
+
+        Args:
+            min_reliability: Reliability gate applied to invariants in the
+                digest line.  Contradicted invariants
+                (``is_contradicted=True``) are always excluded.  Defaults to
+                0.0 (no filtering) when called standalone; the chain caller
+                passes the chain-level threshold for consistency with
+                :meth:`to_full_text` and :meth:`PostmortemChain.to_prompt_text`.
+            contradicted_keys: Optional set of normalized invariant keys
+                contradicted *somewhere in the enclosing chain*.  Per-AC
+                ``invariants_established`` only knows about contradiction
+                state at the AC's own creation time; passing this set lets
+                the chain renderer hide invariants that were later
+                contradicted by a downstream AC.
         """
         s = self.summary
         content = s.ac_content[:_POSTMORTEM_DIGEST_CONTENT_CHARS].rstrip()
@@ -539,16 +643,50 @@ class ACPostmortem:
 
         if self.status != "pass" and self.gotchas:
             parts.append(f"gotcha: {self.gotchas[0]}")
-        elif self.invariants_established:
-            inv_head = "; ".join(self.invariants_established[:2])
-            extra_inv = len(self.invariants_established) - 2
-            inv = inv_head + (f" (+{extra_inv} more)" if extra_inv > 0 else "")
-            parts.append(f"invariants: {inv}")
+        else:
+            # Apply the same reliability gate as to_full_text/to_prompt_text.
+            # Older entries render via to_digest, so without this filter
+            # below-threshold or contradicted invariants would leak back into
+            # the chain context — defeating the render gate.
+            _contradicted = contradicted_keys or frozenset()
+            visible_invs = tuple(
+                inv
+                for inv in self.invariants_established
+                if (
+                    not inv.is_contradicted
+                    and inv.reliability >= min_reliability
+                    and " ".join(inv.text.lower().split()) not in _contradicted
+                )
+            )
+            if visible_invs:
+                inv_head = "; ".join(inv.text for inv in visible_invs[:2])
+                extra_inv = len(visible_invs) - 2
+                inv_str = inv_head + (f" (+{extra_inv} more)" if extra_inv > 0 else "")
+                parts.append(f"invariants: {inv_str}")
 
         return " | ".join(parts)
 
-    def to_full_text(self) -> str:
-        """Render the full postmortem for the in-prompt 'recent' window."""
+    def to_full_text(
+        self,
+        *,
+        min_reliability: float = 0.0,
+        contradicted_keys: "frozenset[str] | None" = None,
+    ) -> str:
+        """Render the full postmortem for the in-prompt 'recent' window.
+
+        Args:
+            min_reliability: Reliability gate applied to per-AC invariants in
+                the "Invariants established" sub-section.  Contradicted
+                invariants (``is_contradicted=True``) are always excluded.
+                Defaults to 0.0 (no filtering) when called standalone; callers
+                should pass the chain-level threshold for consistent behaviour.
+            contradicted_keys: Optional set of normalized invariant keys
+                contradicted *somewhere in the enclosing chain*.  An entry's
+                ``is_contradicted`` flag only reflects state at the AC's
+                creation time; this set lets the chain renderer also suppress
+                invariants that were contradicted by a *later* AC, so the
+                trusted claim is hidden everywhere in the rendered output.
+        """
         s = self.summary
         lines: list[str] = [
             f"### AC {s.ac_index + 1} [{self.status}]"
@@ -572,9 +710,23 @@ class ACPostmortem:
             lines.append(
                 f"**Tool trace:** {self.tool_trace_digest[:_POSTMORTEM_MAX_TRACE_CHARS]}"
             )
-        if self.invariants_established:
+        # Apply reliability gate to per-AC invariants in the full-form render.
+        # Also drop invariants whose normalized key is in the chain-level
+        # contradicted set so a downstream contradiction hides the (then-trusted)
+        # original claim everywhere — not just in the cumulative section.
+        _contradicted = contradicted_keys or frozenset()
+        visible_invs = tuple(
+            inv
+            for inv in self.invariants_established
+            if (
+                not inv.is_contradicted
+                and inv.reliability >= min_reliability
+                and " ".join(inv.text.lower().split()) not in _contradicted
+            )
+        )
+        if visible_invs:
             lines.append("**Invariants established:**")
-            lines.extend(f"- {inv}" for inv in self.invariants_established)
+            lines.extend(f"- {inv.text}" for inv in visible_invs)
         if self.gotchas:
             lines.append("**Gotchas:**")
             lines.extend(f"- {g}" for g in self.gotchas)
@@ -605,20 +757,185 @@ class PostmortemChain:
         """Return a new chain with ``postmortem`` appended (immutable)."""
         return PostmortemChain(postmortems=self.postmortems + (postmortem,))
 
-    def cumulative_invariants(self) -> tuple[str, ...]:
-        """Deduplicated invariants across all ACs, in insertion order."""
-        seen: dict[str, None] = {}
+    def cumulative_invariants(self) -> tuple[Invariant, ...]:
+        """Deduplicated invariants across all ACs, in insertion order.
+
+        Deduplication is by normalized text (lower-cased, collapsed whitespace).
+        The **last** occurrence of each key is used so that
+        :meth:`merge_invariants` results — which carry up-to-date occurrence
+        counts and blended reliability scores — take precedence over earlier,
+        lower-count versions.
+
+        Insertion order is preserved: the first time a key is seen determines
+        its position in the returned tuple; subsequent re-declarations only
+        update the stored :class:`Invariant` object.
+        """
+        order: list[str] = []
+        seen: dict[str, Invariant] = {}
         for pm in self.postmortems:
             for inv in pm.invariants_established:
-                if inv not in seen:
-                    seen[inv] = None
-        return tuple(seen)
+                key = " ".join(inv.text.lower().split())
+                if key not in seen:
+                    order.append(key)
+                seen[key] = inv  # last wins — most recent count / reliability
+        return tuple(seen[k] for k in order)
+
+    def merge_invariants(
+        self,
+        new: "list[tuple[str, float]]",
+        source_ac_id: str,
+    ) -> "tuple[Invariant, ...]":
+        """Merge new invariant claims into the running chain's cumulative set.
+
+        Called after each AC completes to produce the ``invariants_established``
+        tuple for the new :class:`ACPostmortem` being appended to the chain.
+
+        Algorithm (per invariant in ``new``):
+
+        1. **Normalize** the text: lower-case + collapsed whitespace for lookup.
+        2. **Contradiction check** (NOT-prefix): if the normalized key and an
+           existing key are literal NOT-prefix negations of each other (e.g.
+           ``"auth required"`` vs ``"not auth required"``), the new invariant
+           is marked ``is_contradicted=True`` and receives ``reliability=0.0``.
+           A warning is logged.  The contradicted invariant is still included in
+           the returned tuple so it is visible in the chain for inspection.
+        3. **Match** against the chain's cumulative invariants (same key).
+        4. **Re-declaration** (match found): bump ``occurrences`` by 1, blend the
+           reliability score as a weighted mean::
+
+               (prior.reliability × prior.occurrences + new_reliability) / new_occurrences
+
+           The *canonical text* is preserved from the first-seen invariant so
+           the rendered output stays stable across re-declarations with minor
+           wording variations.
+        5. **New** (no match, no contradiction): insert as
+           ``Invariant(text, reliability, 1, source_ac_id)``.
+
+        Deduplication within ``new`` itself (same normalized key appearing
+        twice in one AC) keeps only the first occurrence.
+
+        Args:
+            new: Pairs of ``(text, reliability_score)`` produced by the Haiku
+                verifier (Q3 / C-plus).  Pass an empty list when no invariants
+                were extracted or the verifier returned nothing.
+            source_ac_id: AC id string used as ``first_seen_ac_id`` for
+                genuinely new invariants.  Pass an empty string when the
+                calling AC has no id.
+
+        Returns:
+            A tuple of :class:`Invariant` objects, one per unique entry in
+            ``new``, in the order they appeared.  Re-declared invariants carry
+            updated occurrence counts and blended reliability scores; new ones
+            carry ``occurrences=1`` and ``first_seen_ac_id=source_ac_id``.
+            Contradicted invariants carry ``is_contradicted=True`` and
+            ``reliability=0.0``.
+
+        [[INVARIANT: PostmortemChain.merge_invariants bumps occurrences and averages reliability on re-declaration]]
+        [[INVARIANT: first_seen_ac_id is set on new invariants and preserved on re-declarations]]
+        [[INVARIANT: NOT-prefix contradictions set is_contradicted=True and reliability=0.0 on the new invariant]]
+        """
+        # Build lookup from accumulated history; last occurrence wins so that
+        # previously-merged invariants (with bumped counts) serve as the base.
+        existing: dict[str, Invariant] = {}
+        for pm in self.postmortems:
+            for inv in pm.invariants_established:
+                key = " ".join(inv.text.lower().split())
+                existing[key] = inv
+
+        result: list[Invariant] = []
+        seen_keys: set[str] = set()
+
+        for text, reliability in new:
+            # Apply 200-char cap — mirrors extract_invariant_tags behaviour.
+            text = text[:_MAX_INVARIANT_TEXT_CHARS]
+            key = " ".join(text.lower().split())
+            if not key:
+                continue
+            if key in seen_keys:
+                # Duplicate within this AC's ``new`` list — skip.
+                continue
+            seen_keys.add(key)
+
+            # --- NOT-prefix contradiction detection (AC-2 / B-prime extension) ---
+            # Check if the new claim contradicts an already-established invariant.
+            # A contradiction exists when the new key and an existing key are
+            # literal NOT-prefix negations of each other (e.g. "auth required"
+            # vs "not auth required").  Contradicted invariants are marked with
+            # is_contradicted=True and receive reliability=0.0 to signal that
+            # the pair cannot both be trusted.
+            counterpart_key = _contradiction_counterpart_key(key)
+            is_contradicted = counterpart_key is not None and counterpart_key in existing
+
+            if is_contradicted:
+                log.warning(
+                    "invariant.contradiction_detected",
+                    new_key=key,
+                    counterpart_key=counterpart_key,
+                    source_ac_id=source_ac_id,
+                )
+                result.append(
+                    Invariant(
+                        text=text,
+                        reliability=0.0,
+                        occurrences=1,
+                        first_seen_ac_id=source_ac_id,
+                        is_contradicted=True,
+                    )
+                )
+                # Symmetric contradiction marking: the counterpart living on a
+                # prior postmortem cannot be mutated (frozen dataclass), so we
+                # emit a fresh contradicted Invariant under the COUNTERPART's
+                # key on this batch's result.  ``cumulative_invariants`` walks
+                # the chain with last-wins-by-key semantics, so the older
+                # trusted entry is overridden by this contradicted one and
+                # filtered at the render gate alongside its negation.  Without
+                # this, the prior claim continues to surface in downstream
+                # ACs' compounding context even though it is now provably
+                # contradicted.
+                if counterpart_key is not None and counterpart_key not in seen_keys:
+                    prior_counterpart = existing[counterpart_key]
+                    result.append(
+                        Invariant(
+                            text=prior_counterpart.text,
+                            reliability=0.0,
+                            occurrences=prior_counterpart.occurrences,
+                            first_seen_ac_id=prior_counterpart.first_seen_ac_id,
+                            is_contradicted=True,
+                        )
+                    )
+                    seen_keys.add(counterpart_key)
+            elif key in existing:
+                prior = existing[key]
+                new_occ = prior.occurrences + 1
+                # Weighted mean: weight by prior occurrence count.
+                blended = (prior.reliability * prior.occurrences + reliability) / new_occ
+                result.append(
+                    Invariant(
+                        text=prior.text,  # canonical text from first occurrence
+                        reliability=round(blended, 6),
+                        occurrences=new_occ,
+                        first_seen_ac_id=prior.first_seen_ac_id,
+                    )
+                )
+            else:
+                result.append(
+                    Invariant(
+                        text=text,
+                        reliability=reliability,
+                        occurrences=1,
+                        first_seen_ac_id=source_ac_id,
+                    )
+                )
+
+        return tuple(result)
 
     def to_prompt_text(
         self,
         *,
         k_full: int = POSTMORTEM_DEFAULT_K_FULL,
         token_budget: int = POSTMORTEM_DEFAULT_TOKEN_BUDGET,
+        min_reliability: float | None = None,
+        on_truncated: Callable[[int, int, int, int, int], None] | None = None,
     ) -> str:
         """Render the chain as a markdown section for user-turn injection.
 
@@ -629,12 +946,46 @@ class PostmortemChain:
                 rendered text exceeds ``token_budget * 4`` characters, oldest
                 digest lines are progressively dropped. Full forms and the
                 invariants block are always preserved.
+            min_reliability: Reliability gate for the "Established Invariants"
+                block. Only invariants whose ``reliability`` score is at or
+                above this threshold are rendered; contradicted invariants
+                (``is_contradicted=True``) are always excluded regardless of
+                score. When ``None`` (default), the value is resolved from
+                the ``OUROBOROS_INVARIANT_MIN_RELIABILITY`` env var, falling
+                back to :data:`POSTMORTEM_DEFAULT_INVARIANT_MIN_RELIABILITY`
+                (0.7). Pass ``0.0`` explicitly to show all non-contradicted
+                invariants.
+            on_truncated: Optional callback invoked when the rendered text
+                still exceeds the character budget after dropping all digest
+                entries.  Called with positional args:
+                ``(dropped_count, char_budget, rendered_chars,
+                full_forms_preserved, cumulative_invariants_preserved)``.
+                Used by :func:`build_postmortem_chain_prompt` to emit
+                the Q7 ``"execution.postmortem_chain.truncated"`` event.
 
         Returns:
             The formatted section, or an empty string if the chain is empty.
+
+        [[INVARIANT: to_prompt_text render gate uses OUROBOROS_INVARIANT_MIN_RELIABILITY env var (default 0.7)]]
+        [[INVARIANT: contradicted invariants are always excluded from to_prompt_text regardless of min_reliability]]
         """
         if not self.postmortems:
             return ""
+
+        # --- Resolve min_reliability threshold (arg > env var > built-in default) ---
+        if min_reliability is None:
+            raw = os.environ.get("OUROBOROS_INVARIANT_MIN_RELIABILITY", "").strip()
+            try:
+                min_reliability = (
+                    float(raw) if raw else POSTMORTEM_DEFAULT_INVARIANT_MIN_RELIABILITY
+                )
+            except ValueError:
+                log.warning(
+                    "postmortem_chain.invalid_min_reliability_env",
+                    raw_value=raw,
+                    fallback=POSTMORTEM_DEFAULT_INVARIANT_MIN_RELIABILITY,
+                )
+                min_reliability = POSTMORTEM_DEFAULT_INVARIANT_MIN_RELIABILITY
 
         char_budget = max(0, token_budget) * _POSTMORTEM_CHARS_PER_TOKEN
 
@@ -647,19 +998,59 @@ class PostmortemChain:
             digest_entries = self.postmortems[:split]
             full_entries = self.postmortems[split:]
 
-        invariants = self.cumulative_invariants()
+        all_invariants = self.cumulative_invariants()
+        # Apply render gate: filter contradicted invariants and those below the
+        # reliability threshold.  Contradicted invariants (reliability=0.0) are
+        # always excluded; the threshold check also catches them but the explicit
+        # ``is_contradicted`` guard makes intent clear.
+        invariants = tuple(
+            inv
+            for inv in all_invariants
+            if not inv.is_contradicted and inv.reliability >= min_reliability
+        )
+        hidden_count = len(all_invariants) - len(invariants)
+        # Build the chain-level contradicted-keys set so per-AC renderers can
+        # also hide invariants contradicted by a downstream AC. Without this
+        # set, AC-N's ``to_full_text`` would still render a claim that AC-N+M
+        # later proved false (since the per-AC ``is_contradicted`` is fixed at
+        # the AC's creation time).
+        contradicted_keys: frozenset[str] = frozenset(
+            " ".join(inv.text.lower().split())
+            for inv in all_invariants
+            if inv.is_contradicted
+        )
+        if hidden_count > 0:
+            log.debug(
+                "postmortem_chain.invariants.render_gate_filtered",
+                hidden_count=hidden_count,
+                total_count=len(all_invariants),
+                min_reliability=min_reliability,
+            )
 
         def _render(digests: tuple[ACPostmortem, ...]) -> str:
             sections: list[str] = ["## Prior AC Postmortems (Compounding Context)"]
             if invariants:
                 sections.append("### Established Invariants (cumulative)")
-                sections.extend(f"- {inv}" for inv in invariants)
+                sections.extend(f"- {inv.text}" for inv in invariants)
             if digests:
                 sections.append("### Earlier ACs (digests)")
-                sections.extend(f"- {pm.to_digest()}" for pm in digests)
+                sections.extend(
+                    f"- {pm.to_digest(min_reliability=min_reliability, contradicted_keys=contradicted_keys)}"
+                    for pm in digests
+                )
             if full_entries:
                 sections.append("### Recent ACs (full postmortems)")
-                sections.extend(pm.to_full_text() for pm in full_entries)
+                # Pass min_reliability AND contradicted_keys so individual
+                # full-form sections apply the same gate as the cumulative
+                # invariants block above (including chain-level contradictions
+                # introduced after the AC's creation).
+                sections.extend(
+                    pm.to_full_text(
+                        min_reliability=min_reliability,
+                        contradicted_keys=contradicted_keys,
+                    )
+                    for pm in full_entries
+                )
             return "\n".join(sections)
 
         text = _render(digest_entries)
@@ -672,14 +1063,31 @@ class PostmortemChain:
             remaining.pop(0)
             text = _render(tuple(remaining))
 
-        if len(text) > char_budget:
+        # Compute truncation outside the over-budget branch: when the loop
+        # successfully shrunk the chain below budget by dropping entries, the
+        # caller still needs to know — otherwise telemetry only fires on the
+        # rare case where truncation FAILS to fit, which inverts the intent.
+        dropped_count = len(digest_entries) - len(remaining)
+        if dropped_count > 0:
             log.warning(
                 "postmortem_chain.over_budget",
                 rendered_chars=len(text),
                 char_budget=char_budget,
+                dropped_count=dropped_count,
                 full_count=len(full_entries),
                 invariants_count=len(invariants),
             )
+            # Q7: Notify caller so a structured event can be emitted alongside
+            # this log line.  Callback is intentionally synchronous — callers
+            # that need async event emission collect the info and emit afterward.
+            if on_truncated is not None:
+                on_truncated(
+                    dropped_count,
+                    char_budget,
+                    len(text),
+                    len(full_entries),
+                    len(invariants),
+                )
         return text
 
 
@@ -688,6 +1096,7 @@ def build_postmortem_chain_prompt(
     *,
     k_full: int | None = None,
     token_budget: int | None = None,
+    on_truncated: Callable[[int, int, int, int, int], None] | None = None,
 ) -> str:
     """Build the "Prior AC Postmortems" section for the user-turn prompt.
 
@@ -695,6 +1104,18 @@ def build_postmortem_chain_prompt(
     ``OUROBOROS_POSTMORTEM_FULL_K`` and ``OUROBOROS_POSTMORTEM_TOKEN_BUDGET``
     env overrides when arguments are not supplied. Returns an empty string for
     an empty chain so callers can concatenate unconditionally.
+
+    Args:
+        chain: Postmortem chain to render.
+        k_full: Override for number of most-recent full-form entries.
+            Defaults to ``OUROBOROS_POSTMORTEM_FULL_K`` env var or
+            :data:`POSTMORTEM_DEFAULT_K_FULL`.
+        token_budget: Override for token budget. Defaults to
+            ``OUROBOROS_POSTMORTEM_TOKEN_BUDGET`` env var or
+            :data:`POSTMORTEM_DEFAULT_TOKEN_BUDGET`.
+        on_truncated: Optional callback forwarded to
+            :meth:`PostmortemChain.to_prompt_text` for Q7 truncation event
+            emission. See that method's docstring for callback signature.
     """
     if k_full is None:
         env_k = os.environ.get("OUROBOROS_POSTMORTEM_FULL_K")
@@ -710,7 +1131,11 @@ def build_postmortem_chain_prompt(
             )
         except ValueError:
             token_budget = POSTMORTEM_DEFAULT_TOKEN_BUDGET
-    return chain.to_prompt_text(k_full=k_full, token_budget=token_budget)
+    return chain.to_prompt_text(
+        k_full=k_full,
+        token_budget=token_budget,
+        on_truncated=on_truncated,
+    )
 
 
 def serialize_postmortem_chain(chain: PostmortemChain) -> list[dict[str, Any]]:
@@ -751,7 +1176,10 @@ def _deserialize_postmortem(d: dict[str, Any]) -> ACPostmortem:
         tool_trace_digest=d.get("tool_trace_digest", ""),
         gotchas=_ensure_tuple_or_none(d.get("gotchas", ())),
         qa_suggestions=_ensure_tuple_or_none(d.get("qa_suggestions", ())),
-        invariants_established=_ensure_tuple_or_none(d.get("invariants_established", ())),
+        invariants_established=tuple(
+            _deserialize_invariant(item)
+            for item in (d.get("invariants_established") or ())
+        ),
         retry_attempts=d.get("retry_attempts", 0),
         status=status_value,  # type: ignore[arg-type]
         duration_seconds=d.get("duration_seconds", 0.0),
@@ -775,9 +1203,58 @@ def deserialize_postmortem_chain(data: list[dict[str, Any]]) -> PostmortemChain:
     return PostmortemChain(postmortems=tuple(postmortems))
 
 
+def extract_invariant_tags(messages: "Sequence[AgentMessage] | str") -> list[str]:
+    """Extract ``[[INVARIANT: ...]]`` tags from agent messages or a plain string.
+
+    Implements the Q3 (C-plus) tag-parsing step.  Tags are parsed with the
+    canonical regex ``\\[\\[INVARIANT:\\s*([^\\]]+)\\]\\]`` (case-insensitive),
+    whitespace-stripped, and capped at :data:`_MAX_INVARIANT_TEXT_CHARS` (200)
+    characters.  Duplicates are removed in insertion order (normalization:
+    lower-case + collapsed whitespace).
+
+    Args:
+        messages: Either a sequence of :class:`~ouroboros.orchestrator.adapter.AgentMessage`
+            objects — the ``content`` field of each is scanned — or a plain
+            string scanned directly.  Pass ``result.final_message`` to scan
+            only the last assistant turn; pass ``result.messages`` to scan
+            the full conversation.
+
+    Returns:
+        Deduplicated list of invariant text strings in the order first seen.
+        Returns an empty list when no valid tags are found.
+
+    Examples::
+
+        >>> extract_invariant_tags("Done. [[INVARIANT: X is always true]]")
+        ['X is always true']
+        >>> extract_invariant_tags("[[INVARIANT: A]] [[INVARIANT: A]]")
+        ['A']
+    """
+    if isinstance(messages, str):
+        text = messages
+    else:
+        text = "\n".join(m.content for m in messages)
+
+    results: list[str] = []
+    seen: set[str] = set()
+    for match in _INVARIANT_TAG_RE.finditer(text):
+        raw = match.group(1).strip()
+        if not raw:
+            continue
+        # Apply 200-char cap *before* deduplication so callers see the capped form.
+        raw = raw[:_MAX_INVARIANT_TEXT_CHARS]
+        # Normalize for deduplication: lower-case + collapsed whitespace.
+        key = " ".join(raw.lower().split())
+        if key not in seen:
+            seen.add(key)
+            results.append(raw)
+    return results
+
+
 __all__ = [
     "ACContextSummary",
     "ACPostmortem",
+    "Invariant",
     "LevelContext",
     "POSTMORTEM_DEFAULT_K_FULL",
     "POSTMORTEM_DEFAULT_TOKEN_BUDGET",
@@ -787,6 +1264,7 @@ __all__ = [
     "build_postmortem_chain_prompt",
     "deserialize_level_contexts",
     "deserialize_postmortem_chain",
+    "extract_invariant_tags",
     "extract_level_context",
     "serialize_level_contexts",
     "serialize_postmortem_chain",

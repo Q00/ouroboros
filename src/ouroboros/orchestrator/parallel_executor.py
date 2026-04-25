@@ -401,11 +401,26 @@ def render_parallel_verification_report(
 def render_parallel_completion_message(
     parallel_result: ParallelExecutionResult,
     total_acceptance_criteria: int,
+    *,
+    mode: str | None = None,
 ) -> str:
-    """Build a concise operator-facing completion summary."""
+    """Build a concise operator-facing completion summary.
+
+    Args:
+        parallel_result: Aggregated execution result.
+        total_acceptance_criteria: Total ACs in the seed.
+        mode: Execution mode override. ``"compounding"`` produces a
+            ``"Compounding Execution Complete"`` headline; any other value
+            (or ``None``) keeps the historical ``"Parallel Execution Complete"``.
+    """
     total_satisfied = parallel_result.success_count + parallel_result.externally_satisfied_count
+    headline = (
+        "Compounding Execution Complete"
+        if mode == "compounding"
+        else "Parallel Execution Complete"
+    )
     lines = [
-        "Parallel Execution Complete",
+        headline,
         f"Success: {total_satisfied}/{total_acceptance_criteria}",
     ]
     if parallel_result.externally_satisfied_count > 0:

@@ -9,6 +9,7 @@ import pytest
 from ouroboros.persistence.checkpoint import (
     CheckpointData,
     CheckpointStore,
+    CompoundingCheckpointState,
     PeriodicCheckpointer,
     RecoveryManager,
 )
@@ -539,3 +540,226 @@ class TestRecoveryManager:
         assert result.is_ok
         assert result.value is not None
         assert result.value.phase == "phase1"  # Rolled back to older checkpoint
+
+
+# ---------------------------------------------------------------------------
+# New tests: CompoundingCheckpointState typed payload
+# ---------------------------------------------------------------------------
+
+
+class TestCompoundingCheckpointState:
+    """Test the typed compounding-mode checkpoint payload."""
+
+    def test_to_dict_has_required_keys(self) -> None:
+        """CompoundingCheckpointState.to_dict() produces all required keys."""
+        state = CompoundingCheckpointState(
+            last_completed_ac_index=2,
+            postmortem_chain=[{"ac_id": "AC-1"}, {"ac_id": "AC-2"}],
+        )
+        d = state.to_dict()
+        assert d["last_completed_ac_index"] == 2
+        assert d["mode"] == "compounding"
+        assert len(d["postmortem_chain"]) == 2
+
+    def test_mode_is_always_compounding(self) -> None:
+        """mode field is always 'compounding' regardless of construction order."""
+        state = CompoundingCheckpointState(
+            last_completed_ac_index=0,
+            postmortem_chain=[],
+        )
+        assert state.mode == "compounding"
+        assert state.to_dict()["mode"] == "compounding"
+
+    def test_from_dict_roundtrip(self) -> None:
+        """CompoundingCheckpointState survives to_dict / from_dict roundtrip."""
+        original = CompoundingCheckpointState(
+            last_completed_ac_index=5,
+            postmortem_chain=[{"key": "val"}],
+        )
+        reconstructed = CompoundingCheckpointState.from_dict(original.to_dict())
+        assert reconstructed.last_completed_ac_index == 5
+        assert reconstructed.mode == "compounding"
+        assert reconstructed.postmortem_chain == [{"key": "val"}]
+
+    def test_from_dict_rejects_wrong_mode(self) -> None:
+        """from_dict() raises ValueError when mode != 'compounding'."""
+        bad_data = {
+            "last_completed_ac_index": 0,
+            "postmortem_chain": [],
+            "mode": "parallel",
+        }
+        with pytest.raises(ValueError, match="mode='compounding'"):
+            CompoundingCheckpointState.from_dict(bad_data)
+
+    def test_from_dict_rejects_missing_index(self) -> None:
+        """from_dict() raises ValueError when last_completed_ac_index is absent."""
+        bad_data = {
+            "postmortem_chain": [],
+            "mode": "compounding",
+        }
+        with pytest.raises(ValueError, match="last_completed_ac_index"):
+            CompoundingCheckpointState.from_dict(bad_data)
+
+    def test_json_serializable(self) -> None:
+        """CompoundingCheckpointState.to_dict() is JSON-serializable."""
+        state = CompoundingCheckpointState(
+            last_completed_ac_index=3,
+            postmortem_chain=[{"files_modified": ["a.py", "b.py"], "gotchas": []}],
+        )
+        # Must not raise
+        json.dumps(state.to_dict())
+
+    def test_empty_postmortem_chain(self) -> None:
+        """Empty postmortem_chain is preserved as empty list."""
+        state = CompoundingCheckpointState(
+            last_completed_ac_index=0,
+            postmortem_chain=[],
+        )
+        d = state.to_dict()
+        assert d["postmortem_chain"] == []
+        rebuilt = CompoundingCheckpointState.from_dict(d)
+        assert rebuilt.postmortem_chain == []
+
+    def test_compounding_state_inside_checkpoint_data(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """CompoundingCheckpointState round-trips through CheckpointData."""
+        chain_data = [{"files_modified": ["src/foo.py"], "status": "pass"}]
+        state = CompoundingCheckpointState(
+            last_completed_ac_index=1,
+            postmortem_chain=chain_data,
+        )
+        cp = CheckpointData.create(
+            seed_id="my-compounding-run",
+            phase="compounding",
+            state=state.to_dict(),
+        )
+        result = checkpoint_store.write(cp)
+        assert result.is_ok
+
+        loaded = checkpoint_store.read("my-compounding-run")
+        assert loaded.is_ok
+        recovered = CompoundingCheckpointState.from_dict(loaded.value.state)
+        assert recovered.last_completed_ac_index == 1
+        assert recovered.mode == "compounding"
+        assert recovered.postmortem_chain == chain_data
+
+
+# ---------------------------------------------------------------------------
+# New tests: CheckpointStore.delete and write/read aliases
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointStoreDelete:
+    """Test the new delete() method on CheckpointStore."""
+
+    def test_delete_removes_current_checkpoint(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """delete() removes the current checkpoint file."""
+        seed_id = "del-test"
+        cp = CheckpointData.create(seed_id, "phase1", {"x": 1})
+        checkpoint_store.save(cp)
+
+        result = checkpoint_store.delete(seed_id)
+        assert result.is_ok
+
+        # File should be gone
+        path = checkpoint_store._get_checkpoint_path(seed_id)
+        assert not path.exists()
+
+    def test_delete_removes_all_rollback_levels(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """delete() removes current and all rollback-level files."""
+        seed_id = "del-rollback"
+        # Write three checkpoints so we have levels 0, 1, 2
+        for i in range(3):
+            cp = CheckpointData.create(seed_id, f"phase{i}", {"step": i})
+            checkpoint_store.save(cp)
+
+        # Verify rollback files exist before delete
+        path1 = checkpoint_store._get_checkpoint_path(seed_id, 1)
+        path2 = checkpoint_store._get_checkpoint_path(seed_id, 2)
+        assert path1.exists()
+        assert path2.exists()
+
+        result = checkpoint_store.delete(seed_id)
+        assert result.is_ok
+
+        # All files must be gone
+        for level in range(CheckpointStore.MAX_ROLLBACK_DEPTH + 1):
+            assert not checkpoint_store._get_checkpoint_path(seed_id, level).exists()
+
+    def test_delete_is_idempotent(self, checkpoint_store: CheckpointStore) -> None:
+        """Calling delete() when no checkpoint exists returns ok."""
+        result = checkpoint_store.delete("nonexistent-seed")
+        assert result.is_ok
+
+    def test_load_after_delete_returns_error(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """load() returns an error after the checkpoint has been deleted."""
+        seed_id = "deleted-seed"
+        cp = CheckpointData.create(seed_id, "phase1", {})
+        checkpoint_store.save(cp)
+        checkpoint_store.delete(seed_id)
+
+        load_result = checkpoint_store.load(seed_id)
+        assert load_result.is_err
+
+
+class TestCheckpointStoreWriteRead:
+    """Test the write/read aliases on CheckpointStore."""
+
+    def test_write_is_alias_for_save(self, checkpoint_store: CheckpointStore) -> None:
+        """write() and save() produce equivalent results."""
+        seed_id = "write-alias"
+        cp = CheckpointData.create(seed_id, "phase1", {"key": "val"})
+        result = checkpoint_store.write(cp)
+        assert result.is_ok
+        # File must exist
+        assert checkpoint_store._get_checkpoint_path(seed_id).exists()
+
+    def test_read_is_alias_for_load(self, checkpoint_store: CheckpointStore) -> None:
+        """read() returns the same checkpoint as load()."""
+        seed_id = "read-alias"
+        cp = CheckpointData.create(seed_id, "phase1", {"answer": 42})
+        checkpoint_store.save(cp)
+
+        result = checkpoint_store.read(seed_id)
+        assert result.is_ok
+        assert result.value.state["answer"] == 42
+
+    def test_write_then_read_roundtrip(self, checkpoint_store: CheckpointStore) -> None:
+        """write() followed by read() recovers the original checkpoint."""
+        seed_id = "write-read-rt"
+        cp = CheckpointData.create(seed_id, "compounding", {"last_completed_ac_index": 7})
+        checkpoint_store.write(cp)
+        loaded = checkpoint_store.read(seed_id)
+        assert loaded.is_ok
+        assert loaded.value.state["last_completed_ac_index"] == 7
+
+    def test_write_read_delete_lifecycle(
+        self, checkpoint_store: CheckpointStore
+    ) -> None:
+        """Full write → read → delete lifecycle succeeds."""
+        seed_id = "lifecycle-seed"
+        state = CompoundingCheckpointState(
+            last_completed_ac_index=4,
+            postmortem_chain=[{"status": "pass"}],
+        )
+        cp = CheckpointData.create(seed_id, "compounding", state.to_dict())
+
+        write_result = checkpoint_store.write(cp)
+        assert write_result.is_ok
+
+        read_result = checkpoint_store.read(seed_id)
+        assert read_result.is_ok
+        assert read_result.value.state["last_completed_ac_index"] == 4
+
+        delete_result = checkpoint_store.delete(seed_id)
+        assert delete_result.is_ok
+
+        after_delete = checkpoint_store.read(seed_id)
+        assert after_delete.is_err
