@@ -87,6 +87,37 @@ class _TimeoutTerminableProcess:
         return -1 if self.returncode is None else self.returncode
 
 
+class _DelayedStream:
+    def __init__(self, text: str, delay: float = 0.05) -> None:
+        self._buffer = bytearray(text.encode("utf-8"))
+        self._delay = delay
+        self._slept = False
+
+    async def read(self, n: int = -1) -> bytes:
+        if not self._slept:
+            self._slept = True
+            await asyncio.sleep(self._delay)
+        if not self._buffer:
+            return b""
+        if n < 0 or n >= len(self._buffer):
+            data = bytes(self._buffer)
+            self._buffer.clear()
+            return data
+        data = bytes(self._buffer[:n])
+        del self._buffer[:n]
+        return data
+
+
+class _DelayedSuccessProcess:
+    def __init__(self, stdout: str, delay: float = 0.05) -> None:
+        self.stdout = _DelayedStream(stdout, delay=delay)
+        self.stderr = _FakeStream("")
+        self.returncode: int | None = 0
+
+    async def wait(self) -> int:
+        return 0
+
+
 class _FakeHandler:
     def __init__(self, result: MCPToolResult) -> None:
         self._result = result
@@ -1056,6 +1087,7 @@ class TestHermesCliRuntime:
         runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
         runtime._startup_output_timeout_seconds = 0.01
         runtime._stdout_idle_timeout_seconds = 0.01
+        runtime._subprocess_heartbeat_interval_seconds = None
         process = _TimeoutTerminableProcess()
 
         with patch(
@@ -1064,11 +1096,55 @@ class TestHermesCliRuntime:
         ):
             messages = [message async for message in runtime.execute_task("Do the thing")]
 
-        assert len(messages) == 1
-        assert messages[0].type == "result"
-        assert messages[0].is_error
-        assert messages[0].data["error_type"] == "TimeoutError"
+        assert messages[-1].type == "result"
+        assert messages[-1].is_error
+        assert messages[-1].data["error_type"] == "TimeoutError"
         assert process.terminated or process.killed
+
+    @pytest.mark.asyncio
+    async def test_execute_task_emits_heartbeats_while_quiet_child_is_running(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        runtime._subprocess_heartbeat_interval_seconds = 0.01
+        process = _DelayedSuccessProcess(
+            "Completed research\nsession_id: 20260413_120000_deadbeef\n",
+            delay=0.04,
+        )
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            messages = [message async for message in runtime.execute_task("Do the thing")]
+
+        heartbeat_messages = [m for m in messages if m.data.get("subtype") == "heartbeat"]
+        assert heartbeat_messages
+        assert all(not message.is_final for message in heartbeat_messages)
+        assert messages[-1].type == "result"
+        assert messages[-1].content == "Completed research"
+
+    @pytest.mark.asyncio
+    async def test_execute_task_does_not_fail_first_stdout_timeout_while_child_is_alive(
+        self,
+    ) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        runtime._startup_output_timeout_seconds = 0.01
+        runtime._subprocess_heartbeat_interval_seconds = 0.01
+        process = _DelayedSuccessProcess(
+            "Completed research\nsession_id: 20260413_120000_deadbeef\n",
+            delay=0.04,
+        )
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ):
+            messages = [message async for message in runtime.execute_task("Do the thing")]
+
+        heartbeat_messages = [m for m in messages if m.data.get("subtype") == "heartbeat"]
+        assert heartbeat_messages
+        assert messages[-1].type == "result"
+        assert not messages[-1].is_error
+        assert messages[-1].content == "Completed research"
 
     @pytest.mark.asyncio
     async def test_execute_task_resumes_from_resume_handle(self) -> None:

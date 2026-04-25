@@ -107,6 +107,7 @@ class HermesCliRuntime(AgentRuntime):
     _max_ouroboros_depth = 5
     _startup_output_timeout_seconds = 600.0
     _stdout_idle_timeout_seconds = 900.0
+    _subprocess_heartbeat_interval_seconds = 60.0
     _max_stderr_lines = 512
     _default_research_toolsets = ("web", "browser", "terminal", "file")
 
@@ -137,6 +138,10 @@ class HermesCliRuntime(AgentRuntime):
         self._stdout_idle_timeout_seconds = self._env_float(
             "OUROBOROS_HERMES_STDOUT_IDLE_TIMEOUT_SECONDS",
             self._stdout_idle_timeout_seconds,
+        )
+        self._subprocess_heartbeat_interval_seconds = self._env_float(
+            "OUROBOROS_HERMES_SUBPROCESS_HEARTBEAT_SECONDS",
+            self._subprocess_heartbeat_interval_seconds,
         )
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
@@ -482,10 +487,20 @@ class HermesCliRuntime(AgentRuntime):
             env=self._build_child_env(),
         )
 
+        # Once the subprocess has launched, liveness is tracked by the heartbeat
+        # loop below. Do not also require quiet-mode Hermes to emit a first stdout
+        # chunk within the startup window; long research tasks may produce no
+        # stdout until the final answer even though the child is alive.
+        first_stdout_timeout = (
+            None
+            if self._subprocess_heartbeat_interval_seconds
+            and self._subprocess_heartbeat_interval_seconds > 0
+            else self._startup_output_timeout_seconds
+        )
         stdout_task = asyncio.create_task(
             self._collect_stream_lines(
                 process.stdout,
-                first_chunk_timeout_seconds=self._startup_output_timeout_seconds,
+                first_chunk_timeout_seconds=first_stdout_timeout,
                 chunk_timeout_seconds=self._stdout_idle_timeout_seconds,
             )
         )
@@ -497,7 +512,25 @@ class HermesCliRuntime(AgentRuntime):
         )
 
         try:
-            stdout_lines, stderr_lines = await asyncio.gather(stdout_task, stderr_task)
+            output_task = asyncio.gather(stdout_task, stderr_task)
+            if (
+                self._subprocess_heartbeat_interval_seconds
+                and self._subprocess_heartbeat_interval_seconds > 0
+            ):
+                while not output_task.done():
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(output_task),
+                            timeout=self._subprocess_heartbeat_interval_seconds,
+                        )
+                    except TimeoutError:
+                        yield AgentMessage(
+                            type="assistant",
+                            content="Hermes subprocess still running",
+                            data={"subtype": "heartbeat"},
+                            resume_handle=handle,
+                        )
+            stdout_lines, stderr_lines = await output_task
             returncode = await process.wait()
         except asyncio.CancelledError:
             await self._terminate_process(process)
