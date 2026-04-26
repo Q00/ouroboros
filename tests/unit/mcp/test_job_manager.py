@@ -1177,3 +1177,67 @@ class TestJobManager:
             )
         finally:
             await store.close()
+
+    async def test_job_wait_compact_view_surfaces_subtask_progress_before_workflow(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        await store.append(
+            BaseEvent(
+                type="execution.subtask.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_wait_subtask_only",
+                data={
+                    "ac_index": 1,
+                    "sub_task_index": 1,
+                    "sub_task_id": "ac_1_sub_1",
+                    "content": "Child one",
+                    "status": "executing",
+                },
+            )
+        )
+        snapshot = JobSnapshot(
+            job_id="job_wait_subtask_only",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=22,
+            links=JobLinks(execution_id="exec_wait_subtask_only"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 22
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            result = await handler.handle(
+                {
+                    "job_id": "job_wait_subtask_only",
+                    "cursor": 22,
+                    "timeout_seconds": 0,
+                    "view": "compact",
+                }
+            )
+
+            assert result.is_ok
+            assert result.value.meta["changed"] is True
+            assert result.value.meta["view"] == "compact"
+            assert result.value.meta["sub_ac_executing"] == 1
+            assert result.value.text_content == (
+                "job_wait_subtask_only | running | Sub-AC work | Sub-AC 0/1 | cursor 22"
+            )
+        finally:
+            await store.close()
