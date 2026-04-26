@@ -118,7 +118,7 @@ class TestBuildSystemPrompt:
         assert "It is not a mandatory output outline." in prompt
         assert "Name: TaskManager" in prompt
         assert "Description: Task management ontology" in prompt
-        assert "- tasks: List of tasks (required concept)" in prompt
+        assert "- tasks [array]: List of tasks (required concept)" in prompt
         assert "closer to the Seed's intended outcome" in prompt
         assert "Do not force the final artifact to mirror these fields" in prompt
 

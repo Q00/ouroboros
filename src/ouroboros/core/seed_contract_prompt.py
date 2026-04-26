@@ -66,7 +66,9 @@ def render_ontology_lens_section(
         lines.append("Concepts:")
         for concept in lens.concepts:
             required = "required concept" if concept.required else "optional concept"
-            lines.append(f"- {concept.name}: {concept.description} ({required})")
+            lines.append(
+                f"- {concept.name} [{concept.field_type}]: {concept.description} ({required})"
+            )
 
     lines.extend(
         [
