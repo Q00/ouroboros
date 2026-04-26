@@ -2,7 +2,10 @@
 
 > The serpent that devours itself to be reborn anew.
 
-Ouroboros is a specification-first workflow engine for AI coding agents. It transforms ambiguous human requirements into clear, executable specifications through Socratic questioning and ontological analysis -- then runs them on your choice of runtime backend.
+Ouroboros is an Agent OS for specification-first AI coding workflows. It
+transforms ambiguous human requirements into clear, executable specifications
+through Socratic questioning and ontological analysis, then runs them through a
+replayable execution contract on your choice of runtime backend.
 
 ## Documentation Index
 
@@ -15,6 +18,8 @@ Ouroboros is a specification-first workflow engine for AI coding agents. It tran
 
 - [Claude Code](./runtime-guides/claude-code.md) - Backend-specific configuration and CLI options (see [Getting Started](./getting-started.md) for install/onboarding)
 - [Codex CLI](./runtime-guides/codex.md) - Backend-specific configuration and CLI options (see [Getting Started](./getting-started.md) for install/onboarding)
+- [OpenCode](./runtime-guides/opencode.md) - Interactive plugin mode and headless subprocess runtime
+- [Hermes](./runtime-guides/hermes.md) - Hermes Agent runtime setup and `ooo` dispatch
 - [Runtime Capability Matrix](./runtime-capability-matrix.md) - Feature comparison across runtime backends
 
 ### Architecture

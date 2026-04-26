@@ -18,7 +18,7 @@
 <p align="center">
   <strong>Stop prompting. Start specifying.</strong>
   <br/>
-  <sub>Specification-first workflow engine for AI coding agents</sub>
+  <sub>Agent OS for replayable, specification-first AI coding workflows</sub>
 </p>
 
 <p align="center">
@@ -36,9 +36,13 @@
   <a href="#from-wonder-to-ontology">Philosophy</a>
 </p>
 
-**Turn a vague idea into a verified, working codebase -- with any AI coding agent.**
+**Turn a vague idea into a verified, working codebase -- across Claude Code, Codex CLI, OpenCode, and Hermes.**
 
-Ouroboros sits between you and your AI runtime (Claude Code, Codex CLI, Hermes, or others). It replaces ad-hoc prompting with a structured specification-first workflow: interview, crystallize, execute, evaluate, evolve.
+Ouroboros is an Agent OS for AI coding: a local-first runtime layer that turns
+non-deterministic agent work into a replayable, observable, policy-bound
+execution contract. It replaces ad-hoc prompting with a structured
+specification-first workflow: interview, crystallize, execute, evaluate,
+evolve.
 
 ---
 
@@ -68,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code, Codex CLI, Hermes, and OpenCode. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
+> Works with Claude Code, Codex CLI, OpenCode, and Hermes. The installer detects Claude Code, Codex CLI, and Hermes CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
 
 <details>
 <summary><strong>Other install methods</strong></summary>
@@ -255,7 +259,7 @@ src/ouroboros/
 +-- resilience/     4-pattern stagnation detection, 5 lateral personas
 +-- observability/  3-component drift measurement, auto-retrospective
 +-- persistence/    Event sourcing (SQLAlchemy + aiosqlite), checkpoints
-+-- orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI)
++-- orchestrator/   Runtime abstraction layer (Claude Code, Codex CLI, OpenCode, Hermes)
 +-- core/           Types, errors, seed, ontology, security
 +-- providers/      LiteLLM adapter (100+ models)
 +-- mcp/            MCP client/server integration
@@ -270,7 +274,8 @@ src/ouroboros/
 - **Brownfield** -- Auto-detects config files across multiple language ecosystems
 - **Evolution** -- Up to 30 generations, convergence at ontology similarity >= 0.95
 - **Stagnation** -- Detects spinning, oscillation, no-drift, and diminishing returns patterns
-- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code, Codex CLI, and Hermes; same workflow spec, different execution engines
+- **Agent OS runtime** -- Replayable execution contract across capability discovery, policy, directives, event journal, and agent processes
+- **Runtime backends** -- Pluggable abstraction layer (`orchestrator.runtime_backend` config) with first-class support for Claude Code, Codex CLI, OpenCode, and Hermes; same workflow spec, different execution engines
 
 See [Architecture](./docs/architecture.md) for the full design document.
 
