@@ -277,6 +277,35 @@ class EvaluateHandler:
     opencode_mode: str | None = field(default=None, repr=False)
     TIMEOUT_SECONDS: int = 0  # No server-side timeout; client/runtime decides.
 
+    async def _load_seed_content_from_session(self, session_id: str) -> str | None:
+        """Best-effort load of persisted Seed JSON for evaluation context."""
+        store = self.event_store
+        owns_event_store = False
+        if store is None:
+            store = EventStore()
+            owns_event_store = True
+
+        try:
+            await store.initialize()
+            repo = SessionRepository(store)
+            session_result = await repo.reconstruct_session(session_id)
+            if session_result.is_err:
+                return None
+            seed_json = session_result.value.progress.get("seed_json")
+            if isinstance(seed_json, str) and seed_json.strip():
+                return seed_json
+            return None
+        except Exception as exc:  # noqa: BLE001 - evaluation enrichment is best-effort
+            log.debug(
+                "mcp.tool.evaluate.seed_context_lookup_failed",
+                session_id=session_id,
+                error=str(exc),
+            )
+            return None
+        finally:
+            if owns_event_store and store is not None:
+                await store.close()
+
     @property
     def definition(self) -> MCPToolDefinition:
         """Return the tool definition."""
@@ -427,6 +456,9 @@ class EvaluateHandler:
             multi_ac_count=len(acceptance_criteria),
             trigger_consensus=trigger_consensus,
         )
+
+        if not seed_content:
+            seed_content = await self._load_seed_content_from_session(session_id)
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         payload = build_evaluate_subagent(
