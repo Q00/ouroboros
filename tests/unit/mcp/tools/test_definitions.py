@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -781,6 +782,87 @@ class TestEvaluateHandler:
 
         assert result.is_err
         assert "artifact is required" in str(result.error)
+
+    async def test_document_seed_skips_stage1_mechanical_checks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Research/analysis Seed evaluation should not fail on code-project Stage 1."""
+        import ouroboros.evaluation as evaluation
+        from ouroboros.evaluation.models import EvaluationResult, SemanticResult
+        import ouroboros.mcp.tools.evaluation_handlers as evaluation_handlers
+
+        captured: dict[str, object] = {}
+
+        class FakePipeline:
+            def __init__(self, llm_adapter: object, config: object) -> None:
+                captured["config"] = config
+
+            async def evaluate(self, context: Any, *_args: object, **_kwargs: object):
+                captured["context"] = context
+                return Result.ok(
+                    EvaluationResult(
+                        execution_id=context.execution_id,
+                        stage1_result=None,
+                        stage2_result=SemanticResult(
+                            score=0.9,
+                            ac_compliance=True,
+                            goal_alignment=0.9,
+                            drift_score=0.0,
+                            uncertainty=0.1,
+                            reasoning="document satisfies the contract",
+                        ),
+                        final_approved=True,
+                    )
+                )
+
+        def _fake_llm_adapter(**_kwargs: object) -> object:
+            return object()
+
+        def _unexpected_stage1_call(*_args: object, **_kwargs: object) -> bool:
+            pytest.fail("document evaluation should not touch Stage 1 mechanical checks")
+
+        monkeypatch.setattr(evaluation, "EvaluationPipeline", FakePipeline)
+        monkeypatch.setattr(evaluation, "has_mechanical_toml", _unexpected_stage1_call)
+        monkeypatch.setattr(evaluation, "ensure_mechanical_toml", _unexpected_stage1_call)
+        monkeypatch.setattr(evaluation, "build_mechanical_config", _unexpected_stage1_call)
+        monkeypatch.setattr(evaluation_handlers, "create_llm_adapter", _fake_llm_adapter)
+
+        seed_content = """
+goal: Write a decision brief
+task_type: analysis
+constraints:
+  - Do not produce source code
+acceptance_criteria:
+  - Brief makes a clear recommendation
+ontology_schema:
+  name: DecisionBrief
+  description: Decision brief concepts
+  fields:
+    - name: recommendation
+      type: string
+      description: Chosen path and rationale
+metadata:
+  ambiguity_score: 0.1
+""".strip()
+
+        handler = EvaluateHandler()
+        result = await handler.handle(
+            {
+                "session_id": "sess-doc",
+                "artifact": "Recommendation: choose option B.",
+                "seed_content": seed_content,
+                "working_dir": str(tmp_path),
+            }
+        )
+
+        assert result.is_ok
+        config: Any = captured["config"]
+        context: Any = captured["context"]
+        assert config.stage1_enabled is False
+        assert config.mechanical is None
+        assert context.artifact_type == "document"
 
 
 class TestEvaluateHandlerCodeChanges:
