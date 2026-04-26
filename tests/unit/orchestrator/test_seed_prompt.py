@@ -6,7 +6,6 @@ from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadat
 from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.seed_contract_prompt import (
     render_ontology_lens_section,
-    render_seed_contract_for_evaluation,
     render_seed_contract_for_execution,
 )
 
@@ -37,23 +36,12 @@ def test_seed_contract_from_seed_interprets_ontology_lens() -> None:
 
     assert contract.goal == "Build a task manager"
     assert contract.task_type == "code"
-    assert contract.artifact_type == "code"
     assert contract.acceptance_criteria == ("Tasks can be created",)
     assert contract.ontology_lens.name == "TaskManager"
     assert contract.ontology_lens.description == "Task management ontology"
     assert len(contract.ontology_lens.concepts) == 1
     assert contract.ontology_lens.concepts[0].name == "tasks"
     assert contract.ontology_lens.concepts[0].field_type == "array"
-
-
-def test_seed_contract_maps_non_code_tasks_to_document_artifacts() -> None:
-    """Research and analysis Seeds should not be evaluated as code artifacts."""
-    seed = _seed().model_copy(update={"task_type": "analysis"})
-
-    contract = SeedContract.from_seed(seed)
-
-    assert contract.task_type == "analysis"
-    assert contract.artifact_type == "document"
 
 
 def test_render_ontology_lens_section_frames_ontology_as_lens() -> None:
@@ -86,17 +74,3 @@ def test_render_seed_contract_for_execution_includes_core_sections() -> None:
     assert "- No external database" in rendered
     assert "## Ontology / Conceptual Lens" in rendered
     assert "## Exit Conditions" in rendered
-
-
-def test_render_seed_contract_for_evaluation_frames_contract_as_judgment_lens() -> None:
-    """Evaluation renderer uses the same Seed contract without coding bias."""
-    contract = SeedContract.from_seed(_seed())
-
-    rendered = render_seed_contract_for_evaluation(contract)
-
-    assert "immutable source of truth for this evaluation" in rendered
-    assert "not only the surface wording of an acceptance criterion" in rendered
-    assert "## Task Type" in rendered
-    assert "conceptual lens for evaluation judgments" in rendered
-    assert "When evaluation judgments are ambiguous:" in rendered
-    assert "It is not a mandatory output outline." in rendered

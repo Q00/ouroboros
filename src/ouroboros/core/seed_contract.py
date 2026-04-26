@@ -2,8 +2,8 @@
 
 The Seed remains the frozen source of truth.  This module provides a small
 interpretation layer that turns the Seed into semantic parts the runtime can
-render consistently across execution, evaluation, and evolution without
-teaching every caller how to read Seed internals.
+render consistently during execution without teaching every caller how to read
+Seed internals.
 """
 
 from __future__ import annotations
@@ -49,13 +49,6 @@ class SeedContract:
     evaluation_principles: tuple[EvaluationPrinciple, ...]
     exit_conditions: tuple[ExitCondition, ...]
     brownfield_context: BrownfieldContext
-
-    @property
-    def artifact_type(self) -> str:
-        """Return the evaluator artifact type implied by the task type."""
-        if self.task_type.lower() in {"research", "analysis"}:
-            return "document"
-        return "code"
 
     @classmethod
     def from_seed(cls, seed: Seed) -> SeedContract:
