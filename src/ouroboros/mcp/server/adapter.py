@@ -874,7 +874,7 @@ def create_ouroboros_server(
     )
 
     # Create evolution engines for evolve_step
-    from ouroboros.core.errors import ProviderError
+    from ouroboros.core.errors import ProviderError, ValidationError
     from ouroboros.core.lineage import ACResult, EvaluationSummary
     from ouroboros.evaluation.artifact_collector import ArtifactCollector
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
@@ -1167,9 +1167,12 @@ def create_ouroboros_server(
 
         eval_result = await evolution_eval_pipeline.evaluate(eval_context)
         if eval_result.is_err:
-            if allow_provider_unavailable and isinstance(eval_result.error, ProviderError):
+            if allow_provider_unavailable and isinstance(
+                eval_result.error, (ProviderError, ValidationError)
+            ):
                 log.warning(
                     "evolution.semantic_contract_audit.unavailable",
+                    error_type=type(eval_result.error).__name__,
                     error=str(eval_result.error),
                     seed_id=seed.metadata.seed_id,
                 )
