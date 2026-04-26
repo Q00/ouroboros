@@ -78,6 +78,18 @@ async def _query_all_execution_subtask_events(
     return events
 
 
+async def _query_latest_workflow_event(
+    event_store: EventStore, execution_id: str
+) -> Any | None:
+    """Fetch the latest workflow progress event without relying on a mixed window."""
+    events = await event_store.query_events(
+        aggregate_id=execution_id,
+        event_type="workflow.progress.updated",
+        limit=1,
+    )
+    return events[0] if events else None
+
+
 @dataclass
 class CancelExecutionHandler:
     """Handler for the cancel_execution tool.
@@ -348,13 +360,8 @@ async def _render_job_snapshot_inner(
     ]
 
     if snapshot.links.execution_id:
-        recent_events = await event_store.query_events(
-            aggregate_id=snapshot.links.execution_id,
-            limit=_JOB_EXECUTION_EVENT_LIMIT,
-        )
-        workflow_event = next(
-            (event for event in recent_events if event.type == "workflow.progress.updated"),
-            None,
+        workflow_event = await _query_latest_workflow_event(
+            event_store, snapshot.links.execution_id
         )
 
         subtask_events = await _query_all_execution_subtask_events(
@@ -394,9 +401,7 @@ async def _render_job_snapshot_inner(
                 lines.append(f"**Sub-AC Progress**: {subtask_progress}")
 
         subtasks: dict[str, tuple[str, str]] = {}
-        for event in recent_events:
-            if event.type != "execution.subtask.updated":
-                continue
+        for event in subtask_events[:_JOB_EXECUTION_EVENT_LIMIT]:
             sub_task_id = event.data.get("sub_task_id")
             if sub_task_id and sub_task_id not in subtasks:
                 subtasks[sub_task_id] = (
