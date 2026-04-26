@@ -6321,3 +6321,385 @@ class TestAgentAdjudicationPromptAC4:
             "Adjudication context must reference AC0's postmortem data (prior work); "
             f"got context preview: {args['context_section'][:200]!r}"
         )
+
+
+# =============================================================================
+# AC-1 (Q2) — Per-AC diff capture integration with SerialCompoundingExecutor.
+# =============================================================================
+
+
+def _init_test_repo(repo: Path, *, files: dict[str, str] | None = None) -> None:
+    """Initialise a real git repo at ``repo`` for diff-capture integration tests."""
+    import subprocess as _sp
+
+    repo.mkdir(parents=True, exist_ok=True)
+    env = {
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "HOME": str(repo),
+    }
+    _sp.run(
+        ["git", "init", "-q", "-b", "main"],
+        cwd=str(repo),
+        env=env,
+        check=True,
+    )
+    initial = files or {"README.md": "initial\n"}
+    for name, content in initial.items():
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    _sp.run(["git", "add", "-A"], cwd=str(repo), env=env, check=True)
+    _sp.run(
+        ["git", "commit", "-q", "-m", "initial"],
+        cwd=str(repo),
+        env=env,
+        check=True,
+    )
+
+
+def _make_executor_with_cwd(workspace: Path) -> SerialCompoundingExecutor:
+    """Build a SerialCompoundingExecutor anchored at ``workspace`` for diff capture."""
+    event_store, _ = _make_replaying_event_store()
+    executor = SerialCompoundingExecutor(
+        adapter=MagicMock(),
+        event_store=event_store,
+        console=MagicMock(),
+        enable_decomposition=False,
+        task_cwd=str(workspace),
+    )
+    executor._coordinator.detect_file_conflicts = MagicMock(return_value=[])
+    return executor
+
+
+class TestSerialExecutorDiffCapture:
+    """Integration tests: per-AC diff_summary populated in postmortem chain.
+
+    [[INVARIANT: ACPostmortem.diff_summary is non-empty for ACs that
+    modify tracked files in a git workspace]]
+    [[INVARIANT: diff capture failures never propagate — diff_summary
+    becomes "" on every error path]]
+    """
+
+    @pytest.mark.asyncio
+    async def test_serial_executor_populates_diff_summary_in_postmortem(
+        self, tmp_path: Path
+    ) -> None:
+        """13. A stub adapter that writes a file via the events path leads to a
+        postmortem whose diff_summary contains the file name and a `--stat` line.
+
+        We can't run a real Claude adapter in tests, so we simulate the
+        AC body by performing the actual filesystem write inside the fake
+        ``_execute_single_ac`` (between pre and post snapshots).  We also
+        emit a ``Write`` AgentMessage so files_modified is populated.
+        """
+        _init_test_repo(tmp_path)
+        seed = _make_seed("Add a file")
+        executor = _make_executor_with_cwd(tmp_path)
+
+        captured_postmortem_events: list[Any] = []
+        event_store: Any = executor._event_store
+        appended: list[BaseEvent] = event_store._appended
+
+        async def fake_single_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            # Simulate the AC body: write a tracked file in the workspace.
+            new_file = tmp_path / "src" / "feature.py"
+            new_file.parent.mkdir(parents=True, exist_ok=True)
+            new_file.write_text(
+                "def feature():\n    return 42\n\n# new module\n"
+            )
+            # Stage it so stash create includes it in the post snapshot.
+            import subprocess as _sp
+
+            _sp.run(
+                ["git", "add", "-A"],
+                cwd=str(tmp_path),
+                check=True,
+                env={
+                    "GIT_AUTHOR_NAME": "Test",
+                    "GIT_AUTHOR_EMAIL": "test@example.com",
+                    "GIT_COMMITTER_NAME": "Test",
+                    "GIT_COMMITTER_EMAIL": "test@example.com",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_SYSTEM": "/dev/null",
+                    "HOME": str(tmp_path),
+                },
+            )
+            return _ok_result(
+                ac_index,
+                str(kwargs["ac_content"]),
+                final_message="wrote feature",
+                files_written=("src/feature.py",),
+            )
+
+        executor._execute_single_ac = fake_single_ac  # type: ignore[method-assign]
+
+        # The pre-snapshot helper emits an empty SHA on a clean repo (which
+        # would short-circuit diff capture).  Dirty the worktree before the
+        # run so capture_pre_ac_snapshot returns a real SHA.
+        (tmp_path / "README.md").write_text("dirty before run\n")
+
+        plan = _make_plan((0,))
+        result = await executor.execute_serial(
+            seed=seed,
+            session_id="sess_diff",
+            execution_id="exec_diff",
+            tools=[],
+            system_prompt="SYSTEM",
+            execution_plan=plan,
+        )
+
+        assert result.success_count == 1
+        # The postmortem.captured event carries diff_summary in its payload
+        # under data["postmortem"]["diff_summary"] (the full serialized PM).
+        captured_postmortem_events = [
+            e for e in appended if e.type == "execution.ac.postmortem.captured"
+        ]
+        assert len(captured_postmortem_events) == 1
+        pm_data = captured_postmortem_events[0].data.get("postmortem", {})
+        diff_summary = pm_data.get("diff_summary", "")
+        assert "feature.py" in diff_summary, (
+            f"diff_summary must reference modified file; got: {diff_summary!r}"
+        )
+        # --stat output always contains a `|` between the path and churn.
+        assert "|" in diff_summary
+        # And the summary footer.
+        import re as _re
+
+        assert _re.search(r"\d+ files? changed", diff_summary), diff_summary
+
+    @pytest.mark.asyncio
+    async def test_serial_executor_diff_summary_visible_to_next_ac_prompt(
+        self, tmp_path: Path
+    ) -> None:
+        """14. 2-AC run; AC-2's context_override (built from chain) contains
+        a substring of AC-1's diff_summary."""
+        _init_test_repo(tmp_path)
+        seed = _make_seed("Add module A", "Extend module A")
+        executor = _make_executor_with_cwd(tmp_path)
+
+        captured_overrides: list[str] = []
+        captured_diff_summaries: list[str] = []
+        event_store: Any = executor._event_store
+
+        async def fake_single_ac(**kwargs: Any) -> ACExecutionResult:
+            captured_overrides.append(kwargs.get("context_override") or "")
+            ac_index = int(kwargs["ac_index"])
+            # AC-1 creates a uniquely-named file so we can substring-match.
+            if ac_index == 0:
+                new_file = tmp_path / "src" / "ac1_unique_filename.py"
+                new_file.parent.mkdir(parents=True, exist_ok=True)
+                new_file.write_text("# AC-1 file\nx = 1\n")
+            else:
+                # AC-2 modifies a different file.
+                (tmp_path / "src" / "ac2_other.py").write_text("# AC-2 file\ny = 2\n")
+            import subprocess as _sp
+
+            _sp.run(
+                ["git", "add", "-A"],
+                cwd=str(tmp_path),
+                check=True,
+                env={
+                    "GIT_AUTHOR_NAME": "Test",
+                    "GIT_AUTHOR_EMAIL": "test@example.com",
+                    "GIT_COMMITTER_NAME": "Test",
+                    "GIT_COMMITTER_EMAIL": "test@example.com",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_SYSTEM": "/dev/null",
+                    "HOME": str(tmp_path),
+                },
+            )
+            return _ok_result(
+                ac_index,
+                str(kwargs["ac_content"]),
+                files_written=(
+                    f"src/ac{ac_index + 1}_{'unique_filename' if ac_index == 0 else 'other'}.py",
+                ),
+            )
+
+        executor._execute_single_ac = fake_single_ac  # type: ignore[method-assign]
+
+        # Dirty the worktree so pre-snapshots have content.
+        (tmp_path / "README.md").write_text("dirty\n")
+
+        plan = _make_plan((0,), (1,))
+        await executor.execute_serial(
+            seed=seed,
+            session_id="sess_diff_chain",
+            execution_id="exec_diff_chain",
+            tools=[],
+            system_prompt="SYSTEM",
+            execution_plan=plan,
+        )
+
+        # Pull AC-1's diff_summary from the captured event for the assertion.
+        appended: list[BaseEvent] = event_store._appended
+        pm_events = [
+            e for e in appended if e.type == "execution.ac.postmortem.captured"
+        ]
+        assert len(pm_events) == 2
+        ac1_diff_summary = pm_events[0].data.get("postmortem", {}).get(
+            "diff_summary", ""
+        )
+        assert ac1_diff_summary, "AC-1 must have a non-empty diff_summary"
+        # AC-2's context_override (built from the chain) must contain a
+        # recognizable substring of AC-1's diff_summary — the unique filename.
+        ac2_override = captured_overrides[1]
+        assert "ac1_unique_filename" in ac2_override, (
+            "AC-2's context_override (built from chain) should contain a "
+            f"substring of AC-1's diff_summary. Override:\n{ac2_override[:500]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_serial_executor_no_op_ac_records_empty_diff_summary(
+        self, tmp_path: Path
+    ) -> None:
+        """15. A stub adapter that makes no file changes leads to diff_summary == "" """
+        _init_test_repo(tmp_path)
+        seed = _make_seed("AC that touches nothing")
+        executor = _make_executor_with_cwd(tmp_path)
+
+        async def fake_single_ac(**kwargs: Any) -> ACExecutionResult:
+            # Intentionally do nothing on the filesystem.
+            return _ok_result(int(kwargs["ac_index"]), str(kwargs["ac_content"]))
+
+        executor._execute_single_ac = fake_single_ac  # type: ignore[method-assign]
+
+        # Dirty the worktree so pre-snapshot returns a real SHA — but that
+        # state is identical to the post snapshot (no AC changes), so the
+        # SHAs match and diff_summary stays "".
+        (tmp_path / "README.md").write_text("constant dirty\n")
+
+        plan = _make_plan((0,))
+        await executor.execute_serial(
+            seed=seed,
+            session_id="sess_noop",
+            execution_id="exec_noop",
+            tools=[],
+            system_prompt="SYSTEM",
+            execution_plan=plan,
+        )
+
+        event_store: Any = executor._event_store
+        appended: list[BaseEvent] = event_store._appended
+        pm_events = [
+            e for e in appended if e.type == "execution.ac.postmortem.captured"
+        ]
+        assert len(pm_events) == 1
+        assert (
+            pm_events[0].data.get("postmortem", {}).get("diff_summary", "") == ""
+        )
+
+    @pytest.mark.asyncio
+    async def test_serial_executor_diff_capture_failure_does_not_fail_ac(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """16. monkeypatch capture_pre_ac_snapshot to raise; AC still completes
+        successfully with diff_summary == "".
+
+        [[INVARIANT: diff capture failures never propagate — diff_summary
+        becomes "" on every error path]]
+        """
+        _init_test_repo(tmp_path)
+        seed = _make_seed("AC that survives diff failure")
+        executor = _make_executor_with_cwd(tmp_path)
+
+        async def fake_single_ac(**kwargs: Any) -> ACExecutionResult:
+            return _ok_result(int(kwargs["ac_index"]), str(kwargs["ac_content"]))
+
+        executor._execute_single_ac = fake_single_ac  # type: ignore[method-assign]
+
+        # Patch the helper imported into serial_executor's namespace.
+        from ouroboros.orchestrator import serial_executor as _se
+
+        def _explode(*_a: Any, **_kw: Any) -> Any:
+            raise RuntimeError("simulated diff-capture catastrophe")
+
+        monkeypatch.setattr(_se, "capture_pre_ac_snapshot", _explode)
+
+        plan = _make_plan((0,))
+        result = await executor.execute_serial(
+            seed=seed,
+            session_id="sess_diff_fail",
+            execution_id="exec_diff_fail",
+            tools=[],
+            system_prompt="SYSTEM",
+            execution_plan=plan,
+        )
+
+        assert result.success_count == 1
+        assert result.failure_count == 0
+        event_store: Any = executor._event_store
+        appended: list[BaseEvent] = event_store._appended
+        pm_events = [
+            e for e in appended if e.type == "execution.ac.postmortem.captured"
+        ]
+        assert len(pm_events) == 1
+        assert (
+            pm_events[0].data.get("postmortem", {}).get("diff_summary", "") == ""
+        )
+
+
+class TestDiffSummaryRoundTrip:
+    """Round-trip preservation of non-empty diff_summary through the
+    serializer/deserializer.  The field already exists on
+    ``ACPostmortem``; this test confirms no regression in the serializer
+    path that future ACs will lean on for resume.
+    """
+
+    def test_diff_summary_round_trips_through_serialize_postmortem_chain(
+        self,
+    ) -> None:
+        """17. Serialize a chain with a non-empty diff_summary, deserialize,
+        assert field-for-field equality."""
+        from ouroboros.orchestrator.level_context import (
+            ACContextSummary,
+            ACPostmortem,
+            PostmortemChain,
+            deserialize_postmortem_chain,
+            serialize_postmortem_chain,
+        )
+
+        diff_text = (
+            " src/foo.py | 23 +++++++++++++---------\n"
+            " src/bar.py |  8 ++++----\n"
+            " 2 files changed, 16 insertions(+), 9 deletions(-)"
+        )
+        pm = ACPostmortem(
+            summary=ACContextSummary(
+                ac_index=0,
+                ac_content="Implement foo",
+                success=True,
+                tools_used=("Write",),
+                files_modified=("src/foo.py", "src/bar.py"),
+                key_output="ok",
+                public_api="",
+            ),
+            diff_summary=diff_text,
+            status="pass",
+            duration_seconds=1.23,
+            ac_native_session_id="sess-x",
+        )
+        chain = PostmortemChain(postmortems=(pm,))
+
+        serialized = serialize_postmortem_chain(chain)
+        # diff_summary must appear in the serialized form verbatim.
+        assert serialized[0].get("diff_summary") == diff_text
+
+        round_tripped = deserialize_postmortem_chain(serialized)
+        assert len(round_tripped.postmortems) == 1
+        rt_pm = round_tripped.postmortems[0]
+        # Field-for-field equality.
+        assert rt_pm.diff_summary == pm.diff_summary
+        assert rt_pm.summary.ac_index == pm.summary.ac_index
+        assert rt_pm.summary.ac_content == pm.summary.ac_content
+        assert rt_pm.summary.success == pm.summary.success
+        assert rt_pm.summary.files_modified == pm.summary.files_modified
+        assert rt_pm.status == pm.status
+        assert rt_pm.duration_seconds == pm.duration_seconds
+        assert rt_pm.ac_native_session_id == pm.ac_native_session_id

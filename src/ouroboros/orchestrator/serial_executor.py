@@ -33,6 +33,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ouroboros.orchestrator.diff_capture import (
+    capture_pre_ac_snapshot,
+    compute_diff_summary,
+)
 from ouroboros.orchestrator.events import (
     create_ac_postmortem_captured_event,
     create_monolithic_resume_adjudicated_event,
@@ -1291,6 +1295,23 @@ class SerialCompoundingExecutor(ParallelACExecutor):
             )
             self._flush_console()
 
+            # Q2: Capture pre-AC stash SHA so post-AC `git diff --stat` has a
+            # baseline.  Wrapped defensively — diff capture must NEVER fail
+            # the AC.  All known failure modes already return None inside
+            # capture_pre_ac_snapshot; the broad except guards against
+            # unforeseen errors and monkeypatched test stubs that may raise.
+            workspace_for_diff = Path(self._task_cwd or ".")
+            try:
+                pre_sha = capture_pre_ac_snapshot(workspace_for_diff)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "serial_executor.diff_capture.failed",
+                    reason="unexpected_exception",
+                    phase="pre_snapshot",
+                    error=str(exc),
+                )
+                pre_sha = None
+
             try:
                 result = await self._execute_single_ac(
                     ac_index=ac_index,
@@ -1325,8 +1346,22 @@ class SerialCompoundingExecutor(ParallelACExecutor):
 
             results.append(result)
 
+            # Q2: Compute diff_summary against the post-AC snapshot.  Any
+            # failure inside compute_diff_summary already returns "";
+            # the broad except is a final safety net.
+            try:
+                diff_summary = compute_diff_summary(pre_sha, workspace_for_diff)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "serial_executor.diff_capture.failed",
+                    reason="unexpected_exception",
+                    phase="diff",
+                    error=str(exc),
+                )
+                diff_summary = ""
+
             postmortem = self._build_postmortem_from_result(
-                result, workspace_root=self._task_cwd
+                result, workspace_root=self._task_cwd, diff_summary=diff_summary
             )
 
             # Q3 (C-plus): Extract [[INVARIANT: ...]] tags inline-blocking before
@@ -1547,15 +1582,24 @@ class SerialCompoundingExecutor(ParallelACExecutor):
         result: ACExecutionResult,
         *,
         workspace_root: str | None,
+        diff_summary: str = "",
     ) -> ACPostmortem:
         """Derive an ACPostmortem from an ACExecutionResult.
 
         Uses the existing :func:`extract_level_context` summarization
         (which already folds tool-use events into files_modified, tools_used,
         key_output, and public_api) for a deterministic reconstruction of
-        the factual half of the postmortem. The compounding-specific fields
-        (diff_summary, gotchas, qa_suggestions, invariants_established)
-        remain empty in phase 1 — populated by later milestones.
+        the factual half of the postmortem.
+
+        Args:
+            result: The AC execution result to derive the postmortem from.
+            workspace_root: Working-directory anchor used by
+                :func:`extract_level_context` for public-API summarization.
+            diff_summary: Truncated ``git diff --stat`` for the AC, computed
+                by :func:`compute_diff_summary` at the call site.  Defaults
+                to ``""`` so the recursive sub-postmortem call below does
+                not require per-sub-AC capture (top-AC diff already covers
+                the union — sub-AC granular capture is out of scope).
         """
         # extract_level_context expects a list[tuple[idx, content, success, msgs, final_msg]]
         level_ctx = extract_level_context(
@@ -1644,6 +1688,7 @@ class SerialCompoundingExecutor(ParallelACExecutor):
 
         return ACPostmortem(
             summary=summary,
+            diff_summary=diff_summary,
             status=status,
             retry_attempts=result.retry_attempt,
             duration_seconds=result.duration_seconds,

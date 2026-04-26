@@ -1,0 +1,187 @@
+# Phase-2 Dogfood Seed — Q2: Per-AC Diff Capture
+#
+# Single AC. Adds `git stash create` boundaries around each AC in
+# SerialCompoundingExecutor and populates ACPostmortem.diff_summary with a
+# truncated `git diff --stat <pre> <post>` so the postmortem chain carries
+# line-level change signal.
+#
+# This is the first non-self-referential dogfood run — Phase-1.5 was
+# "compounding building compounding," which gave agents an unusually rich
+# self-referential context. Q2 stress-tests the loop on ordinary feature work.
+#
+# Run:
+#   ooo run workflow seeds/phase-2-q2-diff-capture.yaml --compounding
+#
+# Full reasoning:
+#   docs/brainstorm/phase-2-q2-diff-capture-design.md
+#   docs/brainstorm/serial-compounding-open-questions.md (Q2 section)
+#
+# Prompt caching is intentionally NOT in scope — it requires migrating off
+# the Claude Code subprocess SDK to raw anthropic, which the current runtime
+# (Claude Code subscription) does not support.
+
+goal: "Implement Q2 (per-AC diff capture) for Ouroboros serial compounding mode: surround each AC's body with `git stash create` boundaries and populate ACPostmortem.diff_summary with a truncated `git diff --stat` between the pre/post snapshots, so the rolling postmortem chain carries line-level change signal in addition to the existing files_modified list. Capture must degrade gracefully on every git failure (no .git, missing binary, timeout, non-zero exit) — diff_summary becomes the empty string, AC continues, run is unaffected."
+
+constraints:
+  - "Python 3.10+ (matches existing codebase)"
+  - "Keep the full existing test suite green (`uv run pytest tests/unit/` before committing)"
+  - "Add new unit tests in tests/unit/orchestrator/test_diff_capture.py and integration tests extending test_serial_executor.py"
+  - "Parallel mode (`mode='parallel'`) must remain byte-identical to pre-change — parallel executor and its tests are NOT touched"
+  - "context_override=None path must stay untouched"
+  - "Diff capture is SerialCompoundingExecutor-only behavior; do not call from ParallelACExecutor"
+  - "All git subprocess calls use a 5s timeout and check=False; failures log structured warnings and return empty/None — never raise into the executor loop"
+  - "Use `git stash create` for boundaries (it produces an unreferenced SHA without modifying .git/refs/stash or the working tree). Do NOT use `git stash push`, do NOT auto-commit."
+  - "Truncate the stat output to top 20 files by churn (insertions+deletions) plus a summary footer; hard char cap at 4000 with a [truncated] marker. Make caps configurable via env vars."
+  - "Phase-1.5 invariants are NOT regressed: end-of-run chain artifact still written, sub-postmortems still flattened in prompts, invariant tags still verified by Haiku, per-AC checkpoint still written, resume still works."
+  - "Commit the work with a conventional-commit message (`feat(compounding): Q2 — per-AC diff capture in postmortem chain`) before returning."
+  - "Before starting, read docs/brainstorm/phase-2-q2-diff-capture-design.md for the full design and locked decisions."
+  - "Emit at least one [[INVARIANT: ...]] tag in the final output so Q3's verifier can score the work."
+
+acceptance_criteria:
+  - |
+    AC-1 (Q2) — Per-AC diff capture in postmortem chain
+
+    Implement diff capture for SerialCompoundingExecutor by adding `git stash create`
+    boundaries around each AC and populating ACPostmortem.diff_summary with a
+    truncated `git diff --stat` between the pre/post snapshots.
+
+    REQUIREMENTS:
+
+    - Create new module `src/ouroboros/orchestrator/diff_capture.py` with two
+      pure synchronous helpers:
+        * `capture_pre_ac_snapshot(workspace_root: Path) -> str | None`
+          Runs `git stash create` in workspace_root with a 5s timeout. Returns
+          the resulting SHA on success or None on any failure (no .git/, missing
+          git binary, timeout, non-zero exit). Failures log structured warnings
+          (`serial_executor.diff_capture.skipped` for missing repo,
+          `serial_executor.diff_capture.failed` with a `reason=<key>` field for
+          everything else) but do NOT raise.
+        * `compute_diff_summary(pre_sha: str | None, workspace_root: Path, *, file_cap: int = 20, char_budget: int = 4000) -> str`
+          Takes a pre-AC stash SHA, runs another `git stash create` for the
+          post-AC snapshot, then `git diff --stat <pre> <post>`. Truncates to
+          top file_cap files by total churn with `... and K more files` filler
+          when truncated, then hard-caps at char_budget chars with a `[truncated]`
+          marker (always preserve the summary footer line). Returns "" on:
+          pre_sha is None, post snapshot fails, SHAs match (no-op AC),
+          `git diff` fails, OUROBOROS_DIFF_CAPTURE_ENABLED is false/0/empty.
+
+    - Read these env vars (defaults in parens) inside the helpers at call time,
+      mirroring the pattern in serial_executor.py:_get_min_reliability:
+        * OUROBOROS_DIFF_CAPTURE_ENABLED (default "true")
+        * OUROBOROS_DIFF_SUMMARY_FILE_CAP (default 20)
+        * OUROBOROS_DIFF_SUMMARY_CHAR_BUDGET (default 4000)
+      Invalid env-var values fall back to defaults silently (do not raise).
+
+    - Wire the helpers into SerialCompoundingExecutor's per-AC body:
+        * The workspace anchor is `self._task_cwd: str | None`. Coerce
+          via `Path(self._task_cwd or ".")` at the call site.
+        * Capture pre_sha BEFORE the per-AC body executes inside the
+          serial loop (so the snapshot reflects state going into the AC).
+        * Compute diff_summary at each existing `_build_postmortem_from_result`
+          call site (currently serial_executor.py:1156 and :1328) and pass
+          it as a new kwarg.
+        * `_build_postmortem_from_result` is a @staticmethod at
+          serial_executor.py:1546. Add `diff_summary: str = ""` to its
+          signature (default empty preserves the recursive sub-AC call at
+          line 1605, which does NOT do per-sub-AC capture — top-AC diff
+          covers the union; sub-AC granular capture is out of scope).
+        * Pass diff_summary through to `ACPostmortem(..., diff_summary=...)`.
+
+    - DO NOT call diff capture from ParallelACExecutor. Parallel mode must
+      stay byte-identical (its tests guard this).
+
+    TESTS (required):
+
+    Unit tests in NEW file `tests/unit/orchestrator/test_diff_capture.py`:
+      1. capture_pre_ac_snapshot in clean tmp git repo returns 40-char SHA.
+      2. capture_pre_ac_snapshot with dirty worktree returns SHA that includes
+         the unstaged changes (verify by diffing the SHA against HEAD's tree).
+      3. capture_pre_ac_snapshot in tmp_path with no .git/ returns None and
+         logs `serial_executor.diff_capture.skipped`.
+      4. capture_pre_ac_snapshot returns None on FileNotFoundError when git
+         binary is unavailable (monkeypatch PATH).
+      5. capture_pre_ac_snapshot returns None on subprocess timeout
+         (monkeypatch subprocess.run to raise TimeoutExpired).
+      6. compute_diff_summary returns "" when pre_sha is None.
+      7. compute_diff_summary returns "" when pre==post (no-op AC).
+      8. compute_diff_summary on a real edit returns output containing the
+         file path and the `<N> file changed, <M> insertions(+)` summary.
+      9. compute_diff_summary truncates to top 20 files by churn when 30
+         files changed; output contains `... and 10 more files`.
+     10. compute_diff_summary hard-caps at char_budget; output ends with
+         `[truncated]` marker and the summary footer is preserved.
+     11. compute_diff_summary returns "" when OUROBOROS_DIFF_CAPTURE_ENABLED
+         is "false" / "0" / "" without invoking subprocess.
+     12. compute_diff_summary returns "" gracefully on `git diff` non-zero exit.
+
+    Integration tests extending `tests/unit/orchestrator/test_serial_executor.py`:
+     13. test_serial_executor_populates_diff_summary_in_postmortem — a stub
+         adapter that writes a file via the events path leads to a postmortem
+         whose diff_summary contains the file name and a `--stat` line.
+     14. test_serial_executor_diff_summary_visible_to_next_ac_prompt — a 2-AC
+         run; AC-2's context_override (built from the chain) contains a
+         substring of AC-1's diff_summary.
+     15. test_serial_executor_no_op_ac_records_empty_diff_summary — a stub
+         adapter that makes no file changes leads to diff_summary == "".
+     16. test_serial_executor_diff_capture_failure_does_not_fail_ac —
+         monkeypatch capture_pre_ac_snapshot to raise; AC still completes
+         successfully with diff_summary == "".
+
+    Round-trip:
+     17. test_diff_summary_round_trips_through_serialize_postmortem_chain —
+         serialize a chain with a non-empty diff_summary, deserialize,
+         assert field-for-field equality. Field already exists; this confirms
+         no regression to the existing serializer.
+
+    GOTCHAS TO NOTE FOR FUTURE ACs:
+    - [[INVARIANT: ACPostmortem.diff_summary is non-empty for ACs that
+      modify tracked files in a git workspace]]
+    - [[INVARIANT: diff capture failures never propagate — diff_summary
+      becomes "" on every error path]]
+    - [[INVARIANT: parallel mode prompts are byte-identical pre/post Q2
+      because diff capture is SerialCompoundingExecutor-only]]
+    - [[INVARIANT: git stash create produces an unreferenced SHA without
+      modifying .git/refs/stash, so stash list stays empty across runs]]
+
+ontology_schema:
+  name: "SerialCompoundingPhase2_Q2"
+  description: "Narrowed ontology for the per-AC diff capture work item"
+  fields:
+    - name: "ACPostmortem"
+      field_type: "entity"
+      description: "Per-AC postmortem record; the diff_summary field is the target of this AC"
+    - name: "diff_summary"
+      field_type: "field"
+      description: "str on ACPostmortem; truncated `git diff --stat` between pre/post per-AC stash snapshots"
+    - name: "diff_capture"
+      field_type: "module"
+      description: "New module src/ouroboros/orchestrator/diff_capture.py — capture_pre_ac_snapshot and compute_diff_summary helpers"
+    - name: "workspace_root"
+      field_type: "input"
+      description: "Path on the executor; the directory git subprocess calls run in"
+    - name: "stash_create"
+      field_type: "service"
+      description: "git stash create — produces an unreferenced SHA snapshot of working tree + index without touching .git/refs/stash"
+    - name: "PostmortemChain"
+      field_type: "entity"
+      description: "Existing rolling chain; diff_summary now contributes to per-AC digests"
+
+evaluation_principles:
+  - name: "backward_compatibility"
+    description: "Parallel mode behavior remains byte-identical. context_override=None path untouched. All Phase-1.5 invariants hold (end-of-run artifact, sub-postmortem flattening, invariant verifier, per-AC checkpoint, resume)."
+  - name: "graceful_degradation"
+    description: "Every git failure path leaves diff_summary as the empty string and lets the AC complete. Diff capture is never a run-blocker."
+  - name: "test_coverage"
+    description: "12 unit tests for diff_capture + 4 integration tests in test_serial_executor.py + 1 serialization round-trip test. The full suite (`uv run pytest tests/unit/`) stays green."
+  - name: "isolation"
+    description: "diff capture is SerialCompoundingExecutor-only. ParallelACExecutor and its tests are untouched."
+  - name: "invariant_emission"
+    description: "Emit at least one [[INVARIANT: ...]] tag so Q3's Haiku verifier can score the work on real output."
+
+metadata:
+  seed_id: "phase-2-q2-diff-capture"
+  parent_seed: null
+  ambiguity_score: 0.10
+  expected_decomposition_depth: 0
+  source_brainstorm: "docs/brainstorm/phase-2-q2-diff-capture-design.md"
+  execution_mode_required: "compounding"

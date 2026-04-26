@@ -3,7 +3,23 @@
 import inspect
 import os
 
+import pytest
 import pytest_asyncio
+
+
+@pytest.fixture(autouse=True)
+def _redirect_chain_artifact_dir(tmp_path, monkeypatch):
+    """Redirect SerialCompoundingExecutor chain artifacts to a per-test tmp dir.
+
+    Without this, tests that exercise the executor write postmortem-chain
+    markdown into the real ``docs/brainstorm/`` directory (the production
+    default at ``serial_executor.py:_DEFAULT_CHAIN_ARTIFACT_DIR``). Tests
+    that set their own ``OUROBOROS_CHAIN_ARTIFACT_DIR`` still win because
+    pytest applies their ``monkeypatch.setenv`` after this autouse fixture.
+    """
+    monkeypatch.setenv(
+        "OUROBOROS_CHAIN_ARTIFACT_DIR", str(tmp_path / "chain_artifacts")
+    )
 
 # In CI, GITHUB_ACTIONS env var causes Typer to set force_terminal=True on
 # Rich Console (see typer/rich_utils.py:75-78). This makes Rich emit ANSI
