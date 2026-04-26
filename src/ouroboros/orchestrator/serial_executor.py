@@ -266,6 +266,8 @@ def _render_chain_as_markdown(
         - Files modified: ...
         - Gotchas: ...
         - Public API changes: ...
+        - Invariants established: ...   (when non-empty)
+        - Diff summary:                 (when non-empty; fenced code block)
 
     Args:
         chain: The postmortem chain to render.
@@ -298,6 +300,7 @@ def _render_chain_as_markdown(
         invariants = entry.get("invariants_established") or []
         duration = entry.get("duration_seconds", 0.0)
         retry_attempts = entry.get("retry_attempts", 0)
+        diff_summary = entry.get("diff_summary") or ""
 
         lines.append(f"## AC {ac_index + 1} [{status}]")
         lines.append("")
@@ -337,6 +340,17 @@ def _render_chain_as_markdown(
                 for i in invariants
             ]
             lines.append(f"- Invariants established: {'; '.join(inv_texts)}")
+
+        # Q2: emit `diff_summary` as a fenced code block under the bullet
+        # list when populated.  The 2-space indent keeps the fenced block
+        # associated with the bullet under CommonMark.  Empty diff_summary
+        # is suppressed entirely to keep no-op-AC artifacts terse.
+        if diff_summary:
+            lines.append("- Diff summary:")
+            lines.append("  ```text")
+            for stat_line in diff_summary.split("\n"):
+                lines.append(f"  {stat_line}")
+            lines.append("  ```")
 
         lines.append("")
 

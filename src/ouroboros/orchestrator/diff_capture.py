@@ -7,11 +7,18 @@ the pre- and post-AC snapshots.
 
 Design notes (see ``docs/brainstorm/phase-2-q2-diff-capture-design.md``):
 
-- ``git stash create`` is the per-AC boundary mechanism. It produces an
-  unreferenced commit SHA without modifying ``.git/refs/stash`` or the
-  working tree, so nothing accumulates across thousands of ACs.
+- ``git stash create`` is the *primary* per-AC boundary mechanism. It
+  produces an unreferenced commit SHA without modifying ``.git/refs/stash``
+  or the working tree, so nothing accumulates across thousands of ACs.
   [[INVARIANT: git stash create produces an unreferenced SHA without
   modifying .git/refs/stash, so stash list stays empty across runs]]
+- ``git stash create`` returns empty stdout on a clean tree.  The
+  SerialCompoundingExecutor's commit-per-AC workflow leaves clean trees
+  at AC boundaries, so the helpers fall back to ``git rev-parse HEAD`` —
+  also a valid tree-ish for ``git diff --stat`` — so committed-only
+  changes are still captured.
+  [[INVARIANT: capture falls back to git rev-parse HEAD when git stash
+  create returns empty (clean tree)]]
 - All git subprocess calls use ``check=False`` and a 5s timeout.  Every
   failure (no ``.git/``, missing binary, timeout, non-zero exit) results in
   an empty ``diff_summary`` plus a structured warning log — the AC
@@ -115,6 +122,82 @@ def _is_git_repo(workspace_root: Path) -> bool:
     return git_path.exists()
 
 
+def _resolve_head(workspace_root: Path, *, phase: str) -> str | None:
+    """Resolve HEAD to a commit SHA, returning ``None`` on any failure.
+
+    Used as a fallback when ``git stash create`` returns empty stdout
+    (clean tree).  ``git rev-parse HEAD`` is also a valid tree-ish for
+    ``git diff --stat``, so the downstream diff is unchanged.
+
+    Failures are logged at WARNING with ``fallback="head"`` so structured
+    log queries can distinguish stash-path failures from HEAD-path
+    failures.
+
+    Args:
+        workspace_root: Directory to run ``git`` from.
+        phase: ``"pre_snapshot"`` or ``"post_snapshot"`` (for telemetry).
+
+    Returns:
+        The HEAD SHA, or ``None`` on any failure (no HEAD, broken repo,
+        timeout, etc.).
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(workspace_root),
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except FileNotFoundError:
+        log.warning(
+            "serial_executor.diff_capture.failed",
+            reason="git_binary_missing",
+            phase=phase,
+            fallback="head",
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "serial_executor.diff_capture.failed",
+            reason="timeout",
+            phase=phase,
+            fallback="head",
+        )
+        return None
+    except OSError as exc:  # pragma: no cover — defensive belt
+        log.warning(
+            "serial_executor.diff_capture.failed",
+            reason="os_error",
+            phase=phase,
+            fallback="head",
+            error=str(exc),
+        )
+        return None
+
+    if completed.returncode != 0:
+        log.warning(
+            "serial_executor.diff_capture.failed",
+            reason=f"head_lookup_exit_{completed.returncode}",
+            phase=phase,
+            fallback="head",
+            stderr=(completed.stderr or "")[:200],
+        )
+        return None
+
+    sha = (completed.stdout or "").strip()
+    if not sha:
+        log.warning(
+            "serial_executor.diff_capture.failed",
+            reason="head_lookup_empty",
+            phase=phase,
+            fallback="head",
+        )
+        return None
+    return sha
+
+
 def capture_pre_ac_snapshot(workspace_root: Path) -> str | None:
     """Run ``git stash create`` in ``workspace_root``.
 
@@ -181,16 +264,16 @@ def capture_pre_ac_snapshot(workspace_root: Path) -> str | None:
 
     sha = (completed.stdout or "").strip()
     # ``git stash create`` exits 0 with empty stdout when the working tree
-    # is clean and there's nothing to stash.  That's a valid "no-op" baseline
-    # — but downstream we have no SHA to diff against, so treat it as a
-    # capture failure and let ``compute_diff_summary`` short-circuit cleanly.
+    # is clean.  The orchestrator's commit-per-AC workflow leaves clean
+    # trees at AC boundaries, so fall back to HEAD — also a valid tree-ish
+    # for downstream ``git diff --stat`` — to capture committed changes.
     if not sha:
-        log.warning(
-            "serial_executor.diff_capture.failed",
-            reason="stash_create_empty_sha",
+        log.debug(
+            "serial_executor.diff_capture.head_fallback",
             phase="pre_snapshot",
+            reason="stash_create_empty_sha",
         )
-        return None
+        return _resolve_head(workspace_root, phase="pre_snapshot")
     return sha
 
 
@@ -242,7 +325,17 @@ def _capture_post_snapshot(workspace_root: Path) -> str | None:
         )
         return None
 
-    return (completed.stdout or "").strip()
+    sha = (completed.stdout or "").strip()
+    if not sha:
+        # Clean tree at AC end (e.g. agent committed everything).  Fall
+        # back to HEAD so the diff still covers committed changes.
+        log.debug(
+            "serial_executor.diff_capture.head_fallback",
+            phase="post_snapshot",
+            reason="stash_create_empty_sha",
+        )
+        return _resolve_head(workspace_root, phase="post_snapshot")
+    return sha
 
 
 def _churn_for_stat_line(line: str) -> int:

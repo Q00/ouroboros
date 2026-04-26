@@ -589,6 +589,68 @@ class TestChainArtifact:
         assert "# Postmortem Chain" in content
         assert "## AC" not in content  # no AC sections for empty chain
 
+    def test_artifact_emits_diff_summary_when_non_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """write_chain_artifact renders ACPostmortem.diff_summary into the
+        markdown when it is non-empty.
+
+        Pre-fix: the renderer ignored ``diff_summary`` entirely, so even
+        when capture succeeded the field was invisible in the artifact.
+        """
+        from ouroboros.orchestrator.level_context import (
+            ACContextSummary,
+            ACPostmortem,
+            PostmortemChain,
+        )
+
+        stat_blob = (
+            " feature.py        | 5 +++++\n"
+            " tests/test_x.py   | 12 ++++++++----\n"
+            " 2 files changed, 17 insertions(+), 4 deletions(-)"
+        )
+        summary = ACContextSummary(ac_index=0, ac_content="Build feature", success=True)
+        pm = ACPostmortem(summary=summary, status="pass", diff_summary=stat_blob)
+        chain = PostmortemChain(postmortems=(pm,))
+
+        path = write_chain_artifact(
+            chain,
+            session_id="s_diff_present",
+            execution_id="e_diff_present",
+            artifact_dir=str(tmp_path),
+        )
+        content = path.read_text(encoding="utf-8")
+        assert "Diff summary" in content, content
+        # File rows + summary footer must all flow through unchanged.
+        assert "feature.py" in content
+        assert "tests/test_x.py" in content
+        assert "2 files changed, 17 insertions(+), 4 deletions(-)" in content
+
+    def test_artifact_omits_diff_summary_when_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """An empty ``diff_summary`` field produces no `Diff summary` line —
+        keeps the artifact terse for no-op or capture-failed ACs.
+        """
+        from ouroboros.orchestrator.level_context import (
+            ACContextSummary,
+            ACPostmortem,
+            PostmortemChain,
+        )
+
+        summary = ACContextSummary(ac_index=0, ac_content="No-op AC", success=True)
+        pm = ACPostmortem(summary=summary, status="pass", diff_summary="")
+        chain = PostmortemChain(postmortems=(pm,))
+
+        path = write_chain_artifact(
+            chain,
+            session_id="s_diff_absent",
+            execution_id="e_diff_absent",
+            artifact_dir=str(tmp_path),
+        )
+        content = path.read_text(encoding="utf-8")
+        assert "Diff summary" not in content, content
+
 
 class TestSubPostmortems:
     """AC-2 (Q1, B-prime): Sub-postmortem preservation and flattening.
@@ -6643,6 +6705,88 @@ class TestSerialExecutorDiffCapture:
         assert (
             pm_events[0].data.get("postmortem", {}).get("diff_summary", "") == ""
         )
+
+    @pytest.mark.asyncio
+    async def test_diff_summary_flows_end_to_end_with_commit_per_ac(
+        self, tmp_path: Path
+    ) -> None:
+        """End-to-end: commit-per-AC workflow → diff_summary captured →
+        rendered in chain artifact.
+
+        Regression for the dogfood-gap finding where the orchestrator's
+        per-AC commits left ``git stash create`` empty, silently producing
+        empty ``diff_summary`` that never appeared in the markdown
+        artifact.  Without BOTH the HEAD fallback in capture AND the
+        diff_summary block in ``_render_chain_as_markdown``, the asserts
+        below fail.
+        """
+        import re as _re
+        import subprocess as _sp
+
+        _init_test_repo(tmp_path)
+        seed = _make_seed("Add a feature with a real commit")
+        executor = _make_executor_with_cwd(tmp_path)
+
+        git_env = {
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "HOME": str(tmp_path),
+        }
+
+        async def fake_single_ac(**kwargs: Any) -> ACExecutionResult:
+            # Mirror the real orchestrator workflow: agent commits per AC,
+            # leaving the working tree clean at AC boundaries.  No
+            # pre-dirtying — the bug-fix path must handle the truly-clean
+            # tree case.
+            ac_index = int(kwargs["ac_index"])
+            (tmp_path / "feature.py").write_text("def feature():\n    return 42\n")
+            _sp.run(
+                ["git", "add", "feature.py"],
+                cwd=str(tmp_path),
+                env=git_env,
+                check=True,
+            )
+            _sp.run(
+                ["git", "commit", "-q", "-m", "feat: add feature"],
+                cwd=str(tmp_path),
+                env=git_env,
+                check=True,
+            )
+            return _ok_result(
+                ac_index,
+                str(kwargs["ac_content"]),
+                files_written=("feature.py",),
+            )
+
+        executor._execute_single_ac = fake_single_ac  # type: ignore[method-assign]
+
+        plan = _make_plan((0,))
+        result = await executor.execute_serial(
+            seed=seed,
+            session_id="sess_e2e_commit",
+            execution_id="exec_e2e_commit",
+            tools=[],
+            system_prompt="SYSTEM",
+            execution_plan=plan,
+        )
+        assert result.success_count == 1
+
+        # The chain artifact lands under the per-test redirect from
+        # conftest.py (OUROBOROS_CHAIN_ARTIFACT_DIR → tmp_path/chain_artifacts).
+        artifact_dir = tmp_path / "chain_artifacts"
+        artifacts = list(artifact_dir.glob("chain-sess_e2e_commit-*.md"))
+        assert len(artifacts) == 1, f"expected 1 chain artifact, got: {artifacts}"
+        content = artifacts[0].read_text(encoding="utf-8")
+
+        # End-to-end: the file name AND a `--stat` summary footer must
+        # reach the rendered artifact.
+        assert "Diff summary" in content, content
+        assert "feature.py" in content, content
+        assert _re.search(r"\d+ files? changed", content), content
 
 
 class TestDiffSummaryRoundTrip:

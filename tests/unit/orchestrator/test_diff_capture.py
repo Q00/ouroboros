@@ -180,6 +180,35 @@ class TestCapturePreAcSnapshot:
         stash_list = _git(tmp_path, "stash", "list")
         assert stash_list == "", f"stash list should be empty, got: {stash_list!r}"
 
+    def test_returns_head_sha_when_tree_truly_clean(self, tmp_path: Path) -> None:
+        """capture_pre_ac_snapshot on a clean tree falls back to HEAD SHA.
+
+        The SerialCompoundingExecutor workflow has the agent commit each
+        AC's work, leaving the tree clean at AC boundaries.  Without HEAD
+        fallback, ``git stash create`` returns empty stdout and downstream
+        loses the ability to diff committed-only changes.
+
+        [[INVARIANT: capture_pre_ac_snapshot falls back to git rev-parse
+        HEAD when git stash create returns empty (clean tree)]]
+        """
+        _init_repo(tmp_path)
+        head_sha = _git(tmp_path, "rev-parse", "HEAD")
+        sha = capture_pre_ac_snapshot(tmp_path)
+        assert sha is not None
+        assert sha == head_sha
+
+    def test_returns_none_when_repo_has_no_head(self, tmp_path: Path) -> None:
+        """Brand-new ``git init`` repo with no commits → both stash and HEAD
+        fail → return None.
+
+        Verifies the HEAD fallback itself degrades gracefully when there's
+        no commit to fall back to.
+        """
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        _git(tmp_path, "init", "-q", "-b", "main")
+        sha = capture_pre_ac_snapshot(tmp_path)
+        assert sha is None
+
 
 # --- compute_diff_summary ----------------------------------------------------
 
@@ -214,6 +243,48 @@ class TestComputeDiffSummary:
         # The summary footer always says "<N> file changed, <M> insertion(s)" etc.
         # Match either "file" or "files" (count-dependent).
         assert re.search(r"\d+ files? changed", out), out
+
+    def test_captures_committed_only_changes_when_tree_clean_at_both_boundaries(
+        self, tmp_path: Path
+    ) -> None:
+        """Per-AC commits are captured even when the tree is clean at both
+        snapshots — mirrors SerialCompoundingExecutor's commit-per-AC pattern.
+
+        Pre regression fix this returned ``""`` because both pre and post
+        ``git stash create`` calls produced empty stdout.
+        """
+        _init_repo(tmp_path)
+        pre_sha = capture_pre_ac_snapshot(tmp_path)
+        assert pre_sha is not None
+        # Simulate the agent making a commit during the AC.
+        (tmp_path / "feature.py").write_text("def foo():\n    return 1\n")
+        _git(tmp_path, "add", "feature.py")
+        _git(tmp_path, "commit", "-q", "-m", "feat: add foo")
+        out = compute_diff_summary(pre_sha, tmp_path)
+        assert "feature.py" in out, out
+        assert re.search(r"\d+ files? changed", out), out
+
+    def test_captures_committed_plus_uncommitted_changes(
+        self, tmp_path: Path
+    ) -> None:
+        """Diff covers committed AND uncommitted changes from one AC.
+
+        The agent commits some sub-AC work but may leave staged-but-
+        uncommitted changes mid-AC; both must appear in diff_summary.
+        """
+        _init_repo(tmp_path)
+        pre_sha = capture_pre_ac_snapshot(tmp_path)
+        assert pre_sha is not None
+        # Commit one file.
+        (tmp_path / "committed.py").write_text("x = 1\n")
+        _git(tmp_path, "add", "committed.py")
+        _git(tmp_path, "commit", "-q", "-m", "add committed.py")
+        # Stage a second file without committing.
+        (tmp_path / "staged.py").write_text("y = 2\n")
+        _git(tmp_path, "add", "staged.py")
+        out = compute_diff_summary(pre_sha, tmp_path)
+        assert "committed.py" in out, out
+        assert "staged.py" in out, out
 
     def test_truncates_to_top_file_cap_with_more_files_filler(self, tmp_path: Path) -> None:
         """9. 30 changed files with file_cap=20 → output has 20 file lines + `... and 10 more files`."""
