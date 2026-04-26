@@ -354,24 +354,29 @@ async def _render_job_snapshot_inner(
         )
         subtask_summary = summarize_subtask_events(subtask_events)
         subtask_progress = format_subtask_progress_summary(subtask_summary)
+        if subtask_summary:
+            progress.update(
+                {
+                    "current_phase": "Sub-AC work",
+                    "activity": subtask_progress or "running",
+                    "sub_ac_completed": subtask_summary.get("completed_count"),
+                    "sub_ac_total": subtask_summary.get("total_count"),
+                    "sub_ac_executing": subtask_summary.get("executing_count"),
+                    "sub_ac_pending": subtask_summary.get("pending_count"),
+                    "sub_ac_failed": subtask_summary.get("failed_count"),
+                }
+            )
         if workflow_event is not None:
             data = workflow_event.data
-            progress = {
-                "ac_completed": data.get("completed_count"),
-                "ac_total": data.get("total_count"),
-                "current_phase": data.get("current_phase") or "Working",
-                "activity": data.get("activity_detail") or data.get("activity") or "running",
-            }
-            if subtask_summary:
-                progress.update(
-                    {
-                        "sub_ac_completed": subtask_summary.get("completed_count"),
-                        "sub_ac_total": subtask_summary.get("total_count"),
-                        "sub_ac_executing": subtask_summary.get("executing_count"),
-                        "sub_ac_pending": subtask_summary.get("pending_count"),
-                        "sub_ac_failed": subtask_summary.get("failed_count"),
-                    }
-                )
+            progress.update(
+                {
+                    "ac_completed": data.get("completed_count"),
+                    "ac_total": data.get("total_count"),
+                    "current_phase": data.get("current_phase") or "Working",
+                    "activity": data.get("activity_detail") or data.get("activity") or "running",
+                }
+            )
+        if workflow_event is not None or subtask_summary:
             lines.extend(
                 [
                     "",
@@ -379,9 +384,12 @@ async def _render_job_snapshot_inner(
                     f"**Execution ID**: {snapshot.links.execution_id}",
                     f"**Phase**: {progress['current_phase']}",
                     f"**Activity**: {progress['activity']}",
-                    f"**AC Progress**: {progress['ac_completed']}/{progress['ac_total'] or '?'}",
                 ]
             )
+            if workflow_event is not None:
+                lines.append(
+                    f"**AC Progress**: {progress['ac_completed']}/{progress['ac_total'] or '?'}"
+                )
             if subtask_progress:
                 lines.append(f"**Sub-AC Progress**: {subtask_progress}")
 
