@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ouroboros.core.errors import ProviderError
+from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPResourceNotFoundError, MCPServerError
 from ouroboros.mcp.server.adapter import (
@@ -16,6 +18,7 @@ from ouroboros.mcp.server.adapter import (
     _project_dir_from_artifact,
     _project_dir_from_seed,
     _safe_cwd,
+    create_ouroboros_server,
     validate_transport,
 )
 from ouroboros.mcp.types import (
@@ -28,6 +31,7 @@ from ouroboros.mcp.types import (
     MCPToolResult,
     ToolInputType,
 )
+from ouroboros.persistence.event_store import EventStore
 
 
 class MockToolHandler:
@@ -170,6 +174,64 @@ Feedback Metadata JSON: {"feedback_metadata": [{"code": "decomposition_depth_war
         assert feedback[0].source == "parallel_executor"
         assert feedback[0].details["max_depth"] == 3
         assert feedback[0].details["affected_ac_paths"] == ["1.1.1"]
+
+    @pytest.mark.asyncio
+    async def test_evolution_evaluator_soft_fallback_when_semantic_provider_unavailable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Structured AC approval should survive semantic ProviderError in offline paths."""
+
+        class FailingAdapter:
+            async def complete(self, *args: Any, **kwargs: Any):  # noqa: ANN002, ANN003
+                return Result.err(ProviderError("semantic backend unavailable", provider="test"))
+
+        import ouroboros.orchestrator as orchestrator
+        import ouroboros.providers as providers
+
+        def _failing_adapter_factory(**_kwargs: Any) -> FailingAdapter:
+            return FailingAdapter()
+
+        monkeypatch.setattr(orchestrator, "create_agent_runtime", _failing_adapter_factory)
+        monkeypatch.setattr(providers, "create_llm_adapter", _failing_adapter_factory)
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        try:
+            server = create_ouroboros_server(
+                event_store=store,
+                runtime_backend="claude",
+                llm_backend="test",
+            )
+            handler = server._tool_handlers["ouroboros_evolve_step"]
+            evaluator = handler.evolutionary_loop.evaluator
+
+            seed = Seed(
+                goal="Write a decision brief",
+                task_type="analysis",
+                constraints=("Do not write source code",),
+                acceptance_criteria=("Brief makes a clear recommendation",),
+                ontology_schema=OntologySchema(
+                    name="DecisionBrief",
+                    description="Decision brief ontology",
+                    fields=(
+                        OntologyField(
+                            name="recommendation",
+                            field_type="string",
+                            description="Chosen path",
+                        ),
+                    ),
+                ),
+                metadata=SeedMetadata(seed_id="seed_123", ambiguity_score=0.1),
+            )
+            artifact = "## AC Results\n### AC 1: [PASS] Brief makes a clear recommendation"
+
+            summary = await evaluator(seed, artifact)
+
+            assert summary.final_approved is True
+            assert summary.score == 1.0
+            assert summary.ac_results[0].passed is True
+        finally:
+            await store.close()
 
 
 class TestMCPServerAdapterTools:

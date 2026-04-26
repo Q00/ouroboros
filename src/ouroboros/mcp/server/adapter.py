@@ -874,6 +874,7 @@ def create_ouroboros_server(
     )
 
     # Create evolution engines for evolve_step
+    from ouroboros.core.errors import ProviderError
     from ouroboros.core.lineage import ACResult, EvaluationSummary
     from ouroboros.evaluation.artifact_collector import ArtifactCollector
     from ouroboros.evolution.loop import EvolutionaryLoop, EvolutionaryLoopConfig
@@ -1136,6 +1137,8 @@ def create_ouroboros_server(
     async def _evaluate_semantically_against_seed(
         seed: Any,
         artifact: str,
+        *,
+        allow_provider_unavailable: bool = False,
     ) -> EvaluationSummary:
         """Evaluate artifact against the full Seed contract."""
         # Fallback: LLM-based evaluation when no structured AC results
@@ -1164,6 +1167,19 @@ def create_ouroboros_server(
 
         eval_result = await evolution_eval_pipeline.evaluate(eval_context)
         if eval_result.is_err:
+            if allow_provider_unavailable and isinstance(eval_result.error, ProviderError):
+                log.warning(
+                    "evolution.semantic_contract_audit.unavailable",
+                    error=str(eval_result.error),
+                    seed_id=seed.metadata.seed_id,
+                )
+                return EvaluationSummary(
+                    final_approved=True,
+                    highest_stage_passed=1,
+                    score=None,
+                    drift_score=None,
+                    reward_hacking_risk=None,
+                )
             return EvaluationSummary(
                 final_approved=False,
                 highest_stage_passed=1,
@@ -1210,19 +1226,24 @@ def create_ouroboros_server(
             # convergence: the artifact must also preserve the Seed's semantic
             # contract, including ontology boundaries and evaluation principles.
             if mechanical.final_approved:
-                contract_audit = await _evaluate_semantically_against_seed(seed, artifact)
+                contract_audit = await _evaluate_semantically_against_seed(
+                    seed,
+                    artifact,
+                    allow_provider_unavailable=True,
+                )
                 if not contract_audit.final_approved:
                     return contract_audit
-                return mechanical.model_copy(
-                    update={
-                        "score": min(
-                            mechanical.score if mechanical.score is not None else 1.0,
-                            contract_audit.score if contract_audit.score is not None else 1.0,
-                        ),
-                        "drift_score": contract_audit.drift_score,
-                        "reward_hacking_risk": contract_audit.reward_hacking_risk,
-                    }
-                )
+                audit_update: dict[str, Any] = {}
+                if contract_audit.score is not None:
+                    audit_update["score"] = min(
+                        mechanical.score if mechanical.score is not None else 1.0,
+                        contract_audit.score,
+                    )
+                if contract_audit.drift_score is not None:
+                    audit_update["drift_score"] = contract_audit.drift_score
+                if contract_audit.reward_hacking_risk is not None:
+                    audit_update["reward_hacking_risk"] = contract_audit.reward_hacking_risk
+                return mechanical.model_copy(update=audit_update)
             return mechanical
 
         return await _evaluate_semantically_against_seed(seed, artifact)
