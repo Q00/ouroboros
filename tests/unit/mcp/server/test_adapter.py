@@ -32,6 +32,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.persistence.event_store import EventStore
+from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 
 class MockToolHandler:
@@ -288,6 +289,84 @@ Feedback Metadata JSON: {"feedback_metadata": [{"code": "decomposition_depth_war
             assert summary.final_approved is True
             assert summary.score == 1.0
             assert summary.ac_results[0].passed is True
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_evolution_evaluator_rejects_real_semantic_contract_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Structured AC approval should still fail on a valid contract audit failure."""
+
+        class DriftAuditAdapter:
+            async def complete(self, *args: Any, **kwargs: Any):  # noqa: ANN002, ANN003
+                return Result.ok(
+                    CompletionResponse(
+                        content="""{
+                            "score": 0.92,
+                            "ac_compliance": true,
+                            "goal_alignment": 0.9,
+                            "drift_score": 0.8,
+                            "uncertainty": 0.1,
+                            "reasoning": "The artifact passes the written AC but drifts from intent.",
+                            "reward_hacking_risk": 0.0
+                        }""",
+                        model="test",
+                        usage=UsageInfo(
+                            prompt_tokens=1,
+                            completion_tokens=1,
+                            total_tokens=2,
+                        ),
+                    )
+                )
+
+        import ouroboros.orchestrator as orchestrator
+        import ouroboros.providers as providers
+
+        def _drift_adapter_factory(**_kwargs: Any) -> DriftAuditAdapter:
+            return DriftAuditAdapter()
+
+        monkeypatch.setattr(orchestrator, "create_agent_runtime", _drift_adapter_factory)
+        monkeypatch.setattr(providers, "create_llm_adapter", _drift_adapter_factory)
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        try:
+            server = create_ouroboros_server(
+                event_store=store,
+                runtime_backend="claude",
+                llm_backend="test",
+            )
+            handler = server._tool_handlers["ouroboros_evolve_step"]
+            evaluator = handler.evolutionary_loop.evaluator
+
+            seed = Seed(
+                goal="Write a decision brief",
+                task_type="analysis",
+                constraints=("Do not write source code",),
+                acceptance_criteria=("Brief makes a clear recommendation",),
+                ontology_schema=OntologySchema(
+                    name="DecisionBrief",
+                    description="Decision brief ontology",
+                    fields=(
+                        OntologyField(
+                            name="recommendation",
+                            field_type="string",
+                            description="Chosen path",
+                        ),
+                    ),
+                ),
+                metadata=SeedMetadata(seed_id="seed_123", ambiguity_score=0.1),
+            )
+            artifact = "## AC Results\n### AC 1: [PASS] Brief makes a clear recommendation"
+
+            summary = await evaluator(seed, artifact)
+
+            assert summary.final_approved is False
+            assert summary.highest_stage_passed == 2
+            assert summary.failure_reason
+            assert "Seed contract audit failed" in summary.failure_reason
+            assert "drift score 0.80 > 0.30" in summary.failure_reason
         finally:
             await store.close()
 
