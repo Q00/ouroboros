@@ -18,6 +18,37 @@ workflow over a large always-on catalog.
 | Context7 | Current library/framework documentation is needed | Documentation lookup during planning or implementation |
 | Tavily | External web research is required | Research and source discovery |
 
+## Quick Setup
+
+For a user-wide setup, create the MCP config file under `~/.ouroboros`:
+
+```bash
+mkdir -p ~/.ouroboros
+$EDITOR ~/.ouroboros/mcp_servers.yaml
+chmod 600 ~/.ouroboros/mcp_servers.yaml
+```
+
+Paste the YAML shape from the next section, then replace each placeholder
+command with the MCP server command used in your environment. Keep API keys in
+environment variables and reference them as `${VAR_NAME}` in the YAML.
+
+Ouroboros discovers upstream MCP config in this order:
+
+1. `$OUROBOROS_MCP_CONFIG`
+2. `~/.ouroboros/mcp_servers.yaml`
+3. `{cwd}/.ouroboros/mcp_servers.yaml`
+
+Use the home config for servers you want available across projects. Use the
+project-local config when the server list or credentials are specific to one
+repository. To bypass discovery for one run, pass an explicit path:
+
+```bash
+ouroboros run seed.yaml --mcp-config .ouroboros/mcp_servers.yaml
+```
+
+For the bridge lifecycle quick start, see
+[`docs/guides/mcp-bridge.md`](./mcp-bridge.md).
+
 ## Configuration Pattern
 
 ```yaml
