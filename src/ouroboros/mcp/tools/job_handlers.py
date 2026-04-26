@@ -8,7 +8,7 @@ Contains handlers for background job operations and execution cancellation:
 - CancelJobHandler: Cancel a background job
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import structlog
@@ -36,6 +36,10 @@ log = structlog.get_logger(__name__)
 _DEFAULT_JOB_VIEW = "full"
 _JOB_EXECUTION_EVENT_LIMIT = 250
 _JOB_SUBTASK_EVENT_PAGE_SIZE = 500
+_JOB_PROGRESS_EVENT_TYPES = {
+    "workflow.progress.updated",
+    "execution.subtask.updated",
+}
 _JOB_VIEW_ALIASES = {
     "compact": "compact",
     "brief": "compact",
@@ -623,6 +627,21 @@ class JobWaitHandler:
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_wait"))
 
+        execution_progress_changed = False
+        response_cursor = max(snapshot.cursor, cursor)
+        if snapshot.links.execution_id:
+            execution_events, execution_cursor = await self._event_store.get_events_after(
+                "execution",
+                snapshot.links.execution_id,
+                cursor,
+            )
+            execution_progress_changed = any(
+                event.type in _JOB_PROGRESS_EVENT_TYPES for event in execution_events
+            )
+            response_cursor = max(response_cursor, execution_cursor)
+            if response_cursor != snapshot.cursor:
+                snapshot = replace(snapshot, cursor=response_cursor)
+
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
         has_live_execution_progress = snapshot.links.execution_id is not None and any(
             progress.get(key) is not None
@@ -634,9 +653,13 @@ class JobWaitHandler:
                 "sub_ac_total",
             )
         )
-        response_changed = changed or has_live_execution_progress
+        response_changed = changed or execution_progress_changed
         if not changed:
-            if view in {"compact", "summary"} and has_live_execution_progress:
+            if (
+                view in {"compact", "summary"}
+                and has_live_execution_progress
+                and execution_progress_changed
+            ):
                 text = _render_compact_job_snapshot(
                     snapshot,
                     progress,

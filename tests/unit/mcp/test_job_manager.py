@@ -1140,7 +1140,7 @@ class TestJobManager:
             message="Implement | 1/3 ACs",
             created_at=datetime(2026, 4, 22, tzinfo=UTC),
             updated_at=datetime(2026, 4, 22, tzinfo=UTC),
-            cursor=21,
+            cursor=0,
             links=JobLinks(execution_id="exec_wait_live_progress"),
         )
 
@@ -1153,7 +1153,7 @@ class TestJobManager:
                 timeout_seconds: int,
             ) -> tuple[JobSnapshot, bool]:
                 assert job_id == snapshot.job_id
-                assert cursor == 21
+                assert cursor == 0
                 assert timeout_seconds == 0
                 return snapshot, False
 
@@ -1162,7 +1162,7 @@ class TestJobManager:
             result = await handler.handle(
                 {
                     "job_id": "job_wait_live_progress",
-                    "cursor": 21,
+                    "cursor": 0,
                     "timeout_seconds": 0,
                     "view": "compact",
                 }
@@ -1172,9 +1172,43 @@ class TestJobManager:
             assert result.value.meta["changed"] is True
             assert result.value.meta["view"] == "compact"
             assert result.value.meta["ac_completed"] == 1
+            assert result.value.meta["cursor"] > 0
             assert result.value.text_content == (
-                "job_wait_live_progress | running | Implement | AC 1/3 | cursor 21"
+                "job_wait_live_progress | running | Implement | AC 1/3 | "
+                f"cursor {result.value.meta['cursor']}"
             )
+
+            second_cursor = result.value.meta["cursor"]
+
+            class UnchangedJobManager:
+                async def wait_for_change(
+                    self,
+                    job_id: str,
+                    *,
+                    cursor: int,
+                    timeout_seconds: int,
+                ) -> tuple[JobSnapshot, bool]:
+                    assert job_id == snapshot.job_id
+                    assert cursor == second_cursor
+                    assert timeout_seconds == 0
+                    return snapshot, False
+
+            unchanged_handler = JobWaitHandler(
+                event_store=store,
+                job_manager=UnchangedJobManager(),
+            )
+            unchanged = await unchanged_handler.handle(
+                {
+                    "job_id": "job_wait_live_progress",
+                    "cursor": second_cursor,
+                    "timeout_seconds": 0,
+                    "view": "compact",
+                }
+            )
+
+            assert unchanged.is_ok
+            assert unchanged.value.meta["changed"] is False
+            assert unchanged.value.text_content == f"unchanged cursor={second_cursor}"
         finally:
             await store.close()
 
@@ -1204,7 +1238,7 @@ class TestJobManager:
             message="Running execute_seed",
             created_at=datetime(2026, 4, 22, tzinfo=UTC),
             updated_at=datetime(2026, 4, 22, tzinfo=UTC),
-            cursor=22,
+            cursor=0,
             links=JobLinks(execution_id="exec_wait_subtask_only"),
         )
 
@@ -1217,7 +1251,7 @@ class TestJobManager:
                 timeout_seconds: int,
             ) -> tuple[JobSnapshot, bool]:
                 assert job_id == snapshot.job_id
-                assert cursor == 22
+                assert cursor == 0
                 assert timeout_seconds == 0
                 return snapshot, False
 
@@ -1226,7 +1260,7 @@ class TestJobManager:
             result = await handler.handle(
                 {
                     "job_id": "job_wait_subtask_only",
-                    "cursor": 22,
+                    "cursor": 0,
                     "timeout_seconds": 0,
                     "view": "compact",
                 }
@@ -1236,8 +1270,10 @@ class TestJobManager:
             assert result.value.meta["changed"] is True
             assert result.value.meta["view"] == "compact"
             assert result.value.meta["sub_ac_executing"] == 1
+            assert result.value.meta["cursor"] > 0
             assert result.value.text_content == (
-                "job_wait_subtask_only | running | Sub-AC work | Sub-AC 0/1 | cursor 22"
+                "job_wait_subtask_only | running | Sub-AC work | Sub-AC 0/1 | "
+                f"cursor {result.value.meta['cursor']}"
             )
         finally:
             await store.close()
