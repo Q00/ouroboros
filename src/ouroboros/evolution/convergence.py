@@ -175,6 +175,13 @@ class ConvergenceCriteria:
 
         # Signal 2: Ontology stability (latest two generations) as a secondary stop signal.
         if latest_sim >= self.convergence_threshold and not wonder_has_gap:
+            if self.eval_gate_enabled and latest_evaluation is None:
+                return ConvergenceSignal(
+                    converged=False,
+                    reason="Evaluation gate: no evaluation summary available",
+                    ontology_similarity=latest_sim,
+                    generation=current_gen,
+                )
             if not self.eval_gate_enabled:
                 return ConvergenceSignal(
                     converged=True,

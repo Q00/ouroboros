@@ -444,8 +444,8 @@ class TestConvergenceGating:
         )
         assert signal.converged
 
-    def test_gate_ignores_when_no_result(self) -> None:
-        """Gate enabled but no result provided -> converges normally."""
+    def test_gate_blocks_when_no_result(self) -> None:
+        """Gate enabled but no result provided -> stability does not converge."""
         lineage = self._converging_lineage()
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
@@ -453,7 +453,8 @@ class TestConvergenceGating:
             eval_gate_enabled=True,
         )
         signal = criteria.evaluate(lineage, latest_evaluation=None)
-        assert signal.converged
+        assert not signal.converged
+        assert "no evaluation summary" in signal.reason
 
     def test_gate_does_not_affect_max_generations(self) -> None:
         """Hard cap (max_generations) still works even with gate."""
