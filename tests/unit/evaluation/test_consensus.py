@@ -6,6 +6,8 @@ import pytest
 
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.ontology_aspect import AnalysisResult
+from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
+from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.types import Result
 from ouroboros.evaluation.consensus import (
     ConsensusConfig,
@@ -55,6 +57,43 @@ class TestBuildConsensusPrompt:
         assert "User can logout" in prompt
         assert "Build auth system" in prompt
         assert "Must be secure" in prompt
+
+    def test_seed_contract_context_includes_ontology_lens(self) -> None:
+        """Consensus reviewers judge against the full Seed contract when available."""
+        seed = Seed(
+            goal="Write a decision brief",
+            task_type="analysis",
+            constraints=("Do not produce source code",),
+            acceptance_criteria=("Brief makes a clear recommendation",),
+            ontology_schema=OntologySchema(
+                name="DecisionBrief",
+                description="Decision brief concepts",
+                fields=(
+                    OntologyField(
+                        name="recommendation",
+                        field_type="string",
+                        description="Chosen path and rationale",
+                    ),
+                ),
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.1),
+        )
+        context = EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="Brief makes a clear recommendation",
+            artifact="Ship option B.",
+            artifact_type="document",
+            seed_contract=SeedContract.from_seed(seed),
+        )
+
+        prompt = build_consensus_prompt(context)
+
+        assert "## Seed Contract" in prompt
+        assert "conceptual lens for evaluation judgments" in prompt
+        assert "- recommendation: Chosen path and rationale (required concept)" in prompt
+        assert "Do not produce source code" in prompt
+        assert "## Artifact (document)" in prompt
 
 
 class TestParseVoteResponse:

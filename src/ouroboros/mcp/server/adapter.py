@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 
+from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import (
     MCPResourceNotFoundError,
@@ -781,6 +782,7 @@ def create_ouroboros_server(
         PipelineConfig,
         SemanticConfig,
     )
+    from ouroboros.evaluation.contract_audit import contract_audit_failure
     from ouroboros.mcp.job_manager import JobManager
     from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
     from ouroboros.mcp.tools.definitions import (
@@ -1131,6 +1133,58 @@ def create_ouroboros_server(
             ac_results=tuple(corrected_results),
         )
 
+    async def _evaluate_semantically_against_seed(
+        seed: Any,
+        artifact: str,
+    ) -> EvaluationSummary:
+        """Evaluate artifact against the full Seed contract."""
+        # Fallback: LLM-based evaluation when no structured AC results
+        acs = getattr(seed, "acceptance_criteria", None)
+        if acs:
+            current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(acs))
+        else:
+            current_ac = "Verify execution output meets requirements"
+
+        # Collect file-based artifacts for richer evaluation
+        project_dir = _extract_project_dir(artifact, seed=seed)
+        artifact_bundle = ArtifactCollector().collect(artifact, project_dir)
+
+        seed_contract = SeedContract.from_seed(seed)
+        eval_context = EvaluationContext(
+            execution_id=f"eval_{seed.metadata.seed_id}",
+            seed_id=seed.metadata.seed_id,
+            current_ac=current_ac,
+            artifact=artifact,
+            artifact_type=seed_contract.artifact_type,
+            goal=seed.goal,
+            constraints=tuple(seed.constraints),
+            seed_contract=seed_contract,
+            artifact_bundle=artifact_bundle,
+        )
+
+        eval_result = await evolution_eval_pipeline.evaluate(eval_context)
+        if eval_result.is_err:
+            return EvaluationSummary(
+                final_approved=False,
+                highest_stage_passed=1,
+                score=0.0,
+                drift_score=1.0,
+                failure_reason=f"Seed contract evaluation failed: {eval_result.error}",
+            )
+
+        result = eval_result.value
+        stage2 = result.stage2_result
+        audit_failure = contract_audit_failure(stage2)
+        final_approved = result.final_approved and audit_failure is None
+        return EvaluationSummary(
+            final_approved=final_approved,
+            highest_stage_passed=max(1, result.highest_stage_completed),
+            score=stage2.score if stage2 else None,
+            drift_score=stage2.drift_score if stage2 else None,
+            reward_hacking_risk=stage2.reward_hacking_risk if stage2 else None,
+            failure_reason=audit_failure or result.failure_reason,
+        )
+
     async def _evolution_evaluator(seed: Any, execution_output: str | None) -> EvaluationSummary:
         await _ensure_evolution_store_initialized()
 
@@ -1152,50 +1206,26 @@ def create_ouroboros_server(
             verified = await _verify_spec_compliance(seed, artifact, mechanical)
             if verified is not None:
                 return verified
+            # A structured AC PASS is necessary but not sufficient for Ralph
+            # convergence: the artifact must also preserve the Seed's semantic
+            # contract, including ontology boundaries and evaluation principles.
+            if mechanical.final_approved:
+                contract_audit = await _evaluate_semantically_against_seed(seed, artifact)
+                if not contract_audit.final_approved:
+                    return contract_audit
+                return mechanical.model_copy(
+                    update={
+                        "score": min(
+                            mechanical.score if mechanical.score is not None else 1.0,
+                            contract_audit.score if contract_audit.score is not None else 1.0,
+                        ),
+                        "drift_score": contract_audit.drift_score,
+                        "reward_hacking_risk": contract_audit.reward_hacking_risk,
+                    }
+                )
             return mechanical
 
-        # Fallback: LLM-based evaluation when no structured AC results
-        acs = getattr(seed, "acceptance_criteria", None)
-        if acs:
-            current_ac = "\n".join(f"AC {i + 1}: {ac}" for i, ac in enumerate(acs))
-        else:
-            current_ac = "Verify execution output meets requirements"
-
-        # Collect file-based artifacts for richer evaluation
-        project_dir = _extract_project_dir(artifact, seed=seed)
-        artifact_bundle = ArtifactCollector().collect(artifact, project_dir)
-
-        eval_context = EvaluationContext(
-            execution_id=f"eval_{seed.metadata.seed_id}",
-            seed_id=seed.metadata.seed_id,
-            current_ac=current_ac,
-            artifact=artifact,
-            artifact_type="code",
-            goal=seed.goal,
-            constraints=tuple(seed.constraints),
-            artifact_bundle=artifact_bundle,
-        )
-
-        eval_result = await evolution_eval_pipeline.evaluate(eval_context)
-        if eval_result.is_err:
-            return EvaluationSummary(
-                final_approved=False,
-                highest_stage_passed=1,
-                score=0.0,
-                drift_score=1.0,
-                failure_reason=str(eval_result.error),
-            )
-
-        result = eval_result.value
-        stage2 = result.stage2_result
-        return EvaluationSummary(
-            final_approved=result.final_approved,
-            highest_stage_passed=max(1, result.highest_stage_completed),
-            score=stage2.score if stage2 else None,
-            drift_score=stage2.drift_score if stage2 else None,
-            reward_hacking_risk=stage2.reward_hacking_risk if stage2 else None,
-            failure_reason=result.failure_reason,
-        )
+        return await _evaluate_semantically_against_seed(seed, artifact)
 
     async def _evolution_validator(seed: Any, execution_output: str | None) -> str:
         """Validate and reconcile code generated by parallel AC execution.
@@ -1210,6 +1240,10 @@ def create_ouroboros_server(
         from pathlib import Path  # noqa: I001
         import re
         import subprocess  # noqa: S404  # nosec
+
+        task_type = str(getattr(seed, "task_type", "code")).lower()
+        if task_type != "code":
+            return f"Validation skipped: task_type={task_type} does not require code validation"
 
         project_dir = _extract_project_dir(execution_output or "", seed=seed)
 

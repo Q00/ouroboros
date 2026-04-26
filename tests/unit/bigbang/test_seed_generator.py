@@ -53,6 +53,7 @@ def create_mock_completion_response(
 
 def create_valid_extraction_response(
     goal: str = "Build a CLI task manager with project grouping",
+    task_type: str = "code",
     constraints: str = "Python 3.14+ | No external database | Single-file storage",
     acceptance_criteria: str = "Tasks can be created | Tasks can be listed | Tasks can be deleted",
     ontology_name: str = "TaskManager",
@@ -63,6 +64,7 @@ def create_valid_extraction_response(
 ) -> str:
     """Create a valid LLM extraction response string."""
     return f"""GOAL: {goal}
+TASK_TYPE: {task_type}
 CONSTRAINTS: {constraints}
 ACCEPTANCE_CRITERIA: {acceptance_criteria}
 ONTOLOGY_NAME: {ontology_name}
@@ -328,6 +330,34 @@ class TestSeedGeneratorExtraction:
 
             assert result.is_ok
             assert result.value.goal == "Build a task management CLI tool"
+
+    @pytest.mark.asyncio
+    async def test_generate_extracts_task_type(self) -> None:
+        """SeedGenerator extracts task_type so non-code work keeps its strategy."""
+        mock_adapter = AsyncMock()
+        state = create_interview_state_with_rounds(
+            initial_context="Analyze whether to launch a customer interview program"
+        )
+        low_ambiguity = create_low_ambiguity_score()
+
+        extraction_response = create_valid_extraction_response(
+            goal="Analyze whether to launch a customer interview program",
+            task_type="analysis",
+        )
+        mock_adapter.complete = AsyncMock(
+            return_value=Result.ok(create_mock_completion_response(extraction_response))
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            generator = SeedGenerator(
+                llm_adapter=mock_adapter,
+                output_dir=Path(tmp_dir) / "seeds",
+            )
+
+            result = await generator.generate(state, low_ambiguity)
+
+            assert result.is_ok
+            assert result.value.task_type == "analysis"
 
     @pytest.mark.asyncio
     async def test_generate_extracts_constraints(self) -> None:

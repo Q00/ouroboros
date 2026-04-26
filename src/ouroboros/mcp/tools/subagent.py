@@ -37,7 +37,14 @@ import re
 from typing import Any
 
 import structlog
+import yaml
 
+from ouroboros.core.seed import Seed
+from ouroboros.core.seed_contract import SeedContract
+from ouroboros.core.seed_contract_prompt import (
+    render_seed_contract_for_evaluation,
+    render_seed_contract_for_execution,
+)
 from ouroboros.core.types import Result
 from ouroboros.mcp.types import (
     ContentType,
@@ -52,6 +59,26 @@ _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS = 200
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS = 900
 _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
+
+
+def _render_seed_contract_from_content(seed_content: str | None, *, purpose: str) -> str:
+    """Best-effort SeedContract rendering for delegated subagent prompts."""
+    if not seed_content:
+        return ""
+    try:
+        parsed = yaml.safe_load(seed_content)
+        seed = Seed.from_dict(parsed)
+        contract = SeedContract.from_seed(seed)
+    except Exception as exc:
+        log.debug("subagent.seed_contract_render_skipped", error=str(exc))
+        return ""
+
+    if purpose == "evaluation":
+        rendered = render_seed_contract_for_evaluation(contract)
+    else:
+        rendered = render_seed_contract_for_execution(contract)
+    return f"\n{rendered}\n"
+
 
 # ---------------------------------------------------------------------------
 # SubagentPayload dataclass
@@ -432,7 +459,11 @@ def build_qa_subagent(
     # Build seed section
     seed_section = ""
     if seed_content:
-        seed_section = f"\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
+        contract_section = _render_seed_contract_from_content(
+            seed_content,
+            purpose="evaluation",
+        )
+        seed_section = f"{contract_section}\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
 
     prompt = f"""{system_prompt}
 
@@ -662,7 +693,11 @@ def build_evaluate_subagent(
 
     seed_section = ""
     if seed_content:
-        seed_section = f"\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
+        contract_section = _render_seed_contract_from_content(
+            seed_content,
+            purpose="evaluation",
+        )
+        seed_section = f"{contract_section}\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
 
     ac_section = ""
     if acceptance_criterion:
@@ -741,6 +776,8 @@ def build_execute_subagent(
     else:
         qa_note = "\n## QA\nRun QA evaluation after execution completes.\n"
 
+    contract_section = _render_seed_contract_from_content(seed_content, purpose="execution")
+
     prompt = f"""## Your Task
 
 Execute the following seed specification. Implement all requirements defined
@@ -751,7 +788,7 @@ in the seed, respecting constraints and acceptance criteria.
 
 ## Max Iterations
 {max_iterations}
-{seed_path_note}{cwd_note}{qa_note}
+{seed_path_note}{cwd_note}{qa_note}{contract_section}
 ## Seed Specification
 ```yaml
 {seed_content}

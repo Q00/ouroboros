@@ -7,6 +7,7 @@ Contains handlers for drift measurement, evaluation, and lateral thinking tools:
 """
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import yaml
 from ouroboros.config import get_semantic_model
 from ouroboros.core.errors import ValidationError
 from ouroboros.core.seed import Seed
+from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.tools.subagent import (
@@ -59,6 +61,14 @@ def _evaluation_allowed_tools(runtime_backend: str | None) -> list[str]:
             execution_phase=PolicyExecutionPhase.EVALUATION,
         )
     )
+
+
+def _normalize_artifact_type(value: Any) -> str:
+    """Normalize legacy artifact type spellings for evaluation prompts."""
+    artifact_type = str(value or "code").strip().lower()
+    if artifact_type == "docs":
+        return "document"
+    return artifact_type or "code"
 
 
 @dataclass
@@ -317,10 +327,10 @@ class EvaluateHandler:
                 MCPToolParameter(
                     name="artifact_type",
                     type=ToolInputType.STRING,
-                    description="Type of artifact: code, docs, config. Default: code",
+                    description="Type of artifact: code, document, config. Default: code",
                     required=False,
                     default="code",
-                    enum=("code", "docs", "config"),
+                    enum=("code", "document", "config", "docs"),
                 ),
                 MCPToolParameter(
                     name="trigger_consensus",
@@ -390,7 +400,7 @@ class EvaluateHandler:
         seed_content = arguments.get("seed_content")
         acceptance_criterion = arguments.get("acceptance_criterion")
         acceptance_criteria_raw = arguments.get("acceptance_criteria")
-        artifact_type = arguments.get("artifact_type", "code")
+        artifact_type = _normalize_artifact_type(arguments.get("artifact_type", "code"))
         trigger_consensus = arguments.get("trigger_consensus", False)
 
         # Normalize all AC inputs into a single tuple (#366 fix):
@@ -456,6 +466,7 @@ class EvaluateHandler:
             # Extract goal/constraints from seed if provided
             goal = ""
             constraints: tuple[str, ...] = ()
+            seed_contract: SeedContract | None = None
             seed_id = session_id  # fallback
 
             if seed_content:
@@ -464,6 +475,7 @@ class EvaluateHandler:
                     seed = Seed.from_dict(seed_dict)
                     goal = seed.goal
                     constraints = tuple(seed.constraints)
+                    seed_contract = SeedContract.from_seed(seed)
                     seed_id = seed.metadata.seed_id
                 except (yaml.YAMLError, ValidationError, PydanticValidationError) as e:
                     log.warning("mcp.tool.evaluate.seed_parse_warning", error=str(e))
@@ -481,6 +493,12 @@ class EvaluateHandler:
                     if session_result.is_ok:
                         tracker = session_result.value
                         seed_id = tracker.seed_id
+                        seed_json = tracker.progress.get("seed_json")
+                        if isinstance(seed_json, str) and seed_json.strip():
+                            seed = Seed.from_dict(json.loads(seed_json))
+                            goal = seed.goal
+                            constraints = tuple(seed.constraints)
+                            seed_contract = SeedContract.from_seed(seed)
                 except Exception:
                     pass  # Best-effort enrichment
 
@@ -576,6 +594,7 @@ class EvaluateHandler:
                     artifact_type=artifact_type,
                     goal=goal,
                     constraints=constraints,
+                    seed_contract=seed_contract,
                     trigger_consensus=trigger_consensus,
                     artifact_bundle=artifact_bundle,
                     pipeline=pipeline,
@@ -590,6 +609,7 @@ class EvaluateHandler:
                 artifact_type=artifact_type,
                 goal=goal,
                 constraints=constraints,
+                seed_contract=seed_contract,
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
             )
@@ -684,6 +704,7 @@ class EvaluateHandler:
         artifact_type: str,
         goal: str,
         constraints: tuple[str, ...],
+        seed_contract: SeedContract | None,
         trigger_consensus: bool,
         artifact_bundle: object | None,
         pipeline: object,  # EvaluationPipeline — typed as object to avoid import cycle
@@ -727,6 +748,7 @@ class EvaluateHandler:
             artifact_type=artifact_type,
             goal=goal,
             constraints=constraints,
+            seed_contract=seed_contract,
             trigger_consensus=trigger_consensus,
             artifact_bundle=artifact_bundle,
         )
@@ -754,6 +776,7 @@ class EvaluateHandler:
                 artifact_type=artifact_type,
                 goal=goal,
                 constraints=constraints,
+                seed_contract=seed_contract,
                 trigger_consensus=trigger_consensus,
                 artifact_bundle=artifact_bundle,
             )

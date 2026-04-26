@@ -30,6 +30,23 @@ from ouroboros.mcp.tools.subagent import (
 )
 from ouroboros.mcp.types import ContentType, MCPToolResult
 
+VALID_ANALYSIS_SEED_YAML = """goal: Write a decision brief
+task_type: analysis
+constraints:
+  - Do not produce source code
+acceptance_criteria:
+  - Brief makes a clear recommendation
+ontology_schema:
+  name: DecisionBrief
+  description: Decision brief concepts
+  fields:
+    - name: recommendation
+      type: string
+      description: Chosen path and rationale
+metadata:
+  ambiguity_score: 0.1
+"""
+
 # ---------------------------------------------------------------------------
 # build_subagent_payload: core structure tests
 # ---------------------------------------------------------------------------
@@ -594,6 +611,17 @@ class TestBuildEvaluateSubagent:
         assert p.context["session_id"] == "sess-123"
         assert p.context["trigger_consensus"] is True
 
+    def test_prompt_includes_seed_contract_when_seed_is_valid(self) -> None:
+        p = build_evaluate_subagent(
+            session_id="sess-123",
+            artifact="Decision: ship option B",
+            seed_content=VALID_ANALYSIS_SEED_YAML,
+        )
+
+        assert "## Seed Contract" in p.prompt
+        assert "conceptual lens for evaluation judgments" in p.prompt
+        assert "## Artifact Type" in p.prompt
+
 
 # ---------------------------------------------------------------------------
 # Tool-specific builders: Execute
@@ -616,6 +644,15 @@ class TestBuildExecuteSubagent:
             session_id="sess-123",
         )
         assert "build a CLI tool" in p.prompt
+
+    def test_prompt_includes_seed_contract_when_seed_is_valid(self) -> None:
+        p = build_execute_subagent(
+            seed_content=VALID_ANALYSIS_SEED_YAML,
+            session_id="sess-123",
+        )
+
+        assert "## Seed Contract" in p.prompt
+        assert "conceptual lens for execution decisions" in p.prompt
 
     def test_context_preserves_execution_args(self) -> None:
         p = build_execute_subagent(

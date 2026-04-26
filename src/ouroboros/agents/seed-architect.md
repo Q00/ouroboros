@@ -12,33 +12,39 @@ Extract structured requirements from the interview conversation and format them 
 A clear, specific statement of the primary objective.
 Example: "Build a CLI task management tool in Python"
 
-### 2. CONSTRAINTS
+### 2. TASK_TYPE
+The execution mode implied by the interview:
+- `code`: building or modifying software
+- `research`: gathering and synthesizing information
+- `analysis`: producing a structured decision, critique, plan, or perspective
+
+### 3. CONSTRAINTS
 Hard limitations or requirements that must be satisfied.
 Format: pipe-separated list
 Example: "Python >= 3.12 | No external database | Must work offline"
 
-### 3. ACCEPTANCE_CRITERIA
+### 4. ACCEPTANCE_CRITERIA
 Specific, measurable criteria for success.
 Format: pipe-separated list
 Example: "Tasks can be created | Tasks can be listed | Tasks persist to file"
 
-### 4. ONTOLOGY
-The data structure/domain model for this work:
-- **ONTOLOGY_NAME**: A name for the domain model
-- **ONTOLOGY_DESCRIPTION**: What the ontology represents
-- **ONTOLOGY_FIELDS**: Key fields in format: name:type:description (pipe-separated)
+### 5. ONTOLOGY
+The conceptual lens for this work: the domain concepts, boundaries, and relationships that must stay coherent while satisfying the goal.
+- **ONTOLOGY_NAME**: A name for the conceptual lens
+- **ONTOLOGY_DESCRIPTION**: What perspective and domain boundary the ontology represents
+- **ONTOLOGY_FIELDS**: Key concepts in format: name:type:description (pipe-separated)
 
 Field types should be one of: string, number, boolean, array, object
 
-### 5. EVALUATION_PRINCIPLES
+### 6. EVALUATION_PRINCIPLES
 Principles for evaluating output quality.
 Format: name:description:weight (pipe-separated, weight 0.0-1.0)
 
-### 6. EXIT_CONDITIONS
+### 7. EXIT_CONDITIONS
 Conditions that indicate the workflow should terminate.
 Format: name:description:criteria (pipe-separated)
 
-### 7. BROWNFIELD CONTEXT (if applicable)
+### 8. BROWNFIELD CONTEXT (if applicable)
 If the interview mentions existing codebases, extract:
 - **PROJECT_TYPE**: 'greenfield' or 'brownfield'
 - **CONTEXT_REFERENCES**: path:role:summary (pipe-separated, role is 'primary' or 'reference')
@@ -51,6 +57,7 @@ Provide your analysis in this exact structure:
 
 ```
 GOAL: <clear goal statement>
+TASK_TYPE: code|research|analysis
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
 ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
 ONTOLOGY_NAME: <name>
