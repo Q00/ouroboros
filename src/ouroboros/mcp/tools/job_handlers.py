@@ -630,8 +630,24 @@ class JobWaitHandler:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_wait"))
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
+        has_live_execution_progress = snapshot.links.execution_id is not None and any(
+            progress.get(key) is not None
+            for key in (
+                "ac_completed",
+                "ac_total",
+                "current_phase",
+                "sub_ac_completed",
+                "sub_ac_total",
+            )
+        )
         if not changed:
-            if view in {"compact", "summary"}:
+            if view in {"compact", "summary"} and has_live_execution_progress:
+                text = _render_compact_job_snapshot(
+                    snapshot,
+                    progress,
+                    include_message=view == "summary",
+                )
+            elif view in {"compact", "summary"}:
                 text = f"unchanged cursor={snapshot.cursor}"
             else:
                 text += "\n\nNo new job-level events during this wait window."
