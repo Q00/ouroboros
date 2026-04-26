@@ -108,6 +108,9 @@ _bmad/
 # Local archive for removed/held docs and assets
 archive/
 
+# Git worktrees (local development isolation)
+.worktrees/
+
 # Generated doc reports (regenerable via scripts/)
 docs/link-index.md
 docs/link-index.json
