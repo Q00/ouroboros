@@ -31,6 +31,6 @@ def test_derive_quality_bar_uses_full_seed_contract() -> None:
     assert "preserving the Seed contract" in quality_bar
     assert "## Seed Contract" in quality_bar
     assert "conceptual lens for evaluation judgments" in quality_bar
-    assert "- claim: Central answer to evaluate (required concept)" in quality_bar
+    assert "- claim [string]: Central answer to evaluate (required concept)" in quality_bar
     assert "Do not produce source code" in quality_bar
     assert "- Memo answers the research question" in quality_bar

@@ -139,7 +139,7 @@ class TestBuildEvaluationPrompt:
         assert "## Seed Contract" in prompt
         assert "immutable source of truth for this evaluation" in prompt
         assert "conceptual lens for evaluation judgments" in prompt
-        assert "- claim: Central answer to evaluate (required concept)" in prompt
+        assert "- claim [string]: Central answer to evaluate (required concept)" in prompt
         assert "No code output required" in prompt
         assert "## Artifact Type\ndocument" in prompt
 

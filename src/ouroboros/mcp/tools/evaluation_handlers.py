@@ -438,6 +438,7 @@ class EvaluateHandler:
             working_dir=arguments.get("working_dir"),
             trigger_consensus=trigger_consensus,
         )
+        delegated_artifact_type = str(payload.context.get("artifact_type", artifact_type))
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             await emit_subagent_dispatched_event(
                 self.event_store,
@@ -452,7 +453,7 @@ class EvaluateHandler:
                     "session_id": session_id,
                     "status": "delegated_to_subagent",
                     "dispatch_mode": "plugin",
-                    "artifact_type": artifact_type,
+                    "artifact_type": delegated_artifact_type,
                     "trigger_consensus": trigger_consensus,
                 },
             )

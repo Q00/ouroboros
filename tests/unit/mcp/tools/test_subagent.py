@@ -622,6 +622,28 @@ class TestBuildEvaluateSubagent:
         assert "conceptual lens for evaluation judgments" in p.prompt
         assert "## Artifact Type" in p.prompt
 
+    def test_analysis_seed_defaults_to_document_artifact_type(self) -> None:
+        """Plugin-mode evaluation should not review analysis/research Seeds as code."""
+        p = build_evaluate_subagent(
+            session_id="sess-123",
+            artifact="Decision: ship option B",
+            seed_content=VALID_ANALYSIS_SEED_YAML,
+        )
+
+        assert "## Artifact Type\ndocument" in p.prompt
+        assert p.context["artifact_type"] == "document"
+
+    def test_explicit_non_code_artifact_type_is_preserved(self) -> None:
+        p = build_evaluate_subagent(
+            session_id="sess-123",
+            artifact="Decision: ship option B",
+            artifact_type="report",
+            seed_content=VALID_ANALYSIS_SEED_YAML,
+        )
+
+        assert "## Artifact Type\nreport" in p.prompt
+        assert p.context["artifact_type"] == "report"
+
 
 # ---------------------------------------------------------------------------
 # Tool-specific builders: Execute

@@ -61,16 +61,23 @@ _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
 _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
 
 
-def _render_seed_contract_from_content(seed_content: str | None, *, purpose: str) -> str:
-    """Best-effort SeedContract rendering for delegated subagent prompts."""
+def _seed_contract_from_content(seed_content: str | None) -> SeedContract | None:
+    """Best-effort SeedContract parsing for delegated subagent prompts."""
     if not seed_content:
-        return ""
+        return None
     try:
         parsed = yaml.safe_load(seed_content)
         seed = Seed.from_dict(parsed)
-        contract = SeedContract.from_seed(seed)
+        return SeedContract.from_seed(seed)
     except Exception as exc:
         log.debug("subagent.seed_contract_render_skipped", error=str(exc))
+        return None
+
+
+def _render_seed_contract_from_content(seed_content: str | None, *, purpose: str) -> str:
+    """Best-effort SeedContract rendering for delegated subagent prompts."""
+    contract = _seed_contract_from_content(seed_content)
+    if contract is None:
         return ""
 
     if purpose == "evaluation":
@@ -690,12 +697,15 @@ def build_evaluate_subagent(
     from ouroboros.agents.loader import load_agent_prompt
 
     system_prompt = load_agent_prompt("evaluator")
+    effective_artifact_type = artifact_type or "code"
+    contract = _seed_contract_from_content(seed_content)
+    if contract is not None and effective_artifact_type == "code":
+        effective_artifact_type = contract.artifact_type
 
     seed_section = ""
     if seed_content:
-        contract_section = _render_seed_contract_from_content(
-            seed_content,
-            purpose="evaluation",
+        contract_section = (
+            f"\n{render_seed_contract_for_evaluation(contract)}\n" if contract is not None else ""
         )
         seed_section = f"{contract_section}\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
 
@@ -724,7 +734,7 @@ and goal alignment. Provide a detailed semantic evaluation.
 {session_id}
 {seed_section}{ac_section}{consensus_note}
 ## Artifact Type
-{artifact_type or "code"}
+{effective_artifact_type}
 
 ## Artifact
 ```
@@ -736,7 +746,7 @@ Provide your evaluation with pass/fail verdict and detailed reasoning."""
     context: dict[str, Any] = {
         "session_id": session_id,
         "artifact": artifact,
-        "artifact_type": artifact_type,
+        "artifact_type": effective_artifact_type,
         "seed_content": seed_content,
         "acceptance_criterion": acceptance_criterion,
         "working_dir": working_dir,
