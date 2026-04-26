@@ -10,13 +10,17 @@ instead of calling LLMs directly. Each handler.handle() should:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
+from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
 from ouroboros.core.types import Result
+from ouroboros.orchestrator.session import SessionRepository
+from ouroboros.persistence.event_store import EventStore
 
 # ---------------------------------------------------------------------------
 # Shared mock helper for plugin I/O
@@ -262,6 +266,60 @@ class TestEvaluateHandlerSubagentDispatch:
         assert ctx["session_id"] == "sess-123"
         assert ctx["seed_content"] == "goal: test"
         assert ctx["trigger_consensus"] is True
+
+    async def test_plugin_dispatch_enriches_seed_content_from_session(self) -> None:
+        from ouroboros.mcp.tools.evaluation_handlers import EvaluateHandler
+
+        store = EventStore("sqlite+aiosqlite:///:memory:")
+        await store.initialize()
+        try:
+            seed = Seed(
+                goal="Write a decision brief",
+                task_type="analysis",
+                constraints=("Do not produce source code",),
+                acceptance_criteria=("Brief makes a clear recommendation",),
+                ontology_schema=OntologySchema(
+                    name="DecisionBrief",
+                    description="Decision brief concepts",
+                    fields=(
+                        OntologyField(
+                            name="recommendation",
+                            field_type="string",
+                            description="Chosen path and rationale",
+                        ),
+                    ),
+                ),
+                metadata=SeedMetadata(seed_id="seed-doc", ambiguity_score=0.1),
+            )
+            repo = SessionRepository(store)
+            create_result = await repo.create_session(
+                execution_id="exec-doc",
+                seed_id="seed-doc",
+                session_id="sess-doc",
+                seed_json=json.dumps(seed.to_dict()),
+            )
+            assert create_result.is_ok
+
+            handler = EvaluateHandler(
+                event_store=store,
+                agent_runtime_backend="opencode",
+                opencode_mode="plugin",
+            )
+            result = await handler.handle(
+                {
+                    "session_id": "sess-doc",
+                    "artifact": "Recommendation: choose option B.",
+                }
+            )
+
+            assert result.is_ok
+            payload = result.value.meta["_subagent"]
+            ctx = payload["context"]
+            assert ctx["artifact_type"] == "document"
+            assert "Write a decision brief" in ctx["seed_content"]
+            assert "## Seed Contract" in payload["prompt"]
+        finally:
+            await store.close()
 
 
 # ---------------------------------------------------------------------------
