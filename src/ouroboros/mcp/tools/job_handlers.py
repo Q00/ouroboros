@@ -291,17 +291,18 @@ async def _render_job_snapshot(
     AC progress (ac_completed, ac_total, current_phase, activity) extracted
     from the same query used for rendering — no duplicate event-store hit.
 
-    Results are cached by (job_id, cursor) to avoid redundant EventStore queries
-    when the same snapshot is rendered repeatedly (e.g. poll loops).
-    Terminal snapshots are never cached since they won't change.
+    Results are cached by (job_id, cursor) only when the render does not read
+    directly from execution events. Execution-linked snapshots can change even
+    when the job aggregate cursor does not, so those renders must stay live.
     """
     cache_key = (snapshot.job_id, snapshot.cursor)
-    if not snapshot.is_terminal and cache_key in _render_cache:
+    cacheable = not snapshot.is_terminal and snapshot.links.execution_id is None
+    if cacheable and cache_key in _render_cache:
         return _render_cache[cache_key]
 
     text, progress = await _render_job_snapshot_inner(snapshot, event_store)
 
-    if not snapshot.is_terminal:
+    if cacheable:
         if len(_render_cache) >= _RENDER_CACHE_MAX:
             to_remove = list(_render_cache.keys())[: _RENDER_CACHE_MAX // 2]
             for key in to_remove:
