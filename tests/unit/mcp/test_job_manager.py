@@ -421,7 +421,7 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
-    async def test_cancel_job_persists_cross_process_cancel_when_reconstruct_fails(
+    async def test_cancel_job_does_not_persist_cross_process_cancel_when_reconstruct_fails(
         self, tmp_path
     ) -> None:
         store = _build_store(tmp_path)
@@ -429,13 +429,18 @@ class TestJobManager:
         session_id = "orch_reconstruct_fail_123"
         execution_id = "exec_reconstruct_fail_123"
         await clear_cancellation(session_id)
+        runner_cancelled = asyncio.Event()
 
         try:
             await store.initialize()
             lock_path(session_id).write_text("1")
 
             async def _runner() -> MCPToolResult:
-                await asyncio.sleep(10)
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    runner_cancelled.set()
+                    raise
                 return MCPToolResult(
                     content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
                     is_error=False,
@@ -459,8 +464,86 @@ class TestJobManager:
             )
 
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
-            assert session_cancelled
-            assert session_cancelled[-1].data["cancelled_by"] == "mcp_job_manager"
+            assert runner_cancelled.is_set() is True
+            assert not session_cancelled
+        finally:
+            lock_path(session_id).unlink(missing_ok=True)
+            await clear_cancellation(session_id)
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_job_errors_before_persist_when_latest_reconstruct_fails(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        session_id = "orch_latest_reconstruct_fail_123"
+        execution_id = "exec_latest_reconstruct_fail_123"
+        await clear_cancellation(session_id)
+        runner_cancelled = asyncio.Event()
+
+        try:
+            await store.initialize()
+            repo = SessionRepository(store)
+            create_result = await repo.create_session(
+                execution_id=execution_id,
+                seed_id="seed_latest_reconstruct_fail_123",
+                session_id=session_id,
+            )
+            assert create_result.is_ok
+            lock_path(session_id).write_text("1")
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    runner_cancelled.set()
+                    raise
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="latest-reconstruct-fail-test",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id=session_id, execution_id=execution_id),
+            )
+
+            original_reconstruct = SessionRepository.reconstruct_session
+            call_count = 0
+
+            async def _reconstruct_once_then_fail(self, target_session_id):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return await original_reconstruct(self, target_session_id)
+                return Result.err(PersistenceError("replay failed"))
+
+            with patch(
+                "ouroboros.mcp.job_manager.SessionRepository.reconstruct_session",
+                new=_reconstruct_once_then_fail,
+            ):
+                try:
+                    await manager.cancel_job(started.job_id)
+                except ValueError as exc:
+                    assert "Failed to inspect linked session before cancellation" in str(exc)
+                else:
+                    raise AssertionError("cancel_job should fail when latest inspect fails")
+
+            session_cancelled = await store.query_events(
+                aggregate_id=session_id,
+                event_type="orchestrator.session.cancelled",
+            )
+            execution_cancelled = await store.query_events(
+                aggregate_id=execution_id,
+                event_type="execution.terminal",
+            )
+
+            assert runner_cancelled.is_set() is True
+            assert not session_cancelled
+            assert not execution_cancelled
         finally:
             lock_path(session_id).unlink(missing_ok=True)
             await clear_cancellation(session_id)

@@ -475,7 +475,7 @@ class JobManager:
             if not linked_session_terminal:
                 await request_cancellation(snapshot.links.session_id)
                 should_persist_linked_cancel = (
-                    linked_session_reconstructed or linked_session_started
+                    linked_session_reconstructed
                 ) and (not linked_session_started or not linked_session_owned_by_current_process)
 
         cancelled_tasks: list[asyncio.Task[Any]] = []
@@ -492,6 +492,11 @@ class JobManager:
         if snapshot.links.session_id and should_persist_linked_cancel:
             repo = linked_session_repo or SessionRepository(self._event_store)
             latest_session = await repo.reconstruct_session(snapshot.links.session_id)
+            if latest_session.is_err:
+                raise ValueError(
+                    "Failed to inspect linked session before cancellation: "
+                    f"{latest_session.error.message}"
+                )
             latest_terminal = latest_session.is_ok and latest_session.value.status in {
                 SessionStatus.COMPLETED,
                 SessionStatus.FAILED,
