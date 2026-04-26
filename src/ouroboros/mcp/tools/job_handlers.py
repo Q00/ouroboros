@@ -78,9 +78,7 @@ async def _query_all_execution_subtask_events(
     return events
 
 
-async def _query_latest_workflow_event(
-    event_store: EventStore, execution_id: str
-) -> Any | None:
+async def _query_latest_workflow_event(event_store: EventStore, execution_id: str) -> Any | None:
     """Fetch the latest workflow progress event without relying on a mixed window."""
     events = await event_store.query_events(
         aggregate_id=execution_id,
