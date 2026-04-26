@@ -43,6 +43,7 @@ def test_seed_contract_from_seed_interprets_ontology_lens() -> None:
     assert contract.ontology_lens.description == "Task management ontology"
     assert len(contract.ontology_lens.concepts) == 1
     assert contract.ontology_lens.concepts[0].name == "tasks"
+    assert contract.ontology_lens.concepts[0].field_type == "array"
 
 
 def test_seed_contract_maps_non_code_tasks_to_document_artifacts() -> None:
@@ -64,7 +65,7 @@ def test_render_ontology_lens_section_frames_ontology_as_lens() -> None:
     assert "## Ontology / Conceptual Lens" in section
     assert "conceptual lens for execution decisions" in section
     assert "It is not a mandatory output outline." in section
-    assert "- tasks: List of task objects (required concept)" in section
+    assert "- tasks [array]: List of task objects (required concept)" in section
     assert "Do not introduce concepts that contradict the ontology." in section
     assert "Do not force the final artifact to mirror these fields" in section
     assert "Required concepts must remain represented" in section
