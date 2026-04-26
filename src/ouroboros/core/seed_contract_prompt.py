@@ -159,6 +159,43 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
     return "\n".join(sections)
 
 
+def render_seed_contract_for_evaluation(contract: SeedContract) -> str:
+    """Render the Seed contract into evaluator-facing judgment instructions."""
+    sections = [
+        "## Seed Contract",
+        "The Seed is the immutable source of truth for this evaluation. Judge the artifact against this full contract, not only the surface wording of an acceptance criterion.",
+        "",
+        "## Goal",
+        contract.goal,
+        "",
+        "## Task Type",
+        contract.task_type,
+        "",
+        render_acceptance_criteria_section(contract),
+        "",
+        render_constraints_section(contract),
+    ]
+
+    brownfield = render_brownfield_section(contract)
+    if brownfield:
+        sections.extend(["", brownfield])
+
+    sections.extend(
+        [
+            "",
+            render_ontology_lens_section(
+                contract.ontology_lens,
+                decision_context="evaluation judgments",
+            ),
+            "",
+            render_evaluation_principles_section(contract),
+            "",
+            render_exit_conditions_section(contract),
+        ]
+    )
+    return "\n".join(sections)
+
+
 __all__ = [
     "render_brownfield_section",
     "render_acceptance_criteria_section",
@@ -167,4 +204,5 @@ __all__ = [
     "render_exit_conditions_section",
     "render_ontology_lens_section",
     "render_seed_contract_for_execution",
+    "render_seed_contract_for_evaluation",
 ]

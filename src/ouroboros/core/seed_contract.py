@@ -50,6 +50,13 @@ class SeedContract:
     exit_conditions: tuple[ExitCondition, ...]
     brownfield_context: BrownfieldContext
 
+    @property
+    def artifact_type(self) -> str:
+        """Return the evaluator artifact type implied by the task type."""
+        if self.task_type.lower() in {"research", "analysis"}:
+            return "document"
+        return "code"
+
     @classmethod
     def from_seed(cls, seed: Seed) -> SeedContract:
         """Interpret a Seed as an immutable execution contract."""
