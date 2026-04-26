@@ -108,6 +108,20 @@ class TestBuildSystemPrompt:
         assert "completeness" in prompt
         assert "All requirements are met" in prompt
 
+    def test_includes_seed_contract_ontology_lens(self, sample_seed: Seed) -> None:
+        """System prompt renders Seed ontology as an execution contract lens."""
+        prompt = build_system_prompt(sample_seed)
+
+        assert "## Seed Contract" in prompt
+        assert "## Ontology / Conceptual Lens" in prompt
+        assert "conceptual lens for execution decisions" in prompt
+        assert "It is not a mandatory output outline." in prompt
+        assert "Name: TaskManager" in prompt
+        assert "Description: Task management ontology" in prompt
+        assert "- tasks: List of tasks (required concept)" in prompt
+        assert "closer to the Seed's intended outcome" in prompt
+        assert "Do not force the final artifact to mirror these fields" in prompt
+
     def test_includes_self_recovery_protocol(self, sample_seed: Seed) -> None:
         """Run prompts should tell agents how to change strategy when stuck."""
         prompt = build_system_prompt(sample_seed)
@@ -129,6 +143,27 @@ class TestBuildSystemPrompt:
         )
         prompt = build_system_prompt(seed)
         assert "None" in prompt or "Constraints" in prompt
+
+    def test_handles_empty_ontology_fields(self) -> None:
+        """Ontology lens renders cleanly even when no concepts are listed."""
+        seed = Seed(
+            goal="Test goal",
+            constraints=(),
+            acceptance_criteria=("AC1",),
+            ontology_schema=OntologySchema(
+                name="TestOntology",
+                description="A minimal ontology",
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.1),
+        )
+
+        prompt = build_system_prompt(seed)
+
+        assert "## Ontology / Conceptual Lens" in prompt
+        assert "Name: TestOntology" in prompt
+        assert "Description: A minimal ontology" in prompt
+        assert "Concepts:" not in prompt
+        assert "When execution decisions are ambiguous:" in prompt
 
 
 class TestBuildTaskPrompt:
@@ -152,6 +187,13 @@ class TestBuildTaskPrompt:
         assert "1." in prompt
         assert "2." in prompt
         assert "3." in prompt
+
+    def test_does_not_duplicate_system_ontology_lens(self, sample_seed: Seed) -> None:
+        """Task prompt remains focused on concrete acceptance criteria."""
+        prompt = build_task_prompt(sample_seed)
+
+        assert "## Ontology / Conceptual Lens" not in prompt
+        assert "conceptual lens for execution decisions" not in prompt
 
 
 class TestOrchestratorResult:

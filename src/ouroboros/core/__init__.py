@@ -29,6 +29,9 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "OntologyField": ("ouroboros.core.seed", "OntologyField"),
     "EvaluationPrinciple": ("ouroboros.core.seed", "EvaluationPrinciple"),
     "ExitCondition": ("ouroboros.core.seed", "ExitCondition"),
+    "OntologyConcept": ("ouroboros.core.seed_contract", "OntologyConcept"),
+    "OntologyLens": ("ouroboros.core.seed_contract", "OntologyLens"),
+    "SeedContract": ("ouroboros.core.seed_contract", "SeedContract"),
     # Context management
     "WorkflowContext": ("ouroboros.core.context", "WorkflowContext"),
     "ContextMetrics": ("ouroboros.core.context", "ContextMetrics"),

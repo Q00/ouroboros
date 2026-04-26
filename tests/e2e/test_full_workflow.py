@@ -80,6 +80,18 @@ class TestPromptBuilding:
         for principle in sample_seed.evaluation_principles:
             assert principle.name in prompt
 
+    def test_system_prompt_includes_seed_ontology_lens(self, sample_seed: Seed) -> None:
+        """Test that execution receives the Seed ontology as a conceptual lens."""
+        prompt = build_system_prompt(sample_seed)
+
+        assert "## Seed Contract" in prompt
+        assert "## Ontology / Conceptual Lens" in prompt
+        assert sample_seed.ontology_schema.name in prompt
+        assert sample_seed.ontology_schema.description in prompt
+        for field in sample_seed.ontology_schema.fields:
+            assert field.name in prompt
+            assert field.description in prompt
+
     def test_task_prompt_includes_acceptance_criteria(self, sample_seed: Seed) -> None:
         """Test that task prompt includes all acceptance criteria."""
         prompt = build_task_prompt(sample_seed)
