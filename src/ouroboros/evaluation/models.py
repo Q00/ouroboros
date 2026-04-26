@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from ouroboros.core.seed_contract import SeedContract
 from ouroboros.events.base import BaseEvent
 
 
@@ -311,6 +312,7 @@ class EvaluationContext:
         artifact_type: Type of artifact (code, document, etc.)
         goal: Original goal from seed
         constraints: Constraints from seed
+        seed_contract: Full interpreted Seed contract, when available
         artifact_bundle: Optional file-based artifacts for richer evaluation
     """
 
@@ -321,6 +323,7 @@ class EvaluationContext:
     artifact_type: str = "code"
     goal: str = ""
     constraints: tuple[str, ...] = ()
+    seed_contract: SeedContract | None = None
     artifact_bundle: ArtifactBundle | None = None
     trigger_consensus: bool = False
 

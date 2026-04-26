@@ -408,6 +408,7 @@ Please try again. Extract requirements from this interview:
 You MUST respond with ONLY the following format, one field per line, no other text:
 
 GOAL: <clear goal statement>
+TASK_TYPE: code|research|analysis
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
 ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
 ONTOLOGY_NAME: <name>
@@ -465,6 +466,7 @@ PROJECT_TYPE: greenfield"""
 Respond ONLY with the structured format below. Do NOT add explanations, questions, commentary, or prose. Do NOT wrap in markdown code blocks.
 
 GOAL: <clear goal statement>
+TASK_TYPE: code|research|analysis
 CONSTRAINTS: <constraint 1> | <constraint 2> | ...
 ACCEPTANCE_CRITERIA: <criterion 1> | <criterion 2> | ...
 ONTOLOGY_NAME: <name>
@@ -476,6 +478,7 @@ PROJECT_TYPE: greenfield"""
 
     _KNOWN_PREFIXES = (
         "GOAL:",
+        "TASK_TYPE:",
         "CONSTRAINTS:",
         "ACCEPTANCE_CRITERIA:",
         "ONTOLOGY_NAME:",
@@ -571,6 +574,9 @@ PROJECT_TYPE: greenfield"""
         Returns:
             Constructed Seed instance.
         """
+        # Parse task type
+        task_type = self._normalize_task_type(requirements.get("task_type"))
+
         # Parse constraints
         constraints: tuple[str, ...] = ()
         if "constraints" in requirements and requirements["constraints"]:
@@ -693,6 +699,7 @@ PROJECT_TYPE: greenfield"""
 
         return Seed(
             goal=requirements["goal"],
+            task_type=task_type,
             brownfield_context=brownfield_context,
             constraints=constraints,
             acceptance_criteria=acceptance_criteria,
@@ -701,6 +708,12 @@ PROJECT_TYPE: greenfield"""
             exit_conditions=tuple(exit_conditions),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _normalize_task_type(raw_value: Any) -> str:
+        """Normalize extracted task type, defaulting conservatively to code."""
+        task_type = str(raw_value or "code").strip().lower()
+        return task_type if task_type in {"code", "research", "analysis"} else "code"
 
     async def save_seed(
         self,

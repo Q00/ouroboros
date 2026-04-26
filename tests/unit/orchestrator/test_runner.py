@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -443,6 +444,7 @@ class TestOrchestratorRunner:
             seed_id=sample_seed.metadata.seed_id,
             session_id="orch_prepared",
             seed_goal=sample_seed.goal,
+            seed_json=json.dumps(sample_seed.to_dict()),
         )
 
     @pytest.mark.asyncio

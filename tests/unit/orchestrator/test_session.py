@@ -202,6 +202,23 @@ class TestSessionRepository:
         assert event.data["seed_goal"] == "Ship the OpenCode runtime"
 
     @pytest.mark.asyncio
+    async def test_create_session_persists_seed_json(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Session start events retain the full Seed for later evaluation."""
+        result = await repository.create_session(
+            execution_id="exec_123",
+            seed_id="seed_456",
+            seed_json='{"goal": "Ship"}',
+        )
+
+        assert result.is_ok
+        event = mock_event_store.append.call_args[0][0]
+        assert event.data["seed_json"] == '{"goal": "Ship"}'
+
+    @pytest.mark.asyncio
     async def test_create_session_with_custom_id(
         self,
         repository: SessionRepository,

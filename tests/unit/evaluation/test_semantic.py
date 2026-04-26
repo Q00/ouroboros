@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.seed import OntologyField, OntologySchema, Seed, SeedMetadata
+from ouroboros.core.seed_contract import SeedContract
 from ouroboros.core.types import Result
 from ouroboros.evaluation.models import ArtifactBundle, EvaluationContext, FileArtifact
 from ouroboros.evaluation.semantic import (
@@ -102,6 +104,44 @@ class TestBuildEvaluationPrompt:
         assert "artifact summary from file" in prompt
         assert "## Artifact Content" not in prompt
         assert "inline artifact text that should not be duplicated" not in prompt
+
+    def test_seed_contract_context_includes_ontology_lens(self) -> None:
+        """Semantic evaluation judges against the full Seed contract when available."""
+        seed = Seed(
+            goal="Create a concise research memo",
+            task_type="analysis",
+            constraints=("No code output required",),
+            acceptance_criteria=("Memo answers the research question",),
+            ontology_schema=OntologySchema(
+                name="ResearchMemo",
+                description="Research memo concepts",
+                fields=(
+                    OntologyField(
+                        name="claim",
+                        field_type="string",
+                        description="Central answer to evaluate",
+                    ),
+                ),
+            ),
+            metadata=SeedMetadata(ambiguity_score=0.1),
+        )
+        context = EvaluationContext(
+            execution_id="exec-1",
+            seed_id="seed-1",
+            current_ac="Memo answers the research question",
+            artifact="The memo says...",
+            artifact_type="document",
+            seed_contract=SeedContract.from_seed(seed),
+        )
+
+        prompt = build_evaluation_prompt(context)
+
+        assert "## Seed Contract" in prompt
+        assert "immutable source of truth for this evaluation" in prompt
+        assert "conceptual lens for evaluation judgments" in prompt
+        assert "- claim: Central answer to evaluate (required concept)" in prompt
+        assert "No code output required" in prompt
+        assert "## Artifact Type\ndocument" in prompt
 
 
 class TestParseSemanticResponse:

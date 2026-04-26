@@ -30,6 +30,7 @@ from ouroboros.config import (
 )
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.ontology_aspect import AnalysisResult
+from ouroboros.core.seed_contract_prompt import render_seed_contract_for_evaluation
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.evaluation.models import (
@@ -153,22 +154,32 @@ def build_consensus_prompt(context: EvaluationContext) -> str:
     Returns:
         Formatted prompt string
     """
-    constraints_text = (
-        "\n".join(f"- {c}" for c in context.constraints) if context.constraints else "None"
-    )
+    if context.seed_contract is not None:
+        seed_context = render_seed_contract_for_evaluation(context.seed_contract)
+        artifact_type = (
+            context.seed_contract.artifact_type
+            if context.artifact_type == "code"
+            else context.artifact_type
+        )
+    else:
+        constraints_text = (
+            "\n".join(f"- {c}" for c in context.constraints) if context.constraints else "None"
+        )
+        seed_context = f"""## Original Goal
+{context.goal if context.goal else "Not specified"}
+
+## Constraints
+{constraints_text}"""
+        artifact_type = context.artifact_type
 
     return f"""Review the following artifact for consensus approval:
 
 ## Acceptance Criterion
 {context.current_ac}
 
-## Original Goal
-{context.goal if context.goal else "Not specified"}
+{seed_context}
 
-## Constraints
-{constraints_text}
-
-## Artifact ({context.artifact_type})
+## Artifact ({artifact_type})
 ```
 {context.artifact}
 ```

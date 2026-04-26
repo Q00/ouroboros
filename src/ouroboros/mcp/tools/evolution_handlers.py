@@ -391,15 +391,21 @@ class EvolveStepHandler:
         qa_meta = None
         skip_qa = arguments.get("skip_qa", False)
         if step.action.value in ("continue", "converged") and execute and not skip_qa:
+            from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler
             from ouroboros.mcp.tools.qa import QAHandler
 
             qa_handler = QAHandler()
-            quality_bar = "Generation must improve upon previous generation."
-            if initial_seed:
-                ac_lines = [f"- {ac}" for ac in initial_seed.acceptance_criteria]
-                quality_bar = "The execution must satisfy all acceptance criteria:\n" + "\n".join(
-                    ac_lines
-                )
+            generation_seed = gen.seed or initial_seed
+            quality_bar = (
+                ExecuteSeedHandler._derive_quality_bar(generation_seed)
+                if generation_seed is not None
+                else "Generation must improve upon previous generation."
+            )
+            qa_seed_content = (
+                yaml.safe_dump(generation_seed.to_dict(), sort_keys=False)
+                if generation_seed is not None
+                else seed_content or ""
+            )
 
             execution_artifact = gen.execution_output or "\n".join(text_lines)
             try:
@@ -419,7 +425,7 @@ class EvolveStepHandler:
                     "artifact_type": "test_output",
                     "quality_bar": quality_bar,
                     "reference": reference,
-                    "seed_content": seed_content or "",
+                    "seed_content": qa_seed_content,
                     "pass_threshold": 0.80,
                 }
             )

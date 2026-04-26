@@ -21,6 +21,8 @@ from ouroboros.core.errors import ValidationError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.seed import Seed
+from ouroboros.core.seed_contract import SeedContract
+from ouroboros.core.seed_contract_prompt import render_seed_contract_for_evaluation
 from ouroboros.core.types import Result
 from ouroboros.core.worktree import (
     TaskWorkspace,
@@ -686,9 +688,14 @@ class ExecuteSeedHandler(BridgeAwareMixin):
 
     @staticmethod
     def _derive_quality_bar(seed: Seed) -> str:
-        """Derive a quality bar string from seed acceptance criteria."""
+        """Derive a quality bar string from the full Seed contract."""
         ac_lines = [f"- {ac}" for ac in seed.acceptance_criteria]
-        return "The execution must satisfy all acceptance criteria:\n" + "\n".join(ac_lines)
+        contract = render_seed_contract_for_evaluation(SeedContract.from_seed(seed))
+        return (
+            "The execution must satisfy all acceptance criteria while preserving the Seed contract.\n\n"
+            f"{contract}\n\n"
+            "## Acceptance Criteria\n" + "\n".join(ac_lines)
+        )
 
     @staticmethod
     def _resolve_verification_working_dir(

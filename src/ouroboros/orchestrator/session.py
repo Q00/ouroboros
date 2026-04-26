@@ -485,6 +485,7 @@ class SessionRepository:
         seed_id: str,
         session_id: str | None = None,
         seed_goal: str | None = None,
+        seed_json: str | None = None,
     ) -> Result[SessionTracker, PersistenceError]:
         """Create a new session and persist start event.
 
@@ -493,6 +494,7 @@ class SessionRepository:
             seed_id: Seed ID being executed.
             session_id: Optional custom session ID.
             seed_goal: Optional goal text to persist with the start event.
+            seed_json: Optional full Seed JSON to preserve evaluation context.
 
         Returns:
             Result containing new SessionTracker.
@@ -506,6 +508,8 @@ class SessionRepository:
         }
         if seed_goal:
             event_data["seed_goal"] = seed_goal
+        if seed_json:
+            event_data["seed_json"] = seed_json
 
         event = BaseEvent(
             type="orchestrator.session.started",
@@ -814,6 +818,11 @@ class SessionRepository:
                 start_time=datetime.fromisoformat(
                     start_event.data.get("start_time", datetime.now(UTC).isoformat())
                 ),
+                progress={
+                    "seed_json": start_event.data["seed_json"],
+                }
+                if start_event.data.get("seed_json")
+                else {},
             )
 
             execution_id = start_event.data.get("execution_id", "")

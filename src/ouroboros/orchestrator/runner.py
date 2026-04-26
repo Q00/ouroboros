@@ -23,6 +23,7 @@ import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+import json
 from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import uuid4
 
@@ -1451,6 +1452,7 @@ class OrchestratorRunner:
             seed_id=seed.metadata.seed_id,
             session_id=session_id,
             seed_goal=seed.goal,
+            seed_json=json.dumps(seed.to_dict()),
         )
 
         if session_result.is_err:

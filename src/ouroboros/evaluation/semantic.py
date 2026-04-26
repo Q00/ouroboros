@@ -13,6 +13,7 @@ import json
 
 from ouroboros.config import get_semantic_model
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.seed_contract_prompt import render_seed_contract_for_evaluation
 from ouroboros.core.types import Result
 from ouroboros.evaluation.json_utils import extract_json_payload
 from ouroboros.evaluation.models import EvaluationContext, SemanticResult
@@ -101,11 +102,25 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
     Returns:
         Formatted prompt string
     """
-    constraints_text = (
-        "\n".join(f"- {c}" for c in context.constraints)
-        if context.constraints
-        else "None specified"
-    )
+    if context.seed_contract is not None:
+        seed_context = render_seed_contract_for_evaluation(context.seed_contract)
+        artifact_type = (
+            context.seed_contract.artifact_type
+            if context.artifact_type == "code"
+            else context.artifact_type
+        )
+    else:
+        constraints_text = (
+            "\n".join(f"- {c}" for c in context.constraints)
+            if context.constraints
+            else "None specified"
+        )
+        seed_context = f"""## Original Goal
+{context.goal if context.goal else "Not specified"}
+
+## Constraints
+{constraints_text}"""
+        artifact_type = context.artifact_type
 
     has_files = context.artifact_bundle and context.artifact_bundle.files
 
@@ -130,14 +145,10 @@ def build_evaluation_prompt(context: EvaluationContext) -> str:
 ## Acceptance Criterion
 {context.current_ac}
 
-## Original Goal
-{context.goal if context.goal else "Not specified"}
-
-## Constraints
-{constraints_text}
+{seed_context}
 
 ## Artifact Type
-{context.artifact_type}
+{artifact_type}
 
 {artifact_section}
 {code_section}
