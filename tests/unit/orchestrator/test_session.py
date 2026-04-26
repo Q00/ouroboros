@@ -540,6 +540,35 @@ class TestSessionRepository:
         assert tracker.progress["runtime"]["native_session_id"] == "sess_native"
 
     @pytest.mark.asyncio
+    async def test_reconstruct_session_preserves_seed_json_across_progress_updates(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Start-event Seed JSON must survive later progress payload replacement."""
+        start_event = MagicMock()
+        start_event.type = "orchestrator.session.started"
+        start_event.data = {
+            "execution_id": "exec_123",
+            "seed_id": "seed_456",
+            "start_time": datetime.now(UTC).isoformat(),
+            "seed_json": '{"goal": "Ship"}',
+        }
+
+        progress_event = MagicMock()
+        progress_event.type = "orchestrator.progress.updated"
+        progress_event.data = {"progress": {"step": 1}}
+
+        mock_event_store.replay.return_value = [start_event, progress_event]
+
+        result = await repository.reconstruct_session("sess_123")
+
+        assert result.is_ok
+        tracker = result.value
+        assert tracker.progress["seed_json"] == '{"goal": "Ship"}'
+        assert tracker.progress["step"] == 1
+
+    @pytest.mark.asyncio
     async def test_reconstruct_session_merges_parallel_execution_progress(
         self,
         repository: SessionRepository,

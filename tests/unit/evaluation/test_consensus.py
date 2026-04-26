@@ -91,7 +91,7 @@ class TestBuildConsensusPrompt:
 
         assert "## Seed Contract" in prompt
         assert "conceptual lens for evaluation judgments" in prompt
-        assert "- recommendation: Chosen path and rationale (required concept)" in prompt
+        assert "- recommendation [string]: Chosen path and rationale (required concept)" in prompt
         assert "Do not produce source code" in prompt
         assert "## Artifact (document)" in prompt
 

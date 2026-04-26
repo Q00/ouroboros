@@ -885,6 +885,8 @@ class SessionRepository:
                     }:
                         explicit_terminal_status = status_update
 
+            last_progress = self._merge_progress_payloads(tracker.progress, last_progress)
+
             # Sanitize stale runtime metadata when session reached a terminal
             # state.  Progress events captured during execution may contain
             # ``runtime_status: running`` which contradicts the authoritative
