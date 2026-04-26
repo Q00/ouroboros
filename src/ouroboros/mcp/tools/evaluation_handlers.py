@@ -503,6 +503,10 @@ class EvaluateHandler:
                 except Exception:
                     pass  # Best-effort enrichment
 
+            if seed_contract is not None and artifact_type == "code":
+                artifact_type = seed_contract.artifact_type
+            stage1_enabled = artifact_type == "code"
+
             # Derive current_ac from the unified acceptance_criteria tuple.
             # The tuple already incorporates both the plural and singular params,
             # so we only need to index or fall back to a default.
@@ -561,7 +565,7 @@ class EvaluateHandler:
             # best-effort, so a failed detect simply leaves Stage 1 empty and
             # the pipeline falls through to Stage 2 instead of phantom-failing
             # on hardcoded preset guesses.
-            if not has_mechanical_toml(working_dir):
+            if stage1_enabled and not has_mechanical_toml(working_dir):
                 try:
                     await ensure_mechanical_toml(
                         working_dir,
@@ -574,8 +578,9 @@ class EvaluateHandler:
                         working_dir=str(working_dir),
                         error=str(exc),
                     )
-            mechanical_config = build_mechanical_config(working_dir)
+            mechanical_config = build_mechanical_config(working_dir) if stage1_enabled else None
             config = PipelineConfig(
+                stage1_enabled=stage1_enabled,
                 mechanical=mechanical_config,
                 semantic=SemanticConfig(model=get_semantic_model(self.llm_backend)),
             )
