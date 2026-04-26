@@ -139,7 +139,7 @@ class ConvergenceCriteria:
                     failed_acs=regressed,
                 )
 
-        contract_gate_passed = self.eval_gate_enabled and latest_evaluation is not None
+        contract_gate_passed = not self.eval_gate_enabled or latest_evaluation is not None
 
         wonder_has_gap = latest_wonder is not None and latest_wonder.should_continue
 
@@ -175,6 +175,16 @@ class ConvergenceCriteria:
 
         # Signal 2: Ontology stability (latest two generations) as a secondary stop signal.
         if latest_sim >= self.convergence_threshold and not wonder_has_gap:
+            if not self.eval_gate_enabled:
+                return ConvergenceSignal(
+                    converged=True,
+                    reason=(
+                        f"Ontology converged: similarity {latest_sim:.3f} "
+                        f">= threshold {self.convergence_threshold}"
+                    ),
+                    ontology_similarity=latest_sim,
+                    generation=current_gen,
+                )
             return ConvergenceSignal(
                 converged=True,
                 reason=(

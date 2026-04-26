@@ -29,6 +29,7 @@ LINEAGE_COLUMNS = {
 STATUS_COLORS = {
     "active": "[yellow]active[/yellow]",
     "converged": "[green]converged[/green]",
+    "stagnated": "[yellow]stagnated[/yellow]",
     "exhausted": "[red]exhausted[/red]",
     "aborted": "[dim]aborted[/dim]",
 }

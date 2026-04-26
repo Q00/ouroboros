@@ -612,6 +612,21 @@ class TestZeroMutationConvergence:
         assert signal.converged
         assert "converged" in signal.reason.lower()
 
+    def test_eval_gate_disabled_preserves_stability_convergence(self) -> None:
+        """Disabling the eval gate keeps old stability-based convergence semantics."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            max_generations=30,
+            eval_gate_enabled=False,
+        )
+
+        signal = criteria.evaluate(lineage)
+
+        assert signal.converged
+        assert "Ontology converged" in signal.reason
+
     def test_allows_two_gen_identical_when_contract_passes(self) -> None:
         """Two identical generations with no evolution can converge."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A)

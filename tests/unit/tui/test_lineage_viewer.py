@@ -26,7 +26,7 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.tui.events import GenerationSelected, LineageSelected
 from ouroboros.tui.screens.lineage_detail import GenerationDetailPanel, LineageDetailScreen
-from ouroboros.tui.screens.lineage_selector import LineageSelectorScreen
+from ouroboros.tui.screens.lineage_selector import STATUS_COLORS, LineageSelectorScreen
 from ouroboros.tui.widgets.lineage_tree import (
     GenerationNodeSelected,
     LineageTreeWidget,
@@ -261,6 +261,10 @@ class TestGenerationDetailPanel:
 
 class TestLineageSelectorScreen:
     """Tests for LineageSelectorScreen message types."""
+
+    def test_stagnated_status_has_display_style(self) -> None:
+        """New terminal lineage states should not render as raw unstyled text."""
+        assert STATUS_COLORS["stagnated"] == "[yellow]stagnated[/yellow]"
 
     def test_lineage_selected_message(self) -> None:
         """LineageSelected message carries lineage_id and lineage object."""
