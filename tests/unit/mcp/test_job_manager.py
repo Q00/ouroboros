@@ -1212,6 +1212,71 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_job_wait_full_view_labels_execution_progress_without_job_change(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        await store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_wait_full_progress",
+                data={
+                    "execution_id": "exec_wait_full_progress",
+                    "completed_count": 1,
+                    "total_count": 3,
+                    "current_phase": "Implement",
+                    "activity": "Running",
+                },
+            )
+        )
+        snapshot = JobSnapshot(
+            job_id="job_wait_full_progress",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Implement | 1/3 ACs",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=0,
+            links=JobLinks(execution_id="exec_wait_full_progress"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 0
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            result = await handler.handle(
+                {
+                    "job_id": "job_wait_full_progress",
+                    "cursor": 0,
+                    "timeout_seconds": 0,
+                }
+            )
+
+            assert result.is_ok
+            assert result.value.meta["changed"] is True
+            assert "**AC Progress**: 1/3" in result.value.text_content
+            assert "Execution progress updated during this wait window." in (
+                result.value.text_content
+            )
+            assert "No new job-level events during this wait window." not in (
+                result.value.text_content
+            )
+        finally:
+            await store.close()
+
     async def test_job_wait_compact_view_surfaces_subtask_progress_before_workflow(
         self, tmp_path
     ) -> None:

@@ -667,6 +667,8 @@ class JobWaitHandler:
                 )
             elif view in {"compact", "summary"}:
                 text = f"unchanged cursor={snapshot.cursor}"
+            elif execution_progress_changed:
+                text += "\n\nExecution progress updated during this wait window."
             else:
                 text += "\n\nNo new job-level events during this wait window."
         elif view == "compact":
