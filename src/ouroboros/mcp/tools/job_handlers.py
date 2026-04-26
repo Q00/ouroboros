@@ -35,6 +35,7 @@ log = structlog.get_logger(__name__)
 
 _DEFAULT_JOB_VIEW = "full"
 _JOB_EXECUTION_EVENT_LIMIT = 250
+_JOB_SUBTASK_EVENT_PAGE_SIZE = 500
 _JOB_VIEW_ALIASES = {
     "compact": "compact",
     "brief": "compact",
@@ -53,6 +54,28 @@ def _normalize_job_view(value: object) -> str:
         if stripped:
             return _JOB_VIEW_ALIASES.get(stripped, _DEFAULT_JOB_VIEW)
     return _DEFAULT_JOB_VIEW
+
+
+async def _query_all_execution_subtask_events(
+    event_store: EventStore, execution_id: str
+) -> list[Any]:
+    """Fetch all subtask updates for an execution for accurate rollups."""
+    events: list[Any] = []
+    offset = 0
+    while True:
+        page = await event_store.query_events(
+            aggregate_id=execution_id,
+            event_type="execution.subtask.updated",
+            limit=_JOB_SUBTASK_EVENT_PAGE_SIZE,
+            offset=offset,
+        )
+        if not page:
+            break
+        events.extend(page)
+        if len(page) < _JOB_SUBTASK_EVENT_PAGE_SIZE:
+            break
+        offset += _JOB_SUBTASK_EVENT_PAGE_SIZE
+    return events
 
 
 @dataclass
@@ -329,13 +352,15 @@ async def _render_job_snapshot_inner(
             aggregate_id=snapshot.links.execution_id,
             limit=_JOB_EXECUTION_EVENT_LIMIT,
         )
-        events_chronological = list(reversed(recent_events))
         workflow_event = next(
             (event for event in recent_events if event.type == "workflow.progress.updated"),
             None,
         )
 
-        subtask_summary = summarize_subtask_events(events_chronological)
+        subtask_events = await _query_all_execution_subtask_events(
+            event_store, snapshot.links.execution_id
+        )
+        subtask_summary = summarize_subtask_events(list(reversed(subtask_events)))
         subtask_progress = format_subtask_progress_summary(subtask_summary)
         if workflow_event is not None:
             data = workflow_event.data

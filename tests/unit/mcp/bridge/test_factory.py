@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ouroboros.mcp.bridge.config as bridge_config
 from ouroboros.mcp.bridge.factory import (
     create_bridge_from_env,
 )
@@ -10,11 +11,21 @@ from ouroboros.mcp.bridge.factory import (
 class TestCreateBridgeFromEnv:
     def test_returns_none_when_no_config(self, tmp_path, monkeypatch):
         monkeypatch.delenv("OUROBOROS_MCP_CONFIG", raising=False)
+        monkeypatch.setattr(
+            bridge_config,
+            "_HOME_CONFIG",
+            tmp_path / "home" / ".ouroboros" / "mcp_servers.yaml",
+        )
         result = create_bridge_from_env(cwd=tmp_path)
-        assert result is None or hasattr(result, "manager")
+        assert result is None
 
     def test_returns_bridge_when_config_exists(self, tmp_path, monkeypatch):
         monkeypatch.delenv("OUROBOROS_MCP_CONFIG", raising=False)
+        monkeypatch.setattr(
+            bridge_config,
+            "_HOME_CONFIG",
+            tmp_path / "home" / ".ouroboros" / "mcp_servers.yaml",
+        )
         d = tmp_path / ".ouroboros"
         d.mkdir()
         (d / "mcp_servers.yaml").write_text(
