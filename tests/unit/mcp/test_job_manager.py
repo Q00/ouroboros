@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 from ouroboros.core.types import Result
-from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
+from ouroboros.events.base import BaseEvent
+from ouroboros.mcp.job_manager import JobLinks, JobManager, JobSnapshot, JobStatus
+from ouroboros.mcp.tools.job_handlers import (
+    JobStatusHandler,
+    JobWaitHandler,
+    _render_compact_job_snapshot,
+    _render_job_snapshot,
+    _render_job_snapshot_inner,
+)
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
 from ouroboros.orchestrator.heartbeat import lock_path
@@ -735,4 +744,436 @@ class TestJobManager:
             lock_path(session_id).unlink(missing_ok=True)
             await clear_cancellation(session_id)
             await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_render_job_snapshot_includes_sub_ac_progress(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+
+        try:
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_job_sub_ac_progress",
+                    data={
+                        "execution_id": "exec_job_sub_ac_progress",
+                        "completed_count": 0,
+                        "total_count": 2,
+                        "current_phase": "Deliver",
+                        "activity": "Monitoring",
+                        "activity_detail": "Level 1/1",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.subtask.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_job_sub_ac_progress",
+                    data={
+                        "ac_index": 1,
+                        "sub_task_index": 1,
+                        "sub_task_id": "ac_1_sub_1",
+                        "content": "Child one",
+                        "status": "completed",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.subtask.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_job_sub_ac_progress",
+                    data={
+                        "ac_index": 1,
+                        "sub_task_index": 2,
+                        "sub_task_id": "ac_1_sub_2",
+                        "content": "Child two",
+                        "status": "executing",
+                    },
+                )
+            )
+
+            snapshot = JobSnapshot(
+                job_id="job_sub_ac_progress",
+                job_type="execute_seed",
+                status=JobStatus.RUNNING,
+                message="Deliver | 0/2 ACs",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                cursor=2,
+                links=JobLinks(execution_id="exec_job_sub_ac_progress"),
+            )
+
+            text, progress = await _render_job_snapshot_inner(snapshot, store)
+
+            assert "**AC Progress**: 0/2" in text
+            assert "**Sub-AC Progress**: 1/2 complete · 1 working" in text
+            assert progress["sub_ac_completed"] == 1
+            assert progress["sub_ac_total"] == 2
+            assert "- `ac_1_sub_2`: executing -- Child two" in text
+        finally:
+            await store.close()
+
+    async def test_render_job_snapshot_counts_sub_ac_beyond_recent_event_window(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+
+        try:
+            for index in range(1, 301):
+                await store.append(
+                    BaseEvent(
+                        type="execution.subtask.updated",
+                        aggregate_type="execution",
+                        aggregate_id="exec_job_many_sub_ac",
+                        data={
+                            "ac_index": 1,
+                            "sub_task_index": index,
+                            "sub_task_id": f"ac_1_sub_{index}",
+                            "content": f"Child {index}",
+                            "status": "completed",
+                        },
+                    )
+                )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_job_many_sub_ac",
+                    data={
+                        "execution_id": "exec_job_many_sub_ac",
+                        "completed_count": 0,
+                        "total_count": 1,
+                        "current_phase": "Deliver",
+                        "activity": "Monitoring",
+                    },
+                )
+            )
+
+            snapshot = JobSnapshot(
+                job_id="job_many_sub_ac",
+                job_type="execute_seed",
+                status=JobStatus.RUNNING,
+                message="Deliver | 0/1 ACs",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                cursor=301,
+                links=JobLinks(execution_id="exec_job_many_sub_ac"),
+            )
+
+            text, progress = await _render_job_snapshot_inner(snapshot, store)
+
+            assert "**Sub-AC Progress**: 300/300 complete" in text
+            assert progress["sub_ac_completed"] == 300
+            assert progress["sub_ac_total"] == 300
+        finally:
+            await store.close()
+
+    async def test_render_job_snapshot_keeps_workflow_after_subtask_burst(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+
+        try:
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_job_old_workflow",
+                    data={
+                        "execution_id": "exec_job_old_workflow",
+                        "completed_count": 1,
+                        "total_count": 4,
+                        "current_phase": "Implement",
+                        "activity": "Monitoring",
+                    },
+                )
+            )
+            for index in range(1, 301):
+                await store.append(
+                    BaseEvent(
+                        type="execution.subtask.updated",
+                        aggregate_type="execution",
+                        aggregate_id="exec_job_old_workflow",
+                        data={
+                            "ac_index": 1,
+                            "sub_task_index": index,
+                            "sub_task_id": f"ac_1_sub_{index}",
+                            "content": f"Child {index}",
+                            "status": "completed",
+                        },
+                    )
+                )
+
+            snapshot = JobSnapshot(
+                job_id="job_old_workflow",
+                job_type="execute_seed",
+                status=JobStatus.RUNNING,
+                message="Implement | 1/4 ACs",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                cursor=301,
+                links=JobLinks(execution_id="exec_job_old_workflow"),
+            )
+
+            text, progress = await _render_job_snapshot_inner(snapshot, store)
+
+            assert "**Phase**: Implement" in text
+            assert "**AC Progress**: 1/4" in text
+            assert "**Sub-AC Progress**: 300/300 complete" in text
+            assert progress["current_phase"] == "Implement"
+            assert progress["ac_completed"] == 1
+            assert progress["ac_total"] == 4
+            assert progress["sub_ac_completed"] == 300
+            assert progress["sub_ac_total"] == 300
+        finally:
+            await store.close()
+
+    async def test_render_job_snapshot_does_not_cache_execution_progress(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+
+        try:
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_job_live_progress",
+                    data={
+                        "execution_id": "exec_job_live_progress",
+                        "completed_count": 0,
+                        "total_count": 2,
+                        "current_phase": "Plan",
+                        "activity": "Starting",
+                    },
+                )
+            )
+            snapshot = JobSnapshot(
+                job_id="job_live_progress",
+                job_type="execute_seed",
+                status=JobStatus.RUNNING,
+                message="Plan | 0/2 ACs",
+                created_at=datetime(2026, 4, 22, tzinfo=UTC),
+                updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+                cursor=77,
+                links=JobLinks(execution_id="exec_job_live_progress"),
+            )
+
+            first_text, first_progress = await _render_job_snapshot(snapshot, store)
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_job_live_progress",
+                    data={
+                        "execution_id": "exec_job_live_progress",
+                        "completed_count": 1,
+                        "total_count": 2,
+                        "current_phase": "Implement",
+                        "activity": "Running",
+                    },
+                )
+            )
+
+            second_text, second_progress = await _render_job_snapshot(snapshot, store)
+
+            assert "**Phase**: Plan" in first_text
+            assert first_progress["ac_completed"] == 0
+            assert "**Phase**: Implement" in second_text
+            assert second_progress["ac_completed"] == 1
+        finally:
+            await store.close()
+
+    def test_render_compact_job_snapshot_omits_full_sections(self) -> None:
+        snapshot = JobSnapshot(
+            job_id="job_compact",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Deliver | Sub-AC work | 0/2 ACs",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=77,
+            links=JobLinks(execution_id="exec_compact"),
+        )
+
+        text = _render_compact_job_snapshot(
+            snapshot,
+            {
+                "ac_completed": 0,
+                "ac_total": 2,
+                "current_phase": "Deliver",
+                "sub_ac_completed": 1,
+                "sub_ac_total": 3,
+            },
+            include_message=False,
+        )
+
+        assert text == "job_compact | running | Deliver | AC 0/2 | Sub-AC 1/3 | cursor 77"
+
+    async def test_job_status_omitted_view_preserves_full_snapshot(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_default_full",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=9,
+            links=JobLinks(),
+        )
+
+        class StaticJobManager:
+            async def get_snapshot(self, job_id: str) -> JobSnapshot:
+                assert job_id == snapshot.job_id
+                return snapshot
+
+        handler = JobStatusHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle({"job_id": "job_default_full"})
+
+        assert result.is_ok
+        assert result.value.meta["view"] == "full"
+        assert result.value.text_content.startswith("## Job: job_default_full")
+        assert "**Status**: running" in result.value.text_content
+        assert "job_default_full | running" not in result.value.text_content
+
+    async def test_job_wait_omitted_view_preserves_full_unchanged_snapshot(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_full",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=12,
+            links=JobLinks(),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 12
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle(
+            {"job_id": "job_wait_full", "cursor": 12, "timeout_seconds": 0}
+        )
+
+        assert result.is_ok
+        assert result.value.meta["view"] == "full"
+        assert result.value.text_content.startswith("## Job: job_wait_full")
+        assert "No new job-level events during this wait window." in result.value.text_content
+        assert result.value.text_content != "unchanged cursor=12"
+
+    async def test_job_wait_summary_view_returns_compact_unchanged_line(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        snapshot = JobSnapshot(
+            job_id="job_wait_summary",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Running execute_seed",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=15,
+            links=JobLinks(),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                return snapshot, False
+
+        handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+        result = await handler.handle(
+            {
+                "job_id": "job_wait_summary",
+                "cursor": 15,
+                "timeout_seconds": 0,
+                "view": "summary",
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["view"] == "summary"
+        assert result.value.text_content == "unchanged cursor=15"
+
+    async def test_job_wait_compact_view_surfaces_execution_progress_without_job_change(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        await store.initialize()
+        await store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_wait_live_progress",
+                data={
+                    "execution_id": "exec_wait_live_progress",
+                    "completed_count": 1,
+                    "total_count": 3,
+                    "current_phase": "Implement",
+                    "activity": "Running",
+                },
+            )
+        )
+        snapshot = JobSnapshot(
+            job_id="job_wait_live_progress",
+            job_type="execute_seed",
+            status=JobStatus.RUNNING,
+            message="Implement | 1/3 ACs",
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
+            cursor=21,
+            links=JobLinks(execution_id="exec_wait_live_progress"),
+        )
+
+        class StaticJobManager:
+            async def wait_for_change(
+                self,
+                job_id: str,
+                *,
+                cursor: int,
+                timeout_seconds: int,
+            ) -> tuple[JobSnapshot, bool]:
+                assert job_id == snapshot.job_id
+                assert cursor == 21
+                assert timeout_seconds == 0
+                return snapshot, False
+
+        try:
+            handler = JobWaitHandler(event_store=store, job_manager=StaticJobManager())
+            result = await handler.handle(
+                {
+                    "job_id": "job_wait_live_progress",
+                    "cursor": 21,
+                    "timeout_seconds": 0,
+                    "view": "compact",
+                }
+            )
+
+            assert result.is_ok
+            assert result.value.meta["changed"] is False
+            assert result.value.meta["view"] == "compact"
+            assert result.value.meta["ac_completed"] == 1
+            assert result.value.text_content == (
+                "job_wait_live_progress | running | Implement | AC 1/3 | cursor 21"
+            )
+        finally:
             await store.close()
