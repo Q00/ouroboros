@@ -21,7 +21,7 @@ def _build_store(tmp_path: Path) -> EventStore:
 
 @pytest.mark.asyncio
 async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -> None:
-    """Precreated linked sessions stop local subprocesses without terminalizing sessions."""
+    """Precreated linked sessions stop local subprocesses and persist cancellation."""
     session_id = "orch_cancel_123"
     execution_id = "exec_cancel_123"
     await clear_cancellation(session_id)
@@ -88,8 +88,10 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
 
         assert process.returncode is not None
         assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
-        assert not cancellation_events
-        assert not terminal_events
+        assert cancellation_events
+        assert cancellation_events[-1].data["cancelled_by"] == "mcp_job_manager"
+        assert terminal_events
+        assert terminal_events[-1].data["status"] == "cancelled"
         assert await is_cancellation_requested(session_id) is False
     finally:
         process = process_holder.get("process")

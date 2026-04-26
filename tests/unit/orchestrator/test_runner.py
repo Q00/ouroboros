@@ -2672,9 +2672,10 @@ class TestCancellationPolling:
 
         mock_adapter.execute_task = mock_execute
 
-        # Return no cancellation initially, then return a cancellation event
+        # Return no cancellation at startup, then return a cancellation event
+        # at the first periodic message-loop checkpoint.
         cancel_event = create_session_cancelled_event("session_123", "User requested")
-        mock_event_store.query_events = AsyncMock(return_value=[cancel_event])
+        mock_event_store.query_events = AsyncMock(side_effect=[[], [cancel_event]])
 
         async def mock_create_session(*args: Any, **kwargs: Any):
             return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
