@@ -267,6 +267,32 @@ class TestEvaluateHandlerSubagentDispatch:
         assert ctx["seed_content"] == "goal: test"
         assert ctx["trigger_consensus"] is True
 
+    async def test_plugin_dispatch_preserves_plural_acceptance_criteria(self, handler) -> None:
+        result = await handler.handle(
+            {
+                "session_id": "sess-123",
+                "artifact": "evaluation target",
+                "acceptance_criterion": "Legacy single AC should be ignored",
+                "acceptance_criteria": [
+                    "First AC is satisfied",
+                    "Second AC is satisfied",
+                ],
+            }
+        )
+
+        assert result.is_ok
+        payload = result.value.meta["_subagent"]
+        ctx = payload["context"]
+        assert ctx["acceptance_criteria"] == [
+            "First AC is satisfied",
+            "Second AC is satisfied",
+        ]
+        assert ctx["acceptance_criterion"] is None
+        assert "## Acceptance Criteria" in payload["prompt"]
+        assert "1. First AC is satisfied" in payload["prompt"]
+        assert "2. Second AC is satisfied" in payload["prompt"]
+        assert "Legacy single AC should be ignored" not in payload["prompt"]
+
     async def test_plugin_dispatch_enriches_seed_content_from_session(self) -> None:
         from ouroboros.mcp.tools.evaluation_handlers import EvaluateHandler
 

@@ -466,7 +466,7 @@ class EvaluateHandler:
             artifact=artifact,
             artifact_type=artifact_type,
             seed_content=seed_content,
-            acceptance_criterion=acceptance_criterion,
+            acceptance_criteria=acceptance_criteria,
             working_dir=arguments.get("working_dir"),
             trigger_consensus=trigger_consensus,
         )

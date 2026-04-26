@@ -31,6 +31,7 @@ Payload structure:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 import json
 import re
@@ -690,6 +691,7 @@ def build_evaluate_subagent(
     artifact_type: str | None = "code",
     seed_content: str | None = None,
     acceptance_criterion: str | None = None,
+    acceptance_criteria: Sequence[str] | None = None,
     working_dir: str | None = None,
     trigger_consensus: bool = False,
 ) -> SubagentPayload:
@@ -709,9 +711,27 @@ def build_evaluate_subagent(
         )
         seed_section = f"{contract_section}\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
 
+    effective_acceptance_criteria = tuple(
+        str(item).strip()
+        for item in (acceptance_criteria or ())
+        if isinstance(item, (str, int, float)) and str(item).strip()
+    )
+    if (
+        not effective_acceptance_criteria
+        and acceptance_criterion
+        and str(acceptance_criterion).strip()
+    ):
+        effective_acceptance_criteria = (str(acceptance_criterion).strip(),)
+
     ac_section = ""
-    if acceptance_criterion:
-        ac_section = f"\n## Acceptance Criterion\n{acceptance_criterion}\n"
+    if len(effective_acceptance_criteria) == 1:
+        ac_section = f"\n## Acceptance Criterion\n{effective_acceptance_criteria[0]}\n"
+    elif effective_acceptance_criteria:
+        rendered_criteria = "\n".join(
+            f"{index}. {criterion}"
+            for index, criterion in enumerate(effective_acceptance_criteria, start=1)
+        )
+        ac_section = f"\n## Acceptance Criteria\n{rendered_criteria}\n"
 
     consensus_note = ""
     if trigger_consensus:
@@ -748,7 +768,10 @@ Provide your evaluation with pass/fail verdict and detailed reasoning."""
         "artifact": artifact,
         "artifact_type": effective_artifact_type,
         "seed_content": seed_content,
-        "acceptance_criterion": acceptance_criterion,
+        "acceptance_criterion": (
+            effective_acceptance_criteria[0] if len(effective_acceptance_criteria) == 1 else None
+        ),
+        "acceptance_criteria": list(effective_acceptance_criteria),
         "working_dir": working_dir,
         "trigger_consensus": trigger_consensus,
     }

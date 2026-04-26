@@ -611,6 +611,27 @@ class TestBuildEvaluateSubagent:
         assert p.context["session_id"] == "sess-123"
         assert p.context["trigger_consensus"] is True
 
+    def test_prompt_includes_plural_acceptance_criteria(self) -> None:
+        p = build_evaluate_subagent(
+            session_id="sess-123",
+            artifact="code",
+            acceptance_criterion="Legacy single AC should be ignored",
+            acceptance_criteria=[
+                "First AC is satisfied",
+                "Second AC is satisfied",
+            ],
+        )
+
+        assert "## Acceptance Criteria" in p.prompt
+        assert "1. First AC is satisfied" in p.prompt
+        assert "2. Second AC is satisfied" in p.prompt
+        assert "Legacy single AC should be ignored" not in p.prompt
+        assert p.context["acceptance_criteria"] == [
+            "First AC is satisfied",
+            "Second AC is satisfied",
+        ]
+        assert p.context["acceptance_criterion"] is None
+
     def test_prompt_includes_seed_contract_when_seed_is_valid(self) -> None:
         p = build_evaluate_subagent(
             session_id="sess-123",
