@@ -59,23 +59,9 @@ def _normalize_job_view(value: object) -> str:
 async def _query_all_execution_subtask_events(
     event_store: EventStore, execution_id: str
 ) -> list[Any]:
-    """Fetch all subtask updates for an execution for accurate rollups."""
-    events: list[Any] = []
-    offset = 0
-    while True:
-        page = await event_store.query_events(
-            aggregate_id=execution_id,
-            event_type="execution.subtask.updated",
-            limit=_JOB_SUBTASK_EVENT_PAGE_SIZE,
-            offset=offset,
-        )
-        if not page:
-            break
-        events.extend(page)
-        if len(page) < _JOB_SUBTASK_EVENT_PAGE_SIZE:
-            break
-        offset += _JOB_SUBTASK_EVENT_PAGE_SIZE
-    return events
+    """Fetch subtask updates from one stable execution replay snapshot."""
+    events, _cursor = await event_store.get_events_after("execution", execution_id, 0)
+    return [event for event in events if event.type == "execution.subtask.updated"]
 
 
 async def _query_latest_workflow_event(event_store: EventStore, execution_id: str) -> Any | None:
@@ -366,7 +352,7 @@ async def _render_job_snapshot_inner(
         subtask_events = await _query_all_execution_subtask_events(
             event_store, snapshot.links.execution_id
         )
-        subtask_summary = summarize_subtask_events(list(reversed(subtask_events)))
+        subtask_summary = summarize_subtask_events(subtask_events)
         subtask_progress = format_subtask_progress_summary(subtask_summary)
         if workflow_event is not None:
             data = workflow_event.data
@@ -400,7 +386,7 @@ async def _render_job_snapshot_inner(
                 lines.append(f"**Sub-AC Progress**: {subtask_progress}")
 
         subtasks: dict[str, tuple[str, str]] = {}
-        for event in subtask_events[:_JOB_EXECUTION_EVENT_LIMIT]:
+        for event in reversed(subtask_events[-_JOB_EXECUTION_EVENT_LIMIT:]):
             sub_task_id = event.data.get("sub_task_id")
             if sub_task_id and sub_task_id not in subtasks:
                 subtasks[sub_task_id] = (
@@ -640,6 +626,7 @@ class JobWaitHandler:
                 "sub_ac_total",
             )
         )
+        response_changed = changed or has_live_execution_progress
         if not changed:
             if view in {"compact", "summary"} and has_live_execution_progress:
                 text = _render_compact_job_snapshot(
@@ -663,7 +650,7 @@ class JobWaitHandler:
                     "job_id": snapshot.job_id,
                     "status": snapshot.status.value,
                     "cursor": snapshot.cursor,
-                    "changed": changed,
+                    "changed": response_changed,
                     "view": view,
                     **progress,
                 },

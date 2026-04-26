@@ -1169,7 +1169,7 @@ class TestJobManager:
             )
 
             assert result.is_ok
-            assert result.value.meta["changed"] is False
+            assert result.value.meta["changed"] is True
             assert result.value.meta["view"] == "compact"
             assert result.value.meta["ac_completed"] == 1
             assert result.value.text_content == (
