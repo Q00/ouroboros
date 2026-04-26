@@ -40,6 +40,7 @@ PHASE_ICONS = {
 LINEAGE_STATUS_ICONS = {
     LineageStatus.ACTIVE: "[yellow]\u25b6[/]",
     LineageStatus.CONVERGED: "[bold green]\u2714[/]",
+    LineageStatus.STAGNATED: "[yellow]\u25a0[/]",
     LineageStatus.EXHAUSTED: "[red]\u25a0[/]",
     LineageStatus.ABORTED: "[dim]\u2718[/]",
 }

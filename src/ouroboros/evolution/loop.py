@@ -181,6 +181,11 @@ class EvolutionaryLoop:
             eval_min_score=self.config.eval_min_score,
         )
 
+    @staticmethod
+    def _is_stagnation_route(reason: str) -> bool:
+        """Return whether a convergence reason should route to STAGNATED."""
+        return "Stagnation" in reason or "Oscillation" in reason or "Repetitive feedback" in reason
+
     def _install_sigint_handler(self) -> None:
         """Replace SIGINT handler with graceful shutdown flag."""
         if self._sigint_installed:
@@ -419,7 +424,7 @@ class EvolutionaryLoop:
                         )
                     )
                     lineage = lineage.with_status(LineageStatus.EXHAUSTED)
-                elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
+                elif self._is_stagnation_route(conv_signal.reason):
                     await self.event_store.append(
                         lineage_stagnated(
                             lineage.lineage_id,
@@ -428,7 +433,7 @@ class EvolutionaryLoop:
                             self.config.stagnation_window,
                         )
                     )
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
+                    lineage = lineage.with_status(LineageStatus.STAGNATED)
                 else:
                     await self.event_store.append(
                         lineage_converged(
@@ -440,6 +445,17 @@ class EvolutionaryLoop:
                     )
                     lineage = lineage.with_status(LineageStatus.CONVERGED)
 
+                break
+            elif self._is_stagnation_route(conv_signal.reason):
+                await self.event_store.append(
+                    lineage_stagnated(
+                        lineage.lineage_id,
+                        generation_number,
+                        conv_signal.reason,
+                        self.config.stagnation_window,
+                    )
+                )
+                lineage = lineage.with_status(LineageStatus.STAGNATED)
                 break
 
             # Prepare for next generation
@@ -518,7 +534,11 @@ class EvolutionaryLoop:
                 return Result.err(OuroborosError("Failed to project lineage from events"))
 
             # Check if lineage is already terminated
-            if lineage.status in (LineageStatus.CONVERGED, LineageStatus.EXHAUSTED):
+            if lineage.status in (
+                LineageStatus.CONVERGED,
+                LineageStatus.STAGNATED,
+                LineageStatus.EXHAUSTED,
+            ):
                 return Result.err(
                     OuroborosError(
                         f"Lineage already terminated with status: {lineage.status.value}"
@@ -780,7 +800,7 @@ class EvolutionaryLoop:
                 )
                 lineage = lineage.with_status(LineageStatus.EXHAUSTED)
                 action = StepAction.EXHAUSTED
-            elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
+            elif self._is_stagnation_route(conv_signal.reason):
                 await self.event_store.append(
                     lineage_stagnated(
                         lineage.lineage_id,
@@ -789,7 +809,7 @@ class EvolutionaryLoop:
                         self.config.stagnation_window,
                     )
                 )
-                lineage = lineage.with_status(LineageStatus.CONVERGED)
+                lineage = lineage.with_status(LineageStatus.STAGNATED)
                 action = StepAction.STAGNATED
             else:
                 await self.event_store.append(
@@ -802,6 +822,17 @@ class EvolutionaryLoop:
                 )
                 lineage = lineage.with_status(LineageStatus.CONVERGED)
                 action = StepAction.CONVERGED
+        elif self._is_stagnation_route(conv_signal.reason):
+            await self.event_store.append(
+                lineage_stagnated(
+                    lineage.lineage_id,
+                    generation_number,
+                    conv_signal.reason,
+                    self.config.stagnation_window,
+                )
+            )
+            lineage = lineage.with_status(LineageStatus.STAGNATED)
+            action = StepAction.STAGNATED
 
         return Result.ok(
             StepResult(

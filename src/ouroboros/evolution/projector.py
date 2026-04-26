@@ -175,7 +175,7 @@ class LineageProjector:
 
             elif event.type == "lineage.stagnated":
                 if lineage is not None:
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
+                    lineage = lineage.with_status(LineageStatus.STAGNATED)
 
             elif event.type == "lineage.rewound":
                 data = event.data

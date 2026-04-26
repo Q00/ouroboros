@@ -94,8 +94,8 @@ class SeedGenerator:
 
         Two modes:
         - Gen 1 (reflect_output=None): Extract from interview, gate on ambiguity.
-        - Gen 2+ (reflect_output provided): Use refined ACs and ontology mutations
-          from ReflectEngine. Skip ambiguity gating.
+        - Gen 2+ (reflect_output provided): Preserve the parent Seed contract
+          and apply only ontology mutations from ReflectEngine. Skip ambiguity gating.
 
         Args:
             state: Completed interview state.
@@ -196,8 +196,10 @@ class SeedGenerator:
     ) -> Result[Seed, ValidationError | ProviderError]:
         """Generate a new Seed from ReflectOutput (Gen 2+ path).
 
-        Applies ontology mutations to parent's schema and uses refined
-        ACs from the reflect phase. No ambiguity gating needed.
+        Applies ontology mutations to parent's schema while preserving the
+        parent Seed's goal, constraints, and acceptance criteria. ReflectOutput
+        refined_* fields are proposal/compatibility fields only; they do not
+        automatically rewrite the human-origin Seed contract.
 
         Args:
             parent_seed: The parent seed to evolve from.
@@ -226,11 +228,11 @@ class SeedGenerator:
             )
 
             seed = Seed(
-                goal=reflect_output.refined_goal,
+                goal=parent_seed.goal,
                 task_type=parent_seed.task_type,
                 brownfield_context=parent_seed.brownfield_context,
-                constraints=reflect_output.refined_constraints,
-                acceptance_criteria=reflect_output.refined_acs,
+                constraints=parent_seed.constraints,
+                acceptance_criteria=parent_seed.acceptance_criteria,
                 ontology_schema=new_ontology,
                 evaluation_principles=parent_seed.evaluation_principles,
                 exit_conditions=parent_seed.exit_conditions,

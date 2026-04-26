@@ -5,9 +5,11 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.core.lineage import (
+    ACResult,
     EvaluationSummary,
     GenerationPhase,
     GenerationRecord,
+    LineageStatus,
     OntologyDelta,
     OntologyLineage,
 )
@@ -81,7 +83,7 @@ class TestOscillationDetection:
     """Tests for _check_oscillation and its integration in the convergence check."""
 
     def test_oscillation_period2_full_detected(self) -> None:
-        """A,B,A,B pattern (4 gens, both half-periods verified) -> converged=True."""
+        """A,B,A,B pattern (4 gens, both half-periods verified) -> stagnation route."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_B, SCHEMA_A, SCHEMA_B)
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
@@ -89,11 +91,11 @@ class TestOscillationDetection:
             max_generations=30,
         )
         signal = criteria.evaluate(lineage)
-        assert signal.converged
+        assert not signal.converged
         assert "Oscillation" in signal.reason
 
     def test_oscillation_period2_partial_3gens(self) -> None:
-        """A,B,A pattern (3 gens, simple N~N-2 check) -> converged=True."""
+        """A,B,A pattern (3 gens, simple N~N-2 check) -> stagnation route."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_B, SCHEMA_A)
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
@@ -101,7 +103,7 @@ class TestOscillationDetection:
             max_generations=30,
         )
         signal = criteria.evaluate(lineage)
-        assert signal.converged
+        assert not signal.converged
         assert "Oscillation" in signal.reason
 
     def test_oscillation_not_detected_different(self) -> None:
@@ -153,7 +155,7 @@ class TestOscillationDetection:
             max_generations=30,
         )
         signal = criteria.evaluate(lineage)
-        assert signal.converged
+        assert not signal.converged
         assert "Oscillation" in signal.reason
 
     def test_oscillation_no_indexerror_3gens(self) -> None:
@@ -270,6 +272,13 @@ class TestOscillationLoopRouting:
         result = await loop.evolve_step("lin_osc")
         assert result.is_ok
         assert result.value.action == StepAction.STAGNATED
+        assert result.value.lineage.status == LineageStatus.STAGNATED
+
+        from ouroboros.evolution.projector import LineageProjector
+
+        projected = LineageProjector().project(await store.replay_lineage("lin_osc"))
+        assert projected is not None
+        assert projected.status == LineageStatus.STAGNATED
 
 
 class TestCompletedGenerationFiltering:
@@ -398,7 +407,7 @@ class TestConvergenceGating:
             ),
         )
         assert not signal.converged
-        assert "unsatisfactory" in signal.reason
+        assert "final approval" in signal.reason
 
     def test_gate_blocks_when_score_low(self) -> None:
         """Gate enabled + score < min -> converged=False."""
@@ -416,7 +425,7 @@ class TestConvergenceGating:
             ),
         )
         assert not signal.converged
-        assert "unsatisfactory" in signal.reason
+        assert "score" in signal.reason
 
     def test_gate_passes_when_satisfactory(self) -> None:
         """Gate enabled + approved=True + score >= min -> converged=True."""
@@ -499,27 +508,97 @@ class TestConvergenceGating:
             ),
         )
         assert not signal.converged
-        assert "unsatisfactory" in signal.reason
+        assert "final approval" in signal.reason
+
+    def test_gate_blocks_when_ac_fails_before_ontology_signal(self) -> None:
+        """Gate enabled + failing AC -> converged=False even with stable ontology."""
+        lineage = self._converging_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+            eval_min_score=0.7,
+        )
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=EvaluationSummary(
+                final_approved=True,
+                highest_stage_passed=2,
+                score=0.9,
+                ac_results=(
+                    ACResult(ac_index=0, ac_content="Works", passed=True),
+                    ACResult(ac_index=1, ac_content="Still works", passed=False),
+                ),
+            ),
+        )
+        assert not signal.converged
+        assert "Per-AC gate" in signal.reason
+        assert signal.failed_acs == (1,)
+
+    def test_gate_blocks_when_drift_high(self) -> None:
+        """Gate enabled + drift_score > 0.30 -> converged=False."""
+        lineage = self._converging_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=EvaluationSummary(
+                final_approved=True,
+                highest_stage_passed=2,
+                score=0.9,
+                drift_score=0.31,
+            ),
+        )
+        assert not signal.converged
+        assert "drift score" in signal.reason
+
+    def test_gate_blocks_when_reward_hacking_risk_high(self) -> None:
+        """Gate enabled + reward_hacking_risk > 0.30 -> converged=False."""
+        lineage = self._converging_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=EvaluationSummary(
+                final_approved=True,
+                highest_stage_passed=2,
+                score=0.9,
+                reward_hacking_risk=0.31,
+            ),
+        )
+        assert not signal.converged
+        assert "reward hacking risk" in signal.reason
 
 
-class TestEvolutionGateDetection:
-    """Tests for evolution gate detection (P1-5).
+class TestZeroMutationConvergence:
+    """Tests for Idea-first convergence without mandatory ontology mutation."""
 
-    When the ontology never changes across generations, the system should
-    block convergence — whether due to conservative Reflect or errors.
-    """
-
-    def test_blocks_when_ontology_never_evolved(self) -> None:
-        """Identical ontology across all generations -> convergence withheld."""
+    def test_allows_when_ontology_never_evolved_and_contract_passes(self) -> None:
+        """Identical ontology across generations can converge when evaluation passes."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
-            eval_gate_enabled=False,
+            eval_gate_enabled=True,
         )
-        signal = criteria.evaluate(lineage)
-        assert not signal.converged
-        assert "Convergence withheld" in signal.reason
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=EvaluationSummary(
+                final_approved=True,
+                highest_stage_passed=3,
+                score=0.95,
+                drift_score=0.0,
+                reward_hacking_risk=0.0,
+            ),
+        )
+        assert signal.converged
+        assert "stable ontology lens" in signal.reason
 
     def test_allows_when_ontology_evolved_at_least_once(self) -> None:
         """Ontology evolved once then stabilized -> genuine convergence."""
@@ -533,17 +612,22 @@ class TestEvolutionGateDetection:
         assert signal.converged
         assert "converged" in signal.reason.lower()
 
-    def test_blocks_two_gen_identical(self) -> None:
-        """Two identical generations with no evolution -> blocked."""
+    def test_allows_two_gen_identical_when_contract_passes(self) -> None:
+        """Two identical generations with no evolution can converge."""
         lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A)
         criteria = ConvergenceCriteria(
             convergence_threshold=0.95,
             min_generations=2,
-            eval_gate_enabled=False,
+            eval_gate_enabled=True,
         )
-        signal = criteria.evaluate(lineage)
-        assert not signal.converged
-        assert "Convergence withheld" in signal.reason
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=EvaluationSummary(
+                final_approved=True, highest_stage_passed=3, score=0.95
+            ),
+        )
+        assert signal.converged
+        assert "stable ontology lens" in signal.reason
 
     def test_max_generations_overrides_withheld_convergence(self) -> None:
         """Hard cap still terminates even with withheld convergence."""
@@ -607,6 +691,28 @@ class TestValidationGate:
         signal = criteria.evaluate(
             lineage,
             validation_output="Validation passed: all checks green",
+        )
+        assert signal.converged
+
+    def test_allows_non_code_validation_skip_when_contract_passes(self) -> None:
+        """Non-code tasks can converge when only code validation was skipped."""
+        lineage = self._converging_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+            validation_gate_enabled=True,
+        )
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=EvaluationSummary(
+                final_approved=True,
+                highest_stage_passed=3,
+                score=0.95,
+                drift_score=0.0,
+                reward_hacking_risk=0.0,
+            ),
+            validation_output="Validation skipped: task_type=analysis does not require code validation",
         )
         assert signal.converged
 

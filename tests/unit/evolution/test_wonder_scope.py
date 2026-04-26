@@ -138,6 +138,57 @@ class TestWonderDegradedModeConvergence:
         assert "decomposition_depth_warning" in prompt
         assert "max_depth=3" in prompt
 
+    def test_prompt_frames_ontology_as_lens_for_seed_contract(self) -> None:
+        """Wonder prompt should stop asking when the Seed contract has no gap."""
+        from unittest.mock import AsyncMock
+
+        engine = WonderEngine(llm_adapter=AsyncMock(), model="test")
+        seed = _make_seed()
+
+        prompt = engine._build_prompt(
+            seed.ontology_schema,
+            _make_approved_summary(),
+            execution_output=None,
+            lineage=OntologyLineage(lineage_id="lineage-1", goal=seed.goal),
+            seed=seed,
+        )
+
+        assert "Seed contract" in prompt
+        assert "should_continue=false" in prompt
+        assert "incompleteness is normal" in prompt
+
+
+class TestReflectIdeaFirstPrompt:
+    """Reflect prompt should preserve the Seed contract and allow no mutation."""
+
+    def test_prompt_allows_empty_mutations_when_contract_passes(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from ouroboros.evolution.reflect import ReflectEngine
+        from ouroboros.evolution.wonder import WonderOutput
+
+        seed = _make_seed()
+        engine = ReflectEngine(llm_adapter=AsyncMock(), model="test")
+
+        system_prompt = engine._system_prompt()
+        user_prompt = engine._build_prompt(
+            seed,
+            execution_output="All ACs pass.",
+            eval_summary=_make_approved_summary(),
+            wonder=WonderOutput(
+                questions=(),
+                ontology_tensions=(),
+                should_continue=False,
+                reasoning="No substantive gap",
+            ),
+            lineage=OntologyLineage(lineage_id="lineage-1", goal=seed.goal),
+        )
+
+        assert "Do NOT rewrite the Seed's goal" in system_prompt
+        assert "Wonder questions do NOT automatically justify ontology mutation" in system_prompt
+        assert "empty ontology_mutations list is valid" in system_prompt
+        assert "origin Seed contract" in user_prompt
+
 
 class TestWonderParseResponseFallback:
     """Parse error fallback must be seed-scoped."""

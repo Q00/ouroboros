@@ -26,6 +26,7 @@ class LineageStatus(StrEnum):
 
     ACTIVE = "active"
     CONVERGED = "converged"
+    STAGNATED = "stagnated"
     EXHAUSTED = "exhausted"
     ABORTED = "aborted"
 
