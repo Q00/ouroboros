@@ -69,7 +69,7 @@ def test_render_seed_contract_for_execution_includes_core_sections() -> None:
     assert "## Goal" in rendered
     assert "Build a task manager" in rendered
     assert "## Task Type" in rendered
-    assert "## Acceptance Criteria" in rendered
+    assert "## Acceptance Criteria" not in rendered
     assert "## Constraints" in rendered
     assert "- No external database" in rendered
     assert "## Ontology / Conceptual Lens" in rendered

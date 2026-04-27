@@ -90,6 +90,7 @@ class TestPromptBuilding:
         assert sample_seed.ontology_schema.description in prompt
         for field in sample_seed.ontology_schema.fields:
             assert field.name in prompt
+            assert field.field_type in prompt
             assert field.description in prompt
 
     def test_task_prompt_includes_acceptance_criteria(self, sample_seed: Seed) -> None:
