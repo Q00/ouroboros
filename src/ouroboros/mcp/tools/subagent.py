@@ -88,6 +88,12 @@ def _render_seed_contract_from_content(seed_content: str | None, *, purpose: str
     return f"\n{rendered}\n"
 
 
+def _seed_spec_fence_language(seed_content: str) -> str:
+    """Return the most readable Markdown fence language for Seed content."""
+    stripped = seed_content.lstrip()
+    return "json" if stripped.startswith(("{", "[")) else "yaml"
+
+
 # ---------------------------------------------------------------------------
 # SubagentPayload dataclass
 # ---------------------------------------------------------------------------
@@ -471,7 +477,10 @@ def build_qa_subagent(
             seed_content,
             purpose="evaluation",
         )
-        seed_section = f"{contract_section}\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
+        seed_language = _seed_spec_fence_language(seed_content)
+        seed_section = (
+            f"{contract_section}\n## Seed Specification\n```{seed_language}\n{seed_content}\n```\n"
+        )
 
     prompt = f"""{system_prompt}
 
@@ -709,7 +718,10 @@ def build_evaluate_subagent(
         contract_section = (
             f"\n{render_seed_contract_for_evaluation(contract)}\n" if contract is not None else ""
         )
-        seed_section = f"{contract_section}\n## Seed Specification\n```yaml\n{seed_content}\n```\n"
+        seed_language = _seed_spec_fence_language(seed_content)
+        seed_section = (
+            f"{contract_section}\n## Seed Specification\n```{seed_language}\n{seed_content}\n```\n"
+        )
 
     effective_acceptance_criteria = tuple(
         str(item).strip()
@@ -810,6 +822,7 @@ def build_execute_subagent(
         qa_note = "\n## QA\nRun QA evaluation after execution completes.\n"
 
     contract_section = _render_seed_contract_from_content(seed_content, purpose="execution")
+    seed_language = _seed_spec_fence_language(seed_content)
 
     prompt = f"""## Your Task
 
@@ -823,7 +836,7 @@ in the seed, respecting constraints and acceptance criteria.
 {max_iterations}
 {seed_path_note}{cwd_note}{qa_note}{contract_section}
 ## Seed Specification
-```yaml
+```{seed_language}
 {seed_content}
 ```
 
@@ -1153,7 +1166,8 @@ def build_evolve_subagent(
     """
     seed_note = ""
     if seed_content:
-        seed_note = f"\n## Seed Specification (Gen 1)\n```yaml\n{seed_content}\n```\n"
+        seed_language = _seed_spec_fence_language(seed_content)
+        seed_note = f"\n## Seed Specification (Gen 1)\n```{seed_language}\n{seed_content}\n```\n"
 
     project_dir_note = ""
     if project_dir:

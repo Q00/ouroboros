@@ -449,6 +449,9 @@ class EvaluateHandler:
         if not acceptance_criteria and acceptance_criterion and str(acceptance_criterion).strip():
             acceptance_criteria = (str(acceptance_criterion).strip(),)
 
+        if not seed_content:
+            seed_content = await self._load_seed_content_from_session(session_id)
+
         log.info(
             "mcp.tool.evaluate",
             session_id=session_id,
@@ -456,9 +459,6 @@ class EvaluateHandler:
             multi_ac_count=len(acceptance_criteria),
             trigger_consensus=trigger_consensus,
         )
-
-        if not seed_content:
-            seed_content = await self._load_seed_content_from_session(session_id)
 
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         payload = build_evaluate_subagent(
