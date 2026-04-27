@@ -89,7 +89,7 @@ def render_evaluation_principles_section(contract: SeedContract) -> str:
     """Render evaluation principles from the Seed contract."""
     principles_text = (
         "\n".join(
-            f"- {principle.name} (weight {principle.weight:.2f}): {principle.description}"
+            f"- {principle.name}: {principle.description}"
             for principle in contract.evaluation_principles
         )
         if contract.evaluation_principles
@@ -138,8 +138,6 @@ def render_seed_contract_for_execution(contract: SeedContract) -> str:
         "",
         "## Task Type",
         contract.task_type,
-        "",
-        render_acceptance_criteria_section(contract),
         "",
         render_constraints_section(contract),
     ]

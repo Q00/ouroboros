@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from ouroboros.core.seed import (
+    BrownfieldContext,
+    ContextReference,
     EvaluationPrinciple,
     ExitCondition,
     OntologyField,
@@ -107,6 +109,19 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(sample_seed)
         assert "completeness" in prompt
         assert "All requirements are met" in prompt
+        assert "(weight" not in prompt
+
+    def test_system_prompt_leaves_acceptance_criteria_to_task_prompt(
+        self, sample_seed: Seed
+    ) -> None:
+        """System prompt should not duplicate task-level acceptance criteria."""
+        system_prompt = build_system_prompt(sample_seed)
+        task_prompt = build_task_prompt(sample_seed)
+
+        assert "## Acceptance Criteria" not in system_prompt
+        for criterion in sample_seed.acceptance_criteria:
+            assert criterion not in system_prompt
+            assert criterion in task_prompt
 
     def test_includes_seed_contract_ontology_lens(self, sample_seed: Seed) -> None:
         """System prompt renders Seed ontology as an execution contract lens."""
@@ -164,6 +179,32 @@ class TestBuildSystemPrompt:
         assert "Description: A minimal ontology" in prompt
         assert "Concepts:" not in prompt
         assert "When execution decisions are ambiguous:" in prompt
+
+    def test_includes_brownfield_context(self, sample_seed: Seed) -> None:
+        """System prompt preserves brownfield project references and constraints."""
+        seed = sample_seed.model_copy(
+            update={
+                "brownfield_context": BrownfieldContext(
+                    project_type="brownfield",
+                    context_references=(
+                        ContextReference(
+                            path="/repo/app",
+                            role="primary",
+                            summary="Main application repository",
+                        ),
+                    ),
+                    existing_patterns=("Use repository service classes",),
+                    existing_dependencies=("sqlalchemy",),
+                )
+            }
+        )
+
+        prompt = build_system_prompt(seed)
+
+        assert "## Existing Codebase Context (BROWNFIELD)" in prompt
+        assert "[PRIMARY] /repo/app: Main application repository" in prompt
+        assert "Use repository service classes" in prompt
+        assert "sqlalchemy" in prompt
 
 
 class TestBuildTaskPrompt:

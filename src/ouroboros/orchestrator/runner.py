@@ -1770,6 +1770,9 @@ class OrchestratorRunner:
                     status=status,
                 )
 
+                # Same-session recovery is limited to the sequential runner.
+                # Parallel execution owns per-AC retry semantics, and resume_session
+                # is already a recovery workflow.
                 if cancelled_result is None and not success and runtime_handle is not None:
                     planner = RecoveryPlanner()
                     recovery_action = planner.plan(_build_recovery_snapshot())

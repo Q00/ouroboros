@@ -54,13 +54,13 @@ class EvaluationPrinciple(BaseModel, frozen=True):
 
 
 class OntologyField(BaseModel, frozen=True):
-    """A concept in the ontology lens.
+    """A field in an ontology schema.
 
     Attributes:
-        name: Concept identifier.
-        field_type: Concept kind (string, number, boolean, array, object).
-        description: Purpose of this concept.
-        required: Whether this concept is required.
+        name: Field identifier.
+        field_type: Field type (string, number, boolean, array, object).
+        description: Purpose of this field.
+        required: Whether this field is required.
     """
 
     model_config = {"populate_by_name": True}
@@ -72,16 +72,16 @@ class OntologyField(BaseModel, frozen=True):
 
 
 class OntologySchema(BaseModel, frozen=True):
-    """Conceptual lens defining workflow domain coherence.
+    """Schema describing workflow domain structure.
 
-    The ontology schema names the domain concepts and boundaries the workflow
+    The ontology schema names the domain fields and boundaries the workflow
     should preserve throughout iterations. It is not, by itself, a mandatory
     output shape.
 
     Attributes:
         name: Name of the ontology.
         description: Purpose, scope, and perspective of this ontology.
-        fields: Concepts in the ontology.
+        fields: Fields in the ontology.
     """
 
     name: str = Field(..., min_length=1)
