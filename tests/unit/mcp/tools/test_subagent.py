@@ -47,6 +47,27 @@ metadata:
   ambiguity_score: 0.1
 """
 
+VALID_ANALYSIS_SEED_JSON = json.dumps(
+    {
+        "goal": "Write a decision brief",
+        "task_type": "analysis",
+        "constraints": ["Do not produce source code"],
+        "acceptance_criteria": ["Brief makes a clear recommendation"],
+        "ontology_schema": {
+            "name": "DecisionBrief",
+            "description": "Decision brief concepts",
+            "fields": [
+                {
+                    "name": "recommendation",
+                    "type": "string",
+                    "description": "Chosen path and rationale",
+                }
+            ],
+        },
+        "metadata": {"ambiguity_score": 0.1},
+    }
+)
+
 # ---------------------------------------------------------------------------
 # build_subagent_payload: core structure tests
 # ---------------------------------------------------------------------------
@@ -653,6 +674,16 @@ class TestBuildEvaluateSubagent:
 
         assert "## Artifact Type\ndocument" in p.prompt
         assert p.context["artifact_type"] == "document"
+
+    def test_json_seed_content_uses_json_fence(self) -> None:
+        p = build_evaluate_subagent(
+            session_id="sess-123",
+            artifact="Decision: ship option B",
+            seed_content=VALID_ANALYSIS_SEED_JSON,
+        )
+
+        assert "## Seed Specification\n```json" in p.prompt
+        assert "## Artifact Type\ndocument" in p.prompt
 
     def test_explicit_non_code_artifact_type_is_preserved(self) -> None:
         p = build_evaluate_subagent(
