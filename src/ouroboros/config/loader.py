@@ -484,15 +484,26 @@ def get_max_parallel_workers() -> int:
     if env_value:
         try:
             parsed = int(env_value)
-        except ValueError:
-            return 3
-        return parsed if parsed > 0 else 3
+        except ValueError as exc:
+            raise ConfigError(
+                "OUROBOROS_MAX_PARALLEL_WORKERS must be a positive integer",
+                config_key="OUROBOROS_MAX_PARALLEL_WORKERS",
+                details={"value": env_value},
+            ) from exc
+        if parsed <= 0:
+            raise ConfigError(
+                "OUROBOROS_MAX_PARALLEL_WORKERS must be greater than 0",
+                config_key="OUROBOROS_MAX_PARALLEL_WORKERS",
+                details={"value": env_value},
+            )
+        return parsed
 
-    try:
-        config = load_config()
-        return config.orchestrator.max_parallel_workers
-    except ConfigError:
+    config_path = get_config_dir() / "config.yaml"
+    if not config_path.exists():
         return 3
+
+    config = load_config(config_path)
+    return config.orchestrator.max_parallel_workers
 
 
 def get_codex_cli_path() -> str | None:

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 
 from ouroboros.cli.commands.run import (
     _load_skip_completed_markers,
@@ -120,12 +121,35 @@ def test_resolve_max_parallel_workers_reads_env(monkeypatch: pytest.MonkeyPatch)
     assert _resolve_max_parallel_workers() == 5
 
 
-def test_resolve_max_parallel_workers_reads_config_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_max_parallel_workers_reads_config_when_env_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Parallel worker caps should fall back to config when env override is absent."""
     monkeypatch.delenv("OUROBOROS_MAX_PARALLEL_WORKERS", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("orchestrator:\n  max_parallel_workers: 5\n", encoding="utf-8")
 
-    with patch("ouroboros.cli.commands.run.get_max_parallel_workers", return_value=5):
+    with patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path):
         assert _resolve_max_parallel_workers() == 5
+
+
+def test_resolve_max_parallel_workers_rejects_invalid_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid config worker caps should fail the CLI path clearly."""
+    monkeypatch.delenv("OUROBOROS_MAX_PARALLEL_WORKERS", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("orchestrator:\n  max_parallel_workers: 0\n", encoding="utf-8")
+
+    with (
+        patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        pytest.raises(typer.Exit) as exc_info,
+    ):
+        _resolve_max_parallel_workers()
+
+    assert exc_info.value.exit_code == 1
 
 
 @pytest.mark.asyncio

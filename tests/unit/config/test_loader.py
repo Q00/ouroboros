@@ -26,8 +26,8 @@ from ouroboros.config.loader import (
     get_dependency_analysis_model,
     get_double_diamond_model,
     get_llm_backend,
-    get_max_parallel_workers,
     get_llm_permission_mode,
+    get_max_parallel_workers,
     get_ontology_analysis_model,
     get_opencode_cli_path,
     get_qa_model,
@@ -514,18 +514,66 @@ class TestRuntimeHelperLookups:
 
         assert get_max_parallel_workers() == 5
 
-    def test_get_max_parallel_workers_falls_back_to_config(self) -> None:
+    @pytest.mark.parametrize("env_value", ["0", "-1", "five"])
+    def test_get_max_parallel_workers_rejects_invalid_env(
+        self,
+        env_value: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Invalid environment values fail instead of silently using the default."""
+        monkeypatch.setenv("OUROBOROS_MAX_PARALLEL_WORKERS", env_value)
+
+        with pytest.raises(ConfigError) as exc_info:
+            get_max_parallel_workers()
+
+        assert "OUROBOROS_MAX_PARALLEL_WORKERS" in str(exc_info.value)
+
+    def test_get_max_parallel_workers_falls_back_to_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
         """Config is used when env override is absent for max parallel workers."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("orchestrator:\n  max_parallel_workers: 5\n", encoding="utf-8")
+
         with (
             patch.dict(os.environ, {}, clear=True),
-            patch(
-                "ouroboros.config.loader.load_config",
-                return_value=OuroborosConfig(
-                    orchestrator=OrchestratorConfig(max_parallel_workers=5)
-                ),
-            ),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
         ):
             assert get_max_parallel_workers() == 5
+
+    def test_get_max_parallel_workers_defaults_when_config_missing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The built-in default is used only when no config source is present."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        ):
+            assert get_max_parallel_workers() == 3
+
+    @pytest.mark.parametrize("config_value", ["0", "five"])
+    def test_get_max_parallel_workers_rejects_invalid_config(
+        self,
+        config_value: str,
+        tmp_path: Path,
+    ) -> None:
+        """Invalid config values fail instead of silently using the default."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            f"orchestrator:\n  max_parallel_workers: {config_value}\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            get_max_parallel_workers()
+
+        assert "max_parallel_workers" in str(exc_info.value)
 
 
 class TestLLMHelperLookups:

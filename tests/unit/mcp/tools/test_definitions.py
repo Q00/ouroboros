@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.errors import ConfigError
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_signal
 from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
@@ -113,6 +114,20 @@ class TestExecuteSeedHandler:
 
         assert result.is_err
         assert "seed_content or seed_path is required" in str(result.error)
+
+    async def test_handle_reports_invalid_parallel_worker_config(self) -> None:
+        """Invalid worker-cap config should surface as a tool error."""
+        handler = ExecuteSeedHandler()
+
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
+            side_effect=ConfigError("orchestrator.max_parallel_workers must be greater than 0"),
+        ):
+            result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_err
+        assert "Invalid parallel worker configuration" in str(result.error)
+        assert "max_parallel_workers" in str(result.error)
 
     def test_execute_seed_handler_factory_accepts_runtime_backend(self) -> None:
         """Factory helper preserves explicit runtime backend selection."""
