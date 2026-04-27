@@ -280,6 +280,51 @@ class TestOscillationLoopRouting:
         assert projected is not None
         assert projected.status == LineageStatus.STAGNATED
 
+    def test_loop_routes_repetitive_feedback_reason_to_stagnated(self) -> None:
+        """Repetitive Wonder feedback should use the same STAGNATED route."""
+        from ouroboros.evolution.loop import EvolutionaryLoop
+
+        lineage = _lineage_with_generations(
+            GenerationRecord(
+                generation_number=1,
+                seed_id="seed_1",
+                ontology_snapshot=SCHEMA_A,
+                phase=GenerationPhase.COMPLETED,
+                wonder_questions=("same question", "same gap"),
+            ),
+            GenerationRecord(
+                generation_number=2,
+                seed_id="seed_2",
+                ontology_snapshot=SCHEMA_B,
+                phase=GenerationPhase.COMPLETED,
+                wonder_questions=("same question", "same gap"),
+            ),
+            GenerationRecord(
+                generation_number=3,
+                seed_id="seed_3",
+                ontology_snapshot=SCHEMA_C,
+                phase=GenerationPhase.COMPLETED,
+                wonder_questions=("different question",),
+            ),
+        )
+        latest_wonder = WonderOutput(
+            questions=("same question", "same gap"),
+            ontology_tensions=(),
+            should_continue=True,
+            reasoning="Repeated unresolved gap",
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            max_generations=30,
+        )
+
+        signal = criteria.evaluate(lineage, latest_wonder=latest_wonder)
+
+        assert not signal.converged
+        assert "Repetitive feedback" in signal.reason
+        assert EvolutionaryLoop._is_stagnation_route(signal.reason)
+
 
 class TestCompletedGenerationFiltering:
     """Regression guards for interrupted generations with pending ontologies."""
