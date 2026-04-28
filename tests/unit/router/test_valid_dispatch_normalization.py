@@ -249,6 +249,56 @@ def test_valid_router_dispatch_forms_resolve_expected_parsed_dispatch_fields(
     assert result.outcome is ResolveOutcome.MATCH
 
 
+def test_valid_dispatch_preserves_multiline_inline_seed_payload(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    skill_md_path = _write_dispatchable_skill(skills_dir, "run")
+    runtime_cwd = tmp_path / "workspace"
+    seed_content = (
+        "goal: test\n"
+        "constraints:\n"
+        "  - keep it simple\n"
+        "acceptance_criteria:\n"
+        "  - works"
+    )
+    prompt = f"/ouroboros:run\n{seed_content}"
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt=prompt,
+            cwd=runtime_cwd,
+            skills_dir=skills_dir,
+        )
+    )
+
+    expected_args = {
+        "seed_path": seed_content,
+        "cwd": str(runtime_cwd),
+        "combined": f"cwd={runtime_cwd} seed={seed_content}",
+        "nested": {
+            "values": [
+                seed_content,
+                str(runtime_cwd),
+                True,
+            ],
+        },
+    }
+    _assert_resolved_payload(
+        result,
+        Resolved(
+            skill_name="run",
+            command_prefix="/ouroboros:run",
+            prompt=prompt,
+            skill_path=skill_md_path,
+            mcp_tool="ouroboros_execute_seed",
+            mcp_args=expected_args,
+            first_argument=seed_content,
+        ),
+    )
+    assert result.outcome is ResolveOutcome.MATCH
+
+
 def test_valid_dispatch_without_argument_normalizes_first_argument_template_to_empty_string(
     tmp_path: Path,
 ) -> None:

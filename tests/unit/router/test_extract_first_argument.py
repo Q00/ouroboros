@@ -42,6 +42,11 @@ from ouroboros.router import extract_first_argument
             "add dark mode to settings",
             id="fully-quoted-phrase",
         ),
+        pytest.param(
+            "goal: test\nconstraints:\n  - keep it simple\nacceptance_criteria:\n  - works",
+            "goal: test\nconstraints:\n  - keep it simple\nacceptance_criteria:\n  - works",
+            id="multiline-inline-content-preserved",
+        ),
     ],
 )
 def test_extract_first_argument_returns_full_argument_payload(

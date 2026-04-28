@@ -10,7 +10,7 @@ _SKILL_COMMAND_PATTERN = re.compile(
     r"^\s*(?:(?P<ooo_prefix>ooo)\s+(?P<ooo_skill>[a-z0-9][a-z0-9_-]*)|"
     r"(?P<slash_prefix>/ouroboros:)(?P<slash_skill>[a-z0-9][a-z0-9_-]*))"
     r"(?:\s+(?P<remainder>.*))?$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.DOTALL,
 )
 
 
