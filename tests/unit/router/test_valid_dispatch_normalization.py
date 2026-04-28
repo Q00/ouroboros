@@ -249,6 +249,34 @@ def test_valid_router_dispatch_forms_resolve_expected_parsed_dispatch_fields(
     assert result.outcome is ResolveOutcome.MATCH
 
 
+@pytest.mark.parametrize(
+    "seed_path",
+    [
+        pytest.param(r"C:\temp\seed.yaml --strict", id="drive-letter-path"),
+        pytest.param(r"\\server\share\seed.yaml --strict", id="unc-path"),
+    ],
+)
+def test_valid_dispatch_preserves_windows_path_backslashes(
+    tmp_path: Path,
+    seed_path: str,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    runtime_cwd = tmp_path / "workspace"
+    _write_dispatchable_skill(skills_dir, "run")
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt=f"ooo run {seed_path}",
+            cwd=runtime_cwd,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.first_argument == seed_path
+    assert result.mcp_args["seed_path"] == seed_path
+
+
 def test_valid_dispatch_without_argument_normalizes_first_argument_template_to_empty_string(
     tmp_path: Path,
 ) -> None:

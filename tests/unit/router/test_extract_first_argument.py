@@ -42,6 +42,16 @@ from ouroboros.router import extract_first_argument
             "add dark mode to settings",
             id="fully-quoted-phrase",
         ),
+        pytest.param(
+            r"C:\temp\seed.yaml --strict",
+            r"C:\temp\seed.yaml --strict",
+            id="windows-drive-path-backslashes-preserved",
+        ),
+        pytest.param(
+            r"\\server\share\seed.yaml --strict",
+            r"\\server\share\seed.yaml --strict",
+            id="windows-unc-path-backslashes-preserved",
+        ),
     ],
 )
 def test_extract_first_argument_returns_full_argument_payload(

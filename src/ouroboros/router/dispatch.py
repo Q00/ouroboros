@@ -54,6 +54,8 @@ from ouroboros.router.types import (
 _MCP_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SKILL_IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DISPATCH_TEMPLATE_PATTERN = re.compile(r"\$(?:CWD|1)(?![A-Za-z0-9_])")
+_WINDOWS_DRIVE_PATH_PAYLOAD_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
+_WINDOWS_UNC_PATH_PAYLOAD_PATTERN = re.compile(r"^\\\\[^\\/\s]+[\\/][^\\/\s]+")
 _REQUIRED_MCP_FRONTMATTER_KEYS = ("mcp_tool", "mcp_args")
 _MCP_FRONTMATTER_VALUE_TYPES = "string, finite number, boolean, null, list, or mapping"
 _PACKAGED_SKILL_CACHE: TemporaryDirectory[str] | None = None
@@ -261,16 +263,24 @@ def extract_first_argument(remainder: str | None) -> str | None:
     """Extract the full argument payload following a skill command prefix.
 
     The legacy name is preserved for API stability, but the semantics cover the
-    whole remainder: shell-style tokenization is used purely to strip matching
-    quotes and escape sequences, then tokens are rejoined with single spaces so
-    natural-language usage like ``ooo interview add dark mode to settings``
-    yields the full phrase rather than just ``add``. Quoted forms such as
-    ``ooo interview "add dark mode"`` produce the same unquoted result. If
-    shell tokenization fails (unterminated quote), a whitespace split is used
-    as fallback.
+    whole remainder. Windows drive-letter and UNC path payloads are preserved
+    before shell-style tokenization because POSIX ``shlex`` treats backslashes
+    as escapes. Other single-line payloads still use shell-style tokenization
+    purely to strip matching quotes and escape sequences, then tokens are
+    rejoined with single spaces so natural-language usage like
+    ``ooo interview add dark mode to settings`` yields the full phrase rather
+    than just ``add``. Quoted forms such as ``ooo interview "add dark mode"``
+    produce the same unquoted result. If shell tokenization fails (unterminated
+    quote), a whitespace split is used as fallback.
     """
     if remainder is None or not remainder.strip():
         return None
+    stripped_remainder = remainder.strip()
+    if (
+        _WINDOWS_DRIVE_PATH_PAYLOAD_PATTERN.match(stripped_remainder)
+        or _WINDOWS_UNC_PATH_PAYLOAD_PATTERN.match(stripped_remainder)
+    ):
+        return stripped_remainder
     try:
         parts = shlex.split(remainder)
     except ValueError:
