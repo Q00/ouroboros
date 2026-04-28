@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **opencode/bridge**: Plugin v23 recognizes `_subagents` array for parallel fan-out. Per-payload validation, truncation, and dedupe. One failed dispatch does not abort the rest. New `ouroboros_subagents` and `ouroboros_dispatch_errors` metadata fields. Backwards compatible with v22 single-payload `_subagent` contract.
 
 ### Fixed
+- **skills**: Renamed the packaged `resume` skill to `resume-session` so Claude Code's built-in `/resume` session picker is no longer shadowed. Use `ooo resume-session` or `/ouroboros:resume-session` for the Ouroboros in-flight session listing.
 - **mcp/security**: `FREETEXT_FIELDS` allowlist for user-input fields (goals, prompts, descriptions) — shell metacharacters (`;`, `|`, `&`, backticks, `$()`) are no longer rejected in fields where they are legitimate prose. Structural fields remain strictly validated.
 - **opencode/bridge**: Robustness hardening (v22) — no uncaught errors under any input. Adds reject-path logging, frozen-content guards, empty-sessionID guard, client init-order guard, 5-second FNV-1a prompt dedupe, 100 KB prompt byte cap with truncation marker, user-visible `surfaceErr()` for dispatch failures (no more silent "dispatched but never ran"), and an absolute outer try/catch so the plugin cannot throw into the opencode runLoop.
 

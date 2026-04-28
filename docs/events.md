@@ -1,7 +1,7 @@
 # Event Payload Schema Reference
 
 This document defines the stable payload fields for Ouroboros EventStore
-events. Consumers that read events -- TUI, `ooo status`, `ooo resume`,
+events. Consumers that read events -- TUI, `ooo status`, `ooo resume-session`,
 `ouroboros_query_events` -- can rely on these
 fields not being removed or renamed within a given `event_version`.
 

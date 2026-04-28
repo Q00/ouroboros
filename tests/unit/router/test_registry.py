@@ -17,6 +17,7 @@ from ouroboros.router import (
     SkillDispatchTarget,
     SkillDispatchTargetResolution,
     normalize_skill_identifier,
+    packaged_skill_dispatch_registry,
     resolve_skill_dispatch,
     resolve_skill_dispatch_target,
 )
@@ -757,3 +758,14 @@ def test_packaged_registry_target_resolver_missing_skill_returns_not_handled(
 
 def test_packaged_registry_target_resolver_type_alias_includes_not_handled() -> None:
     assert SkillDispatchTargetResolution.__value__ == (SkillDispatchTarget | NotHandled)
+
+
+def test_packaged_registry_does_not_claim_claude_builtin_resume_command() -> None:
+    with packaged_skill_dispatch_registry() as registry:
+        reserved = registry.resolve("resume")
+        renamed = registry.resolve("resume-session")
+
+    assert isinstance(reserved, NotHandled)
+    assert reserved.category is NoMatchReason.SKILL_NOT_FOUND
+    assert isinstance(renamed, SkillDispatchTarget)
+    assert renamed.skill_name == "resume-session"
