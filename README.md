@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/q00-ouroboros-badge.png)](https://mseep.ai/app/q00-ouroboros)
+
 <p align="right">
   <strong>English</strong> | <a href="./README.ko.md">한국어</a>
 </p>
