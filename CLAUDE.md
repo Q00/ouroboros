@@ -32,7 +32,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo pm` or `ooo pm ...` | Read `skills/pm/SKILL.md` and follow it |
 | `ooo brownfield` or `ooo brownfield ...` | Read `skills/brownfield/SKILL.md` and follow it |
 | `ooo publish` or `ooo publish ...` | Read `skills/publish/SKILL.md` and follow it |
-| `ooo resume` | Read `skills/resume/SKILL.md` and follow it |
+| `ooo resume-session` | Read `skills/resume-session/SKILL.md` and follow it |
 
 **Important**: Do NOT use the Skill tool. Read the file with the Read tool and execute its instructions directly.
 

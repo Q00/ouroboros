@@ -1,31 +1,35 @@
 ---
-name: resume
-description: "List in-flight sessions and show the commands needed to re-attach after MCP disconnect"
+name: resume-session
+description: "List in-flight Ouroboros sessions and show the commands needed to re-attach after MCP disconnect"
 ---
 
-# /ouroboros:resume
+# /ouroboros:resume-session
 
-Recover in-flight sessions after an unexpected MCP server disconnect.
+Recover in-flight Ouroboros sessions after an unexpected MCP server disconnect.
+
+Claude Code reserves `/resume` for its built-in session picker. This skill
+intentionally uses `resume-session` so it does not shadow that native command.
 
 ## Usage
 
 ```
-ooo resume
-ooo resume --all
+ooo resume-session
+ooo resume-session --all
+/ouroboros:resume-session
 ```
 
-**Trigger keywords:** "resume session", "re-attach", "mcp disconnected", "lost session", "in-flight"
+**Trigger keywords:** "in-flight Ouroboros sessions", "re-attach", "mcp disconnected", "lost Ouroboros execution"
 
 ## How It Works
 
-`ooo resume` reads the EventStore directly (no MCP server required) and lists
+`ooo resume-session` reads the EventStore directly (no MCP server required) and lists
 every session that is still in a `running` or `paused` state. The command is
 strictly read-only — it never creates the data directory, never writes
 schema, and never appends events. Its job is to surface the identifiers you
 need to re-attach.
 
-- `ooo resume` shows the 20 most recent active sessions.
-- `ooo resume --all` shows every active session.
+- `ooo resume-session` shows the 20 most recent active sessions.
+- `ooo resume-session --all` shows every active session.
 
 ## Instructions
 
@@ -85,7 +89,7 @@ ouroboros tui monitor
 ## Example
 
 ```
-User: ooo resume
+User: ooo resume-session
 
 ┌─────────────────────── In-Flight Sessions ───────────────────────┐
 │  #  Session ID          Execution ID        Status    Started    │

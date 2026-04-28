@@ -14,7 +14,7 @@ no MCP spin-up, no seed file required).
 Scope:
 
 - Every command line emitted by ``resume._format_reattach_guidance``.
-- Every ``ouroboros ...`` directive documented in ``skills/resume/SKILL.md``.
+- Every ``ouroboros ...`` directive documented in ``skills/resume-session/SKILL.md``.
 - The bare ``ouroboros`` entrypoints listed in the CLAUDE.md ``ooo`` table
   that correspond to a real CLI subcommand (plugin-only skills such as
   ``ooo welcome`` are not CLI commands and are skipped).
@@ -115,7 +115,7 @@ class TestReattachGuidanceCommandsAreReal:
 
 
 # ---------------------------------------------------------------------------
-# 2) Every `ouroboros ...` directive in skills/resume/SKILL.md
+# 2) Every `ouroboros ...` directive in skills/resume-session/SKILL.md
 # ---------------------------------------------------------------------------
 
 

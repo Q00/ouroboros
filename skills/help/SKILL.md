@@ -37,6 +37,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo evaluate` | 3-stage verification | MCP |
 | `ooo unstuck` | 5 lateral thinking personas | Plugin |
 | `ooo status` | Session status + drift check | MCP |
+| `ooo resume-session` | List in-flight sessions and re-attach commands | CLI |
 | `ooo setup` | Installation wizard | Plugin |
 | `ooo welcome` | First-touch welcome guide | Plugin |
 | `ooo tutorial` | Interactive hands-on learning | Plugin |
@@ -76,6 +77,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | "write prd", "pm interview", "product requirements", "create prd" | `ooo pm` |
 | "qa check", "quality check" | `ooo qa` |
 | "cancel execution", "stop job", "kill stuck", "abort execution" | `ooo cancel` |
+| "in-flight sessions", "mcp disconnected", "lost Ouroboros execution" | `ooo resume-session` |
 | "update ouroboros", "upgrade ouroboros" | `ooo update` |
 | "brownfield defaults", "brownfield scan" | `ooo brownfield` |
 | "publish to github", "create issues from seed", "seed to issues" | `ooo publish` |
@@ -100,6 +102,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `/ouroboros:evaluate` | 3-stage verification | MCP |
 | `/ouroboros:unstuck` | 5 lateral thinking personas | Plugin |
 | `/ouroboros:status` | Session status + drift check | MCP |
+| `/ouroboros:resume-session` | List in-flight sessions and re-attach commands | CLI |
 | `/ouroboros:setup` | Installation wizard | Plugin |
 | `/ouroboros:tutorial` | Interactive hands-on learning | Plugin |
 | `/ouroboros:help` | This guide | Plugin |
