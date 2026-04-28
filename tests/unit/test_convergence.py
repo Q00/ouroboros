@@ -454,6 +454,26 @@ class TestConvergenceGating:
         assert not signal.converged
         assert "final approval" in signal.reason
 
+    def test_gate_failure_stagnates_when_ontology_is_stalled(self) -> None:
+        """Repeated unchanged ontology plus failing evaluation should terminate as stagnated."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+            eval_min_score=0.7,
+        )
+        signal = criteria.evaluate(
+            lineage,
+            latest_evaluation=EvaluationSummary(
+                final_approved=False, highest_stage_passed=1, score=0.9
+            ),
+        )
+
+        assert not signal.converged
+        assert "Stagnation detected" in signal.reason
+        assert "Evaluation gate: final approval is false" in signal.reason
+
     def test_gate_blocks_when_score_low(self) -> None:
         """Gate enabled + score < min -> converged=False."""
         lineage = self._converging_lineage()
@@ -621,6 +641,57 @@ class TestConvergenceGating:
         assert not signal.converged
         assert "reward hacking risk" in signal.reason
 
+    def test_regression_stagnates_when_ontology_is_stalled(self) -> None:
+        """Repeated unchanged ontology plus AC regression should terminate as stagnated."""
+        lineage = _lineage_with_generations(
+            GenerationRecord(
+                generation_number=1,
+                seed_id="seed_1",
+                ontology_snapshot=SCHEMA_A,
+                phase=GenerationPhase.COMPLETED,
+                evaluation_summary=EvaluationSummary(
+                    final_approved=True,
+                    highest_stage_passed=2,
+                    ac_results=(ACResult(ac_index=0, ac_content="Works", passed=True),),
+                ),
+            ),
+            GenerationRecord(
+                generation_number=2,
+                seed_id="seed_2",
+                ontology_snapshot=SCHEMA_A,
+                phase=GenerationPhase.COMPLETED,
+                evaluation_summary=EvaluationSummary(
+                    final_approved=True,
+                    highest_stage_passed=2,
+                    ac_results=(ACResult(ac_index=0, ac_content="Works", passed=True),),
+                ),
+            ),
+            GenerationRecord(
+                generation_number=3,
+                seed_id="seed_3",
+                ontology_snapshot=SCHEMA_A,
+                phase=GenerationPhase.COMPLETED,
+                evaluation_summary=EvaluationSummary(
+                    final_approved=False,
+                    highest_stage_passed=2,
+                    ac_results=(ACResult(ac_index=0, ac_content="Works", passed=False),),
+                ),
+            ),
+        )
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            regression_gate_enabled=True,
+        )
+
+        signal = criteria.evaluate(lineage)
+
+        assert not signal.converged
+        assert "Stagnation detected" in signal.reason
+        assert "Regression detected" in signal.reason
+        assert signal.failed_acs == (0,)
+
 
 class TestZeroMutationConvergence:
     """Tests for Idea-first convergence without mandatory ontology mutation."""
@@ -724,6 +795,23 @@ class TestValidationGate:
             validation_output="Validation skipped: no project directory found",
         )
         assert not signal.converged
+        assert "Validation gate blocked" in signal.reason
+
+    def test_stagnates_when_validation_blocks_stalled_ontology(self) -> None:
+        """Repeated unchanged ontology plus validation failure should terminate as stagnated."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            validation_gate_enabled=True,
+        )
+        signal = criteria.evaluate(
+            lineage,
+            validation_output="Validation error: subprocess failed",
+        )
+
+        assert not signal.converged
+        assert "Stagnation detected" in signal.reason
         assert "Validation gate blocked" in signal.reason
 
     def test_blocks_when_validation_error(self) -> None:

@@ -45,6 +45,11 @@ LINEAGE_STATUS_ICONS = {
     LineageStatus.ABORTED: "[dim]\u2718[/]",
 }
 
+TERMINAL_LINEAGE_MARKERS = {
+    LineageStatus.CONVERGED: "  [bold green][CONVERGED][/]",
+    LineageStatus.STAGNATED: "  [yellow][STAGNATED][/]",
+}
+
 
 class GenerationNodeSelected(Message):
     """Message emitted when a generation node is selected in the tree."""
@@ -130,6 +135,11 @@ class LineageTreeWidget(Widget):
             goal += "..."
         return f"{status_icon} [bold]{goal}[/]"
 
+    @staticmethod
+    def _terminal_marker_for_status(status: LineageStatus) -> str | None:
+        """Return a leaf marker for terminal lineage states shown in the tree."""
+        return TERMINAL_LINEAGE_MARKERS.get(status)
+
     def _rebuild_tree(self) -> None:
         if self.lineage is None or not self.lineage.generations:
             return
@@ -173,12 +183,11 @@ class LineageTreeWidget(Widget):
             for q in gen.wonder_questions:
                 gen_node.add_leaf(f'  [cyan]Wonder:[/] "{q}"')
 
-            # Show convergence marker on last generation
-            if (
-                gen == self.lineage.generations[-1]
-                and self.lineage.status == LineageStatus.CONVERGED
-            ):
-                gen_node.add_leaf("  [bold green][CONVERGED][/]")
+            # Show terminal marker on last generation
+            if gen == self.lineage.generations[-1]:
+                terminal_marker = self._terminal_marker_for_status(self.lineage.status)
+                if terminal_marker:
+                    gen_node.add_leaf(terminal_marker)
 
             gen_node.expand()
 

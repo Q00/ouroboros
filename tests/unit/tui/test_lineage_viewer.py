@@ -224,6 +224,13 @@ class TestLineageTreeWidget:
         msg = GenerationNodeSelected(generation_number=3)
         assert msg.generation_number == 3
 
+    def test_stagnated_status_has_terminal_marker(self) -> None:
+        """Stagnated lineages should annotate the last tree generation as terminal."""
+        assert (
+            LineageTreeWidget._terminal_marker_for_status(LineageStatus.STAGNATED)
+            == "  [yellow][STAGNATED][/]"
+        )
+
 
 # =============================================================================
 # GenerationDetailPanel Tests

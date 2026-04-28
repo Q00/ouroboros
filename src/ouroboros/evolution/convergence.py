@@ -104,60 +104,62 @@ class ConvergenceCriteria:
 
         latest_sim = self._latest_similarity(lineage)
 
-        if self.eval_gate_enabled and latest_evaluation is not None:
-            eval_block = self._check_evaluation_contract_gate(latest_evaluation)
-            if eval_block is not None:
-                failed_acs, reason = eval_block
-                return ConvergenceSignal(
-                    converged=False,
-                    reason=reason,
-                    ontology_similarity=latest_sim,
-                    generation=current_gen,
-                    failed_acs=failed_acs,
-                )
+        blocking_signal: tuple[tuple[int, ...], str] | None = None
 
-        if self.validation_gate_enabled and validation_output:
+        if self.eval_gate_enabled:
+            if latest_evaluation is None:
+                blocking_signal = ((), "Evaluation gate: no evaluation summary available")
+            else:
+                blocking_signal = self._check_evaluation_contract_gate(latest_evaluation)
+
+        if blocking_signal is None and self.validation_gate_enabled and validation_output:
             if self._validation_blocks_convergence(validation_output):
-                return ConvergenceSignal(
-                    converged=False,
-                    reason=(f"Validation gate blocked: {validation_output}"),
-                    ontology_similarity=latest_sim,
-                    generation=current_gen,
-                )
+                blocking_signal = ((), f"Validation gate blocked: {validation_output}")
 
-        if self.regression_gate_enabled:
+        if blocking_signal is None and self.regression_gate_enabled:
             completed_lineage = lineage.model_copy(update={"generations": completed})
             regression_report = RegressionDetector().detect(completed_lineage)
             if regression_report.has_regressions:
                 regressed = regression_report.regressed_ac_indices
                 display = ", ".join(str(i + 1) for i in regressed)
-                return ConvergenceSignal(
-                    converged=False,
-                    reason=f"Regression detected: {len(regressed)} AC(s) regressed (AC {display})",
-                    ontology_similarity=latest_sim,
-                    generation=current_gen,
-                    failed_acs=regressed,
+                blocking_signal = (
+                    regressed,
+                    f"Regression detected: {len(regressed)} AC(s) regressed (AC {display})",
                 )
-
-        contract_gate_passed = not self.eval_gate_enabled or latest_evaluation is not None
 
         wonder_has_gap = latest_wonder is not None and latest_wonder.should_continue
 
         # Stagnation is not successful convergence unless the Idea contract gate
         # already passed and Wonder has no substantive gap; then zero ontology
         # mutation may be the correct outcome.
-        if (not contract_gate_passed or wonder_has_gap) and num_completed >= self.stagnation_window:
+        if (
+            blocking_signal is not None or wonder_has_gap
+        ) and num_completed >= self.stagnation_window:
             stagnant = self._check_stagnation(lineage)
             if stagnant:
+                failed_acs, block_reason = blocking_signal or ((), "")
+                block_suffix = f" while blocked by {block_reason}" if block_reason else ""
                 return ConvergenceSignal(
                     converged=False,
                     reason=(
                         f"Stagnation detected: ontology unchanged for "
                         f"{self.stagnation_window} consecutive generations"
+                        f"{block_suffix}"
                     ),
                     ontology_similarity=latest_sim,
                     generation=current_gen,
+                    failed_acs=failed_acs,
                 )
+
+        if blocking_signal is not None:
+            failed_acs, reason = blocking_signal
+            return ConvergenceSignal(
+                converged=False,
+                reason=reason,
+                ontology_similarity=latest_sim,
+                generation=current_gen,
+                failed_acs=failed_acs,
+            )
 
         # Signal 1: Idea contract satisfied and Wonder reports no substantive gap.
         if (
