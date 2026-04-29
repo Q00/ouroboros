@@ -54,6 +54,10 @@ from ouroboros.router.types import (
 _MCP_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SKILL_IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DISPATCH_TEMPLATE_PATTERN = re.compile(r"\$(?:CWD|1)(?![A-Za-z0-9_])")
+# Windows literal path payloads (drive-letter `C:\…` or UNC `\\server\share\…`)
+# must skip shell tokenization — `shlex.split` treats backslash as an escape and
+# silently drops it, so `C:\temp\seed.yaml` would dispatch as `C:tempseed.yaml`.
+_WINDOWS_LITERAL_PATH_PATTERN = re.compile(r"^(?:[A-Za-z]:\\|\\\\)")
 _REQUIRED_MCP_FRONTMATTER_KEYS = ("mcp_tool", "mcp_args")
 _MCP_FRONTMATTER_VALUE_TYPES = "string, finite number, boolean, null, list, or mapping"
 _PACKAGED_SKILL_CACHE: TemporaryDirectory[str] | None = None
@@ -273,6 +277,8 @@ def extract_first_argument(remainder: str | None) -> str | None:
     if remainder is None or not remainder.strip():
         return None
     if re.search(r"[\r\n].*\S", remainder):
+        return remainder
+    if _WINDOWS_LITERAL_PATH_PATTERN.match(remainder.strip()):
         return remainder
     try:
         parts = shlex.split(remainder)
