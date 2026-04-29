@@ -368,6 +368,51 @@ class TestCheckShutdownSerialization:
         assert ps["execution_output"] == "exec output"
         assert ps["evaluation_summary"]["score"] == 0.6
 
+    @pytest.mark.asyncio
+    async def test_post_validation_interrupt_persists_validation_output(self) -> None:
+        """Shutdown after validation must preserve validator evidence.
+
+        Regression for PR #497 review: the post-validation/pre-evaluation
+        checkpoint used ``last_completed_phase=executing`` but omitted
+        ``validation_output``. Resume then had to re-run validation and could
+        lose the original failure/skip evidence that convergence must honor.
+        """
+        loop = self._make_loop()
+        lineage = MagicMock()
+        lineage.lineage_id = LINEAGE_ID
+        lineage.generations = []
+
+        seed = MagicMock()
+        seed.metadata.seed_id = "s1"
+        seed.to_dict.return_value = {"goal": "test"}
+
+        async def executor(_seed, parallel=True):
+            return "exec output"
+
+        async def validator(_seed, _execution_output):
+            loop._shutdown_requested = True
+            return "Validation fix failed (attempt 1): still broken"
+
+        loop.executor = executor
+        loop.validator = validator
+
+        result = await loop._run_generation_phases(
+            lineage=lineage,
+            generation_number=1,
+            current_seed=seed,
+            execute=True,
+        )
+
+        assert result.is_ok
+        gen_result = result.value
+        assert gen_result.phase == GenerationPhase.INTERRUPTED
+        assert gen_result.validation_output == "Validation fix failed (attempt 1): still broken"
+
+        event = loop.event_store.append.call_args[0][0]
+        ps = event.data["partial_state"]
+        assert ps["execution_output"] == "exec output"
+        assert ps["validation_output"] == "Validation fix failed (attempt 1): still broken"
+
 
 # -- Resume restore tests --
 
