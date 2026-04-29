@@ -307,6 +307,39 @@ class TestBrownfieldHandlerDispatch:
         assert meta["count"] == 1
 
     @pytest.mark.asyncio
+    async def test_scan_rejects_missing_scan_root(self, tmp_path) -> None:
+        store = _make_store_stub()
+        handler = BrownfieldHandler(_store=store)
+        missing = tmp_path / "missing"
+
+        with patch(
+            "ouroboros.mcp.tools.brownfield_handler.scan_and_register",
+            new_callable=AsyncMock,
+        ) as scan_mock:
+            result = await handler.handle({"action": "scan", "scan_root": str(missing)})
+
+        assert result.is_err
+        assert "scan_root must be an existing directory" in str(result.error)
+        scan_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scan_rejects_file_scan_root(self, tmp_path) -> None:
+        store = _make_store_stub()
+        handler = BrownfieldHandler(_store=store)
+        scan_file = tmp_path / "not-a-directory.txt"
+        scan_file.write_text("not a directory")
+
+        with patch(
+            "ouroboros.mcp.tools.brownfield_handler.scan_and_register",
+            new_callable=AsyncMock,
+        ) as scan_mock:
+            result = await handler.handle({"action": "scan", "scan_root": str(scan_file)})
+
+        assert result.is_err
+        assert "scan_root must be an existing directory" in str(result.error)
+        scan_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_auto_detect_register(self) -> None:
         """Providing path + name without action auto-detects 'register'."""
         store = _make_store_stub()

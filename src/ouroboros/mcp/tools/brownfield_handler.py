@@ -3,9 +3,9 @@
 Provides an ``ouroboros_brownfield`` MCP tool for managing brownfield
 repository registrations in the SQLite database. Supports four actions:
 
-- **scan** — Scan home directory for git repos with GitHub origins and
-  register them in the DB. Optionally generates one-line descriptions
-  via a Frugal-tier LLM.
+- **scan** — Walk a caller-supplied root (or the home directory by
+  default) for seed repos/worktrees, include Git-reported linked worktrees
+  from normal repo roots, and register discovered local repositories in the DB.
 - **register** — Manually register a single repository by path.
 - **query** — List all registered repos or get the current default.
 - **set_default** — Set a registered repo as the default brownfield context.
@@ -74,7 +74,7 @@ class BrownfieldHandler:
 
     Manages brownfield repository registrations with action-based dispatch:
 
-    - ``scan`` — Walk ``~/`` for GitHub repos and register them.
+    - ``scan`` — Walk a scan root for seed repos/worktrees and register them.
     - ``register`` — Manually register one repo.
     - ``query`` — List repos or fetch the default.
     - ``set_default`` — Set a repo as the default brownfield context.
@@ -163,7 +163,10 @@ class BrownfieldHandler:
                 MCPToolParameter(
                     name="scan_root",
                     type=ToolInputType.STRING,
-                    description=("Root directory for 'scan' action. Defaults to ~/."),
+                    description=(
+                        "Existing directory to walk for the 'scan' action. "
+                        "Defaults to the current user's home directory."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -320,19 +323,25 @@ class BrownfieldHandler:
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Scan home directory for git repos and register them.
+        """Scan an existing root directory for repos/worktrees and register them.
 
         Delegates to ``bigbang.brownfield.scan_and_register`` which handles
-        directory walking, GitHub origin filtering, LLM description generation,
-        and DB upsert.
+        directory walking, linked worktree expansion, and DB upsert.
         """
         scan_root_str = arguments.get("scan_root")
-        scan_root = Path(scan_root_str) if scan_root_str else None
+        scan_root = Path(scan_root_str).expanduser() if scan_root_str else None
+        if scan_root is not None and not scan_root.is_dir():
+            return Result.err(
+                MCPToolError(
+                    f"scan_root must be an existing directory: {scan_root}",
+                    tool_name=_TOOL_NAME,
+                )
+            )
 
         store = await self._get_store()
 
         # scan_and_register handles the full workflow:
-        # walk dirs → filter GitHub origins → generate descs → upsert
+        # walk dirs → expand linked worktrees → upsert
         repos = await scan_and_register(
             store=store,
             llm_adapter=None,  # No LLM in MCP context for now
