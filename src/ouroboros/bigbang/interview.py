@@ -729,7 +729,14 @@ class InterviewEngine:
         if state.ambiguity_score is None:
             return ""
 
-        from ouroboros.bigbang.ambiguity import get_milestone
+        from pydantic import ValidationError as PydanticValidationError
+
+        from ouroboros.bigbang.ambiguity import (
+            AmbiguityScore,
+            ScoreBreakdown,
+            get_completion_floor_failures,
+            get_milestone,
+        )
 
         milestone, milestone_desc = get_milestone(state.ambiguity_score)
 
@@ -739,7 +746,16 @@ class InterviewEngine:
             f"- Milestone: **{milestone.value.upper()}** — {milestone_desc}",
         ]
 
+        reconstructed_score: AmbiguityScore | None = None
         if isinstance(state.ambiguity_breakdown, dict):
+            try:
+                reconstructed_score = AmbiguityScore(
+                    overall_score=state.ambiguity_score,
+                    breakdown=ScoreBreakdown.model_validate(state.ambiguity_breakdown),
+                )
+            except PydanticValidationError:
+                reconstructed_score = None
+
             weakest_components: list[tuple[float, str, str]] = []
             for payload in state.ambiguity_breakdown.values():
                 if not isinstance(payload, dict):
@@ -760,6 +776,20 @@ class InterviewEngine:
                 lines.append(f"- Weakest area: {name} ({clarity:.2f} clarity)")
                 if justification:
                     lines.append(f"  Reason: {justification}")
+
+        if reconstructed_score is not None:
+            floor_failures = get_completion_floor_failures(
+                reconstructed_score,
+                is_brownfield=state.is_brownfield,
+            )
+            if floor_failures:
+                lines.append(f"- Per-dimension gaps: {'; '.join(floor_failures)}")
+                lines.append(
+                    "- Keep drilling those dimensions before asking a closure-style question, "
+                    "even when overall ambiguity reads low."
+                )
+            else:
+                lines.append("- Per-dimension gaps: none")
 
         lines.append("- Drill into the weakest area with a concrete, scenario-grounded question.")
         return "\n".join(lines)
