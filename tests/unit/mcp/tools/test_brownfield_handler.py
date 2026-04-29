@@ -324,9 +324,7 @@ class TestBrownfieldHandlerDispatch:
         # The handler resolves scan_root before passing it down so the validity
         # check and the walk operate on the same path. Compare against the
         # resolved tmp_path (e.g. macOS prefixes /private/var with /private).
-        mock_scan.assert_awaited_once_with(
-            store=store, llm_adapter=None, root=tmp_path.resolve()
-        )
+        mock_scan.assert_awaited_once_with(store=store, llm_adapter=None, root=tmp_path.resolve())
 
     @pytest.mark.asyncio
     async def test_scan_action_rejects_nonexistent_scan_root(self, tmp_path: Path) -> None:
