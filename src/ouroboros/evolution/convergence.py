@@ -127,7 +127,16 @@ class ConvergenceCriteria:
                     f"Regression detected: {len(regressed)} AC(s) regressed (AC {display})",
                 )
 
-        wonder_has_gap = latest_wonder is not None and latest_wonder.should_continue
+        # A gap exists whenever Wonder asked to continue OR still surfaced
+        # questions/tensions. Mirrors loop.py's contradictory-Wonder override
+        # (should_continue=False with non-empty questions still routes through
+        # Reflect) so the stability branch below cannot terminate while Wonder
+        # is still reporting unresolved gaps.
+        wonder_has_gap = latest_wonder is not None and (
+            latest_wonder.should_continue
+            or bool(latest_wonder.questions)
+            or bool(latest_wonder.ontology_tensions)
+        )
 
         # Stagnation is not successful convergence unless the Idea contract gate
         # already passed and Wonder has no substantive gap; then zero ontology

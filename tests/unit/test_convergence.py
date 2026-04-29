@@ -985,6 +985,98 @@ class TestIdeaContractWonderNoGap:
         assert "Idea contract converged" not in signal.reason
 
 
+class TestStabilityBranchHonorsWonderGaps:
+    """Stability convergence (similarity >= threshold) must respect Wonder gaps.
+
+    Regression for PR #497 second-round review: previously `wonder_has_gap` was
+    derived only from `should_continue`, so a stable ontology plus passing
+    evaluation could terminate as converged even when Wonder was still
+    surfacing questions or ontology_tensions.
+    """
+
+    def _stable_lineage(self) -> OntologyLineage:
+        return _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+
+    def _passing_evaluation(self) -> EvaluationSummary:
+        return EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=3,
+            score=0.95,
+            drift_score=0.0,
+            reward_hacking_risk=0.0,
+        )
+
+    def test_stable_ontology_with_lingering_questions_does_not_converge(self) -> None:
+        """should_continue=False but with questions must keep stability branch closed."""
+        lineage = self._stable_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+        wonder = WonderOutput(
+            questions=("Is field Z still ambiguous?",),
+            ontology_tensions=(),
+            should_continue=False,
+            reasoning="Stop requested but unresolved questions remain.",
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=wonder,
+            latest_evaluation=self._passing_evaluation(),
+        )
+
+        assert not signal.converged
+        assert "stable ontology lens" not in signal.reason
+        assert "Idea contract converged" not in signal.reason
+
+    def test_stable_ontology_with_lingering_tensions_does_not_converge(self) -> None:
+        """Lingering ontology_tensions must also block the stability branch."""
+        lineage = self._stable_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+        wonder = WonderOutput(
+            questions=(),
+            ontology_tensions=("Field A contradicts field B.",),
+            should_continue=False,
+            reasoning="Tension unresolved.",
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=wonder,
+            latest_evaluation=self._passing_evaluation(),
+        )
+
+        assert not signal.converged
+        assert "stable ontology lens" not in signal.reason
+        assert "Idea contract converged" not in signal.reason
+
+    def test_stable_ontology_with_lingering_questions_blocks_eval_off_path(self) -> None:
+        """Even with eval gate off, stability branch must honor unresolved Wonder gaps."""
+        lineage = self._stable_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+        )
+        wonder = WonderOutput(
+            questions=("Is field Z still ambiguous?",),
+            ontology_tensions=(),
+            should_continue=False,
+            reasoning="Stop requested but unresolved questions remain.",
+        )
+
+        signal = criteria.evaluate(lineage, latest_wonder=wonder)
+
+        assert not signal.converged
+        assert "Ontology converged" not in signal.reason
+
+
 class TestWonderFastPathLoopIntegration:
     """Loop short-circuit on Wonder no-gap must produce a convergeable result.
 
