@@ -206,7 +206,7 @@ def backend(
         "hermes": "hermes",
         "gemini": "gemini",
     }[new_backend]
-    cli_path: str | None = None
+    cli_path = None
     if new_backend == "gemini":
         from ouroboros.config import get_gemini_cli_path
 

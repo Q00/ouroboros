@@ -272,6 +272,18 @@ class TestConfigValidate:
             result = runner.invoke(app, ["validate"])
         assert result.exit_code == 0
 
+    def test_gemini_runtime_backend_is_valid(self, tmp_path: Path) -> None:
+        """validate should accept gemini as a valid runtime backend."""
+        config = {"orchestrator": {"runtime_backend": "gemini"}, "llm": {"backend": "gemini"}}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=tmp_path),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 0
+
     def test_missing_cli_path_exits_nonzero(self, tmp_path: Path) -> None:
         """validate should exit 1 when CLI path doesn't exist."""
         config = {

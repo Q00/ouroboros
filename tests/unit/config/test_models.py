@@ -462,6 +462,22 @@ class TestOrchestratorConfig:
         assert config.runtime_backend == "opencode"
         assert "~" not in config.opencode_cli_path
 
+    def test_orchestrator_config_accepts_gemini_backend(self) -> None:
+        """Gemini is a valid runtime_backend value."""
+        config = OrchestratorConfig(runtime_backend="gemini")
+        assert config.runtime_backend == "gemini"
+        assert config.gemini_cli_path is None
+
+    def test_orchestrator_config_expands_gemini_cli_path(self) -> None:
+        """Expands ~ in gemini_cli_path."""
+        config = OrchestratorConfig(
+            runtime_backend="gemini",
+            gemini_cli_path="~/bin/gemini",
+        )
+        assert config.runtime_backend == "gemini"
+        assert config.gemini_cli_path is not None
+        assert "~" not in config.gemini_cli_path
+
 
 class TestGetDefaultConfig:
     """Test get_default_config helper function."""
