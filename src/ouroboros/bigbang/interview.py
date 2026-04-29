@@ -469,12 +469,20 @@ class InterviewEngine:
                     )
                 )
             prior_ambiguity = state.ambiguity_score
+            prior_streak = state.completion_candidate_streak
             state.status = InterviewStatus.IN_PROGRESS
             state.clear_stored_ambiguity()
+            # The completion-candidate streak is the other half of the cached
+            # closure decision (authoring_handlers auto-completes when
+            # streak >= AUTO_COMPLETE_STREAK_REQUIRED). Leaving it intact would
+            # let the reopened session auto-close after a single qualifying
+            # score instead of rebuilding the required two-signal stability.
+            state.completion_candidate_streak = 0
             log.info(
                 "interview.reopened",
                 interview_id=state.interview_id,
                 prior_ambiguity_score=prior_ambiguity,
+                prior_completion_candidate_streak=prior_streak,
             )
 
         # Create new round

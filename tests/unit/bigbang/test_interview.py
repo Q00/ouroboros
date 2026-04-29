@@ -645,6 +645,7 @@ class TestInterviewEngineRecordResponse:
         state = InterviewState(
             interview_id="test_seed_ready_reopen",
             status=InterviewStatus.COMPLETED,
+            completion_candidate_streak=2,
         )
         state.store_ambiguity(score=0.15, breakdown={"scope": 0.1})
 
@@ -659,6 +660,10 @@ class TestInterviewEngineRecordResponse:
         assert updated.status == InterviewStatus.IN_PROGRESS
         assert updated.ambiguity_score is None
         assert updated.ambiguity_breakdown is None
+        # Streak must reset too — otherwise authoring_handlers would auto-complete
+        # the reopened session after a single qualifying score instead of
+        # rebuilding two-signal stability.
+        assert updated.completion_candidate_streak == 0
         assert updated.rounds[-1].user_response.startswith("Item boxes")
 
     @pytest.mark.asyncio
