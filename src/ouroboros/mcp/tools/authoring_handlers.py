@@ -1525,14 +1525,41 @@ class InterviewHandler:
                             )
                         )
 
-                    last_question = state.rounds[-1].question
-
-                    # Pop the unanswered round so record_response can re-create it
-                    # with the correct round_number (len(rounds) + 1)
+                    # Resolve the question text for this round.
+                    #
+                    # Case A — last round is unanswered (the normal flow): the
+                    # caller is answering the pending MCP-generated question.
+                    # Pop the unanswered round; record_response re-creates it
+                    # with the same question and the user's answer. A
+                    # caller-provided ``last_question`` overrides the stored
+                    # text to repair stale placeholders.
+                    #
+                    # Case B — last round is already answered (post-seed-ready
+                    # challenge per the Seed-ready Acceptance Guard, or any
+                    # reopen with no pending question): MCP did not generate
+                    # the probe — the main session did. Reusing
+                    # state.rounds[-1].question would bind the caller's new
+                    # answer to the previously-answered question, corrupting
+                    # the transcript. Require the caller to supply the
+                    # question via ``last_question``.
                     if state.rounds[-1].user_response is None:
+                        pending_question = last_question or state.rounds[-1].question
                         state.rounds.pop()
+                    else:
+                        if not last_question:
+                            return Result.err(
+                                MCPToolError(
+                                    "Cannot record answer - the previous round is "
+                                    "already answered and no follow-up question was "
+                                    "provided. When reopening a completed interview "
+                                    "(Seed-ready challenge), pass the new probe "
+                                    "question as 'last_question' alongside 'answer'.",
+                                    tool_name="ouroboros_interview",
+                                )
+                            )
+                        pending_question = last_question
 
-                    record_result = await engine.record_response(state, answer, last_question)
+                    record_result = await engine.record_response(state, answer, pending_question)
                     if record_result.is_err:
                         return Result.err(
                             MCPToolError(
@@ -1550,7 +1577,7 @@ class InterviewHandler:
                         interview_response_recorded(
                             interview_id=session_id,
                             round_number=len(state.rounds),
-                            question_preview=last_question,
+                            question_preview=pending_question,
                             response_preview=answer,
                         )
                     )
