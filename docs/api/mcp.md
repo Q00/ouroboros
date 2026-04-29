@@ -261,6 +261,25 @@ Ouroboros exposes workflow tools as ordinary MCP handlers. The MCP server does
 not parse `ooo` syntax and does not receive channel-specific identifiers for
 skill routing.
 
+### `ouroboros_brownfield` Scan Boundaries
+
+The brownfield MCP tool registers existing codebases for PM/interview context.
+For `{"action": "scan"}`, `scan_root` controls only the filesystem walk for
+seed repositories and worktrees. When `scan_root` is omitted, the walk starts at
+the current user's home directory. Dot-prefixed directories and known noisy
+directories such as `node_modules` are not walked as seed locations.
+
+Linked worktree expansion is asymmetric. When the walk finds a normal repo root
+with a `.git` directory, Ouroboros runs `git worktree list --porcelain` from
+that repo and may register Git-reported linked worktrees even when those paths
+are outside `scan_root`. When the walk finds a linked worktree root with a
+`.git` file, Ouroboros registers that worktree itself but does not use it to
+register the main worktree or sibling worktrees outside `scan_root`. This keeps
+narrow scans scoped when a user intentionally passes one worktree as AI context.
+Local repos, repos without remotes, and repos whose remotes are not named
+`origin` are all eligible. Stale linked worktree paths are skipped when the path
+no longer exists or is no longer a valid Git working tree.
+
 Runtime integrations that support `ooo <skill>` or `/ouroboros:<skill>` use the
 shared stateless router in `ouroboros.router` before invoking MCP. The router
 loads packaged `SKILL.md` frontmatter, validates `mcp_tool` and `mcp_args`,

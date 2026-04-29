@@ -4,7 +4,8 @@ Manages the global brownfield registry in ``~/.ouroboros/ouroboros.db``
 via :class:`~ouroboros.persistence.brownfield.BrownfieldStore`.
 
 Business-level operations:
-- Home directory scanning for git repos with an ``origin`` remote
+- Scan-root discovery for valid seed git repos/worktrees
+- Linked worktree discovery from normal repo roots via Git metadata
 - README/CLAUDE.md parsing for one-line description generation (Frugal model)
 - Async CRUD delegated to BrownfieldStore
 
@@ -17,6 +18,7 @@ import asyncio
 import os
 from pathlib import Path
 import subprocess
+from urllib.parse import urlparse
 
 import structlog
 
@@ -73,7 +75,7 @@ _DESC_SYSTEM_PROMPT = (
 )
 
 
-# ── Home directory scanning ────────────────────────────────────────
+# ── Scan root discovery ────────────────────────────────────────────
 
 
 def _has_origin_remote(repo_path: Path) -> bool:
@@ -85,6 +87,11 @@ def _has_origin_remote(repo_path: Path) -> bool:
     Returns:
         True if ``git remote get-url origin`` returns a non-empty URL.
     """
+    return _origin_remote_url(repo_path) is not None
+
+
+def _origin_remote_url(repo_path: Path) -> str | None:
+    """Return the configured ``origin`` remote URL for a git repo, if present."""
     try:
         result = subprocess.run(
             ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
@@ -92,47 +99,161 @@ def _has_origin_remote(repo_path: Path) -> bool:
             text=True,
             timeout=5,
         )
-        return result.returncode == 0 and bool(result.stdout.strip())
+        if result.returncode != 0:
+            return None
+        origin = result.stdout.strip()
+        return origin or None
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return False
+        return None
+
+
+def _origin_host(remote_url: str) -> str:
+    """Extract the host from common Git remote URL forms."""
+    parsed = urlparse(remote_url)
+    if parsed.hostname:
+        return parsed.hostname.lower()
+
+    # SCP-like remotes: git@github.com:owner/repo.git
+    if ":" in remote_url:
+        before_path = remote_url.split(":", 1)[0]
+        if "@" in before_path:
+            return before_path.rsplit("@", 1)[-1].lower()
+
+    return ""
 
 
 def _has_github_origin(repo_path: Path) -> bool:
-    """Backward-compatible wrapper for callers using the old helper name."""
-    return _has_origin_remote(repo_path)
+    """Check whether a git repo has a GitHub ``origin`` remote."""
+    origin = _origin_remote_url(repo_path)
+    return origin is not None and _origin_host(origin) == "github.com"
+
+
+def _is_git_worktree(repo_path: Path) -> bool:
+    """Check whether a path is inside a valid Git working tree."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _list_git_worktrees(repo_path: Path) -> list[Path]:
+    """Return linked worktree paths reported by Git for a normal repo root."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return []
+
+    worktrees: list[Path] = []
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            worktree_path = line.removeprefix("worktree ").strip()
+            if worktree_path:
+                worktrees.append(Path(worktree_path))
+    return worktrees
+
+
+def _repo_entry(repo_path: Path) -> dict[str, str] | None:
+    """Build a scan result entry for an existing repository directory."""
+    try:
+        resolved = repo_path.resolve()
+    except OSError:
+        return None
+
+    if not resolved.is_dir():
+        return None
+
+    return {"path": str(resolved), "name": resolved.name}
+
+
+def _add_repo_and_worktrees(
+    repo_path: Path,
+    repos_by_path: dict[str, dict[str, str]],
+    *,
+    include_linked_worktrees: bool,
+) -> None:
+    """Add a seed repo and optionally any Git-reported linked worktrees.
+
+    The seed path must be found by the filesystem walk. For normal repository
+    roots, linked worktrees come from ``git worktree list`` and may be outside
+    the walk root.
+    """
+    if not _is_git_worktree(repo_path):
+        return
+
+    candidates = [repo_path]
+    if include_linked_worktrees:
+        candidates.extend(_list_git_worktrees(repo_path))
+
+    for candidate in candidates:
+        if not _is_git_worktree(candidate):
+            continue
+        entry = _repo_entry(candidate)
+        if entry is None:
+            continue
+        repos_by_path.setdefault(entry["path"], entry)
 
 
 def scan_home_for_repos(
     root: Path | None = None,
 ) -> list[dict[str, str]]:
-    """Walk the home directory to find git repositories with an ``origin`` remote.
+    """Walk a root directory to find valid git repos/worktrees.
 
     Scanning rules:
-    - Prune subdirectories once ``.git`` is found (no nested repos)
-    - Skip hardcoded noise directories (node_modules, .venv, etc.)
-    - Only include repos with a configured ``origin`` remote
+    - Repositories are discovered by filesystem walking under ``root`` only.
+    - A seed repo/worktree is any walked directory with a ``.git`` directory or file.
+    - Prune subdirectories once a seed is found (no nested repo walk).
+    - Skip hardcoded noise directories (node_modules, .venv, etc.).
+    - Skip dot-prefixed directories during filesystem walking.
+    - Normal repo roots are expanded via ``git worktree list --porcelain``.
+    - Linked worktrees reported by normal repo roots may be included outside ``root``.
+    - Linked worktree seeds are registered self-only and do not pull main/sibling
+      worktrees outside ``root``.
+    - Local repos and repos with any remote name are included.
 
     Args:
-        root: Directory to start scanning. Defaults to ``~/``.
+        root: Directory to start the seed filesystem walk. Defaults to the
+            current user's home directory.
 
     Returns:
-        Sorted list of ``{path, name}`` dicts for each discovered repository.
+        Sorted list of ``{path, name}`` dicts for each discovered repo/worktree.
     """
     if root is None:
         root = Path.home()
 
-    repos: list[dict[str, str]] = []
+    repos_by_path: dict[str, dict[str, str]] = {}
 
     # os.walk with topdown=True so we can modify dirs in-place to prune
-    for dirpath, dirnames, _filenames in os.walk(root, topdown=True):
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
         current = Path(dirpath)
 
-        # Check for .git directory
-        if ".git" in dirnames:
-            if _has_origin_remote(current):
-                resolved = current.resolve()
-                repos.append({"path": str(resolved), "name": resolved.name})
-                log.debug("brownfield.scan.found", path=str(current))
+        has_git_dir = ".git" in dirnames
+        has_git_file = ".git" in filenames
+        if has_git_dir or has_git_file:
+            # A .git directory is a normal repo root, so it can safely expand to
+            # its Git-reported worktree family. A .git file is a linked worktree
+            # seed; register it, but do not use it as a portal to pull in the
+            # main repo or siblings. Users may scan/pass a specific worktree to
+            # keep the rest of the repository out of AI context.
+            _add_repo_and_worktrees(
+                current,
+                repos_by_path,
+                include_linked_worktrees=has_git_dir,
+            )
+            log.debug("brownfield.scan.found", path=str(current))
 
             # Prune: don't descend into this repo's subdirectories
             dirnames.clear()
@@ -141,6 +262,7 @@ def scan_home_for_repos(
         # Prune skip directories
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
 
+    repos = list(repos_by_path.values())
     repos.sort(key=lambda r: r["path"])
     log.info("brownfield.scan.complete", root=str(root), found=len(repos))
     return repos
@@ -241,13 +363,16 @@ async def scan_and_register(
     *,
     model: str = _FRUGAL_MODEL,  # noqa: ARG001
 ) -> list[BrownfieldRepo]:
-    """Scan home directory for repos and bulk-register them in the DB.
+    """Scan a root directory for repos/worktrees and bulk-register them in the DB.
 
-    This is the main entry point for ``ooo setup`` brownfield scanning.
+    This is the main entry point for brownfield scanning.
 
-    1. Walk ``~/`` to find git repos with an ``origin`` remote.
-    2. Bulk-insert all found repos with ``is_default=False`` and ``desc=""``.
-    3. Set the first repo as default if no default exists.
+    1. Walk ``root`` (the current user's home directory when omitted) to find
+       valid seed git repos/worktrees.
+    2. For each normal repo root, include Git-reported linked worktrees even
+       when they live outside ``root``. Linked worktree seeds are self-only.
+    3. Upsert all found repos while preserving existing names, descriptions,
+       and default flags. Default selection is handled by setup/MCP flows.
 
     Description generation is deferred to ``set_default_repo`` (Frugal model).
     The ``llm_adapter`` and ``model`` params are accepted for API compatibility
@@ -256,7 +381,8 @@ async def scan_and_register(
     Args:
         store: Initialized BrownfieldStore.
         llm_adapter: Unused — kept for backward API compatibility.
-        root: Directory to scan. Defaults to ``~/``.
+        root: Directory to walk for seed repos/worktrees. Defaults to the
+            current user's home directory.
         model: Unused — kept for backward API compatibility.
 
     Returns:

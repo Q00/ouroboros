@@ -917,7 +917,8 @@ class TestScanRegisterPipeline:
         mock_store.initialize = AsyncMock(side_effect=lambda: call_order.append("initialize"))
         mock_store.close = AsyncMock(side_effect=lambda: call_order.append("close"))
 
-        async def fake_scan(store):
+        async def fake_scan(store, *, root=None):
+            _ = store, root
             call_order.append("scan_and_register")
             return []
 
@@ -945,7 +946,8 @@ class TestScanRegisterPipeline:
 
         captured_store = None
 
-        async def capture_store(store):
+        async def capture_store(store, *, root=None):
+            _ = root
             nonlocal captured_store
             captured_store = store
             return []
@@ -963,6 +965,35 @@ class TestScanRegisterPipeline:
             await _scan_and_register_repos()
 
         assert captured_store is mock_store
+
+    @pytest.mark.asyncio
+    async def test_scan_passes_scan_root_to_scan_and_register(self, tmp_path: Path) -> None:
+        """The requested scan root is passed to scan_and_register."""
+        mock_store = AsyncMock()
+        mock_store.initialize = AsyncMock()
+        mock_store.close = AsyncMock()
+
+        captured_root = None
+
+        async def capture_root(store, *, root=None):
+            _ = store
+            nonlocal captured_root
+            captured_root = root
+            return []
+
+        with (
+            patch(
+                "ouroboros.cli.commands.setup.BrownfieldStore",
+                return_value=mock_store,
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.scan_and_register",
+                side_effect=capture_root,
+            ),
+        ):
+            await _scan_and_register_repos(tmp_path)
+
+        assert captured_root == tmp_path
 
     @pytest.mark.asyncio
     async def test_converts_brownfield_repo_to_dict(self) -> None:
@@ -1061,6 +1092,42 @@ class TestScanRegisterPipeline:
         assert len(result) == count
         assert result[0]["is_default"] is True
         assert all(r["is_default"] is False for r in result[1:])
+
+
+class TestScanCommand:
+    """Tests for the brownfield scan CLI command."""
+
+    def test_scan_command_accepts_scan_root_argument(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+
+        with patch(
+            "ouroboros.cli.commands.setup._run_scan_only",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as mock_run:
+            result = runner.invoke(setup_cmd.app, ["scan", str(tmp_path)])
+
+        assert result.exit_code == 0
+        mock_run.assert_awaited_once_with(tmp_path.resolve())
+
+    def test_scan_command_defaults_scan_root_to_current_user_home(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = CliRunner()
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup._run_scan_only",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_run,
+        ):
+            result = runner.invoke(setup_cmd.app, ["scan"])
+
+        assert result.exit_code == 0
+        mock_run.assert_awaited_once_with(tmp_path)
 
 
 # ── List repos extended tests ─────────────────────────────────────

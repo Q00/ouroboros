@@ -3,8 +3,12 @@
 Provides an ``ouroboros_brownfield`` MCP tool for managing brownfield
 repository registrations in the SQLite database. Supports four actions:
 
-- **scan** — Scan an explicit root (or a caller-provided default root) for git
-  repos/worktrees with an ``origin`` remote and register them in the DB.
+- **scan** — Walk ``scan_root`` (or the current user's home directory when omitted) for seed git
+  repos/worktrees and register them in the DB. For each normal repo root, also
+  register Git-reported linked worktrees, even when those linked worktrees live
+  outside the scan root. Linked worktree seeds are registered themselves, but do
+  not pull their main/sibling worktrees outside the scan root. Local repos and
+  repos with any remote name are eligible.
 - **register** — Manually register a single repository by path.
 - **query** — List all registered repos or get the current default.
 - **set_default** — Set a registered repo as the default brownfield context.
@@ -72,7 +76,8 @@ class BrownfieldHandler:
 
     Manages brownfield repository registrations with action-based dispatch:
 
-    - ``scan`` — Walk a caller-supplied root for repos with an ``origin`` remote and register them.
+    - ``scan`` — Walk a caller-supplied root for seed repos/worktrees, then include
+      Git-reported linked worktrees for normal repo roots.
     - ``register`` — Manually register one repo.
     - ``query`` — List repos or fetch the default.
     - ``set_default`` — Set a repo as the default brownfield context.
@@ -90,7 +95,7 @@ class BrownfieldHandler:
             name=_TOOL_NAME,
             description=(
                 "Manage brownfield repository registrations. "
-                "Scan a requested root for repos, register/query repos, "
+                "Scan a requested root for repos/worktrees, register/query repos, "
                 "or set the default brownfield context for PM interviews."
             ),
             parameters=(
@@ -98,7 +103,8 @@ class BrownfieldHandler:
                     name="action",
                     type=ToolInputType.STRING,
                     description=(
-                        "Action to perform: 'scan' to discover repos from a caller-provided root,"
+                        "Action to perform: 'scan' to discover seed repos/worktrees "
+                        "from scan_root plus Git-reported linked worktrees from normal repos,"
                         " 'register' to add a single repo,"
                         " 'query' to list all repos or get default,"
                         " 'set_default' to toggle a repo's default flag"
@@ -157,7 +163,14 @@ class BrownfieldHandler:
                 MCPToolParameter(
                     name="scan_root",
                     type=ToolInputType.STRING,
-                    description=("Root directory for 'scan' action. Caller chooses the scan root."),
+                    description=(
+                        "Root directory for the 'scan' filesystem walk. "
+                        "Defaults to the current user's home directory. "
+                        "Only seed repos/worktrees are discovered by walking this root; "
+                        "linked worktrees reported by Git for normal repo roots may be "
+                        "included even when their paths are outside scan_root. Linked "
+                        "worktree seeds are registered themselves only."
+                    ),
                     required=False,
                 ),
                 MCPToolParameter(
@@ -251,18 +264,21 @@ class BrownfieldHandler:
                 self._store = None
 
     # ──────────────────────────────────────────────────────────────
-    # scan — Discover repos from home directory
+    # scan — Discover repos/worktrees from a caller-provided root
     # ──────────────────────────────────────────────────────────────
 
     async def _handle_scan(
         self,
         arguments: dict[str, Any],
     ) -> Result[MCPToolResult, MCPServerError]:
-        """Scan a caller-provided root for git repos and register them.
+        """Scan a caller-provided root for git repos/worktrees and register them.
 
         Delegates to ``bigbang.brownfield.scan_and_register`` which handles
-        directory walking, origin-remote filtering, LLM description generation,
-        and DB upsert.
+        directory walking, linked worktree discovery, LLM description generation,
+        and DB upsert. The directory walk is bounded to ``scan_root`` (or the
+        current user's home directory when omitted), but linked worktrees
+        reported by Git for discovered normal repo roots may be outside that
+        root. Linked worktree seeds are registered themselves only.
         """
         scan_root_str = arguments.get("scan_root")
         scan_root = Path(scan_root_str) if scan_root_str else None
@@ -270,7 +286,7 @@ class BrownfieldHandler:
         store = await self._get_store()
 
         # scan_and_register handles the full workflow:
-        # walk dirs → filter origin remotes → generate descs → upsert
+        # walk dirs -> discover linked worktrees -> upsert
         repos = await scan_and_register(
             store=store,
             llm_adapter=None,  # No LLM in MCP context for now

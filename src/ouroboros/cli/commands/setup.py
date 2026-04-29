@@ -4,7 +4,7 @@ Standalone setup that works in any terminal — not just inside Claude Code.
 Detects available runtimes and configures Ouroboros accordingly.
 
 Also provides brownfield repository management subcommands:
-    ouroboros setup scan         Re-scan home directory for repos
+    ouroboros setup scan [ROOT]  Re-scan a root directory for repos/worktrees
     ouroboros setup list         List registered brownfield repos
     ouroboros setup default      Toggle default brownfield repos
 """
@@ -1075,19 +1075,23 @@ def _prompt_repo_selection(
 # ── Brownfield async core logic ──────────────────────────────────
 
 
-async def _scan_and_register_repos() -> list[dict]:
-    """Scan home directory and register repos in DB.
+async def _scan_and_register_repos(scan_root: Path | None = None) -> list[dict]:
+    """Scan a root directory and register repos/worktrees in DB.
 
     Uses upsert semantics so that manually-registered repos outside the
-    scan root are preserved across re-scans.
+    scan root are preserved across re-scans. Git-reported linked worktrees for
+    discovered normal repo roots may be registered even when they live outside
+    the scan root. A linked worktree inside the scan root is registered itself
+    but does not pull its main/sibling worktrees outside the scan root.
 
     Returns:
         List of repo dicts with path, name, desc, is_default.
     """
+    scan_root = scan_root or Path.home()
     store = BrownfieldStore()
     try:
         await store.initialize()
-        repos = await scan_and_register(store)
+        repos = await scan_and_register(store, root=scan_root)
         return [
             {
                 "path": r.path,
@@ -1327,16 +1331,33 @@ def setup(
 
 
 @app.command()
-def scan() -> None:
-    """Re-scan home directory and register new repos.
+def scan(
+    scan_root: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Root directory for the brownfield scan. Defaults to the current user's home directory.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+            resolve_path=True,
+        ),
+    ] = None,
+) -> None:
+    """Re-scan a root directory and register new repos.
 
-    Scans ~/ for git repos with configured origin remotes and updates the
-    brownfield registry. Existing repos are preserved (upsert).
+    Scans the requested root for valid seed git repos/worktrees and updates the
+    brownfield registry. Linked worktrees reported by normal repo roots may be
+    registered even when they live outside the scan root. A linked worktree
+    found inside the scan root is registered itself but does not pull its
+    main/sibling worktrees outside the scan root. Local repos and repos with any
+    remote name are eligible. Existing repos are preserved (upsert).
     """
+    effective_scan_root = scan_root or Path.home()
     console.print("\n[bold cyan]Brownfield Scan[/]\n")
 
     try:
-        repos = asyncio.run(_run_scan_only())
+        repos = asyncio.run(_run_scan_only(effective_scan_root))
     except KeyboardInterrupt:
         print_info("\nScan interrupted.")
         raise typer.Exit(code=0)
@@ -1349,10 +1370,10 @@ def scan() -> None:
     _display_repos_table(repos)
 
 
-async def _run_scan_only() -> list[dict]:
+async def _run_scan_only(scan_root: Path) -> list[dict]:
     """Scan and register, returning repo list."""
-    with console.status("[cyan]Scanning home directory...[/]", spinner="dots"):
-        return await _scan_and_register_repos()
+    with console.status("[cyan]Scanning scan root and linked worktrees...[/]", spinner="dots"):
+        return await _scan_and_register_repos(scan_root)
 
 
 @app.command(name="list")

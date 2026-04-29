@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -298,13 +299,29 @@ class TestBrownfieldHandlerDispatch:
             "ouroboros.mcp.tools.brownfield_handler.scan_and_register",
             new_callable=AsyncMock,
             return_value=[_REPO_A],
-        ):
+        ) as mock_scan:
             result = await handler.handle({"action": "scan"})
 
         assert result.is_ok
         meta = result.value.meta
         assert meta["action"] == "scan"
         assert meta["count"] == 1
+        mock_scan.assert_awaited_once_with(store=store, llm_adapter=None, root=None)
+
+    @pytest.mark.asyncio
+    async def test_scan_action_passes_scan_root(self, tmp_path: Path) -> None:
+        store = _make_store_stub(repos=[_REPO_A], default=_REPO_A)
+        handler = BrownfieldHandler(_store=store)
+
+        with patch(
+            "ouroboros.mcp.tools.brownfield_handler.scan_and_register",
+            new_callable=AsyncMock,
+            return_value=[_REPO_A],
+        ) as mock_scan:
+            result = await handler.handle({"action": "scan", "scan_root": str(tmp_path)})
+
+        assert result.is_ok
+        mock_scan.assert_awaited_once_with(store=store, llm_adapter=None, root=tmp_path)
 
     @pytest.mark.asyncio
     async def test_auto_detect_register(self) -> None:
@@ -364,6 +381,7 @@ class TestBrownfieldHandlerDispatch:
 
         assert result.is_ok
         assert "scan" in result.value.text_content.lower()
+
 
 # ── Pagination tests ──────────────────────────────────────────────
 

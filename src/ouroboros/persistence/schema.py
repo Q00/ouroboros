@@ -7,7 +7,7 @@ Table: events
     Single unified table for all event types following event sourcing pattern.
 
 Table: brownfield_repos
-    Registered brownfield repositories scanned from the user's home directory.
+    Registered brownfield repositories/worktrees discovered by brownfield scan.
 """
 
 from datetime import UTC, datetime
@@ -61,7 +61,10 @@ events_table = Table(
     Index("ix_events_agg_type_id_timestamp", "aggregate_type", "aggregate_id", "timestamp"),
 )
 
-# Brownfield repos table - registered repositories from home directory scan
+# Brownfield repos table - registered repositories/worktrees from brownfield scan.
+# Filesystem discovery is bounded to the scan root. Normal repo roots can add
+# Git-reported linked worktrees outside that root, but linked worktree seeds are
+# registered themselves only.
 brownfield_repos_table = Table(
     "brownfield_repos",
     metadata,
