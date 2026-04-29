@@ -277,6 +277,26 @@ def test_valid_dispatch_preserves_windows_path_backslashes(
     assert result.mcp_args["seed_path"] == seed_path
 
 
+def test_valid_dispatch_normalizes_windows_forward_slash_paths(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    runtime_cwd = tmp_path / "workspace"
+    _write_dispatchable_skill(skills_dir, "run")
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt='ooo run C:/temp/seed.yaml "two words"',
+            cwd=runtime_cwd,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.first_argument == "C:/temp/seed.yaml two words"
+    assert result.mcp_args["seed_path"] == "C:/temp/seed.yaml two words"
+
+
 def test_valid_dispatch_without_argument_normalizes_first_argument_template_to_empty_string(
     tmp_path: Path,
 ) -> None:

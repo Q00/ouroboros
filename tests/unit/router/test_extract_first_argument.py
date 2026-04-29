@@ -52,6 +52,11 @@ from ouroboros.router import extract_first_argument
             r"\\server\share\seed.yaml --strict",
             id="windows-unc-path-backslashes-preserved",
         ),
+        pytest.param(
+            'C:/temp/seed.yaml "two words"',
+            "C:/temp/seed.yaml two words",
+            id="windows-forward-slash-path-still-normalized",
+        ),
     ],
 )
 def test_extract_first_argument_returns_full_argument_payload(

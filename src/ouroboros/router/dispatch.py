@@ -54,7 +54,7 @@ from ouroboros.router.types import (
 _MCP_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SKILL_IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _DISPATCH_TEMPLATE_PATTERN = re.compile(r"\$(?:CWD|1)(?![A-Za-z0-9_])")
-_WINDOWS_DRIVE_PATH_PAYLOAD_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
+_WINDOWS_DRIVE_PATH_PAYLOAD_PATTERN = re.compile(r"^[A-Za-z]:\\")
 _WINDOWS_UNC_PATH_PAYLOAD_PATTERN = re.compile(r"^\\\\[^\\/\s]+[\\/][^\\/\s]+")
 _REQUIRED_MCP_FRONTMATTER_KEYS = ("mcp_tool", "mcp_args")
 _MCP_FRONTMATTER_VALUE_TYPES = "string, finite number, boolean, null, list, or mapping"
@@ -276,10 +276,9 @@ def extract_first_argument(remainder: str | None) -> str | None:
     if remainder is None or not remainder.strip():
         return None
     stripped_remainder = remainder.strip()
-    if (
-        _WINDOWS_DRIVE_PATH_PAYLOAD_PATTERN.match(stripped_remainder)
-        or _WINDOWS_UNC_PATH_PAYLOAD_PATTERN.match(stripped_remainder)
-    ):
+    if _WINDOWS_DRIVE_PATH_PAYLOAD_PATTERN.match(
+        stripped_remainder
+    ) or _WINDOWS_UNC_PATH_PAYLOAD_PATTERN.match(stripped_remainder):
         return stripped_remainder
     try:
         parts = shlex.split(remainder)
