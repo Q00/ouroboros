@@ -937,7 +937,13 @@ class EvolutionaryLoop:
         partial_state: dict[str, Any] = {}
         try:
             if wonder_output:
+                # Persist the full Wonder shape, not just questions —
+                # ontology_tensions and should_continue are first-class signals
+                # for "keep evolving" so resume must restore all three to
+                # avoid silently dropping unresolved gaps.
                 partial_state["wonder_questions"] = list(wonder_output.questions)
+                partial_state["wonder_tensions"] = list(wonder_output.ontology_tensions)
+                partial_state["wonder_should_continue"] = bool(wonder_output.should_continue)
             if reflect_output:
                 partial_state["reflect_output"] = reflect_output.model_dump(mode="json")
             if execution_output:
@@ -1041,11 +1047,35 @@ class EvolutionaryLoop:
             )
             if interrupted_gen and interrupted_gen.partial_state:
                 ps = interrupted_gen.partial_state
-                if _should_skip("wondering") and ps.get("wonder_questions"):
-                    wonder_output = WonderOutput(
-                        questions=tuple(ps["wonder_questions"]),
-                        should_continue=True,
-                    )
+                if _should_skip("wondering"):
+                    # Restore Wonder if any of its three "keep evolving"
+                    # signals was persisted: questions, ontology_tensions, or
+                    # should_continue. Older interrupt records only carry
+                    # `wonder_questions`, so falling back on that key alone
+                    # remains backwards compatible while newer records also
+                    # carry tensions and the explicit continue flag.
+                    persisted_questions = ps.get("wonder_questions") or []
+                    persisted_tensions = ps.get("wonder_tensions") or []
+                    persisted_should_continue = ps.get("wonder_should_continue")
+                    if (
+                        persisted_questions
+                        or persisted_tensions
+                        or persisted_should_continue is not None
+                    ):
+                        wonder_output = WonderOutput(
+                            questions=tuple(persisted_questions),
+                            ontology_tensions=tuple(persisted_tensions),
+                            # Default to True only when the flag was not
+                            # persisted at all (legacy records). With the
+                            # flag persisted, honor it verbatim so a saved
+                            # `should_continue=False` plus tensions still
+                            # routes through Reflect as an unresolved gap.
+                            should_continue=(
+                                True
+                                if persisted_should_continue is None
+                                else bool(persisted_should_continue)
+                            ),
+                        )
                 if _should_skip("reflecting") and ps.get("reflect_output"):
                     try:
                         reflect_output = ReflectOutput.model_validate(ps["reflect_output"])

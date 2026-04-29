@@ -297,6 +297,42 @@ class TestCheckShutdownSerialization:
         assert ps["evaluation_summary"]["score"] == 0.95
 
     @pytest.mark.asyncio
+    async def test_wonder_full_shape_persisted_to_partial_state(self) -> None:
+        """Persisted Wonder must carry questions, ontology_tensions, and
+        should_continue so resume can rebuild the full "keep evolving" signal.
+
+        Regression for PR #497 sixth-round review: previously only
+        wonder_questions was persisted, so a Wonder that surfaced
+        ontology_tensions but no questions (a case the new convergence path
+        treats as an unresolved gap) was silently dropped on resume — the
+        reconstructed Wonder had no tensions and Reflect was skipped.
+        """
+        loop = self._make_loop()
+        loop._shutdown_requested = True
+        seed = MagicMock()
+        seed.to_dict.return_value = {"goal": "test"}
+
+        from ouroboros.evolution.wonder import WonderOutput
+
+        wonder_out = WonderOutput(
+            questions=(),
+            ontology_tensions=("tension X contradicts goal Y",),
+            should_continue=False,
+            reasoning="No more questions but a tension persists.",
+        )
+
+        result = await loop._check_shutdown(
+            LINEAGE_ID, 3, "wondering", seed, wonder_output=wonder_out
+        )
+        assert result is not None
+
+        event = loop.event_store.append.call_args[0][0]
+        ps = event.data["partial_state"]
+        assert ps["wonder_questions"] == []
+        assert ps["wonder_tensions"] == ["tension X contradicts goal Y"]
+        assert ps["wonder_should_continue"] is False
+
+    @pytest.mark.asyncio
     async def test_all_outputs_serialized_together(self) -> None:
         loop = self._make_loop()
         loop._shutdown_requested = True
@@ -493,3 +529,93 @@ class TestResumeRestore:
 
         # evaluator should NOT have been called
         assert len(evaluator_called) == 0
+
+    @pytest.mark.asyncio
+    async def test_wonder_full_shape_restored_on_resume(self) -> None:
+        """Resume rebuilds the full Wonder shape — questions, tensions, and
+        should_continue — so Reflect runs on tension-only signals instead of
+        being skipped because wonder_output is None.
+        """
+        partial_state = {
+            "wonder_questions": [],
+            "wonder_tensions": ["tension X contradicts goal Y"],
+            "wonder_should_continue": False,
+            "reflect_output": ReflectOutput(
+                refined_goal="g", ontology_mutations=(), reasoning="r"
+            ).model_dump(mode="json"),
+        }
+
+        loop = self._make_loop()
+        lineage = self._make_lineage_with_interrupted_gen(partial_state, "reflecting")
+
+        seed = MagicMock()
+        seed.metadata.seed_id = "s1"
+        seed.metadata.parent_seed_id = None
+        seed.ontology_schema = MagicMock()
+        seed.to_dict.return_value = {"goal": "test"}
+
+        gen_result_mock = MagicMock()
+        gen_result_mock.is_err = False
+        gen_result_mock.is_ok = True
+        gen_result_mock.value = seed
+        loop.seed_generator = MagicMock()
+        loop.seed_generator.generate_from_reflect.return_value = gen_result_mock
+
+        result = await loop._run_generation_phases(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed,
+            execute=False,
+            resume_after_phase="reflecting",
+        )
+
+        assert result.is_ok
+        gen_result = result.value
+        assert gen_result.wonder_output is not None
+        assert gen_result.wonder_output.questions == ()
+        assert gen_result.wonder_output.ontology_tensions == ("tension X contradicts goal Y",)
+        assert gen_result.wonder_output.should_continue is False
+
+    @pytest.mark.asyncio
+    async def test_legacy_wonder_questions_only_resume_remains_compatible(self) -> None:
+        """Older interrupt records (only wonder_questions persisted) must still
+        round-trip through resume. should_continue defaults to True since the
+        flag was not persisted at all.
+        """
+        partial_state = {
+            "wonder_questions": ["q1", "q2"],
+            "reflect_output": ReflectOutput(
+                refined_goal="g", ontology_mutations=(), reasoning="r"
+            ).model_dump(mode="json"),
+        }
+
+        loop = self._make_loop()
+        lineage = self._make_lineage_with_interrupted_gen(partial_state, "reflecting")
+
+        seed = MagicMock()
+        seed.metadata.seed_id = "s1"
+        seed.metadata.parent_seed_id = None
+        seed.ontology_schema = MagicMock()
+        seed.to_dict.return_value = {"goal": "test"}
+
+        gen_result_mock = MagicMock()
+        gen_result_mock.is_err = False
+        gen_result_mock.is_ok = True
+        gen_result_mock.value = seed
+        loop.seed_generator = MagicMock()
+        loop.seed_generator.generate_from_reflect.return_value = gen_result_mock
+
+        result = await loop._run_generation_phases(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed,
+            execute=False,
+            resume_after_phase="reflecting",
+        )
+
+        assert result.is_ok
+        gen_result = result.value
+        assert gen_result.wonder_output is not None
+        assert gen_result.wonder_output.questions == ("q1", "q2")
+        assert gen_result.wonder_output.ontology_tensions == ()
+        assert gen_result.wonder_output.should_continue is True

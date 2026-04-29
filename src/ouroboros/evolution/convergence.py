@@ -376,11 +376,29 @@ class ConvergenceCriteria:
         Code validation can be intentionally skipped for non-code tasks such as
         research or analysis. Those tasks are still judged through the semantic
         Seed contract gate; a skipped pytest/import pass is not a failure.
+
+        Failure markers below mirror the strings the MCP validator actually
+        emits (see src/ouroboros/mcp/server/adapter.py): bare "Validation
+        passed ..." messages must NOT block, while "Validation skipped ...",
+        "Validation error ...", "Validation fix failed ...",
+        "Validation: no fixable errors ...", and
+        "Validation: N errors remain ..." all indicate the gate is unmet.
         """
         normalized = validation_output.lower()
         if "does not require code validation" in normalized:
             return False
-        return "skipped" in normalized or "error" in normalized
+        # Block if the validator reported any failure or skipped state. The
+        # check is substring-based to stay tolerant of phrasing changes; any
+        # of these markers is sufficient evidence that validation did not
+        # succeed.
+        failure_markers = (
+            "skipped",
+            "error",  # also matches "errors"
+            "failed",  # e.g. "Validation fix failed"
+            "fixable",  # e.g. "no fixable errors detected"
+            "remain",  # e.g. "N errors remain after attempts"
+        )
+        return any(marker in normalized for marker in failure_markers)
 
     def _check_stagnation(self, lineage: OntologyLineage) -> bool:
         """Check if ontology has been unchanged for stagnation_window gens."""

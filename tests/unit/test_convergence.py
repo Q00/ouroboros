@@ -918,6 +918,77 @@ class TestValidationGate:
         assert signal.converged
 
 
+class TestValidationGateRealValidatorOutputs:
+    """Validation gate must block on every failure-y string the real MCP
+    validator emits, not only "skipped"/"error".
+
+    Regression for PR #497 sixth-round review: the actual validator
+    (src/ouroboros/mcp/server/adapter.py) returns strings like
+    "Validation fix failed ...", "Validation: no fixable errors detected ...",
+    and "Validation: N errors remain after attempts ..." when validation
+    fails. The previous gate matched only "skipped" or "error" substrings,
+    so "Validation fix failed (attempt 2): ..." (which contains neither)
+    silently bypassed the gate and could converge on a failed run.
+    """
+
+    def _stable_lineage(self) -> OntologyLineage:
+        return _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+
+    def _criteria(self) -> ConvergenceCriteria:
+        return ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            validation_gate_enabled=True,
+        )
+
+    def test_blocks_when_validation_fix_failed(self) -> None:
+        """`Validation fix failed (attempt N): ...` must block convergence."""
+        signal = self._criteria().evaluate(
+            self._stable_lineage(),
+            latest_wonder=_satisfied_wonder(),
+            validation_output="Validation fix failed (attempt 2): subprocess timeout",
+        )
+        assert not signal.converged
+        assert "Validation gate blocked" in signal.reason
+
+    def test_blocks_when_no_fixable_errors(self) -> None:
+        """`Validation: no fixable errors detected ...` must block convergence.
+
+        This case happens to also contain the substring "errors" so the
+        previous matcher caught it, but this test pins it explicitly so a
+        future refactor doesn't drop the coverage.
+        """
+        signal = self._criteria().evaluate(
+            self._stable_lineage(),
+            latest_wonder=_satisfied_wonder(),
+            validation_output="Validation: no fixable errors detected (exit code 1)",
+        )
+        assert not signal.converged
+        assert "Validation gate blocked" in signal.reason
+
+    def test_blocks_when_errors_remain_after_attempts(self) -> None:
+        """`Validation: N errors remain after N attempts. Remaining: ...` blocks."""
+        signal = self._criteria().evaluate(
+            self._stable_lineage(),
+            latest_wonder=_satisfied_wonder(),
+            validation_output=(
+                "Validation: 3 errors remain after 2 attempts. "
+                "Remaining: missing module foo, missing module bar"
+            ),
+        )
+        assert not signal.converged
+        assert "Validation gate blocked" in signal.reason
+
+    def test_passes_after_successful_fix_attempts(self) -> None:
+        """`Validation passed after N fix attempts` must NOT block (real success)."""
+        signal = self._criteria().evaluate(
+            self._stable_lineage(),
+            latest_wonder=_satisfied_wonder(),
+            validation_output="Validation passed after 2 fix attempts",
+        )
+        assert signal.converged
+
+
 class TestIdeaContractWonderNoGap:
     """Tests for the Idea-contract / Wonder fast-path convergence signal."""
 
