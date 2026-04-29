@@ -1088,6 +1088,105 @@ class TestWonderFastPathLoopIntegration:
     The fix carries prev_gen.evaluation_summary forward on the fast path.
     """
 
+    def test_fast_path_carries_validation_output_so_validation_gate_still_blocks(
+        self,
+    ) -> None:
+        """Fast-path GenerationResult must forward validation_output so the
+        validation gate cannot be silently bypassed.
+
+        Regression for PR #497 third-round review: previously the fast path
+        forwarded only evaluation_summary and execution_output, leaving
+        validation_output=None. Convergence's validation gate only fires when
+        validation_output is non-None, so a lineage with a failed/skipped
+        validation could converge as soon as Wonder said "no gap". The fix
+        carries the prior generation's validation_output forward as well.
+        """
+        from ouroboros.core.seed import (
+            EvaluationPrinciple,
+            ExitCondition,
+            Seed,
+            SeedMetadata,
+        )
+        from ouroboros.evolution.loop import GenerationResult
+
+        passing_eval = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=3,
+            score=0.95,
+            drift_score=0.0,
+            reward_hacking_risk=0.0,
+        )
+        # Previous generation completed but its validation was skipped/errored.
+        bad_validation = "Validation skipped: subprocess failed"
+
+        prev_gen = GenerationRecord(
+            generation_number=1,
+            seed_id="seed_1",
+            ontology_snapshot=SCHEMA_A,
+            phase=GenerationPhase.COMPLETED,
+            evaluation_summary=passing_eval,
+            validation_output=bad_validation,
+        )
+        current_gen = GenerationRecord(
+            generation_number=2,
+            seed_id="seed_2",
+            ontology_snapshot=SCHEMA_A,
+            phase=GenerationPhase.COMPLETED,
+            evaluation_summary=passing_eval,
+            validation_output=bad_validation,
+        )
+        lineage = _lineage_with_generations(prev_gen, current_gen)
+
+        seed = Seed(
+            goal="test",
+            task_type="code",
+            constraints=("Python",),
+            acceptance_criteria=("Works",),
+            ontology_schema=SCHEMA_A,
+            evaluation_principles=(EvaluationPrinciple(name="c", description="c", weight=1.0),),
+            exit_conditions=(ExitCondition(name="e", description="e", evaluation_criteria="e"),),
+            metadata=SeedMetadata(seed_id="seed_2", parent_seed_id="seed_1", ambiguity_score=0.1),
+        )
+
+        wonder_no_gap = WonderOutput(
+            questions=(),
+            ontology_tensions=(),
+            should_continue=False,
+            reasoning="Contract satisfied per evaluation; nothing more to learn.",
+        )
+
+        # Fast-path GenerationResult must forward validation_output too.
+        fast_path_result = GenerationResult(
+            generation_number=2,
+            seed=seed,
+            execution_output="prev output",
+            evaluation_summary=passing_eval,
+            validation_output=bad_validation,
+            wonder_output=wonder_no_gap,
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+            validation_gate_enabled=True,
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=fast_path_result.wonder_output,
+            latest_evaluation=fast_path_result.evaluation_summary,
+            validation_output=fast_path_result.validation_output,
+        )
+
+        # Validation gate must block convergence even though eval and Wonder
+        # both signal "done".
+        assert not signal.converged
+        assert "Validation gate blocked" in signal.reason
+        assert "Idea contract converged" not in signal.reason
+
     def test_fast_path_result_inherits_prev_evaluation_for_convergence(self) -> None:
         """Carry-forward evaluation summary makes Idea-contract convergence reachable."""
         from ouroboros.core.seed import (

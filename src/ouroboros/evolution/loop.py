@@ -360,6 +360,7 @@ class EvolutionaryLoop:
                 wonder_questions=result.wonder_output.questions if result.wonder_output else (),
                 phase=result.phase,
                 execution_output=result.execution_output,
+                validation_output=result.validation_output,
             )
             lineage = lineage.with_generation(record)
 
@@ -382,6 +383,7 @@ class EvolutionaryLoop:
                         for feedback in record.seed_quality_canary_feedback
                     ]
                     or None,
+                    validation_output=result.validation_output,
                 )
             )
 
@@ -746,6 +748,7 @@ class EvolutionaryLoop:
             phase=result.phase,
             seed_json=json.dumps(result.seed.to_dict()),
             execution_output=result.execution_output,
+            validation_output=result.validation_output,
         )
         lineage = lineage.with_generation(record)
 
@@ -767,6 +770,7 @@ class EvolutionaryLoop:
                     for feedback in record.seed_quality_canary_feedback
                 ]
                 or None,
+                validation_output=result.validation_output,
             )
         )
 
@@ -1098,10 +1102,13 @@ class EvolutionaryLoop:
                         # at all. If either exist, we must continue to Reflect even
                         # if should_continue=false, because they represent
                         # ontological gaps that need to be addressed.
-                        # Carry the previous generation's evaluation_summary and
-                        # execution_output forward so the convergence eval gate has
-                        # the contract evidence it needs to declare success on this
-                        # zero-mutation path.
+                        # Carry the previous generation's evaluation_summary,
+                        # execution_output, and validation_output forward so every
+                        # convergence gate (eval, AC, drift, validation) has the
+                        # contract evidence it needs on this zero-mutation path.
+                        # Without validation_output, the validation gate is
+                        # silently skipped and a previously failing validation
+                        # would be bypassed.
                         logger.info("evolution.wonder.nothing_to_learn")
                         return Result.ok(
                             GenerationResult(
@@ -1109,6 +1116,7 @@ class EvolutionaryLoop:
                                 seed=current_seed,
                                 execution_output=prev_gen.execution_output,
                                 evaluation_summary=prev_gen.evaluation_summary,
+                                validation_output=prev_gen.validation_output,
                                 wonder_output=wonder_output,
                                 phase=GenerationPhase.COMPLETED,
                                 success=True,

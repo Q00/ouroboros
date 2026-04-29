@@ -100,6 +100,7 @@ class LineageProjector:
                     created_at=event.timestamp,
                     seed_json=data.get("seed_json"),
                     execution_output=data.get("execution_output"),
+                    validation_output=data.get("validation_output"),
                 )
                 generations[gen_num] = record
 
