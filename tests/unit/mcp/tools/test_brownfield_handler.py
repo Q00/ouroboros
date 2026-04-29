@@ -395,6 +395,43 @@ class TestBrownfieldHandlerDispatch:
         assert second.is_ok
         assert store.initialize.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_concurrent_first_requests_initialize_once(self) -> None:
+        """Concurrent first requests must serialize initialization.
+
+        Without ``_init_lock``, two coroutines hitting ``_get_store()`` at the
+        same time on a not-yet-ready injected store could each call
+        ``initialize()``. With the lock, the second coroutine waits and sees
+        ``_store_ready`` already True after the first finishes.
+        """
+        import asyncio
+
+        store = _make_store_stub(repos=[_REPO_A], default=_REPO_A)
+        init_started = asyncio.Event()
+        release_init = asyncio.Event()
+
+        async def slow_initialize() -> None:
+            init_started.set()
+            await release_init.wait()
+
+        store.initialize.side_effect = slow_initialize
+        handler = BrownfieldHandler(_store=store)
+
+        first = asyncio.create_task(handler.handle({"action": "query"}))
+        await init_started.wait()
+        second = asyncio.create_task(handler.handle({"action": "query"}))
+        # Give the second task a chance to enter _get_store and block on the
+        # lock without racing past the first's still-in-progress initialize.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        release_init.set()
+
+        first_result, second_result = await asyncio.gather(first, second)
+
+        assert first_result.is_ok
+        assert second_result.is_ok
+        store.initialize.assert_awaited_once()
+
 
 # ── Pagination tests ──────────────────────────────────────────────
 

@@ -42,6 +42,27 @@ def _make_tracker(
 class TestMCPStartupAutoCleanup:
     """Tests for auto-cleanup during MCP server startup (_run_mcp_server)."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_brownfield_store(self):
+        """Stub ``BrownfieldStore`` for every test in this class.
+
+        ``_run_mcp_server()`` always constructs and initializes a
+        ``BrownfieldStore`` after PR #487. Without this stub, tests that do
+        not patch it explicitly would open and migrate the real default DB
+        at ``~/.ouroboros/ouroboros.db``, making the unit tests stateful and
+        unsafe in environments where ``$HOME`` is not writable. Tests that
+        need a custom stub (e.g. to simulate init failure) can override by
+        patching ``ouroboros.persistence.brownfield.BrownfieldStore`` again
+        inside the test — the inner patch wins for its scope.
+        """
+        mock_brownfield = AsyncMock()
+        mock_brownfield.initialize = AsyncMock()
+        with patch(
+            "ouroboros.persistence.brownfield.BrownfieldStore",
+            return_value=mock_brownfield,
+        ):
+            yield mock_brownfield
+
     def _create_patches(
         self,
         mock_event_store: AsyncMock | None = None,

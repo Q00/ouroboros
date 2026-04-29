@@ -15,6 +15,7 @@ Follows the action-dispatch pattern from ``pm_handler.py``.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -84,6 +85,7 @@ class BrownfieldHandler:
 
     _store: BrownfieldStore | None = field(default=None, repr=False)
     _store_ready: bool = field(default=False, repr=False)
+    _init_lock: asyncio.Lock | None = field(default=None, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -197,17 +199,26 @@ class BrownfieldHandler:
         ``_store_ready`` flips to ``True`` only after a successful
         ``initialize()`` so a partially-initialized shared store retries on the
         next request instead of being treated as ready forever.
+
+        ``_init_lock`` serializes the first-time initialization across
+        concurrent requests so a shared store is only initialized once even
+        when multiple coroutines race for it on startup.
         """
-        if self._store is None:
-            store = BrownfieldStore()
-            await store.initialize()
-            self._store = store
-            self._store_ready = True
-            return store
-        if not self._store_ready:
-            await self._store.initialize()
-            self._store_ready = True
-        return self._store
+        if self._init_lock is None:
+            # Lazily bound to the running loop on first use; subsequent
+            # `if`-check is atomic because this assignment never awaits.
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if self._store is None:
+                store = BrownfieldStore()
+                await store.initialize()
+                self._store = store
+                self._store_ready = True
+                return store
+            if not self._store_ready:
+                await self._store.initialize()
+                self._store_ready = True
+            return self._store
 
     async def handle(
         self,
