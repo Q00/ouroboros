@@ -250,6 +250,51 @@ class TestLoadConfig:
         error_message = str(exc_info.value)
         assert "default_tier" in error_message or "economics" in error_message
 
+    def test_load_config_single_validation_error_sets_config_key(self, tmp_path: Path) -> None:
+        """Single-field validation errors should be self-classifying."""
+        config_path = tmp_path / "config.yaml"
+        config_content = {
+            "orchestrator": {
+                "max_parallel_workers": 0,
+            }
+        }
+        with config_path.open("w") as f:
+            yaml.dump(config_content, f)
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(config_path)
+
+        error = exc_info.value
+        assert error.config_key == "orchestrator.max_parallel_workers"
+        assert error.details["config_keys"] == ["orchestrator.max_parallel_workers"]
+
+    def test_load_config_multiple_validation_errors_leave_config_key_unset(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Multi-field validation failures should keep all keys in details."""
+        config_path = tmp_path / "config.yaml"
+        config_content = {
+            "economics": {
+                "default_tier": "invalid_tier",
+            },
+            "orchestrator": {
+                "max_parallel_workers": 0,
+            },
+        }
+        with config_path.open("w") as f:
+            yaml.dump(config_content, f)
+
+        with pytest.raises(ConfigError) as exc_info:
+            load_config(config_path)
+
+        error = exc_info.value
+        assert error.config_key is None
+        assert set(error.details["config_keys"]) == {
+            "economics.default_tier",
+            "orchestrator.max_parallel_workers",
+        }
+
     def test_load_config_empty_file(self, tmp_path: Path) -> None:
         """load_config handles empty file (uses defaults)."""
         config_path = tmp_path / "config.yaml"
@@ -526,6 +571,7 @@ class TestRuntimeHelperLookups:
         with pytest.raises(ConfigError) as exc_info:
             get_max_parallel_workers()
 
+        assert exc_info.value.config_key == "OUROBOROS_MAX_PARALLEL_WORKERS"
         assert "OUROBOROS_MAX_PARALLEL_WORKERS" in str(exc_info.value)
 
     def test_get_max_parallel_workers_falls_back_to_config(
@@ -573,6 +619,7 @@ class TestRuntimeHelperLookups:
         ):
             get_max_parallel_workers()
 
+        assert exc_info.value.config_key == "orchestrator.max_parallel_workers"
         assert "max_parallel_workers" in str(exc_info.value)
 
 

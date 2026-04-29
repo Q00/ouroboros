@@ -115,19 +115,41 @@ class TestExecuteSeedHandler:
         assert result.is_err
         assert "seed_content or seed_path is required" in str(result.error)
 
-    async def test_handle_reports_invalid_parallel_worker_config(self) -> None:
-        """Invalid worker-cap config should surface as a tool error."""
+    async def test_handle_reports_execution_handler_config_error(self) -> None:
+        """Config failures should surface with execution-handler context."""
         handler = ExecuteSeedHandler()
 
         with patch(
             "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
-            side_effect=ConfigError("orchestrator.max_parallel_workers must be greater than 0"),
+            side_effect=ConfigError(
+                "orchestrator.max_parallel_workers must be greater than 0",
+                config_key="orchestrator.max_parallel_workers",
+            ),
         ):
             result = await handler.handle({"seed_content": VALID_SEED_YAML})
 
         assert result.is_err
-        assert "Invalid parallel worker configuration" in str(result.error)
+        assert "Execution handler config error" in str(result.error)
         assert "max_parallel_workers" in str(result.error)
+        assert "Invalid parallel worker configuration" not in str(result.error)
+
+    async def test_handle_reports_unrelated_config_error_with_same_prefix(self) -> None:
+        """Unrelated config failures should use the same handler-context prefix."""
+        handler = ExecuteSeedHandler()
+
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
+            side_effect=ConfigError(
+                "Configuration validation failed: economics.default_tier",
+                config_key="economics.default_tier",
+            ),
+        ):
+            result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_err
+        assert "Execution handler config error" in str(result.error)
+        assert "economics.default_tier" in str(result.error)
+        assert "Invalid parallel worker configuration" not in str(result.error)
 
     def test_execute_seed_handler_factory_accepts_runtime_backend(self) -> None:
         """Factory helper preserves explicit runtime backend selection."""

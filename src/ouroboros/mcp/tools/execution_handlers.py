@@ -65,7 +65,6 @@ from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
 
-
 # ---------------------------------------------------------------------------
 # Delegation context extraction
 # ---------------------------------------------------------------------------
@@ -347,7 +346,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
         except ConfigError as e:
             return Result.err(
                 MCPToolError(
-                    f"Invalid parallel worker configuration: {e}",
+                    f"Execution handler config error: {e}",
                     tool_name="ouroboros_execute_seed",
                 )
             )

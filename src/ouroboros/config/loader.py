@@ -282,16 +282,26 @@ def load_config(config_path: Path | None = None) -> OuroborosConfig:
         return OuroborosConfig.model_validate(config_dict)
     except PydanticValidationError as e:
         # Format validation errors for clarity
+        validation_errors = e.errors()
         error_messages = []
-        for error in e.errors():
+        config_keys = []
+        for error in validation_errors:
             loc = ".".join(str(x) for x in error["loc"])
             msg = error["msg"]
             error_messages.append(f"  - {loc}: {msg}")
+            if loc:
+                config_keys.append(loc)
+
+        config_key = config_keys[0] if len(validation_errors) == 1 and config_keys else None
 
         raise ConfigError(
             "Configuration validation failed:\n" + "\n".join(error_messages),
+            config_key=config_key,
             config_file=str(config_path),
-            details={"validation_errors": e.errors()},
+            details={
+                "validation_errors": validation_errors,
+                "config_keys": config_keys,
+            },
         ) from e
 
 
