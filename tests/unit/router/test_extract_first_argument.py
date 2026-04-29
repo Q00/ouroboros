@@ -68,6 +68,46 @@ from ouroboros.router import extract_first_argument
             "  C:\\temp\\seed.yaml --strict",
             id="windows-drive-path-with-incidental-leading-whitespace-preserved",
         ),
+        pytest.param(
+            r'"C:\Program Files\app\seed.yaml" --strict',
+            r"C:\Program Files\app\seed.yaml --strict",
+            id="quoted-drive-path-with-spaces-preserved",
+        ),
+        pytest.param(
+            r"'C:\Program Files\app\seed.yaml' --strict",
+            r"C:\Program Files\app\seed.yaml --strict",
+            id="single-quoted-drive-path-with-spaces-preserved",
+        ),
+        pytest.param(
+            r'"\\server\share\dir name\seed.yaml" --strict',
+            r"\\server\share\dir name\seed.yaml --strict",
+            id="quoted-unc-path-with-spaces-preserved",
+        ),
+        pytest.param(
+            r"'\\server\share\dir name\seed.yaml' --strict",
+            r"\\server\share\dir name\seed.yaml --strict",
+            id="single-quoted-unc-path-with-spaces-preserved",
+        ),
+        pytest.param(
+            r'"C:\Program Files\app\seed.yaml"',
+            r"C:\Program Files\app\seed.yaml",
+            id="quoted-drive-path-without-tail",
+        ),
+        pytest.param(
+            r'"\\server\share\dir name\seed.yaml" "two words"',
+            r"\\server\share\dir name\seed.yaml two words",
+            id="quoted-unc-path-with-quoted-tail-shell-normalized",
+        ),
+        pytest.param(
+            r'"C:\Program Files\app\seed.yaml" --label "two words"',
+            r"C:\Program Files\app\seed.yaml --label two words",
+            id="quoted-drive-path-with-quoted-tail-shell-normalized",
+        ),
+        pytest.param(
+            r'"C:\temp\seed.yaml" --label one --label two',
+            r"C:\temp\seed.yaml --label one --label two",
+            id="quoted-drive-path-with-bare-tail-rejoined",
+        ),
     ],
 )
 def test_extract_first_argument_returns_full_argument_payload(
@@ -82,3 +122,16 @@ def test_extract_first_argument_falls_back_to_whitespace_split_for_invalid_shell
         extract_first_argument('"unterminated seed path.yaml --strict')
         == '"unterminated seed path.yaml --strict'
     )
+
+
+def test_extract_first_argument_does_not_split_drive_path_on_embedded_quote() -> None:
+    """A leading quote followed mid-path by another quote must not produce a
+    silently-corrupted ``C:\\Pro`` token. The helper bails out when the closing
+    quote is not separated from any tail by whitespace, so the contrived input
+    falls through to the existing shlex/fallback path; whatever shlex returns,
+    it must not be the truncated drive-letter prefix.
+    """
+    corrupted_prefix = r"C:\Pro"
+    result = extract_first_argument(r'"C:\Pro"gram Files\app\seed.yaml"')
+    assert result != corrupted_prefix
+    assert result is not None and "Files" in result
