@@ -262,15 +262,18 @@ def normalize_mcp_frontmatter(
 
 
 def _try_extract_quoted_windows_literal_payload(stripped: str) -> str | None:
-    """Strip a leading quote pair around a Windows literal path payload.
+    """Preserve a quoted Windows literal path while shell-normalizing the tail.
 
     Quoting is the natural way to pass UNC or drive-letter paths that contain
     spaces (e.g. ``"\\\\server\\share\\dir name\\seed.yaml" --strict``).
     POSIX ``shlex`` would interpret the embedded backslashes as escape
-    characters and corrupt the path, so we peek inside a leading quote pair,
-    verify the inner token matches :data:`_WINDOWS_LITERAL_PATH_PATTERN`, and
-    only then preserve the path verbatim (mirroring the unquoted Windows
-    literal carve-out). The closing quote must be followed by either
+    characters and corrupt the path, so we peek inside a leading quote pair
+    and only short-circuit when the inner token matches
+    :data:`_WINDOWS_LITERAL_PATH_PATTERN`. The path itself is returned
+    verbatim (backslashes intact); any trailing tokens go through
+    :func:`shlex.split` exactly like the rest of the parser, so callers see
+    the same quote-stripped, single-space-joined tail they would get for any
+    other quoted prefix. The closing quote must be followed by either
     end-of-string or whitespace, so an embedded mid-token quote like
     ``"C:\\Pro"gram Files\\seed.yaml`` cannot silently truncate the payload to
     a ``C:\\Pro`` prefix.
@@ -288,7 +291,15 @@ def _try_extract_quoted_windows_literal_payload(stripped: str) -> str | None:
     if not _WINDOWS_LITERAL_PATH_PATTERN.match(inner):
         return None
     tail = after_close.lstrip()
-    return f"{inner} {tail}" if tail else inner
+    if not tail:
+        return inner
+    try:
+        tail_parts = shlex.split(tail)
+    except ValueError:
+        tail_parts = tail.split()
+    if not tail_parts:
+        return inner
+    return " ".join([inner, *tail_parts])
 
 
 def extract_first_argument(remainder: str | None) -> str | None:
@@ -296,16 +307,18 @@ def extract_first_argument(remainder: str | None) -> str | None:
 
     The legacy name is preserved for API stability, but the semantics cover the
     whole remainder. Multiline payloads are preserved exactly for inline
-    content such as Seed YAML. Windows literal path payloads (drive-letter or
-    UNC) are preserved verbatim, including the case where the user wraps the
-    path in quotes — the natural form for UNC paths that contain spaces. Other
-    single-line payloads still use shell-style tokenization purely to strip
-    matching quotes and escape sequences, then tokens are rejoined with single
-    spaces so natural-language usage like ``ooo interview add dark mode to
-    settings`` yields the full phrase rather than just ``add``. Quoted forms
-    such as ``ooo interview "add dark mode"`` produce the same unquoted
-    result. If shell tokenization fails (unterminated quote), a whitespace
-    split is used as fallback.
+    content such as Seed YAML. Unquoted Windows literal path payloads (drive-
+    letter or UNC) are preserved verbatim. When the user wraps a Windows path
+    in quotes — the natural form for UNC paths that contain spaces — the path
+    itself stays verbatim while any trailing tokens still flow through the
+    standard shell-style normalization, so quoted-tail behavior matches every
+    other quoted payload. Other single-line payloads still use shell-style
+    tokenization purely to strip matching quotes and escape sequences, then
+    tokens are rejoined with single spaces so natural-language usage like
+    ``ooo interview add dark mode to settings`` yields the full phrase rather
+    than just ``add``. Quoted forms such as ``ooo interview "add dark mode"``
+    produce the same unquoted result. If shell tokenization fails (unterminated
+    quote), a whitespace split is used as fallback.
     """
     if remainder is None or not remainder.strip():
         return None

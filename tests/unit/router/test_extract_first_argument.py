@@ -95,8 +95,18 @@ from ouroboros.router import extract_first_argument
         ),
         pytest.param(
             r'"\\server\share\dir name\seed.yaml" "two words"',
-            r'\\server\share\dir name\seed.yaml "two words"',
-            id="quoted-unc-path-with-quoted-trailing-args-preserved-verbatim",
+            r"\\server\share\dir name\seed.yaml two words",
+            id="quoted-unc-path-with-quoted-tail-shell-normalized",
+        ),
+        pytest.param(
+            r'"C:\Program Files\app\seed.yaml" --label "two words"',
+            r"C:\Program Files\app\seed.yaml --label two words",
+            id="quoted-drive-path-with-quoted-tail-shell-normalized",
+        ),
+        pytest.param(
+            r'"C:\temp\seed.yaml" --label one --label two',
+            r"C:\temp\seed.yaml --label one --label two",
+            id="quoted-drive-path-with-bare-tail-rejoined",
         ),
     ],
 )

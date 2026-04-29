@@ -474,6 +474,11 @@ def test_valid_dispatch_preserves_windows_unc_path_payload(tmp_path: Path) -> No
             r"C:\Program Files\app\seed.yaml",
             id="quoted-drive-without-tail",
         ),
+        pytest.param(
+            r'ooo run "C:\Program Files\app\seed.yaml" --label "two words"',
+            r"C:\Program Files\app\seed.yaml --label two words",
+            id="quoted-drive-with-quoted-tail-shell-normalized",
+        ),
     ],
 )
 def test_valid_dispatch_preserves_quoted_windows_path_backslashes(
