@@ -132,10 +132,16 @@ class ConvergenceCriteria:
         # (should_continue=False with non-empty questions still routes through
         # Reflect) so the stability branch below cannot terminate while Wonder
         # is still reporting unresolved gaps.
-        wonder_has_gap = latest_wonder is not None and (
+        # When Wonder did not run successfully (latest_wonder is None — e.g.
+        # the loop swallowed a Wonder degradation), we have no positive
+        # evidence that no gap remains. Treat that as a gap so the positive
+        # convergence paths stay closed; the loop's other signals
+        # (stagnation, max_generations) still terminate eventually.
+        wonder_evidence_present = latest_wonder is not None
+        wonder_has_gap = (not wonder_evidence_present) or bool(
             latest_wonder.should_continue
-            or bool(latest_wonder.questions)
-            or bool(latest_wonder.ontology_tensions)
+            or latest_wonder.questions
+            or latest_wonder.ontology_tensions
         )
 
         # Stagnation is not successful convergence unless the Idea contract gate

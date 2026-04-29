@@ -37,6 +37,21 @@ SCHEMA_C = _schema(("epsilon", "zeta"))
 SCHEMA_D = _schema(("eta", "theta"))
 
 
+def _satisfied_wonder() -> WonderOutput:
+    """Wonder output that confirms 'no remaining gap'.
+
+    Convergence requires positive Wonder evidence (not just absence) before
+    any stability/idea-contract branch can fire. Tests that exercise those
+    positive paths must hand in an explicit satisfied Wonder.
+    """
+    return WonderOutput(
+        questions=(),
+        ontology_tensions=(),
+        should_continue=False,
+        reasoning="Test: no remaining gap.",
+    )
+
+
 def _lineage_with_schemas(*schemas: OntologySchema) -> OntologyLineage:
     """Build an OntologyLineage with generations using the given schemas."""
     gens = tuple(
@@ -429,6 +444,7 @@ class TestConvergenceGating:
         )
         signal = criteria.evaluate(
             lineage,
+            latest_wonder=_satisfied_wonder(),
             latest_evaluation=EvaluationSummary(
                 final_approved=False, highest_stage_passed=1, score=0.3
             ),
@@ -503,6 +519,7 @@ class TestConvergenceGating:
         )
         signal = criteria.evaluate(
             lineage,
+            latest_wonder=_satisfied_wonder(),
             latest_evaluation=EvaluationSummary(
                 final_approved=True, highest_stage_passed=2, score=0.9
             ),
@@ -552,6 +569,7 @@ class TestConvergenceGating:
         )
         signal = criteria.evaluate(
             lineage,
+            latest_wonder=_satisfied_wonder(),
             latest_evaluation=EvaluationSummary(
                 final_approved=True, highest_stage_passed=2, score=None
             ),
@@ -706,6 +724,7 @@ class TestZeroMutationConvergence:
         )
         signal = criteria.evaluate(
             lineage,
+            latest_wonder=_satisfied_wonder(),
             latest_evaluation=EvaluationSummary(
                 final_approved=True,
                 highest_stage_passed=3,
@@ -715,7 +734,7 @@ class TestZeroMutationConvergence:
             ),
         )
         assert signal.converged
-        assert "stable ontology lens" in signal.reason
+        assert "Idea contract converged" in signal.reason
 
     def test_allows_when_ontology_evolved_at_least_once(self) -> None:
         """Ontology evolved once then stabilized -> genuine convergence."""
@@ -725,7 +744,7 @@ class TestZeroMutationConvergence:
             min_generations=2,
             eval_gate_enabled=False,
         )
-        signal = criteria.evaluate(lineage)
+        signal = criteria.evaluate(lineage, latest_wonder=_satisfied_wonder())
         assert signal.converged
         assert "converged" in signal.reason.lower()
 
@@ -739,7 +758,7 @@ class TestZeroMutationConvergence:
             eval_gate_enabled=False,
         )
 
-        signal = criteria.evaluate(lineage)
+        signal = criteria.evaluate(lineage, latest_wonder=_satisfied_wonder())
 
         assert signal.converged
         assert "Ontology converged" in signal.reason
@@ -754,12 +773,13 @@ class TestZeroMutationConvergence:
         )
         signal = criteria.evaluate(
             lineage,
+            latest_wonder=_satisfied_wonder(),
             latest_evaluation=EvaluationSummary(
                 final_approved=True, highest_stage_passed=3, score=0.95
             ),
         )
         assert signal.converged
-        assert "stable ontology lens" in signal.reason
+        assert "Idea contract converged" in signal.reason
 
     def test_max_generations_overrides_withheld_convergence(self) -> None:
         """Hard cap still terminates even with withheld convergence."""
@@ -839,6 +859,7 @@ class TestValidationGate:
         )
         signal = criteria.evaluate(
             lineage,
+            latest_wonder=_satisfied_wonder(),
             validation_output="Validation passed: all checks green",
         )
         assert signal.converged
@@ -854,6 +875,7 @@ class TestValidationGate:
         )
         signal = criteria.evaluate(
             lineage,
+            latest_wonder=_satisfied_wonder(),
             latest_evaluation=EvaluationSummary(
                 final_approved=True,
                 highest_stage_passed=3,
@@ -873,7 +895,11 @@ class TestValidationGate:
             min_generations=2,
             validation_gate_enabled=True,
         )
-        signal = criteria.evaluate(lineage, validation_output=None)
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=_satisfied_wonder(),
+            validation_output=None,
+        )
         assert signal.converged
 
     def test_disabled_allows_skipped_validation(self) -> None:
@@ -886,6 +912,7 @@ class TestValidationGate:
         )
         signal = criteria.evaluate(
             lineage,
+            latest_wonder=_satisfied_wonder(),
             validation_output="Validation skipped: no project directory",
         )
         assert signal.converged
@@ -983,6 +1010,66 @@ class TestIdeaContractWonderNoGap:
 
         assert not signal.converged
         assert "Idea contract converged" not in signal.reason
+
+
+class TestStabilityBranchRequiresWonderEvidence:
+    """Stability/Idea-contract convergence must NOT fire without Wonder evidence.
+
+    Regression for PR #497 fourth-round review: when Wonder degrades, the loop
+    swallows the error and returns wonder_output=None ([loop.py:1134]). With
+    `wonder_has_gap` previously derived only from `should_continue`, a None
+    Wonder was indistinguishable from "no gap", so the stability branches
+    could declare a terminal CONVERGED/Idea-contract result with zero Wonder
+    evidence. The fix treats missing Wonder as an unresolved gap.
+    """
+
+    def _stable_lineage(self) -> OntologyLineage:
+        return _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+
+    def _passing_evaluation(self) -> EvaluationSummary:
+        return EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=3,
+            score=0.95,
+            drift_score=0.0,
+            reward_hacking_risk=0.0,
+        )
+
+    def test_idea_first_stability_blocked_without_wonder(self) -> None:
+        """eval_gate on + stable ontology + Wonder=None must NOT converge."""
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+
+        signal = criteria.evaluate(
+            self._stable_lineage(),
+            latest_wonder=None,
+            latest_evaluation=self._passing_evaluation(),
+        )
+
+        assert not signal.converged
+        assert "Idea contract converged" not in signal.reason
+        assert "stable ontology lens" not in signal.reason
+
+    def test_legacy_stability_blocked_without_wonder(self) -> None:
+        """eval_gate off + stable ontology + Wonder=None must NOT converge.
+
+        The loop's degraded-Wonder path applies symmetrically to the legacy
+        stability branch — without positive Wonder evidence, "Ontology
+        converged" is not safe to declare.
+        """
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+        )
+
+        signal = criteria.evaluate(self._stable_lineage(), latest_wonder=None)
+
+        assert not signal.converged
+        assert "Ontology converged" not in signal.reason
 
 
 class TestStabilityBranchHonorsWonderGaps:
