@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import typer
 
 from ouroboros.cli.commands.run import (
     _load_skip_completed_markers,
@@ -120,6 +121,50 @@ def test_resolve_max_parallel_workers_reads_env(monkeypatch: pytest.MonkeyPatch)
     assert _resolve_max_parallel_workers() == 5
 
 
+def test_resolve_max_parallel_workers_reads_config_when_env_unset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parallel worker caps should fall back to config when env override is absent."""
+    monkeypatch.delenv("OUROBOROS_MAX_PARALLEL_WORKERS", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("orchestrator:\n  max_parallel_workers: 5\n", encoding="utf-8")
+
+    with patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path):
+        assert _resolve_max_parallel_workers() == 5
+
+
+def test_resolve_max_parallel_workers_rejects_invalid_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid config worker caps should fail the CLI path clearly."""
+    monkeypatch.delenv("OUROBOROS_MAX_PARALLEL_WORKERS", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("orchestrator:\n  max_parallel_workers: 0\n", encoding="utf-8")
+
+    with (
+        patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        pytest.raises(typer.Exit) as exc_info,
+    ):
+        _resolve_max_parallel_workers()
+
+    assert exc_info.value.exit_code == 1
+
+
+def test_resolve_max_parallel_workers_ignores_unrelated_invalid_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated invalid config should not block CLI worker-cap resolution."""
+    monkeypatch.delenv("OUROBOROS_MAX_PARALLEL_WORKERS", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("economics:\n  default_tier: invalid_tier\n", encoding="utf-8")
+
+    with patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path):
+        assert _resolve_max_parallel_workers() == 3
+
+
 @pytest.mark.asyncio
 async def test_run_orchestrator_passes_artifact_and_reference_to_qa(tmp_path: Path) -> None:
     """CLI QA should use the generated verification artifact and raw reference."""
@@ -169,8 +214,8 @@ async def test_run_orchestrator_passes_artifact_and_reference_to_qa(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_run_orchestrator_passes_resolved_depth_cap_to_runner(tmp_path: Path) -> None:
-    """CLI orchestration should pass the resolved decomposition cap into the runner."""
+async def test_run_orchestrator_passes_resolved_execution_caps_to_runner(tmp_path: Path) -> None:
+    """CLI orchestration should pass resolved execution caps into the runner."""
     seed_file = tmp_path / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
 
@@ -197,6 +242,7 @@ async def test_run_orchestrator_passes_resolved_depth_cap_to_runner(tmp_path: Pa
         patch(
             "ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner
         ) as mock_runner_cls,
+        patch("ouroboros.cli.commands.run._resolve_max_parallel_workers", return_value=7),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
             "ouroboros.cli.commands.run.build_verification_artifacts",
@@ -213,6 +259,7 @@ async def test_run_orchestrator_passes_resolved_depth_cap_to_runner(tmp_path: Pa
         await _run_orchestrator(seed_file)
 
     assert mock_runner_cls.call_args.kwargs["max_decomposition_depth"] == 3
+    assert mock_runner_cls.call_args.kwargs["max_parallel_workers"] == 7
 
 
 @pytest.mark.asyncio

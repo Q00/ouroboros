@@ -296,6 +296,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
             - ~ expansion: ~/.local/bin/opencode
             - None: Resolve from PATH at runtime
         default_max_turns: Default max turns for agent execution
+        max_parallel_workers: Default maximum concurrent AC workers
         use_worktrees: Whether mutating workflows run in dedicated git worktrees
         worktree_root: Root directory for managed task worktrees
         worktree_cleanup: Cleanup policy for managed task worktrees
@@ -316,6 +317,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     opencode_cli_path: str | None = None
     hermes_cli_path: str | None = None
     default_max_turns: int = Field(default=10, ge=1)
+    max_parallel_workers: int = Field(default=3, ge=1)
     use_worktrees: bool = True
     worktree_root: str = "~/.ouroboros/worktrees"
     worktree_cleanup: Literal["keep"] = "keep"

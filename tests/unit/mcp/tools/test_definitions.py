@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.errors import ConfigError
 from ouroboros.core.types import Result
 from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_signal
 from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
@@ -113,6 +114,41 @@ class TestExecuteSeedHandler:
 
         assert result.is_err
         assert "seed_content or seed_path is required" in str(result.error)
+
+    async def test_handle_reports_execution_handler_config_error(self) -> None:
+        """Config failures should surface with execution-handler context."""
+        handler = ExecuteSeedHandler()
+
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
+            side_effect=ConfigError(
+                "orchestrator.max_parallel_workers must be greater than 0",
+                config_key="orchestrator.max_parallel_workers",
+            ),
+        ):
+            result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_err
+        assert "Execution handler config error" in str(result.error)
+        assert "max_parallel_workers" in str(result.error)
+        assert "Invalid parallel worker configuration" not in str(result.error)
+
+    async def test_handle_reports_parse_config_error_with_same_prefix(self) -> None:
+        """Non-worker config failures should use the same handler-context prefix."""
+        handler = ExecuteSeedHandler()
+
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
+            side_effect=ConfigError(
+                "Failed to parse configuration file: invalid YAML",
+            ),
+        ):
+            result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_err
+        assert "Execution handler config error" in str(result.error)
+        assert "Failed to parse configuration file" in str(result.error)
+        assert "Invalid parallel worker configuration" not in str(result.error)
 
     def test_execute_seed_handler_factory_accepts_runtime_backend(self) -> None:
         """Factory helper preserves explicit runtime backend selection."""

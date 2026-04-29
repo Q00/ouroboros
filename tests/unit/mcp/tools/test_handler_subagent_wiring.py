@@ -304,6 +304,35 @@ class TestExecuteSeedHandlerSubagentDispatch:
         assert ctx["max_iterations"] == 5
         assert ctx["skip_qa"] is True
 
+    async def test_plugin_payload_includes_resolved_worker_cap(self, handler) -> None:
+        """Plugin dispatch must propagate the configured worker cap (#489)."""
+        from unittest.mock import patch
+
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
+            return_value=7,
+        ):
+            result = await handler.handle({"seed_content": "goal: test"})
+        ctx = result.value.meta["_subagent"]["context"]
+        assert ctx["max_parallel_workers"] == 7
+
+    async def test_plugin_path_surfaces_worker_cap_config_error(self, handler) -> None:
+        """Plugin dispatch must fail clearly on invalid worker-cap config (#489)."""
+        from unittest.mock import patch
+
+        from ouroboros.core.errors import ConfigError
+
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
+            side_effect=ConfigError(
+                "orchestrator.max_parallel_workers must be greater than 0",
+                config_key="orchestrator.max_parallel_workers",
+            ),
+        ):
+            result = await handler.handle({"seed_content": "goal: test"})
+        assert result.is_err
+        assert "Execution handler config error" in str(result.error)
+
 
 # ---------------------------------------------------------------------------
 # StartExecuteSeedHandler
@@ -352,6 +381,35 @@ class TestStartExecuteSeedHandlerSubagentDispatch:
         assert result.is_ok
         assert result.value.meta["job_id"] is None
         assert result.value.meta["status"] == "delegated_to_plugin"
+
+    async def test_plugin_payload_includes_resolved_worker_cap(self, handler) -> None:
+        """Plugin dispatch must propagate the configured worker cap (#489)."""
+        from unittest.mock import patch
+
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
+            return_value=7,
+        ):
+            result = await handler.handle({"seed_content": "goal: test"})
+        ctx = result.value.meta["_subagent"]["context"]
+        assert ctx["max_parallel_workers"] == 7
+
+    async def test_plugin_path_surfaces_worker_cap_config_error(self, handler) -> None:
+        """Plugin dispatch must fail clearly on invalid worker-cap config (#489)."""
+        from unittest.mock import patch
+
+        from ouroboros.core.errors import ConfigError
+
+        with patch(
+            "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
+            side_effect=ConfigError(
+                "orchestrator.max_parallel_workers must be greater than 0",
+                config_key="orchestrator.max_parallel_workers",
+            ),
+        ):
+            result = await handler.handle({"seed_content": "goal: test"})
+        assert result.is_err
+        assert "Execution handler config error" in str(result.error)
 
 
 # ---------------------------------------------------------------------------

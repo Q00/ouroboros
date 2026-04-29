@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
+from ouroboros.config.loader import get_max_parallel_workers
+from ouroboros.core.errors import ConfigError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.worktree import (
@@ -226,14 +228,18 @@ def _load_skip_completed_markers(
 
 
 def _resolve_max_parallel_workers() -> int:
-    """Resolve the parallel worker cap from the environment."""
+    """Resolve the parallel worker cap from environment, config, then default."""
     env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
     if env_value:
         return _coerce_positive_int(
             env_value,
             source="OUROBOROS_MAX_PARALLEL_WORKERS",
         )
-    return 3
+    try:
+        return get_max_parallel_workers()
+    except ConfigError as exc:
+        print_error(str(exc))
+        raise typer.Exit(1) from exc
 
 
 async def _initialize_mcp_manager(

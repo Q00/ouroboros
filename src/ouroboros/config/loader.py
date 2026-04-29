@@ -57,6 +57,7 @@ _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
+_DEFAULT_MAX_PARALLEL_WORKERS = 3
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
     "openrouter/anthropic/claude-opus-4-6",
@@ -282,16 +283,26 @@ def load_config(config_path: Path | None = None) -> OuroborosConfig:
         return OuroborosConfig.model_validate(config_dict)
     except PydanticValidationError as e:
         # Format validation errors for clarity
+        validation_errors = e.errors()
         error_messages = []
-        for error in e.errors():
+        config_keys = []
+        for error in validation_errors:
             loc = ".".join(str(x) for x in error["loc"])
             msg = error["msg"]
             error_messages.append(f"  - {loc}: {msg}")
+            if loc:
+                config_keys.append(loc)
+
+        config_key = config_keys[0] if len(validation_errors) == 1 and config_keys else None
 
         raise ConfigError(
             "Configuration validation failed:\n" + "\n".join(error_messages),
+            config_key=config_key,
             config_file=str(config_path),
-            details={"validation_errors": e.errors()},
+            details={
+                "validation_errors": validation_errors,
+                "config_keys": config_keys,
+            },
         ) from e
 
 
@@ -470,6 +481,108 @@ def get_agent_permission_mode(backend: str | None = None) -> str:
         return config.orchestrator.permission_mode
     except ConfigError:
         return "bypassPermissions" if _uses_opencode_backend(backend) else "acceptEdits"
+
+
+def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
+    """Parse a worker-cap setting without validating unrelated config keys."""
+    if isinstance(value, bool):
+        raise ConfigError(
+            f"{config_key} must be a positive integer",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"{config_key} must be a positive integer",
+            config_key=config_key,
+            details={"value": value},
+        ) from exc
+
+    if isinstance(value, float) and not value.is_integer():
+        raise ConfigError(
+            f"{config_key} must be a positive integer",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    if parsed <= 0:
+        raise ConfigError(
+            f"{config_key} must be greater than 0",
+            config_key=config_key,
+            details={"value": value},
+        )
+
+    return parsed
+
+
+def get_max_parallel_workers() -> int:
+    """Get the default AC worker cap from environment variable or config.
+
+    Priority:
+        1. OUROBOROS_MAX_PARALLEL_WORKERS environment variable
+        2. config.yaml orchestrator.max_parallel_workers
+        3. built-in default (3)
+    """
+    env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
+    if env_value:
+        return _parse_max_parallel_workers(
+            env_value,
+            config_key="OUROBOROS_MAX_PARALLEL_WORKERS",
+        )
+
+    config_path = get_config_dir() / "config.yaml"
+    if not config_path.exists():
+        # No config file means no worker-cap override; use the built-in default.
+        return _DEFAULT_MAX_PARALLEL_WORKERS
+
+    try:
+        with config_path.open() as f:
+            config_dict = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ConfigError(
+            f"Failed to parse configuration file: {e}",
+            config_file=str(config_path),
+            details={"yaml_error": str(e)},
+        ) from e
+    except OSError as e:
+        raise ConfigError(
+            f"Failed to read configuration file: {e}",
+            config_file=str(config_path),
+            details={"os_error": str(e), "error_type": type(e).__name__},
+        ) from e
+
+    if config_dict is None:
+        # Empty config means no worker-cap override; use the built-in default.
+        return _DEFAULT_MAX_PARALLEL_WORKERS
+    if not isinstance(config_dict, dict):
+        raise ConfigError(
+            "Configuration file must contain a mapping",
+            config_file=str(config_path),
+            details={"value_type": type(config_dict).__name__},
+        )
+
+    orchestrator_config = config_dict.get("orchestrator")
+    if orchestrator_config is None:
+        # Missing orchestrator section means no worker-cap override.
+        return _DEFAULT_MAX_PARALLEL_WORKERS
+    if not isinstance(orchestrator_config, dict):
+        raise ConfigError(
+            "orchestrator must be a mapping",
+            config_key="orchestrator",
+            config_file=str(config_path),
+            details={"value": orchestrator_config},
+        )
+    if "max_parallel_workers" not in orchestrator_config:
+        # Missing worker-cap key means no override; invalid values still raise below.
+        return _DEFAULT_MAX_PARALLEL_WORKERS
+
+    return _parse_max_parallel_workers(
+        orchestrator_config["max_parallel_workers"],
+        config_key="orchestrator.max_parallel_workers",
+    )
 
 
 def get_codex_cli_path() -> str | None:

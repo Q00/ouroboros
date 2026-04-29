@@ -752,6 +752,7 @@ The table below covers the most commonly used variables. For the full list — i
 | `OPENROUTER_API_KEY` | — | OpenRouter API key for consensus and LiteLLM |
 | `OUROBOROS_AGENT_RUNTIME` | `orchestrator.runtime_backend` | Override the runtime backend (`claude`, `codex`, `opencode`) |
 | `OUROBOROS_AGENT_PERMISSION_MODE` | `orchestrator.permission_mode` | Permission mode for Claude Code / Codex runtimes (no-op for OpenCode) |
+| `OUROBOROS_MAX_PARALLEL_WORKERS` | `orchestrator.max_parallel_workers` | Maximum concurrent Acceptance Criteria workers for parallel execution |
 | `OUROBOROS_LLM_BACKEND` | `llm.backend` | Override the LLM-only flow backend |
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary |
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary |

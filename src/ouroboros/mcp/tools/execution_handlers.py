@@ -17,7 +17,8 @@ from rich.console import Console
 import structlog
 import yaml
 
-from ouroboros.core.errors import ValidationError
+from ouroboros.config.loader import get_max_parallel_workers
+from ouroboros.core.errors import ConfigError, ValidationError
 from ouroboros.core.project_paths import resolve_seed_project_path
 from ouroboros.core.security import InputValidator
 from ouroboros.core.seed import Seed
@@ -63,7 +64,6 @@ from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
 log = structlog.get_logger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Delegation context extraction
@@ -282,6 +282,17 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             cwd=str(resolved_cwd),
         )
 
+        # Resolve worker cap up front so plugin and in-process paths agree.
+        try:
+            max_parallel_workers = get_max_parallel_workers()
+        except ConfigError as e:
+            return Result.err(
+                MCPToolError(
+                    f"Execution handler config error: {e}",
+                    tool_name="ouroboros_execute_seed",
+                )
+            )
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         payload = build_execute_subagent(
             seed_content=seed_content,
@@ -291,6 +302,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             max_iterations=max_iterations,
             skip_qa=arguments.get("skip_qa", False),
             model_tier=model_tier,
+            max_parallel_workers=max_parallel_workers,
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             await emit_subagent_dispatched_event(
@@ -450,6 +462,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     inherited_tools=inherited_effective_tools,
                     task_workspace=workspace,
                     checkpoint_store=checkpoint_store,
+                    max_parallel_workers=max_parallel_workers,
                 )
 
                 skip_qa = arguments.get("skip_qa", False)
@@ -854,6 +867,17 @@ class StartExecuteSeedHandler:
                 )
             )
 
+        # Resolve worker cap up front so plugin and background paths agree.
+        try:
+            max_parallel_workers = get_max_parallel_workers()
+        except ConfigError as e:
+            return Result.err(
+                MCPToolError(
+                    f"Execution handler config error: {e}",
+                    tool_name="ouroboros_start_execute_seed",
+                )
+            )
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # StartExecuteSeedHandler delegates to ExecuteSeedHandler internally.
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -876,6 +900,7 @@ class StartExecuteSeedHandler:
                 max_iterations=arguments.get("max_iterations", 10),
                 skip_qa=arguments.get("skip_qa", False),
                 model_tier=arguments.get("model_tier", "medium"),
+                max_parallel_workers=max_parallel_workers,
             )
 
             await emit_subagent_dispatched_event(
@@ -912,6 +937,7 @@ class StartExecuteSeedHandler:
             max_iterations=arguments.get("max_iterations", 10),
             skip_qa=arguments.get("skip_qa", False),
             model_tier=arguments.get("model_tier", "medium"),
+            max_parallel_workers=max_parallel_workers,
         )
 
         await self._event_store.initialize()
