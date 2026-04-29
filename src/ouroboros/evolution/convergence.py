@@ -63,6 +63,13 @@ class ConvergenceCriteria:
     reward_hacking_max_risk: float = 0.30
     regression_gate_enabled: bool = True
     validation_gate_enabled: bool = True
+    # When True, missing Wonder evidence (latest_wonder is None) is treated as
+    # an unresolved gap, so positive convergence stays closed. Loops that wire
+    # in a WonderEngine should set this so a degraded Wonder cannot silently
+    # produce a terminal CONVERGED result. Loops without a Wonder engine
+    # leave it False — convergence then falls back to ontology stability and
+    # the other gates without requiring Wonder evidence that would never come.
+    wonder_required: bool = False
 
     def evaluate(
         self,
@@ -132,17 +139,20 @@ class ConvergenceCriteria:
         # (should_continue=False with non-empty questions still routes through
         # Reflect) so the stability branch below cannot terminate while Wonder
         # is still reporting unresolved gaps.
-        # When Wonder did not run successfully (latest_wonder is None — e.g.
-        # the loop swallowed a Wonder degradation), we have no positive
-        # evidence that no gap remains. Treat that as a gap so the positive
-        # convergence paths stay closed; the loop's other signals
-        # (stagnation, max_generations) still terminate eventually.
-        wonder_evidence_present = latest_wonder is not None
-        wonder_has_gap = (not wonder_evidence_present) or bool(
-            latest_wonder.should_continue
-            or latest_wonder.questions
-            or latest_wonder.ontology_tensions
-        )
+        # When wonder_required=True and Wonder did not run successfully
+        # (latest_wonder is None — e.g. the loop swallowed a Wonder
+        # degradation), we have no positive evidence that no gap remains.
+        # Treat that as a gap so the positive convergence paths stay closed.
+        # When wonder_required=False (loops without a WonderEngine), missing
+        # Wonder is benign — convergence falls back to the other gates.
+        if latest_wonder is None:
+            wonder_has_gap = self.wonder_required
+        else:
+            wonder_has_gap = bool(
+                latest_wonder.should_continue
+                or latest_wonder.questions
+                or latest_wonder.ontology_tensions
+            )
 
         # Stagnation is not successful convergence unless the Idea contract gate
         # already passed and Wonder has no substantive gap; then zero ontology

@@ -1013,14 +1013,20 @@ class TestIdeaContractWonderNoGap:
 
 
 class TestStabilityBranchRequiresWonderEvidence:
-    """Stability/Idea-contract convergence must NOT fire without Wonder evidence.
+    """Stability/Idea-contract convergence must NOT fire without Wonder evidence
+    when the loop has a WonderEngine wired in (`wonder_required=True`).
 
     Regression for PR #497 fourth-round review: when Wonder degrades, the loop
     swallows the error and returns wonder_output=None ([loop.py:1134]). With
     `wonder_has_gap` previously derived only from `should_continue`, a None
     Wonder was indistinguishable from "no gap", so the stability branches
     could declare a terminal CONVERGED/Idea-contract result with zero Wonder
-    evidence. The fix treats missing Wonder as an unresolved gap.
+    evidence.
+
+    Loops without a WonderEngine (`wonder_required=False`) keep the legacy
+    permissive behavior — see `TestWonderOptionalLoops` below — so this guard
+    does not regress the constructor contract that allows
+    `wonder_engine=None`.
     """
 
     def _stable_lineage(self) -> OntologyLineage:
@@ -1041,6 +1047,7 @@ class TestStabilityBranchRequiresWonderEvidence:
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=True,
+            wonder_required=True,
         )
 
         signal = criteria.evaluate(
@@ -1064,12 +1071,63 @@ class TestStabilityBranchRequiresWonderEvidence:
             convergence_threshold=0.95,
             min_generations=2,
             eval_gate_enabled=False,
+            wonder_required=True,
         )
 
         signal = criteria.evaluate(self._stable_lineage(), latest_wonder=None)
 
         assert not signal.converged
         assert "Ontology converged" not in signal.reason
+
+
+class TestWonderOptionalLoops:
+    """Loops without a WonderEngine still converge on stability + gates.
+
+    The EvolutionaryLoop constructor accepts `wonder_engine=None`, so
+    convergence cannot mandate Wonder evidence in those configurations.
+    `wonder_required=False` (default) keeps Wonder=None permissive while
+    every other gate still applies.
+    """
+
+    def test_stability_converges_without_wonder_when_not_required(self) -> None:
+        """No Wonder + stable ontology + eval gate off -> legacy convergence."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=False,
+            wonder_required=False,
+        )
+
+        signal = criteria.evaluate(lineage, latest_wonder=None)
+
+        assert signal.converged
+        assert "Ontology converged" in signal.reason
+
+    def test_idea_first_converges_without_wonder_when_not_required(self) -> None:
+        """No Wonder + eval contract passes -> Idea-contract stability path fires."""
+        lineage = _lineage_with_schemas(SCHEMA_A, SCHEMA_A, SCHEMA_A)
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+            wonder_required=False,
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=None,
+            latest_evaluation=EvaluationSummary(
+                final_approved=True,
+                highest_stage_passed=3,
+                score=0.95,
+                drift_score=0.0,
+                reward_hacking_risk=0.0,
+            ),
+        )
+
+        assert signal.converged
+        assert "stable ontology lens" in signal.reason
 
 
 class TestStabilityBranchHonorsWonderGaps:

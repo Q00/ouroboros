@@ -179,6 +179,11 @@ class EvolutionaryLoop:
             enable_oscillation_detection=self.config.enable_oscillation_detection,
             eval_gate_enabled=self.config.eval_gate_enabled,
             eval_min_score=self.config.eval_min_score,
+            # Only require Wonder evidence for convergence when this loop
+            # actually has a WonderEngine wired in. Loops constructed without
+            # one (some tests, simple synchronous flows) don't produce Wonder
+            # output, so demanding it would prevent convergence entirely.
+            wonder_required=self.wonder_engine is not None,
         )
 
     @staticmethod
