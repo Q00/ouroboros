@@ -7,6 +7,7 @@ import pytest
 from ouroboros.router import (
     MCPDispatchTarget,
     NormalizedMCPFrontmatter,
+    ParsedOooCommand,
     Resolved,
     ResolveOutcome,
     ResolveRequest,
@@ -255,13 +256,7 @@ def test_valid_dispatch_preserves_multiline_inline_seed_payload(
     skills_dir = tmp_path / "skills"
     skill_md_path = _write_dispatchable_skill(skills_dir, "run")
     runtime_cwd = tmp_path / "workspace"
-    seed_content = (
-        "goal: test\n"
-        "constraints:\n"
-        "  - keep it simple\n"
-        "acceptance_criteria:\n"
-        "  - works"
-    )
+    seed_content = "goal: test\nconstraints:\n  - keep it simple\nacceptance_criteria:\n  - works"
     prompt = f"/ouroboros:run\n{seed_content}"
 
     result = resolve_skill_dispatch(
@@ -297,6 +292,26 @@ def test_valid_dispatch_preserves_multiline_inline_seed_payload(
         ),
     )
     assert result.outcome is ResolveOutcome.MATCH
+
+
+def test_valid_parsed_dispatch_reconstructs_multiline_prompt_with_newline_separator(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_dispatchable_skill(skills_dir, "run")
+    seed_content = "goal: test\nconstraints:\n  - keep it simple"
+    parsed = ParsedOooCommand(
+        skill_name="run",
+        command_prefix="/ouroboros:run",
+        remainder=seed_content,
+    )
+
+    result = resolve_skill_dispatch(parsed, cwd=tmp_path, skills_dir=skills_dir)
+
+    assert isinstance(result, Resolved)
+    assert result.prompt == f"/ouroboros:run\n{seed_content}"
+    assert result.first_argument == seed_content
+    assert result.mcp_args["seed_path"] == seed_content
 
 
 def test_valid_dispatch_without_argument_normalizes_first_argument_template_to_empty_string(
