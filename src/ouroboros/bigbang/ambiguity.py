@@ -283,7 +283,7 @@ class AmbiguityScorer:
     llm_adapter: LLMAdapter
     model: str = field(default_factory=get_clarification_model)
     temperature: float = SCORING_TEMPERATURE
-    initial_max_tokens: int = 512
+    initial_max_tokens: int = 2048
     max_retries: int | None = 10  # Default to 10 retries (None = unlimited)
     max_format_error_retries: int = 5  # Stop after N format errors (non-truncation)
 

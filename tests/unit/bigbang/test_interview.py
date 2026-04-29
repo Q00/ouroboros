@@ -1068,7 +1068,6 @@ class TestInterviewEngineSystemPrompt:
         prompt = engine._build_system_prompt(state)
 
         assert "### seed-closer" in prompt
-        assert "Closure mode active: yes" in prompt
 
     def test_system_prompt_omits_seed_closer_when_closure_mode_is_inactive(self) -> None:
         """High ambiguity should keep the closure perspective disabled."""
@@ -1091,7 +1090,6 @@ class TestInterviewEngineSystemPrompt:
         prompt = engine._build_system_prompt(state)
 
         assert "### seed-closer" not in prompt
-        assert "Closure mode active: no" in prompt
 
 
 class TestInterviewEngineConversationHistory:

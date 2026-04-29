@@ -288,7 +288,7 @@ class InterviewEngine:
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
     model: str = field(default_factory=get_clarification_model)
     temperature: float = 0.7
-    max_tokens: int = 512
+    max_tokens: int = 2048
     _MAX_TOTAL_PROMPT_CHARS = 4800
     _MAX_SYSTEM_PROMPT_CHARS = 3500
     _MIN_SYSTEM_PROMPT_CHARS = 1200
@@ -729,62 +729,17 @@ class InterviewEngine:
         if state.ambiguity_score is None:
             return ""
 
-        from pydantic import ValidationError as PydanticValidationError
-
-        from ouroboros.bigbang.ambiguity import (
-            AMBIGUITY_THRESHOLD,
-            AUTO_COMPLETE_STREAK_REQUIRED,
-            SEED_CLOSER_ACTIVATION_THRESHOLD,
-            AmbiguityScore,
-            ScoreBreakdown,
-            get_completion_floor_failures,
-            get_milestone,
-            get_next_milestone,
-        )
+        from ouroboros.bigbang.ambiguity import get_milestone
 
         milestone, milestone_desc = get_milestone(state.ambiguity_score)
-        next_ms = get_next_milestone(state.ambiguity_score)
 
         lines = [
             "## Current Ambiguity Snapshot",
             f"- Overall ambiguity: {state.ambiguity_score:.2f}",
             f"- Milestone: **{milestone.value.upper()}** — {milestone_desc}",
         ]
-        if next_ms is not None:
-            lines.append(
-                f"- Next milestone: {next_ms[1].value} (<= {next_ms[0]:.1f}) — {next_ms[2]}"
-            )
-        lines.extend(
-            [
-                f"- Seed-ready threshold: {AMBIGUITY_THRESHOLD:.2f}",
-                f"- Closure-mode threshold: {SEED_CLOSER_ACTIVATION_THRESHOLD:.2f}",
-                (
-                    "- Seed-ready now: yes"
-                    if state.ambiguity_score <= AMBIGUITY_THRESHOLD
-                    else "- Seed-ready now: no"
-                ),
-                (
-                    "- Closure mode active: yes"
-                    if state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
-                    else "- Closure mode active: no"
-                ),
-                (
-                    "- Completion candidate streak: "
-                    f"{state.completion_candidate_streak}/{AUTO_COMPLETE_STREAK_REQUIRED}"
-                ),
-            ]
-        )
 
-        reconstructed_score: AmbiguityScore | None = None
         if isinstance(state.ambiguity_breakdown, dict):
-            try:
-                reconstructed_score = AmbiguityScore(
-                    overall_score=state.ambiguity_score,
-                    breakdown=ScoreBreakdown.model_validate(state.ambiguity_breakdown),
-                )
-            except PydanticValidationError:
-                reconstructed_score = None
-
             weakest_components: list[tuple[float, str, str]] = []
             for payload in state.ambiguity_breakdown.values():
                 if not isinstance(payload, dict):
@@ -806,22 +761,7 @@ class InterviewEngine:
                 if justification:
                     lines.append(f"  Reason: {justification}")
 
-        if reconstructed_score is not None:
-            floor_failures = get_completion_floor_failures(
-                reconstructed_score,
-                is_brownfield=state.is_brownfield,
-            )
-            if floor_failures:
-                lines.append(f"- Completion floors unmet: {'; '.join(floor_failures)}")
-            else:
-                lines.append("- Completion floors: passed")
-
-        lines.append(
-            "- Use this snapshot to drill into the weakest area until closure mode is active."
-        )
-        lines.append(
-            "- A single seed-ready score is not enough to end the interview; require sustained clarity before asking a closure question."
-        )
+        lines.append("- Drill into the weakest area with a concrete, scenario-grounded question.")
         return "\n".join(lines)
 
     def _select_perspectives(self, state: InterviewState) -> tuple[InterviewPerspective, ...]:
