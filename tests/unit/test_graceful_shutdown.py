@@ -577,6 +577,92 @@ class TestResumeRestore:
         assert gen_result.wonder_output.should_continue is False
 
     @pytest.mark.asyncio
+    async def test_validation_output_restored_when_resuming_after_executing(self) -> None:
+        """Interrupt between validation and evaluation must preserve validator
+        result so resume reuses it instead of re-running validation.
+
+        Regression for PR #497 seventh-round review: previously the
+        post-executing shutdown checkpoint did not carry validation_output,
+        and resume only restored it for the evaluating-phase resume path.
+        That meant a SIGINT between validation and evaluation would lose the
+        validator evidence and resume would silently re-run validation — a
+        different outcome could leak past the convergence gate.
+        """
+        partial_state = {
+            "wonder_questions": ["q1"],
+            "reflect_output": ReflectOutput(
+                refined_goal="g", ontology_mutations=(), reasoning="r"
+            ).model_dump(mode="json"),
+            "execution_output": "exec output",
+            "validation_output": "Validation fix failed (attempt 2): subprocess timeout",
+        }
+
+        loop = self._make_loop()
+        lineage = self._make_lineage_with_interrupted_gen(partial_state, "executing")
+
+        seed = MagicMock()
+        seed.metadata.seed_id = "s1"
+        seed.metadata.parent_seed_id = None
+        seed.ontology_schema = MagicMock()
+        seed.to_dict.return_value = {"goal": "test"}
+
+        gen_result_mock = MagicMock()
+        gen_result_mock.is_err = False
+        gen_result_mock.is_ok = True
+        gen_result_mock.value = seed
+        loop.seed_generator = MagicMock()
+        loop.seed_generator.generate_from_reflect.return_value = gen_result_mock
+
+        # If the validator gets called, the test failed — resume must NOT
+        # re-run validation when a saved validation_output exists.
+        validator_called = []
+
+        async def mock_validator(s, output):
+            validator_called.append(True)
+            return "Validation passed: re-run produced different result"
+
+        loop.validator = mock_validator
+
+        result = await loop._run_generation_phases(
+            lineage=lineage,
+            generation_number=2,
+            current_seed=seed,
+            execute=True,
+            resume_after_phase="executing",
+        )
+
+        assert result.is_ok
+        gen_result = result.value
+        assert (
+            gen_result.validation_output == "Validation fix failed (attempt 2): subprocess timeout"
+        )
+        assert len(validator_called) == 0
+
+    @pytest.mark.asyncio
+    async def test_post_executing_checkpoint_persists_validation_output(self) -> None:
+        """The shutdown checkpoint after the executing phase must persist
+        validation_output so resume has it to restore.
+        """
+        loop = self._make_loop()
+        loop._shutdown_requested = True
+        seed = MagicMock()
+        seed.to_dict.return_value = {"goal": "test"}
+
+        result = await loop._check_shutdown(
+            LINEAGE_ID,
+            3,
+            "executing",
+            seed,
+            execution_output="exec output",
+            validation_output="Validation: 2 errors remain after 2 attempts.",
+        )
+        assert result is not None
+
+        event = loop.event_store.append.call_args[0][0]
+        ps = event.data["partial_state"]
+        assert ps["validation_output"] == "Validation: 2 errors remain after 2 attempts."
+
+    @pytest.mark.asyncio
     async def test_legacy_wonder_questions_only_resume_remains_compatible(self) -> None:
         """Older interrupt records (only wonder_questions persisted) must still
         round-trip through resume. should_continue defaults to True since the

@@ -1086,6 +1086,14 @@ class EvolutionaryLoop:
                         )
                 if _should_skip("executing") and ps.get("execution_output"):
                     restored_execution_output = ps["execution_output"]
+                # Validation runs at the tail of the executing phase (before
+                # the post-executing shutdown checkpoint), so its output must
+                # be restored whenever execute is being skipped — not only on
+                # the evaluating-phase resume path. Without this, an interrupt
+                # between validation and evaluation would lose validator
+                # evidence and resume would silently re-run validation.
+                if _should_skip("executing") and ps.get("validation_output"):
+                    restored_validation_output = ps["validation_output"]
                 if _should_skip("evaluating") and ps.get("evaluation_summary"):
                     try:
                         restored_evaluation_summary = EvaluationSummary.model_validate(
@@ -1424,9 +1432,11 @@ class EvolutionaryLoop:
                 return Result.err(OuroborosError(f"Execution error: {e}"))
 
         # Validate phase - reconcile parallel execution artifacts
-        # Skip if restored from checkpoint (resume after evaluating)
+        # Skip if restored from checkpoint. Validation completes at the tail
+        # of the executing phase, so a saved validation_output is reusable
+        # whenever execute (or any later phase) is being skipped on resume.
         validation_output: str | None = restored_validation_output
-        if validation_output and _should_skip("evaluating"):
+        if validation_output and (_should_skip("executing") or _should_skip("evaluating")):
             logger.info(
                 "evolution.generation.validation_restored_from_checkpoint",
                 extra={"generation": generation_number},
@@ -1460,7 +1470,12 @@ class EvolutionaryLoop:
                 )
                 validation_output = f"Validation skipped: {e}"
 
-        # Check for graceful shutdown after executing
+        # Check for graceful shutdown after executing.
+        # Validation has already run by this point, so its output must be
+        # checkpointed here too — otherwise a SIGINT between validation and
+        # evaluation would lose the validator result and resume would re-run
+        # validation, potentially producing a different outcome or dropping
+        # the failure evidence the convergence gate depends on.
         interrupted = await self._check_shutdown(
             lineage.lineage_id,
             generation_number,
@@ -1469,6 +1484,7 @@ class EvolutionaryLoop:
             wonder_output=wonder_output,
             reflect_output=reflect_output,
             execution_output=execution_output,
+            validation_output=validation_output,
         )
         if interrupted:
             return Result.ok(interrupted)
