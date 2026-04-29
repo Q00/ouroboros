@@ -149,6 +149,25 @@ def test_valid_dispatch_inputs_normalize_to_canonical_runtime_metadata(
     assert result.outcome is ResolveOutcome.MATCH
 
 
+def test_valid_dispatch_normalizes_trailing_line_ending_on_single_line_argument(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_dispatchable_skill(skills_dir, "run")
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt='ooo run "seed file.yaml"\r\n',
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.first_argument == "seed file.yaml"
+    assert result.mcp_args["seed_path"] == "seed file.yaml"
+
+
 @pytest.mark.parametrize(
     ("prompt", "expected_prefix"),
     [

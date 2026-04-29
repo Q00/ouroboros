@@ -27,6 +27,12 @@ from ouroboros.router import extract_first_argument
             "seed file.yaml --strict",
             id="double-quoted-joined",
         ),
+        pytest.param("seed.yaml\n", "seed.yaml", id="trailing-newline-normalized"),
+        pytest.param(
+            '"seed file.yaml"\r\n',
+            "seed file.yaml",
+            id="quoted-trailing-crlf-normalized",
+        ),
         pytest.param(
             "'seed file.yaml' --strict",
             "seed file.yaml --strict",

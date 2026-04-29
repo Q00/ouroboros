@@ -272,7 +272,7 @@ def extract_first_argument(remainder: str | None) -> str | None:
     """
     if remainder is None or not remainder.strip():
         return None
-    if "\n" in remainder or "\r" in remainder:
+    if re.search(r"[\r\n].*\S", remainder):
         return remainder
     try:
         parts = shlex.split(remainder)
