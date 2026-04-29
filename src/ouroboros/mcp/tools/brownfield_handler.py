@@ -281,7 +281,28 @@ class BrownfieldHandler:
         root. Linked worktree seeds are registered themselves only.
         """
         scan_root_str = arguments.get("scan_root")
-        scan_root = Path(scan_root_str) if scan_root_str else None
+        if scan_root_str:
+            # Resolve before validating so the existence/dir checks apply to
+            # the same path the walk will actually traverse. Without this,
+            # symlinks and TOCTOU swaps could let a caller pass an exists+dir
+            # check while the underlying walk runs against a different target.
+            scan_root = Path(scan_root_str).resolve()
+            if not scan_root.exists():
+                return Result.err(
+                    MCPToolError(
+                        f"scan_root does not exist: {scan_root_str!r}",
+                        tool_name=_TOOL_NAME,
+                    )
+                )
+            if not scan_root.is_dir():
+                return Result.err(
+                    MCPToolError(
+                        f"scan_root is not a directory: {scan_root_str!r}",
+                        tool_name=_TOOL_NAME,
+                    )
+                )
+        else:
+            scan_root = None
 
         store = await self._get_store()
 
