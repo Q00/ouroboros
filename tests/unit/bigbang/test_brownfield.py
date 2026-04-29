@@ -1103,8 +1103,14 @@ class TestScanAndRegisterMocked:
         store.update_is_default.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_mocked_scan_empty_returns_store_list(self) -> None:
-        """When scan finds no repos, returns store.list() (may have pre-registered)."""
+    async def test_mocked_scan_empty_returns_empty_list(self) -> None:
+        """An empty scan must not leak previously-registered repos into the result.
+
+        scan_and_register is boundary-sensitive: callers (CLI, MCP) display its
+        return value as "what this scan discovered." Returning the full DB on an
+        empty scan would falsely report unrelated repos as if they were just
+        found. Callers that need the full registry must call store.list() directly.
+        """
         store = AsyncMock(spec=BrownfieldStore)
         pre_registered = [BrownfieldRepo(path="/existing", name="existing")]
         store.list.return_value = pre_registered
@@ -1115,9 +1121,30 @@ class TestScanAndRegisterMocked:
         ):
             result = await scan_and_register(store, root=Path("/fake"))
 
-        assert len(result) == 1
-        assert result[0].path == "/existing"
+        assert result == []
+        store.register.assert_not_called()
         store.bulk_register.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mocked_scan_returns_only_scanned_repos(self) -> None:
+        """Result must contain only repos discovered by THIS scan, not the whole DB."""
+        fake_repos = [{"path": "/scanned", "name": "scanned"}]
+        store = AsyncMock(spec=BrownfieldStore)
+        store.register.return_value = BrownfieldRepo(path="/scanned", name="scanned")
+        # store.list() includes both the scanned repo AND an unrelated, manually
+        # registered repo outside the scan root.
+        store.list.return_value = [
+            BrownfieldRepo(path="/scanned", name="scanned"),
+            BrownfieldRepo(path="/manual/outside", name="outside"),
+        ]
+
+        with patch(
+            "ouroboros.bigbang.brownfield.scan_home_for_repos",
+            return_value=fake_repos,
+        ):
+            result = await scan_and_register(store, root=Path("/fake"))
+
+        assert {r.path for r in result} == {"/scanned"}
 
     @pytest.mark.asyncio
     async def test_mocked_scan_llm_adapter_not_called(self) -> None:

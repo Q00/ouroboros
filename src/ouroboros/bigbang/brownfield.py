@@ -386,13 +386,16 @@ async def scan_and_register(
         model: Unused — kept for backward API compatibility.
 
     Returns:
-        List of all registered BrownfieldRepo instances.
+        List of BrownfieldRepo instances discovered and upserted by THIS scan.
+        Repos that were registered manually or by previous scans but not
+        re-discovered by this scan are not included; callers that need the
+        full registry should call :py:meth:`BrownfieldStore.list` directly.
     """
     scanned = scan_home_for_repos(root)
 
     if not scanned:
         log.info("brownfield.scan_and_register.no_repos")
-        return await store.list()
+        return []
 
     # Upsert scanned repos — register() does INSERT OR UPDATE for
     # existing paths, preserving is_default and desc for repos already
@@ -411,7 +414,11 @@ async def scan_and_register(
 
     log.info("brownfield.upsert_registered", count=len(scanned_paths))
 
-    return await store.list()
+    # Return only the repos that were just discovered/upserted. The full
+    # registry can include manually-registered or previously-scanned repos
+    # outside the current scan root, and conflating them with "what this
+    # scan found" leaks state into a boundary-sensitive operation.
+    return [r for r in await store.list() if r.path in scanned_paths]
 
 
 async def get_default_brownfield_context(
