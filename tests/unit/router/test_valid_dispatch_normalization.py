@@ -294,6 +294,27 @@ def test_valid_dispatch_preserves_multiline_inline_seed_payload(
     assert result.outcome is ResolveOutcome.MATCH
 
 
+def test_valid_dispatch_preserves_multiline_inline_seed_leading_whitespace(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    _write_dispatchable_skill(skills_dir, "run")
+    seed_content = "  goal: test\n  constraints:\n    - keep it simple"
+    prompt = f"/ouroboros:run\n{seed_content}"
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt=prompt,
+            cwd=tmp_path,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.first_argument == seed_content
+    assert result.mcp_args["seed_path"] == seed_content
+
+
 def test_valid_parsed_dispatch_reconstructs_multiline_prompt_with_newline_separator(
     tmp_path: Path,
 ) -> None:
