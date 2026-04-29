@@ -21,6 +21,9 @@ _CLAUDE_BACKENDS = {"claude", "claude_code"}
 _CODEX_BACKENDS = {"codex", "codex_cli"}
 _OPENCODE_BACKENDS = {"opencode", "opencode_cli"}
 _HERMES_BACKENDS = {"hermes", "hermes_cli"}
+_GEMINI_BACKENDS = {"gemini", "gemini_cli"}
+
+_SUPPORTED_BACKENDS = ("claude", "codex", "opencode", "hermes", "gemini")
 
 
 def resolve_agent_runtime_backend(backend: str | None = None) -> str:
@@ -34,8 +37,13 @@ def resolve_agent_runtime_backend(backend: str | None = None) -> str:
         return "opencode"
     if candidate in _HERMES_BACKENDS:
         return "hermes"
+    if candidate in _GEMINI_BACKENDS:
+        return "gemini"
 
-    msg = f"Unsupported orchestrator runtime backend: {candidate}"
+    msg = (
+        f"Unsupported orchestrator runtime backend: {candidate}. "
+        f"Supported backends: {', '.join(_SUPPORTED_BACKENDS)}"
+    )
     raise ValueError(msg)
 
 
@@ -102,7 +110,19 @@ def create_agent_runtime(
             **runtime_kwargs,
         )
 
-    msg = f"Unsupported orchestrator runtime backend: {resolved_backend}"
+    if resolved_backend == "gemini":
+        from ouroboros.config import get_gemini_cli_path
+        from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
+
+        return GeminiCLIRuntime(
+            cli_path=cli_path or get_gemini_cli_path(),
+            **runtime_kwargs,
+        )
+
+    msg = (
+        f"Unsupported orchestrator runtime backend: {resolved_backend}. "
+        f"Supported backends: {', '.join(_SUPPORTED_BACKENDS)}"
+    )
     raise ValueError(msg)
 
 

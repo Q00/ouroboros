@@ -35,6 +35,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     CODEX = "codex"
     OPENCODE = "opencode"
     HERMES = "hermes"
+    GEMINI = "gemini"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -44,6 +45,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     LITELLM = "litellm"
     CODEX = "codex"
     OPENCODE = "opencode"
+    GEMINI = "gemini"
 
 
 def _write_pid_file() -> bool:
@@ -369,7 +371,7 @@ def serve(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or opencode)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, opencode, or gemini)."
             ),
             case_sensitive=False,
         ),
@@ -459,7 +461,7 @@ def info(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or opencode)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, opencode, or gemini)."
             ),
             case_sensitive=False,
         ),

@@ -47,6 +47,7 @@ from ouroboros.orchestrator.coordinator import (
     FileConflict,
     LevelCoordinator,
 )
+from ouroboros.orchestrator.gemini_cli_runtime import GeminiCLIRuntime
 from ouroboros.orchestrator.opencode_runtime import (
     OpenCodeRuntime,
 )
@@ -150,6 +151,7 @@ __all__ = [
     "ClaudeAgentAdapter",
     "ClaudeCodeRuntime",
     "CodexCliRuntime",
+    "GeminiCLIRuntime",
     "OpenCodeRuntime",
     "DEFAULT_TOOLS",
     "RuntimeHandle",

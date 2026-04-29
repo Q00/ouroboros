@@ -22,8 +22,8 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-_VALID_BACKENDS = ("claude", "codex", "opencode", "hermes")
-_SWITCHABLE_BACKENDS = ("claude", "codex", "hermes")
+_VALID_BACKENDS = ("claude", "codex", "opencode", "hermes", "gemini")
+_SWITCHABLE_BACKENDS = ("claude", "codex", "hermes", "gemini")
 
 
 def _load_config() -> tuple[dict, Path]:
@@ -90,6 +90,8 @@ def _resolve_cli_path(data: dict) -> str | None:
         return data.get("orchestrator", {}).get("opencode_cli_path")
     if backend == "hermes":
         return data.get("orchestrator", {}).get("hermes_cli_path")
+    if backend == "gemini":
+        return data.get("orchestrator", {}).get("gemini_cli_path")
     return data.get("orchestrator", {}).get("cli_path")
 
 
@@ -150,7 +152,7 @@ def show(
 def backend(
     new_backend: Annotated[
         str | None,
-        typer.Argument(help="Backend to switch to (claude, codex, hermes)."),
+        typer.Argument(help="Backend to switch to (claude, codex, hermes, gemini)."),
     ] = None,
 ) -> None:
     """Show or switch the runtime backend.
@@ -165,6 +167,7 @@ def backend(
     [dim]    ouroboros config backend codex     # switch to Codex[/dim]
     [dim]    ouroboros config backend claude    # switch to Claude Code[/dim]
     [dim]    ouroboros config backend hermes    # switch to Hermes[/dim]
+    [dim]    ouroboros config backend gemini    # switch to Gemini CLI[/dim]
     """
     data, config_path = _load_config()
     current = data.get("orchestrator", {}).get("runtime_backend", "unknown")
@@ -175,7 +178,9 @@ def backend(
         cli_path = _resolve_cli_path(data)
         if cli_path:
             console.print(f"[bold]CLI path:[/bold]        [dim]{cli_path}[/dim]")
-        console.print("\n[dim]Switch with: ouroboros config backend <claude|codex|hermes>[/dim]\n")
+        console.print(
+            "\n[dim]Switch with: ouroboros config backend <claude|codex|hermes|gemini>[/dim]\n"
+        )
         return
 
     # Validate
@@ -192,11 +197,31 @@ def backend(
         print_info(f"Already using {new_backend}.")
         return
 
-    # Detect CLI path
-    cli_name = {"claude": "claude", "codex": "codex", "hermes": "hermes"}[new_backend]
-    cli_path = shutil.which(cli_name)
+    # Detect CLI path. For backends that expose an env-var or persisted
+    # config path (gemini), honor those before falling back to PATH so users
+    # with explicit-path installs can still switch via the CLI.
+    cli_name = {
+        "claude": "claude",
+        "codex": "codex",
+        "hermes": "hermes",
+        "gemini": "gemini",
+    }[new_backend]
+    cli_path: str | None = None
+    if new_backend == "gemini":
+        from ouroboros.config import get_gemini_cli_path
+
+        cli_path = get_gemini_cli_path()
     if not cli_path:
-        print_error(f"{cli_name} CLI not found in PATH.\nInstall it first, then retry.")
+        cli_path = shutil.which(cli_name)
+    if not cli_path:
+        if new_backend == "gemini":
+            print_error(
+                "gemini CLI not found.\n"
+                "Set OUROBOROS_GEMINI_CLI_PATH, configure orchestrator.gemini_cli_path "
+                "in config.yaml, or install gemini on PATH and retry."
+            )
+        else:
+            print_error(f"{cli_name} CLI not found in PATH.\nInstall it first, then retry.")
         raise typer.Exit(1)
 
     # Delegate to the full setup flow for the chosen backend.
@@ -205,7 +230,12 @@ def backend(
     # Suppress setup output; detect non-exception failures by monkey-patching
     # print_error to set a flag.
     from ouroboros.cli.commands import setup as setup_mod
-    from ouroboros.cli.commands.setup import _setup_claude, _setup_codex, _setup_hermes
+    from ouroboros.cli.commands.setup import (
+        _setup_claude,
+        _setup_codex,
+        _setup_gemini,
+        _setup_hermes,
+    )
 
     _setup_had_errors = False
     _orig_print_error = setup_mod.print_error
@@ -226,6 +256,8 @@ def backend(
             _setup_codex(cli_path)
         elif new_backend == "hermes":
             _setup_hermes(cli_path)
+        elif new_backend == "gemini":
+            _setup_gemini(cli_path)
     except Exception as exc:
         setup_failed = True
         console.quiet = prev_quiet
@@ -429,6 +461,10 @@ def validate() -> None:
         cli = data.get("orchestrator", {}).get("hermes_cli_path")
         if cli and not Path(cli).exists():
             issues.append(f"Hermes CLI path does not exist: {cli}")
+    elif backend_val == "gemini":
+        cli = data.get("orchestrator", {}).get("gemini_cli_path")
+        if cli and not Path(cli).exists():
+            issues.append(f"Gemini CLI path does not exist: {cli}")
 
     # Try loading config through the validated schema
     try:

@@ -159,11 +159,25 @@ def _get_current_backend() -> str | None:
 
 
 def _detect_runtimes() -> dict[str, str | None]:
-    """Detect available runtime CLIs in PATH."""
+    """Detect available runtime CLIs in PATH.
+
+    For Gemini, we additionally honor the explicit-path overrides
+    (``OUROBOROS_GEMINI_CLI_PATH`` and persisted ``orchestrator.gemini_cli_path``)
+    so that users with non-PATH installs are still detected.
+    """
     runtimes: dict[str, str | None] = {}
     for name in ("claude", "codex", "opencode", "hermes"):
         path = shutil.which(name)
         runtimes[name] = path
+
+    # Gemini: prefer explicit-path config (env var / config.yaml) over PATH.
+    try:
+        from ouroboros.config import get_gemini_cli_path
+
+        gemini_path = get_gemini_cli_path()
+    except Exception:
+        gemini_path = None
+    runtimes["gemini"] = gemini_path or shutil.which("gemini")
     return runtimes
 
 
@@ -438,6 +452,51 @@ def _setup_hermes(hermes_path: str) -> None:
 
     # Register MCP server
     _register_hermes_mcp_server()
+
+
+def _setup_gemini(gemini_path: str) -> None:
+    """Configure Ouroboros for the Gemini CLI runtime.
+
+    Gemini is a base-package runtime — it does not require the ``[claude]``
+    extra (or any provider-specific extra) to function, so the MCP entry is
+    not rewritten as part of this flow. Users who want the Gemini runtime to
+    drive the MCP server can keep their existing entry; switching the
+    ``orchestrator.runtime_backend`` is sufficient.
+    """
+    from ouroboros.config.loader import create_default_config, ensure_config_dir
+
+    config_dir = ensure_config_dir()
+    config_path = config_dir / "config.yaml"
+
+    if config_path.exists():
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        create_default_config(config_dir)
+        config_dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+    if not isinstance(config_dict, dict):
+        print_warning("~/.ouroboros/config.yaml top-level is not a mapping — resetting.")
+        config_dict = {}
+
+    orch = config_dict.get("orchestrator")
+    if not isinstance(orch, dict):
+        orch = {}
+        config_dict["orchestrator"] = orch
+    orch["runtime_backend"] = "gemini"
+    orch["gemini_cli_path"] = gemini_path
+
+    # Gemini also serves as an LLM-only backend for interview/seed/eval flows.
+    llm = config_dict.get("llm")
+    if not isinstance(llm, dict):
+        llm = {}
+        config_dict["llm"] = llm
+    llm["backend"] = "gemini"
+
+    with config_path.open("w", encoding="utf-8") as f:
+        yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+    print_success(f"Configured Gemini runtime (CLI: {gemini_path})")
+    print_info(f"Config saved to: {config_path}")
 
 
 def _setup_claude(claude_path: str) -> None:
@@ -1165,7 +1224,7 @@ def setup(
         typer.Option(
             "--runtime",
             "-r",
-            help="Runtime backend to configure (claude, codex, opencode, hermes).",
+            help="Runtime backend to configure (claude, codex, opencode, hermes, gemini).",
         ),
     ] = None,
     non_interactive: Annotated[
@@ -1258,7 +1317,8 @@ def setup(
                 "  • Claude Code: https://claude.ai/download\n"
                 "  • Codex CLI:   npm install -g @openai/codex\n"
                 "  • OpenCode:    npm install -g opencode-ai\n"
-                "  • Hermes CLI:  https://hermes.ai/cli"
+                "  • Hermes CLI:  https://hermes.ai/cli\n"
+                "  • Gemini CLI:  npm install -g @google/gemini-cli"
             )
             raise typer.Exit(1)
 
@@ -1313,6 +1373,16 @@ def setup(
             print_error("Hermes CLI not found in PATH.")
             raise typer.Exit(1)
         _setup_hermes(hermes_path)
+    elif selected in ("gemini", "gemini_cli"):
+        gemini_path = available.get("gemini")
+        if not gemini_path:
+            print_error(
+                "Gemini CLI not found.\n"
+                "Install it (npm install -g @google/gemini-cli), set "
+                "OUROBOROS_GEMINI_CLI_PATH, or configure orchestrator.gemini_cli_path."
+            )
+            raise typer.Exit(1)
+        _setup_gemini(gemini_path)
     else:
         print_error(f"Unsupported runtime: {selected}")
         raise typer.Exit(1)

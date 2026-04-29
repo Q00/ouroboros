@@ -52,6 +52,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     CODEX = "codex"
     OPENCODE = "opencode"
     HERMES = "hermes"
+    GEMINI = "gemini"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -61,6 +62,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     LITELLM = "litellm"
     CODEX = "codex"
     OPENCODE = "opencode"
+    GEMINI = "gemini"
 
 
 class _DefaultStartGroup(typer.core.TyperGroup):
