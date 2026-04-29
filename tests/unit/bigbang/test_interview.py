@@ -630,24 +630,36 @@ class TestInterviewEngineRecordResponse:
         assert error.field == "user_response"
 
     @pytest.mark.asyncio
-    async def test_record_response_when_complete(self) -> None:
-        """record_response rejects responses when interview is complete."""
+    async def test_record_response_reopens_seed_ready_and_invalidates_ambiguity(
+        self,
+    ) -> None:
+        """Completed seed-ready interviews reopen and invalidate stored ambiguity.
+
+        The main session is the final gate on seed-ready (Seed-ready Acceptance
+        Guard). When it sends another answer after closure, the prior ambiguity
+        snapshot is no longer trustworthy and must be re-evaluated.
+        """
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
         state = InterviewState(
-            interview_id="test_001",
+            interview_id="test_seed_ready_reopen",
             status=InterviewStatus.COMPLETED,
         )
+        state.store_ambiguity(score=0.15, breakdown={"scope": 0.1})
 
         result = await engine.record_response(
             state,
-            user_response="Some response",
-            question="Test question",
+            user_response="Item boxes spawn on track; pickup by collision",
+            question="How are items acquired?",
         )
 
-        assert result.is_err
-        assert isinstance(result.error, ValidationError)
+        assert result.is_ok
+        updated = result.value
+        assert updated.status == InterviewStatus.IN_PROGRESS
+        assert updated.ambiguity_score is None
+        assert updated.ambiguity_breakdown is None
+        assert updated.rounds[-1].user_response.startswith("Item boxes")
 
     @pytest.mark.asyncio
     async def test_record_response_reopens_completed_long_context_for_summary(self) -> None:

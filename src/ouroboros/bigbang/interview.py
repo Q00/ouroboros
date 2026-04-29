@@ -159,9 +159,6 @@ class InterviewState(BaseModel):
         """Get the current round number (1-based)."""
         return len(self.rounds) + 1
 
-    # Mirrors AMBIGUITY_THRESHOLD from ambiguity.py to avoid circular import.
-    _SEED_READY_THRESHOLD: float = 0.2
-
     @property
     def is_complete(self) -> bool:
         """Check if interview is marked complete (user-controlled)."""
@@ -182,18 +179,13 @@ class InterviewState(BaseModel):
     def can_reopen(self) -> bool:
         """True when a completed interview should be reopenable.
 
-        A completed interview is reopenable when it is missing a required
-        long-context summary, or when its stored ambiguity score exceeds the
-        seed-generation threshold — i.e. it was completed prematurely and is
-        now in a deadlock (can't generate seed, can't resume).
+        Any completed interview is reopenable: the main session is the final
+        gate on seed-ready (see Seed-ready Acceptance Guard in skills/interview/
+        SKILL.md). When it sends another answer, it is explicitly challenging
+        the prior closure — the stored ambiguity score is no longer trustworthy
+        and must be re-evaluated against the extended round history.
         """
-        return self.is_complete and (
-            self.needs_initial_context_summary
-            or (
-                self.ambiguity_score is not None
-                and self.ambiguity_score > self._SEED_READY_THRESHOLD
-            )
-        )
+        return self.is_complete
 
     def mark_updated(self) -> None:
         """Update the updated_at timestamp."""
@@ -476,12 +468,13 @@ class InterviewEngine:
                         value=state.status,
                     )
                 )
-            # Deadlock recovery: reopen when completed prematurely
+            prior_ambiguity = state.ambiguity_score
             state.status = InterviewStatus.IN_PROGRESS
+            state.clear_stored_ambiguity()
             log.info(
-                "interview.reopened_for_ambiguity",
+                "interview.reopened",
                 interview_id=state.interview_id,
-                ambiguity_score=state.ambiguity_score,
+                prior_ambiguity_score=prior_ambiguity,
             )
 
         # Create new round
