@@ -432,6 +432,92 @@ class TestBrownfieldHandlerDispatch:
         assert second_result.is_ok
         store.initialize.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_concurrent_lazy_requests_do_not_close_in_use_store(self) -> None:
+        """Concurrent requests on a non-injected handler must not close a
+        cached store while another in-flight request is still using it.
+
+        Regression for the PR #507 review finding: with the init lock added
+        in this PR, two parallel first requests share one lazily-created
+        cached store. The pre-fix ``owned_store = self._store is None``
+        snapshot let the request that finished first close the store in its
+        ``finally`` while the slower one was still mid-query, surfacing as
+        closed-connection / ``PersistenceError`` failures under parallel
+        brownfield tool calls.
+
+        Construction:
+        - ``initialize()`` is slow so the second request enters ``handle()``
+          while the first still holds the init lock; both therefore see the
+          same cached store after init unlocks.
+        - The first ``count()`` call returns immediately (the first request
+          finishes its dispatch quickly); the second blocks, leaving that
+          request in-flight when the first reaches its ``finally``.
+        - The test then asserts ``close`` was *not* awaited yet. With the
+          refcount-tracked ownership the first request observes
+          ``refcount > 0`` and skips the close; with the buggy snapshot it
+          would already have closed the still-shared store.
+        """
+        import asyncio
+
+        init_started = asyncio.Event()
+        release_init = asyncio.Event()
+        second_count_started = asyncio.Event()
+        release_second_count = asyncio.Event()
+
+        store_stub = _make_store_stub(repos=[_REPO_A], default=_REPO_A)
+
+        async def slow_initialize() -> None:
+            init_started.set()
+            await release_init.wait()
+
+        store_stub.initialize = AsyncMock(side_effect=slow_initialize)
+
+        count_calls: list[str] = []
+
+        async def conditionally_slow_count() -> int:
+            count_calls.append("call")
+            if len(count_calls) == 2:
+                second_count_started.set()
+                await release_second_count.wait()
+            return 1
+
+        store_stub.count = AsyncMock(side_effect=conditionally_slow_count)
+
+        with patch(
+            "ouroboros.mcp.tools.brownfield_handler.BrownfieldStore",
+            return_value=store_stub,
+        ) as MockStore:
+            handler = BrownfieldHandler()  # no injected store — lazy path
+
+            first = asyncio.create_task(handler.handle({"action": "query"}))
+            await init_started.wait()
+            # First is mid-init holding the init lock. Start the second so
+            # it snapshots state and blocks waiting for the same lock —
+            # this is the interleaving the OLD ownership snapshot mishandled.
+            second = asyncio.create_task(handler.handle({"action": "query"}))
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            release_init.set()
+            await second_count_started.wait()
+
+            # The first request has reached its ``finally`` by now (its
+            # ``count`` returned immediately); the second is still mid-query.
+            # The store must NOT be closed yet — closing here is the exact
+            # close-while-in-use bug the refcount fix prevents.
+            store_stub.close.assert_not_awaited()
+
+            release_second_count.set()
+            first_result, second_result = await asyncio.gather(first, second)
+
+        assert first_result.is_ok
+        assert second_result.is_ok
+        # Lazy store created and initialized exactly once, closed exactly
+        # once after every concurrent request has finished.
+        assert MockStore.call_count == 1
+        store_stub.initialize.assert_awaited_once()
+        store_stub.close.assert_awaited_once()
+
 
 # ── Pagination tests ──────────────────────────────────────────────
 

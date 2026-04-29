@@ -85,7 +85,9 @@ class BrownfieldHandler:
 
     _store: BrownfieldStore | None = field(default=None, repr=False)
     _store_ready: bool = field(default=False, repr=False)
+    _store_owned: bool = field(default=False, repr=False)
     _init_lock: asyncio.Lock | None = field(default=None, repr=False)
+    _refcount: int = field(default=0, repr=False)
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -203,6 +205,11 @@ class BrownfieldHandler:
         ``_init_lock`` serializes the first-time initialization across
         concurrent requests so a shared store is only initialized once even
         when multiple coroutines race for it on startup.
+
+        ``_store_owned`` records whether *this handler* created the store
+        lazily (no injected store). It is used by ``handle()`` together with
+        the in-flight refcount to close the store only after every concurrent
+        request that shares it has finished.
         """
         if self._init_lock is None:
             # Lazily bound to the running loop on first use; subsequent
@@ -214,6 +221,7 @@ class BrownfieldHandler:
                 await store.initialize()
                 self._store = store
                 self._store_ready = True
+                self._store_owned = True
                 return store
             if not self._store_ready:
                 await self._store.initialize()
@@ -233,7 +241,28 @@ class BrownfieldHandler:
         - Otherwise → ``query``
         """
         action = _detect_action(arguments)
-        owned_store = self._store is None
+
+        # Acquire a refcounted reference to the store. The first request
+        # creates (or initializes) it under ``_init_lock``; concurrent
+        # requests share the cached instance and increment the refcount
+        # so the lazily-created store is only closed after every in-flight
+        # request that shares it has finished. This prevents the
+        # close-while-in-use race that previously surfaced under parallel
+        # brownfield tool calls on a non-injected handler.
+        try:
+            await self._get_store()
+        except Exception as e:
+            log.error("brownfield_handler.store_init_failed", error=str(e), action=action)
+            return Result.err(
+                MCPToolError(
+                    f"Brownfield operation failed: {e}",
+                    tool_name=_TOOL_NAME,
+                )
+            )
+
+        assert self._init_lock is not None  # set inside _get_store
+        async with self._init_lock:
+            self._refcount += 1
 
         try:
             if action == "scan":
@@ -268,9 +297,24 @@ class BrownfieldHandler:
                 )
             )
         finally:
-            if owned_store and self._store is not None:
-                await self._store.close()
-                self._store = None
+            # Take ownership of the close obligation under the lock so a
+            # concurrent request cannot decide to close the same store. The
+            # actual ``close()`` is awaited outside the lock to avoid holding
+            # it during database IO.
+            store_to_close: BrownfieldStore | None = None
+            async with self._init_lock:
+                self._refcount -= 1
+                if (
+                    self._refcount == 0
+                    and self._store_owned
+                    and self._store is not None
+                ):
+                    store_to_close = self._store
+                    self._store = None
+                    self._store_ready = False
+                    self._store_owned = False
+            if store_to_close is not None:
+                await store_to_close.close()
 
     # ──────────────────────────────────────────────────────────────
     # scan — Discover repos from home directory
