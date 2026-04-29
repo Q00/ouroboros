@@ -1,0 +1,259 @@
+# RFC — Contract Ledger schema
+
+> Status: **Accepted** (Phase 2 of #476 Agent OS roadmap).
+> Closes [#513](https://github.com/Q00/ouroboros/issues/513).
+> Related: [#319](https://github.com/Q00/ouroboros/pull/319) (recursive AC decomposition / `ac_tree`), [#338](https://github.com/Q00/ouroboros/pull/338) (CheckpointStore), [#436](https://github.com/Q00/ouroboros/pull/436) (`event_version`), [#476](https://github.com/Q00/ouroboros/issues/476) M2 + S4, [docs/rfc/mesh.md](./mesh.md), [docs/rfc/disposable-memory.md](./disposable-memory.md).
+
+## Summary
+
+This RFC specifies how the **Contract Ledger** is structured: a `contract_id`-rooted view that combines audit, dependency, and replay over the existing `event_store`, `CheckpointStore`, and `ac_tree`. The Ledger is the physical backing of the *replay* and *explain* verbs in #476's north star.
+
+A first-pass reading might suggest a new physical store. The RFC takes the opposite stance: the Ledger is **a projection over the existing event journal**, not a new authoritative database. RFC #476 M2 already locked the invariant — *journal is source of truth; live state is a projection* — and the Ledger respects it.
+
+## Scope
+
+This document **does** decide:
+- Schema strategy (where data lives, what is canonical, what is a view).
+- Dependency edge representation across the existing AC tree and a new contract dependency graph.
+- Audit trail composition (raw events vs aggregated summaries).
+- Replay API surface (three layers: events / state / timeline).
+- Migration plan including opt-in backfill of historical event_store data.
+
+This document **does not** decide:
+- Mesh wire format (deferred to [docs/rfc/mesh.md](./mesh.md)).
+- Disposable Memory's storage layout for `artifact_ref` (deferred to [docs/rfc/disposable-memory.md](./disposable-memory.md)).
+- AgentProcess lifecycle verbs (deferred to [#518](https://github.com/Q00/ouroboros/issues/518)).
+- The relationship to CheckpointStore beyond stating that the Ledger does not absorb it.
+
+## Inherited from earlier RFCs
+
+| Decision | Source | Used here as |
+|---|---|---|
+| `contract_id = ULID` | [mesh.md](./mesh.md) D2 | Primary key of the Ledger; sortable, log-friendly. |
+| `artifact_ref = "sha256:..."` | [disposable-memory.md](./disposable-memory.md) C2 | Stored as a reference in the Ledger; bodies remain in the artifact store. |
+| `target_type` vocabulary | events/control.py ([#492](https://github.com/Q00/ouroboros/pull/492)) | Authoritative source for `lineage / execution / session / agent_process`. |
+
+## Decisions
+
+### L2 — Schema strategy: event_store source + projection layer + optional materialized view
+
+**Decision.**
+
+- **Source of truth (unchanged).** `persistence/event_store.py` — append-only, six event categories today plus the new `contract.*` family from L7.
+- **Projection layer (new code).** A `ContractLedgerProjector` reads `event_store` and produces contract-rooted views: AC tree state, dependency edges, audit aggregates, result envelope handles.
+- **Materialized view (optional, hot path only).** A `contract_summaries` table populated by the projector at write time. Recoverable from `event_store` at any point; loss of this table never loses information.
+
+**Rationale.** RFC #476 M2 established the invariant *"journal is source of truth; live state is a projection"*. Treating the Contract Ledger as a new physical store would silently violate that invariant. Treating it as a projection respects it. A future projection-logic change becomes a *rebuild* operation, not a *schema migration*. That keeps schema discipline aligned with [#436](https://github.com/Q00/ouroboros/pull/436)'s additive-only rule and #476 S4.
+
+**Risks.**
+- Materialized view drift. Mitigation: `ouroboros ledger verify` compares the materialized table against a fresh projection and reports diffs; drift never silently corrupts queries because event_store remains authoritative.
+- Projection logic versioning. Mitigation: `ContractLedgerProjector.PROJECTION_VERSION` constant is incremented when projection semantics change; an `ouroboros ledger rebuild` command rebuilds materialized views from the journal.
+
+### L3 — Dependency edges: two graphs, clearly distinguished
+
+`ac_tree` (in `core/ac_tree.py`, materialized by [#319](https://github.com/Q00/ouroboros/pull/319)) describes **static AC decomposition** — recursive parent/child of acceptance criteria. It is a structural artifact, set at decomposition time, immutable for the life of a generation.
+
+A contract dependency graph is something different: **runtime-recorded edges between contracts**. Contract A's result feeds Contract B; Contract B is a sub-contract spawned by Contract A; etc.
+
+**Decision.** Keep the two graphs separate:
+
+- `ac_tree` stays where it is. **No promotion** to "ledger first-class".
+- A new event `contract.dependency.recorded(from_contract_id, to_contract_id, edge_type)` captures runtime contract dependencies.
+- `edge_type` initial vocabulary (additive):
+  - `result_input` — A's result envelope feeds B
+  - `parent_ac` — B is a sub-contract spawned to satisfy a sub-AC of A
+- The `ContractLedgerProjector` exposes both graphs through *separate* accessors:
+  - `ledger.ac_tree(contract_id) → ACNode`
+  - `ledger.dependency_graph(contract_id) → ContractDependencyGraph`
+
+**Distinction at a glance.**
+
+| Graph | Level | When set | Mutability |
+|---|---|---|---|
+| AC tree | per AC | at decomposition | immutable for the generation |
+| Contract dependency | per contract | at runtime emission | grows during the run |
+
+**Rationale.** Conflating the two graphs causes confusion that compounds over time. Same word ("dependency") refers to two different things; the RFC body's distinction table is the canonical reference for future readers.
+
+### L5 — Audit trail: raw 1:1 + projected aggregates
+
+**Decision.**
+
+- **Raw layer.** `control.directive.emitted` events stay 1:1, exactly the shape [#492](https://github.com/Q00/ouroboros/pull/492) sets up. No collapsing, no compaction.
+- **Aggregated layer.** `ContractLedgerProjector` exposes `contract_audit_trail(contract_id)` which folds the raw events into a per-contract narrative (timeline, terminal directive, retry budget consumed, etc.).
+
+**Rationale.** RFC #476 M2's acceptance test is *"every control decision persists `{who, what, why, when, caused_by}`"* — that requires 1:1 fidelity at the event level. M2 also requires *"any past session's directive timeline reconstructs from a single SQL query"* — that requires aggregated views. Both can be satisfied without choosing between them: keep raw events 1:1 and let the projector aggregate.
+
+This is the same shape as L2 — raw lives in the journal, aggregates live in the projection.
+
+### L6 — Replay API: three layers, same source
+
+`replay(contract_id)` is not a single signature, because three different consumers want three different shapes:
+
+```python
+# Layer 0 — raw events. Always available, idempotent.
+events: list[BaseEvent] = ledger.replay_events(contract_id)
+
+# Layer 1 — reconstituted state (uses the projector).
+state: ContractState = ledger.replay_state(contract_id)
+# state holds: status, ac_tree, dependency_graph, result_envelope_ref,
+#              audit_trail aggregates, runtime_id per stage
+
+# Layer 2 — render-ready timeline. The S2 Introspection feed.
+timeline: list[TimelineEntry] = ledger.replay_timeline(contract_id)
+```
+
+**Invariants** (re-cited from upstream RFCs so this RFC stays consistent):
+
+- Replay does **not** re-execute LLM calls (#476 M3, [#518](https://github.com/Q00/ouroboros/issues/518) M6).
+- Replay does **not** re-fork sub-agents ([mesh.md](./mesh.md) D6, [disposable-memory.md](./disposable-memory.md) C5).
+- Force-rerun = allocate a new `contract_id`. Replay of the existing one is read-only.
+- All three layers read from the same `event_store` source. **No private replay store.**
+
+### L7 — Migration plan: five additive steps, opt-in backfill
+
+**Goal.** The 1.0 release ships *without* anyone running a migration. New contracts produce `contract.*` events from day one; historical event_store data becomes Ledger-aware *only if and when* the user opts in.
+
+**Steps.**
+
+```
+Step 1 — additive code only
+        Introduce ContractLedgerProjector. Read-only over event_store.
+        Works against existing data immediately, no schema change.
+
+Step 2 — additive event family
+        New factories: contract.created / completed / failed / dependency.recorded.
+        event_version bump per #436. Existing categories unchanged.
+
+Step 3 — opt-in backfill (operator command)
+        Walk historical event_store, infer contract boundaries from
+        (lineage_id, execution_id), emit synthetic contract.* events
+        with synthetic=true. User triggers via:
+            ouroboros ledger backfill [--apply]
+
+Step 4 — materialized view (hot path optimization)
+        contract_summaries table populated by the projector at write time.
+        Recoverable from event_store. Never authoritative.
+
+Step 5 — slow consumer migration
+        TUI / MCP tools / evaluator move to ContractLedger API on their
+        own schedules. Direct event_store reads remain valid for a long
+        deprecation window. No flag day.
+```
+
+**Backfill mapping rule (first draft).**
+
+| Existing event field | Maps to | Notes |
+|---|---|---|
+| `aggregate_type=lineage`, `aggregate_id=<lineage_id>` | one contract per lineage generation | A new `contract_id` per generation; `parent_ac` edges connect generations |
+| `execution_id` (orchestrator session) | one contract per execution | `contract_id` derived from `execution_id` + ULID seed |
+| Pre-#492 sessions with no directive events | no synthetic directive emission | Backfill records contract envelope but leaves directive timeline empty |
+| Ambiguous boundaries | `synthetic=true` + `provenance="backfill"` flag | Flagged in TUI as inferred, not authoritative |
+
+This table is the **first draft**; the L7 sub-thread on [#513](https://github.com/Q00/ouroboros/issues/513) is the canonical place to extend it for additional edge cases.
+
+**Rationale.** Migrations that require a flag day or destructive schema change tend to be deferred indefinitely; making backfill *opt-in* keeps 1.0 unblocked while preserving the option to retrofit history when a user actually wants it. RFC #476 S4's additive-only rule is honored throughout.
+
+**Risks.**
+- Backfill mapping ambiguity. Mitigation: `synthetic=true` + `provenance="backfill"` flag makes inferred contracts visible in the TUI rather than silent.
+- Materialized view drift on long-running installs. Mitigation: `ouroboros ledger verify` plus `ledger rebuild`.
+- AC tree vs contract dependency conflation. Mitigation: distinct accessors (L3) plus the distinction table above.
+- CheckpointStore relationship confusion. Mitigation: this RFC explicitly states the Ledger does **not** absorb [#338](https://github.com/Q00/ouroboros/pull/338)'s CheckpointStore — CheckpointStore stores pause/resume state for AgentProcess, which is a separate concern from the audit Ledger.
+
+## ER-style diagram
+
+```mermaid
+erDiagram
+    EVENT_STORE ||--o{ CONTRACT_PROJECTION : "projector reads"
+    CONTRACT_PROJECTION ||--o| CONTRACT_SUMMARIES : "materializes (optional)"
+    CONTRACT_PROJECTION ||--o{ AC_TREE : "exposes via ledger.ac_tree()"
+    CONTRACT_PROJECTION ||--o{ CONTRACT_DEP_GRAPH : "exposes via ledger.dependency_graph()"
+    CONTRACT_PROJECTION ||--o{ AUDIT_TRAIL : "exposes via ledger.contract_audit_trail()"
+    CONTRACT_DEP_GRAPH ||--o{ CONTRACT_DEPENDENCY_RECORDED : "built from events"
+
+    EVENT_STORE {
+        string aggregate_type
+        string aggregate_id
+        int event_version
+    }
+    CONTRACT_PROJECTION {
+        ULID contract_id
+        int PROJECTION_VERSION
+    }
+    CONTRACT_SUMMARIES {
+        ULID contract_id
+        string status
+        sha256 artifact_ref
+        string runtime_id
+    }
+    AC_TREE {
+        string ac_id
+        string parent_ac_id
+        string status
+    }
+    CONTRACT_DEP_GRAPH {
+        ULID from_contract_id
+        ULID to_contract_id
+        string edge_type
+    }
+```
+
+## Sequence diagram — one contract's lifecycle through the Ledger
+
+```mermaid
+sequenceDiagram
+    participant O as Orchestrator
+    participant E as EventStore (source of truth)
+    participant P as ContractLedgerProjector
+    participant V as contract_summaries (materialized view)
+    participant T as TUI / MCP tools
+
+    O->>E: append contract.created
+    E->>P: notify
+    P->>V: upsert(contract_id, status="running")
+    O->>E: append control.directive.emitted (target=lineage/<id>)
+    O->>E: append tool.call.* / llm.call.*
+    O->>E: append contract.dependency.recorded (from=<parent>, to=<child>)
+    E->>P: notify
+    P->>V: update audit_trail aggregate
+    O->>E: append contract.completed
+    E->>P: notify
+    P->>V: upsert(contract_id, status="completed", artifact_ref="sha256:...")
+    T->>P: ledger.replay_timeline(contract_id)
+    P-->>T: List[TimelineEntry] (from event_store + view)
+```
+
+## Cross-RFC consistency
+
+| Subject | Source | This RFC's behaviour |
+|---|---|---|
+| `contract_id = ULID` | [mesh.md](./mesh.md) D2 | Inherited; primary key of the Ledger. |
+| `artifact_ref = "sha256:..."` | [disposable-memory.md](./disposable-memory.md) C2 | Inherited; stored as a reference, never inlined. |
+| `replay()` semantics | [mesh.md](./mesh.md) D6, [disposable-memory.md](./disposable-memory.md) C5 | Honored; no LLM re-execution, no sub-agent re-fork. |
+| CheckpointStore boundary | [#338](https://github.com/Q00/ouroboros/pull/338) | The Ledger does **not** absorb CheckpointStore. |
+| Additive-only schema | [#436](https://github.com/Q00/ouroboros/pull/436), #476 S4 | Honored throughout L7. |
+
+## Pre-merge checklist
+
+- [ ] All 5 fresh decisions present (L2 / L3 / L5 / L6 / L7) with option + rationale + risks
+- [ ] Inherited-from list cites [mesh.md](./mesh.md) D2 and [disposable-memory.md](./disposable-memory.md) C2
+- [ ] AC tree vs contract dependency graph distinction table present
+- [ ] Backfill mapping table present (at least the four-row first draft above)
+- [ ] ER + sequence diagrams render
+- [ ] Cross-references resolve to existing issues / files
+- [ ] At least two maintainer approvals
+- [ ] L7 sub-thread resolved with the backfill mapping table extended for ambiguous boundaries (`synthetic=true` + `provenance="backfill"`)
+- [ ] `replay()` semantics match [mesh.md](./mesh.md) D6 (no LLM re-execution) and [disposable-memory.md](./disposable-memory.md) C5 (read artifact default)
+- [ ] CheckpointStore boundary explicit: Ledger does not absorb [#338](https://github.com/Q00/ouroboros/pull/338)
+
+## Post-merge checklist
+
+- [ ] `docs/rfc/contract-ledger.md` reachable from the docs site (or the README index when it lands)
+- [ ] Issue [#513](https://github.com/Q00/ouroboros/issues/513) closed with a back-link to this PR
+- [ ] At least three Phase F implementation issues opened (Contract envelope object, ledger projections, dependency edge promotion)
+- [ ] `ouroboros ledger backfill` and `ouroboros ledger verify` commands listed in the user-facing CLI docs
+- [ ] No silent change to existing event_store reads (consumer migration is opt-in per L7)
+
+## Rollback
+
+Docs PR with no runtime impact. Rollback = revert the docs PR. The proposal comment in [#513](https://github.com/Q00/ouroboros/issues/513) remains as the working draft.
