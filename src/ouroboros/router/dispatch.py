@@ -319,7 +319,8 @@ def _reconstruct_prompt_from_parsed_command(parsed: ParsedOooCommand) -> str:
     """Build a canonical prompt when a caller only has parsed command data."""
     if parsed.remainder is None:
         return parsed.command_prefix
-    return f"{parsed.command_prefix} {parsed.remainder}"
+    separator = "\n" if "\n" in parsed.remainder or "\r" in parsed.remainder else " "
+    return f"{parsed.command_prefix}{separator}{parsed.remainder}"
 
 
 def _validate_parsed_command(parsed: ParsedOooCommand) -> str | None:
