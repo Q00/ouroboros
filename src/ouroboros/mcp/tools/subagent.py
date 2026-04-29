@@ -725,6 +725,7 @@ def build_execute_subagent(
     max_iterations: int = 10,
     skip_qa: bool = False,
     model_tier: str | None = "medium",
+    max_parallel_workers: int | None = None,
 ) -> SubagentPayload:
     """Build subagent payload for seed execution."""
     seed_path_note = ""
@@ -741,6 +742,10 @@ def build_execute_subagent(
     else:
         qa_note = "\n## QA\nRun QA evaluation after execution completes.\n"
 
+    workers_note = ""
+    if max_parallel_workers is not None:
+        workers_note = f"\n## Max Parallel Workers\n{max_parallel_workers}\n"
+
     prompt = f"""## Your Task
 
 Execute the following seed specification. Implement all requirements defined
@@ -751,7 +756,7 @@ in the seed, respecting constraints and acceptance criteria.
 
 ## Max Iterations
 {max_iterations}
-{seed_path_note}{cwd_note}{qa_note}
+{seed_path_note}{cwd_note}{qa_note}{workers_note}
 ## Seed Specification
 ```yaml
 {seed_content}
@@ -768,6 +773,7 @@ Stop when all acceptance criteria are met or max iterations reached."""
         "max_iterations": max_iterations,
         "skip_qa": skip_qa,
         "model_tier": model_tier,
+        "max_parallel_workers": max_parallel_workers,
     }
 
     return build_subagent_payload(

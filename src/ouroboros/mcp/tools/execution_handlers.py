@@ -282,6 +282,17 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             cwd=str(resolved_cwd),
         )
 
+        # Resolve worker cap up front so plugin and in-process paths agree.
+        try:
+            max_parallel_workers = get_max_parallel_workers()
+        except ConfigError as e:
+            return Result.err(
+                MCPToolError(
+                    f"Execution handler config error: {e}",
+                    tool_name="ouroboros_execute_seed",
+                )
+            )
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         payload = build_execute_subagent(
             seed_content=seed_content,
@@ -291,6 +302,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             max_iterations=max_iterations,
             skip_qa=arguments.get("skip_qa", False),
             model_tier=model_tier,
+            max_parallel_workers=max_parallel_workers,
         )
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
             await emit_subagent_dispatched_event(
@@ -340,16 +352,6 @@ class ExecuteSeedHandler(BridgeAwareMixin):
             arguments.get("cwd"),
             arguments.get(DELEGATED_PARENT_CWD_ARG),
         )
-
-        try:
-            max_parallel_workers = get_max_parallel_workers()
-        except ConfigError as e:
-            return Result.err(
-                MCPToolError(
-                    f"Execution handler config error: {e}",
-                    tool_name="ouroboros_execute_seed",
-                )
-            )
 
         # Use injected or create orchestrator dependencies
         try:
@@ -865,6 +867,17 @@ class StartExecuteSeedHandler:
                 )
             )
 
+        # Resolve worker cap up front so plugin and background paths agree.
+        try:
+            max_parallel_workers = get_max_parallel_workers()
+        except ConfigError as e:
+            return Result.err(
+                MCPToolError(
+                    f"Execution handler config error: {e}",
+                    tool_name="ouroboros_start_execute_seed",
+                )
+            )
+
         # --- Subagent dispatch: gate on runtime + opencode_mode ---
         # StartExecuteSeedHandler delegates to ExecuteSeedHandler internally.
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):
@@ -887,6 +900,7 @@ class StartExecuteSeedHandler:
                 max_iterations=arguments.get("max_iterations", 10),
                 skip_qa=arguments.get("skip_qa", False),
                 model_tier=arguments.get("model_tier", "medium"),
+                max_parallel_workers=max_parallel_workers,
             )
 
             await emit_subagent_dispatched_event(
@@ -923,6 +937,7 @@ class StartExecuteSeedHandler:
             max_iterations=arguments.get("max_iterations", 10),
             skip_qa=arguments.get("skip_qa", False),
             model_tier=arguments.get("model_tier", "medium"),
+            max_parallel_workers=max_parallel_workers,
         )
 
         await self._event_store.initialize()
