@@ -53,6 +53,11 @@ from ouroboros.router import extract_first_argument
             id="windows-drive-path-backslashes-preserved-and-quotes-normalized",
         ),
         pytest.param(
+            r'C:\temp\seed.yaml "two \"quoted\" words"',
+            r'C:\temp\seed.yaml two "quoted" words',
+            id="windows-drive-path-backslashes-preserved-and-escaped-quotes-normalized",
+        ),
+        pytest.param(
             r"\\server\share\seed.yaml --strict",
             r"\\server\share\seed.yaml --strict",
             id="windows-unc-path-backslashes-preserved",

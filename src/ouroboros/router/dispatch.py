@@ -59,7 +59,6 @@ _WINDOWS_UNC_PATH_PAYLOAD_PATTERN = re.compile(r"^\\\\[^\\/\s]+[\\/][^\\/\s]+")
 _REQUIRED_MCP_FRONTMATTER_KEYS = ("mcp_tool", "mcp_args")
 _MCP_FRONTMATTER_VALUE_TYPES = "string, finite number, boolean, null, list, or mapping"
 _PACKAGED_SKILL_CACHE: TemporaryDirectory[str] | None = None
-_QUOTE_CHARS = {"'", '"'}
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,24 +259,20 @@ def normalize_mcp_frontmatter(
     )
 
 
-def _strip_matching_quotes(value: str) -> str:
-    """Remove one pair of matching shell quotes from a token."""
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in _QUOTE_CHARS:
-        return value[1:-1]
-    return value
-
-
 def _normalize_windows_literal_payload(remainder: str) -> str | None:
-    """Normalize Windows-path payloads without treating backslashes as escapes."""
+    """Preserve the Windows path token while shell-normalizing trailing args."""
+    match = re.match(r"(?P<path>\S+)(?:\s+(?P<tail>.*))?$", remainder, re.DOTALL)
+    if match is None:
+        return None
+    path = match.group("path")
+    tail = match.group("tail")
+    if tail is None or not tail.strip():
+        return path
     try:
-        lexer = shlex.shlex(remainder, posix=False)
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        parts = list(lexer)
+        tail_parts = shlex.split(tail)
     except ValueError:
-        parts = remainder.split()
-    normalized = [_strip_matching_quotes(part) for part in parts]
-    return " ".join(normalized) if normalized else None
+        tail_parts = tail.split()
+    return " ".join([path, *tail_parts]) if tail_parts else path
 
 
 def extract_first_argument(remainder: str | None) -> str | None:
