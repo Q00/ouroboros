@@ -197,6 +197,157 @@ class TestCodexSetup:
         # Comment header is also written exactly once.
         assert contents.count("Ouroboros Agent OS runtime profile") == 1
 
+    def test_register_codex_worker_profile_preserves_user_overrides(self, tmp_path: Path) -> None:
+        """Re-running setup must NOT clobber operator-authored worker keys.
+
+        The runtime guide tells operators to add `model`, `notify`,
+        `sandbox`, etc. directly under `[profiles.ouroboros-worker]`. The
+        managed comment block may be refreshed, but the table body is
+        user-owned data and must survive every setup rerun.
+        """
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "# Ouroboros Agent OS runtime profile for Codex worker subprocesses.",
+                    "# Activated when ~/.ouroboros/config.yaml sets "
+                    "`orchestrator.runtime_profile: worker`",
+                    "# (or the OUROBOROS_RUNTIME_PROFILE=worker env var). Add per-worker Codex",
+                    "# overrides below — for example a different model, sandbox, or notify hook —",
+                    "# without affecting interactive `codex` sessions that share this config file.",
+                    "",
+                    "[profiles.ouroboros-worker]",
+                    'model = "o3-mini"',
+                    "notify = []",
+                    'sandbox = "workspace-write"',
+                    "",
+                    "[profiles.ouroboros-worker.shell_environment_policy]",
+                    'inherit = "core"',
+                    "",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_worker_profile()
+
+        contents = codex_config.read_text(encoding="utf-8")
+
+        assert contents.count("[profiles.ouroboros-worker]") == 1
+        assert 'model = "o3-mini"' in contents
+        assert "notify = []" in contents
+        assert 'sandbox = "workspace-write"' in contents
+        assert "[profiles.ouroboros-worker.shell_environment_policy]" in contents
+        assert 'inherit = "core"' in contents
+        # Managed comment is still present (refreshed exactly once).
+        assert contents.count("Ouroboros Agent OS runtime profile") == 1
+
+    def test_register_codex_worker_profile_idempotent_with_user_overrides(
+        self, tmp_path: Path
+    ) -> None:
+        """Multiple reruns must converge — no key loss, no comment bloat."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            # First call writes the managed block fresh.
+            setup_cmd._register_codex_worker_profile()
+            # Operator follows the runtime guide and adds overrides.
+            existing = codex_config.read_text(encoding="utf-8")
+            codex_config.write_text(
+                existing.rstrip()
+                + "\n"
+                + 'model = "o3-mini"\nnotify = []\nsandbox = "workspace-write"\n',
+                encoding="utf-8",
+            )
+
+            after_first_user_edit = codex_config.read_text(encoding="utf-8")
+            setup_cmd._register_codex_worker_profile()
+            after_second = codex_config.read_text(encoding="utf-8")
+            setup_cmd._register_codex_worker_profile()
+            after_third = codex_config.read_text(encoding="utf-8")
+
+        for snapshot in (after_second, after_third):
+            assert snapshot.count("[profiles.ouroboros-worker]") == 1
+            assert snapshot.count("Ouroboros Agent OS runtime profile") == 1
+            assert 'model = "o3-mini"' in snapshot
+            assert "notify = []" in snapshot
+            assert 'sandbox = "workspace-write"' in snapshot
+
+        # The first rerun after the user edit must already be the fixed
+        # point — no key loss AND no spurious additions. Anything less
+        # leaves a churn / drift surface that subsequent setup runs would
+        # amplify.
+        assert after_second == after_first_user_edit
+        # And every subsequent rerun keeps the same state byte for byte:
+        # the upsert is genuinely idempotent on user-customized input,
+        # not just stable-after-the-second-run.
+        assert after_third == after_second
+
+    def test_register_codex_worker_profile_handles_abutting_predecessor_table(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-managed table immediately preceding the worker block stays untouched.
+
+        The trim-comments helper pops trailing blanks before checking for
+        the managed comment marker, so a predecessor table that abuts the
+        worker header (no blank-line separator) is the most adversarial
+        layout. Lock the behaviour: predecessor stays untouched, the
+        managed comment block is inserted with separation, and the
+        user-authored worker keys still survive.
+        """
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "[some_other_table]",
+                    'key = "preserved"',
+                    "[profiles.ouroboros-worker]",
+                    'model = "o3-mini"',
+                    "",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_worker_profile()
+
+        contents = codex_config.read_text(encoding="utf-8")
+
+        assert "[some_other_table]" in contents
+        assert 'key = "preserved"' in contents
+        assert contents.count("[profiles.ouroboros-worker]") == 1
+        assert 'model = "o3-mini"' in contents
+        assert "Ouroboros Agent OS runtime profile" in contents
+        # Predecessor table comes first, worker block follows with managed
+        # comment between them — no header collapse.
+        predecessor_index = contents.index('key = "preserved"')
+        worker_index = contents.index("[profiles.ouroboros-worker]")
+        assert predecessor_index < worker_index
+        between = contents[predecessor_index:worker_index]
+        assert "Ouroboros Agent OS runtime profile for Codex worker subprocesses." in between
+
+    def test_register_codex_worker_profile_skips_invalid_toml(self, tmp_path: Path) -> None:
+        """Malformed TOML should produce an error message and leave the file alone."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        original = "this is = not = valid = toml\n[unterminated"
+        codex_config.write_text(original, encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.print_error") as mock_error,
+        ):
+            setup_cmd._register_codex_worker_profile()
+
+        mock_error.assert_called_once()
+        assert codex_config.read_text(encoding="utf-8") == original
+
     def test_install_codex_artifacts_installs_rules_and_skills(self, tmp_path: Path) -> None:
         """Codex setup should install both managed rules and managed skills."""
         rules_path = tmp_path / ".codex" / "rules"
