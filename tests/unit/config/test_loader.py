@@ -25,6 +25,7 @@ from ouroboros.config.loader import (
     get_decomposition_model,
     get_dependency_analysis_model,
     get_double_diamond_model,
+    get_gemini_cli_path,
     get_llm_backend,
     get_llm_permission_mode,
     get_ontology_analysis_model,
@@ -409,6 +410,62 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_opencode_cli_path() == "/tmp/opencode"
+
+    def test_get_gemini_cli_path_returns_executable_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Env var path is returned when it points to an executable file."""
+        fake = tmp_path / "gemini"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        monkeypatch.setenv("OUROBOROS_GEMINI_CLI_PATH", str(fake))
+        assert get_gemini_cli_path() == str(fake)
+
+    def test_get_gemini_cli_path_rejects_stale_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Stale env var that doesn't point to an executable is treated as missing.
+
+        Prevents writing an unusable path back into config via
+        `ouroboros config backend gemini` / `setup --runtime gemini`.
+        """
+        stale = tmp_path / "missing-gemini"
+        monkeypatch.setenv("OUROBOROS_GEMINI_CLI_PATH", str(stale))
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig()),
+        ):
+            assert get_gemini_cli_path() is None
+
+    def test_get_gemini_cli_path_falls_back_to_config(self, tmp_path: Path) -> None:
+        """Config path is honored when env is absent and the file is executable."""
+        fake = tmp_path / "gemini"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(gemini_cli_path=str(fake))
+                ),
+            ),
+        ):
+            assert get_gemini_cli_path() == str(fake)
+
+    def test_get_gemini_cli_path_rejects_stale_config(self, tmp_path: Path) -> None:
+        """Stale config value that no longer points to an executable returns None."""
+        stale = tmp_path / "ghost-gemini"
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(gemini_cli_path=str(stale))
+                ),
+            ),
+        ):
+            assert get_gemini_cli_path() is None
 
     def test_get_opencode_mode_returns_config_value(self) -> None:
         """get_opencode_mode reads orchestrator.opencode_mode from config."""

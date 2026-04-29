@@ -37,6 +37,7 @@ Functions:
 import ast
 import os
 from pathlib import Path
+import shutil
 import stat
 from typing import Any
 
@@ -576,18 +577,27 @@ def get_gemini_cli_path() -> str | None:
         2. config.yaml orchestrator.gemini_cli_path
         3. None (resolve from PATH at runtime)
 
+    Stale env var / config values that don't point to an executable are
+    treated as missing so callers fall back to PATH discovery instead of
+    persisting an unusable path. Mirrors the strictness of `shutil.which`
+    used for the other runtime backends in the setup detection path.
+
     Returns:
         Path to Gemini CLI binary or None.
     """
     env_path = os.environ.get("OUROBOROS_GEMINI_CLI_PATH", "").strip()
     if env_path:
-        return str(Path(env_path).expanduser())
+        resolved = str(Path(env_path).expanduser())
+        if shutil.which(resolved):
+            return resolved
 
     try:
         config = load_config()
         gemini_path = getattr(config.orchestrator, "gemini_cli_path", None)
         if gemini_path:
-            return gemini_path
+            resolved = str(Path(gemini_path).expanduser())
+            if shutil.which(resolved):
+                return resolved
     except ConfigError:
         pass
 
