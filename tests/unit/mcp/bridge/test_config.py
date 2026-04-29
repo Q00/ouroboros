@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import ouroboros.mcp.bridge.config as bridge_config
 from ouroboros.mcp.bridge.config import MCPBridgeConfig, discover_config, load_bridge_config
 
 
@@ -38,6 +39,11 @@ class TestDiscoverConfig:
 
     def test_cwd_config(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.delenv("OUROBOROS_MCP_CONFIG", raising=False)
+        monkeypatch.setattr(
+            bridge_config,
+            "_HOME_CONFIG",
+            tmp_path / "home" / ".ouroboros" / "mcp_servers.yaml",
+        )
         cwd_config = tmp_path / ".ouroboros" / "mcp_servers.yaml"
         cwd_config.parent.mkdir(parents=True)
         cwd_config.write_text("mcp_servers: []")

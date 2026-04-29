@@ -10,7 +10,9 @@ from ouroboros.events.base import BaseEvent
 from ouroboros.mcp.tools.ac_tree_hud_handler import (
     ACTreeHUDHandler,
     _extract_tree_snapshot,
+    format_subtask_progress_summary,
     render_ac_tree_hud_markdown,
+    summarize_subtask_events,
 )
 from ouroboros.persistence.event_store import EventStore
 
@@ -73,6 +75,95 @@ class TestRenderACTreeHUDMarkdown:
             "├─ ◐ AC 2: Second criterion  [Read src/ouroboros/mcp/tools/ac_tree_hud_handler.py]"
         ) in markdown
         assert "└─ ○ AC 3: Third criterion" in markdown
+
+    def test_renders_sub_ac_progress_without_changing_top_level_progress(self) -> None:
+        """HUD should expose Sub-AC progress when top-level ACs have not rolled up."""
+        markdown = render_ac_tree_hud_markdown(
+            session_id="sess_sub_ac_progress",
+            execution_id="exec_sub_ac_progress",
+            session_status="running",
+            progress_data={
+                "completed_count": 0,
+                "total_count": 17,
+                "acceptance_criteria": [
+                    {"index": 1, "content": "Parent criterion", "status": "executing"},
+                ],
+                "sub_ac_progress": {
+                    "completed_count": 258,
+                    "executing_count": 7,
+                    "pending_count": 1,
+                    "failed_count": 0,
+                    "total_count": 266,
+                },
+            },
+        )
+
+        assert "Progress: 0/17 AC complete" in markdown
+        assert "Sub-AC Progress: 258/266 complete · 7 working · 1 pending" in markdown
+
+    def test_renders_summary_view_without_tree(self) -> None:
+        """Summary view should keep frequent polling output short."""
+        markdown = render_ac_tree_hud_markdown(
+            session_id="sess_summary",
+            execution_id="exec_summary",
+            session_status="running",
+            progress_data={
+                "current_phase": "Deliver",
+                "completed_count": 0,
+                "total_count": 17,
+                "activity": "Monitoring",
+                "activity_detail": "Level 1/1",
+                "sub_ac_progress": {
+                    "completed_count": 258,
+                    "executing_count": 7,
+                    "pending_count": 1,
+                    "failed_count": 0,
+                    "total_count": 266,
+                    "active": [
+                        {"sub_task_id": "ac_1604_sub_3"},
+                        {"sub_task_id": "ac_1604_sub_2"},
+                    ],
+                },
+                "acceptance_criteria": [
+                    {"index": 1, "content": "Parent criterion", "status": "executing"},
+                ],
+            },
+            view="summary",
+            cursor=443527,
+        )
+
+        assert "Status: running | Phase: Deliver | AC: 0/17" in markdown
+        assert "Sub-AC: 258/266 complete · 7 working · 1 pending" in markdown
+        assert "Active: ac_1604_sub_3, ac_1604_sub_2" in markdown
+        assert "Cursor: 443527" in markdown
+        assert "◇ Acceptance Criteria" not in markdown
+
+    def test_renders_compact_view_for_polling(self) -> None:
+        """Compact view should fit the key monitor state into two short lines."""
+        markdown = render_ac_tree_hud_markdown(
+            session_id="sess_compact",
+            execution_id="exec_compact",
+            session_status="running",
+            progress_data={
+                "current_phase": "Deliver",
+                "completed_count": 3,
+                "total_count": 17,
+                "sub_ac_progress": {
+                    "completed_count": 42,
+                    "executing_count": 2,
+                    "pending_count": 1,
+                    "failed_count": 0,
+                    "total_count": 45,
+                },
+            },
+            view="compact",
+            cursor=123,
+        )
+
+        assert (
+            markdown
+            == "sess_compact | running | Deliver | AC 3/17 | Sub-AC 42/45 | cursor 123\nexec_compact"
+        )
 
     def test_renders_all_top_level_acs_when_tree_has_12_or_fewer_nodes(self) -> None:
         """Small trees should render every top-level AC without ellipsis."""
@@ -456,6 +547,55 @@ class TestRenderACTreeHUDMarkdown:
         assert "└─ ◐ Parent criterion  [working]" in markdown
         assert "   └─ ◐ Nested child waiting on tool payload  [working]" in markdown
 
+    def test_summarize_subtask_events_uses_latest_status_per_subtask(self) -> None:
+        """Subtask summary should count the latest event for each Sub-AC."""
+        events = [
+            BaseEvent(
+                type="execution.subtask.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_summary",
+                data={
+                    "ac_index": 1,
+                    "sub_task_index": 1,
+                    "sub_task_id": "ac_1_sub_1",
+                    "content": "First child",
+                    "status": "pending",
+                },
+            ),
+            BaseEvent(
+                type="execution.subtask.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_summary",
+                data={
+                    "ac_index": 1,
+                    "sub_task_index": 1,
+                    "sub_task_id": "ac_1_sub_1",
+                    "content": "First child",
+                    "status": "completed",
+                },
+            ),
+            BaseEvent(
+                type="execution.subtask.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_summary",
+                data={
+                    "ac_index": 1,
+                    "sub_task_index": 2,
+                    "sub_task_id": "ac_1_sub_2",
+                    "content": "Second child",
+                    "status": "executing",
+                },
+            ),
+        ]
+
+        summary = summarize_subtask_events(events)
+
+        assert summary["completed_count"] == 1
+        assert summary["executing_count"] == 1
+        assert summary["pending_count"] == 0
+        assert summary["total_count"] == 2
+        assert format_subtask_progress_summary(summary) == "1/2 complete · 1 working"
+
 
 class TestACTreeHUDHandler:
     """Integration tests for ACTreeHUDHandler against EventStore data."""
@@ -510,7 +650,7 @@ class TestACTreeHUDHandler:
         )
 
         handler = ACTreeHUDHandler(event_store=memory_event_store)
-        result = await handler.handle({"session_id": "sess_depth1", "cursor": 0})
+        result = await handler.handle({"session_id": "sess_depth1", "cursor": 0, "view": "tree"})
 
         assert result.is_ok
         tool_result = result.value
@@ -521,6 +661,62 @@ class TestACTreeHUDHandler:
         assert "◇ Acceptance Criteria" in tool_result.text_content
         assert "├─ ● AC 1: First criterion" in tool_result.text_content
         assert "└─ ○ AC 3: Third criterion" in tool_result.text_content
+
+    async def test_handle_defaults_to_tree_view(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Omitting view should preserve the legacy full-tree handler output."""
+        await memory_event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess_default_summary",
+                data={
+                    "execution_id": "exec_default_summary",
+                    "seed_id": "seed_default_summary",
+                    "start_time": "2026-04-05T12:00:00+00:00",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_default_summary",
+                data={
+                    "execution_id": "exec_default_summary",
+                    "current_phase": "deliver",
+                    "completed_count": 1,
+                    "total_count": 3,
+                    "acceptance_criteria": [
+                        {"index": 1, "content": "First criterion", "status": "completed"},
+                        {"index": 2, "content": "Second criterion", "status": "pending"},
+                    ],
+                },
+            )
+        )
+
+        handler = ACTreeHUDHandler(event_store=memory_event_store)
+        result = await handler.handle({"session_id": "sess_default_summary", "cursor": 0})
+
+        assert result.is_ok
+        assert result.value.meta["view"] == "tree"
+        assert "Status: running" in result.value.text_content
+        assert "Phase: deliver" in result.value.text_content
+        assert "Progress: 1/3 AC complete" in result.value.text_content
+        assert "◇ Acceptance Criteria" in result.value.text_content
+        assert "├─ ● AC 1: First criterion" in result.value.text_content
+        assert "└─ ○ AC 2: Second criterion" in result.value.text_content
+
+        summary_result = await handler.handle(
+            {"session_id": "sess_default_summary", "cursor": 0, "view": "summary"}
+        )
+
+        assert summary_result.is_ok
+        assert summary_result.value.meta["view"] == "summary"
+        assert "Status: running | Phase: deliver | AC: 1/3" in summary_result.value.text_content
+        assert "◇ Acceptance Criteria" not in summary_result.value.text_content
 
     async def test_handle_renders_explicit_tree_with_fallback_activity_state(
         self,
@@ -573,7 +769,9 @@ class TestACTreeHUDHandler:
         )
 
         handler = ACTreeHUDHandler(event_store=memory_event_store)
-        result = await handler.handle({"session_id": "sess_explicit_fallback", "cursor": 0})
+        result = await handler.handle(
+            {"session_id": "sess_explicit_fallback", "cursor": 0, "view": "tree"}
+        )
 
         assert result.is_ok
         tool_result = result.value
@@ -585,11 +783,73 @@ class TestACTreeHUDHandler:
         assert "Progress: 0/1 AC complete" in tool_result.text_content
         assert "└─ ◐ AC 1: Fallback-only criterion  [working]" in tool_result.text_content
 
-    async def test_handle_returns_delta_one_liner_when_only_non_progress_events_are_new(
+    async def test_handle_renders_sub_ac_progress_when_top_level_count_is_zero(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """A newer cursor with no new progress event returns the compact unchanged line."""
+        """Sub-AC completion should be visible before top-level AC roll-up."""
+        await memory_event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess_sub_ac_progress",
+                data={
+                    "execution_id": "exec_sub_ac_progress",
+                    "seed_id": "seed_sub_ac_progress",
+                    "start_time": "2026-04-05T12:00:00+00:00",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                type="workflow.progress.updated",
+                aggregate_type="execution",
+                aggregate_id="exec_sub_ac_progress",
+                data={
+                    "execution_id": "exec_sub_ac_progress",
+                    "current_phase": "deliver",
+                    "completed_count": 0,
+                    "total_count": 2,
+                    "acceptance_criteria": [
+                        {"index": 1, "content": "First parent", "status": "executing"},
+                        {"index": 2, "content": "Second parent", "status": "executing"},
+                    ],
+                },
+            )
+        )
+        for sub_task_index, status in ((1, "completed"), (2, "executing"), (3, "pending")):
+            await memory_event_store.append(
+                BaseEvent(
+                    type="execution.subtask.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_sub_ac_progress",
+                    data={
+                        "ac_index": 1,
+                        "sub_task_index": sub_task_index,
+                        "sub_task_id": f"ac_1_sub_{sub_task_index}",
+                        "content": f"Child {sub_task_index}",
+                        "status": status,
+                    },
+                )
+            )
+
+        handler = ACTreeHUDHandler(event_store=memory_event_store)
+        result = await handler.handle(
+            {"session_id": "sess_sub_ac_progress", "cursor": 0, "view": "tree"}
+        )
+
+        assert result.is_ok
+        text = result.value.text_content
+        assert "Progress: 0/2 AC complete" in text
+        assert "Sub-AC Progress: 1/3 complete · 1 working · 1 pending" in text
+        assert "│  ├─ ● Child 1" in text
+        assert "│  ├─ ◐ Child 2  [working]" in text
+
+    async def test_handle_preserves_tree_delta_text_when_only_non_progress_events_are_new(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Default tree view should preserve the legacy unchanged response text."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
@@ -645,11 +905,11 @@ class TestACTreeHUDHandler:
         assert tool_result.meta["changed"] is False
         assert tool_result.meta["cursor"] > initial_cursor
 
-    async def test_handle_returns_delta_one_liner_when_no_events_arrive_after_cursor(
+    async def test_handle_returns_summary_delta_one_liner_when_no_events_arrive_after_cursor(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """An unchanged cursor returns the same compact delta line without a full rerender."""
+        """Explicit summary view may use the compact unchanged cursor line."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
@@ -681,26 +941,30 @@ class TestACTreeHUDHandler:
         )
 
         handler = ACTreeHUDHandler(event_store=memory_event_store)
-        initial_result = await handler.handle({"session_id": "sess_idle", "cursor": 0})
+        initial_result = await handler.handle(
+            {"session_id": "sess_idle", "cursor": 0, "view": "summary"}
+        )
 
         assert initial_result.is_ok
         initial_cursor = initial_result.value.meta["cursor"]
 
-        delta_result = await handler.handle({"session_id": "sess_idle", "cursor": initial_cursor})
+        delta_result = await handler.handle(
+            {"session_id": "sess_idle", "cursor": initial_cursor, "view": "summary"}
+        )
 
         assert delta_result.is_ok
         tool_result = delta_result.value
-        assert tool_result.text_content == f"No AC tree change since cursor {initial_cursor}."
+        assert tool_result.text_content == f"unchanged cursor={initial_cursor}"
         assert tool_result.meta["session_id"] == "sess_idle"
         assert tool_result.meta["execution_id"] == "exec_idle"
         assert tool_result.meta["changed"] is False
         assert tool_result.meta["cursor"] == initial_cursor
 
-    async def test_handle_returns_delta_one_liner_when_new_progress_repeats_fallback_snapshot(
+    async def test_handle_preserves_tree_delta_text_when_new_progress_repeats_fallback_snapshot(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """Repeated fallback-only progress snapshots should collapse to the unchanged delta line."""
+        """Repeated fallback snapshots should not change default tree response contracts."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
@@ -775,11 +1039,11 @@ class TestACTreeHUDHandler:
         assert tool_result.meta["changed"] is False
         assert tool_result.meta["cursor"] > initial_cursor
 
-    async def test_handle_returns_delta_one_liner_when_explicit_fallback_tree_repeats(
+    async def test_handle_preserves_tree_delta_text_when_explicit_fallback_tree_repeats(
         self,
         memory_event_store: EventStore,
     ) -> None:
-        """Repeated explicit-tree fallback states should not force a full rerender."""
+        """Repeated explicit-tree fallback states should keep tree unchanged text."""
         await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",

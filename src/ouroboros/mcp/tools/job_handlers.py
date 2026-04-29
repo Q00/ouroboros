@@ -8,7 +8,7 @@ Contains handlers for background job operations and execution cancellation:
 - CancelJobHandler: Cancel a background job
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import structlog
@@ -16,6 +16,10 @@ import structlog
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.job_manager import JobManager, JobSnapshot, JobStatus
+from ouroboros.mcp.tools.ac_tree_hud_handler import (
+    format_subtask_progress_summary,
+    summarize_subtask_events,
+)
 from ouroboros.mcp.types import (
     ContentType,
     MCPContentItem,
@@ -28,6 +32,50 @@ from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
+
+_DEFAULT_JOB_VIEW = "full"
+_JOB_EXECUTION_EVENT_LIMIT = 250
+_JOB_SUBTASK_EVENT_PAGE_SIZE = 500
+_JOB_PROGRESS_EVENT_TYPES = {
+    "workflow.progress.updated",
+    "execution.subtask.updated",
+}
+_JOB_VIEW_ALIASES = {
+    "compact": "compact",
+    "brief": "compact",
+    "summary": "summary",
+    "default": "full",
+    "full": "full",
+    "tree": "full",
+    "verbose": "full",
+}
+
+
+def _normalize_job_view(value: object) -> str:
+    """Normalize requested job-status verbosity."""
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped:
+            return _JOB_VIEW_ALIASES.get(stripped, _DEFAULT_JOB_VIEW)
+    return _DEFAULT_JOB_VIEW
+
+
+async def _query_all_execution_subtask_events(
+    event_store: EventStore, execution_id: str
+) -> list[Any]:
+    """Fetch subtask updates from one stable execution replay snapshot."""
+    events, _cursor = await event_store.get_events_after("execution", execution_id, 0)
+    return [event for event in events if event.type == "execution.subtask.updated"]
+
+
+async def _query_latest_workflow_event(event_store: EventStore, execution_id: str) -> Any | None:
+    """Fetch the latest workflow progress event without relying on a mixed window."""
+    events = await event_store.query_events(
+        aggregate_id=execution_id,
+        event_type="workflow.progress.updated",
+        limit=1,
+    )
+    return events[0] if events else None
 
 
 @dataclass
@@ -233,17 +281,18 @@ async def _render_job_snapshot(
     AC progress (ac_completed, ac_total, current_phase, activity) extracted
     from the same query used for rendering — no duplicate event-store hit.
 
-    Results are cached by (job_id, cursor) to avoid redundant EventStore queries
-    when the same snapshot is rendered repeatedly (e.g. poll loops).
-    Terminal snapshots are never cached since they won't change.
+    Results are cached by (job_id, cursor) only when the render does not read
+    directly from execution events. Execution-linked snapshots can change even
+    when the job aggregate cursor does not, so those renders must stay live.
     """
     cache_key = (snapshot.job_id, snapshot.cursor)
-    if not snapshot.is_terminal and cache_key in _render_cache:
+    cacheable = not snapshot.is_terminal and snapshot.links.execution_id is None
+    if cacheable and cache_key in _render_cache:
         return _render_cache[cache_key]
 
     text, progress = await _render_job_snapshot_inner(snapshot, event_store)
 
-    if not snapshot.is_terminal:
+    if cacheable:
         if len(_render_cache) >= _RENDER_CACHE_MAX:
             to_remove = list(_render_cache.keys())[: _RENDER_CACHE_MAX // 2]
             for key in to_remove:
@@ -251,6 +300,36 @@ async def _render_job_snapshot(
         _render_cache[cache_key] = (text, progress)
 
     return text, progress
+
+
+def _render_compact_job_snapshot(
+    snapshot: JobSnapshot,
+    progress: dict[str, Any],
+    *,
+    include_message: bool,
+) -> str:
+    """Render a low-token job monitor summary."""
+    parts = [snapshot.job_id, snapshot.status.value]
+
+    phase = progress.get("current_phase")
+    if phase:
+        parts.append(str(phase))
+
+    ac_completed = progress.get("ac_completed")
+    ac_total = progress.get("ac_total")
+    if ac_completed is not None or ac_total is not None:
+        parts.append(f"AC {ac_completed if ac_completed is not None else '?'}/{ac_total or '?'}")
+
+    sub_ac_completed = progress.get("sub_ac_completed")
+    sub_ac_total = progress.get("sub_ac_total")
+    if sub_ac_completed is not None and sub_ac_total:
+        parts.append(f"Sub-AC {sub_ac_completed}/{sub_ac_total}")
+
+    parts.append(f"cursor {snapshot.cursor}")
+    lines = [" | ".join(parts)]
+    if include_message and snapshot.message:
+        lines.append(snapshot.message)
+    return "\n".join(lines)
 
 
 async def _render_job_snapshot_inner(
@@ -270,19 +349,38 @@ async def _render_job_snapshot_inner(
     ]
 
     if snapshot.links.execution_id:
-        events = await event_store.query_events(
-            aggregate_id=snapshot.links.execution_id,
-            limit=25,
+        workflow_event = await _query_latest_workflow_event(
+            event_store, snapshot.links.execution_id
         )
-        workflow_event = next((e for e in events if e.type == "workflow.progress.updated"), None)
+
+        subtask_events = await _query_all_execution_subtask_events(
+            event_store, snapshot.links.execution_id
+        )
+        subtask_summary = summarize_subtask_events(subtask_events)
+        subtask_progress = format_subtask_progress_summary(subtask_summary)
+        if subtask_summary:
+            progress.update(
+                {
+                    "current_phase": "Sub-AC work",
+                    "activity": subtask_progress or "running",
+                    "sub_ac_completed": subtask_summary.get("completed_count"),
+                    "sub_ac_total": subtask_summary.get("total_count"),
+                    "sub_ac_executing": subtask_summary.get("executing_count"),
+                    "sub_ac_pending": subtask_summary.get("pending_count"),
+                    "sub_ac_failed": subtask_summary.get("failed_count"),
+                }
+            )
         if workflow_event is not None:
             data = workflow_event.data
-            progress = {
-                "ac_completed": data.get("completed_count"),
-                "ac_total": data.get("total_count"),
-                "current_phase": data.get("current_phase") or "Working",
-                "activity": data.get("activity_detail") or data.get("activity") or "running",
-            }
+            progress.update(
+                {
+                    "ac_completed": data.get("completed_count"),
+                    "ac_total": data.get("total_count"),
+                    "current_phase": data.get("current_phase") or "Working",
+                    "activity": data.get("activity_detail") or data.get("activity") or "running",
+                }
+            )
+        if workflow_event is not None or subtask_summary:
             lines.extend(
                 [
                     "",
@@ -290,20 +388,25 @@ async def _render_job_snapshot_inner(
                     f"**Execution ID**: {snapshot.links.execution_id}",
                     f"**Phase**: {progress['current_phase']}",
                     f"**Activity**: {progress['activity']}",
-                    f"**AC Progress**: {progress['ac_completed']}/{progress['ac_total'] or '?'}",
                 ]
             )
+            if workflow_event is not None:
+                lines.append(
+                    f"**AC Progress**: {progress['ac_completed']}/{progress['ac_total'] or '?'}"
+                )
+            if subtask_progress:
+                lines.append(f"**Sub-AC Progress**: {subtask_progress}")
 
         subtasks: dict[str, tuple[str, str]] = {}
-        for event in events:
-            if event.type != "execution.subtask.updated":
-                continue
+        for event in reversed(subtask_events[-_JOB_EXECUTION_EVENT_LIMIT:]):
             sub_task_id = event.data.get("sub_task_id")
             if sub_task_id and sub_task_id not in subtasks:
                 subtasks[sub_task_id] = (
                     event.data.get("content", ""),
                     event.data.get("status", "unknown"),
                 )
+            if len(subtasks) >= 5:
+                break
 
         if subtasks:
             lines.append("")
@@ -395,6 +498,13 @@ class JobStatusHandler:
                     description="Job ID returned by a start tool",
                     required=True,
                 ),
+                MCPToolParameter(
+                    name="view",
+                    type=ToolInputType.STRING,
+                    description="'full' (default), 'summary', or 'compact'.",
+                    required=False,
+                    default=_DEFAULT_JOB_VIEW,
+                ),
             ),
         )
 
@@ -410,6 +520,7 @@ class JobStatusHandler:
                     tool_name="ouroboros_job_status",
                 )
             )
+        view = _normalize_job_view(arguments.get("view"))
 
         try:
             snapshot = await self._job_manager.get_snapshot(job_id)
@@ -417,6 +528,11 @@ class JobStatusHandler:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_status"))
 
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
+        if view == "compact":
+            text = _render_compact_job_snapshot(snapshot, progress, include_message=False)
+        elif view == "summary":
+            text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
+
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
@@ -428,6 +544,7 @@ class JobStatusHandler:
                     "session_id": snapshot.links.session_id,
                     "execution_id": snapshot.links.execution_id,
                     "lineage_id": snapshot.links.lineage_id,
+                    "view": view,
                     **progress,
                 },
             )
@@ -474,6 +591,13 @@ class JobWaitHandler:
                     required=False,
                     default=30,
                 ),
+                MCPToolParameter(
+                    name="view",
+                    type=ToolInputType.STRING,
+                    description="'full' (default), 'summary', or 'compact'.",
+                    required=False,
+                    default=_DEFAULT_JOB_VIEW,
+                ),
             ),
         )
 
@@ -492,6 +616,7 @@ class JobWaitHandler:
 
         cursor = int(arguments.get("cursor", 0))
         timeout_seconds = int(arguments.get("timeout_seconds", 30))
+        view = _normalize_job_view(arguments.get("view"))
 
         try:
             snapshot, changed = await self._job_manager.wait_for_change(
@@ -502,9 +627,54 @@ class JobWaitHandler:
         except ValueError as exc:
             return Result.err(MCPToolError(str(exc), tool_name="ouroboros_job_wait"))
 
+        execution_progress_changed = False
+        response_cursor = max(snapshot.cursor, cursor)
+        if snapshot.links.execution_id:
+            execution_events, execution_cursor = await self._event_store.get_events_after(
+                "execution",
+                snapshot.links.execution_id,
+                cursor,
+            )
+            execution_progress_changed = any(
+                event.type in _JOB_PROGRESS_EVENT_TYPES for event in execution_events
+            )
+            response_cursor = max(response_cursor, execution_cursor)
+            if response_cursor != snapshot.cursor:
+                snapshot = replace(snapshot, cursor=response_cursor)
+
         text, progress = await _render_job_snapshot(snapshot, self._event_store)
+        has_live_execution_progress = snapshot.links.execution_id is not None and any(
+            progress.get(key) is not None
+            for key in (
+                "ac_completed",
+                "ac_total",
+                "current_phase",
+                "sub_ac_completed",
+                "sub_ac_total",
+            )
+        )
+        response_changed = changed or execution_progress_changed
         if not changed:
-            text += "\n\nNo new job-level events during this wait window."
+            if (
+                view in {"compact", "summary"}
+                and has_live_execution_progress
+                and execution_progress_changed
+            ):
+                text = _render_compact_job_snapshot(
+                    snapshot,
+                    progress,
+                    include_message=view == "summary",
+                )
+            elif view in {"compact", "summary"}:
+                text = f"unchanged cursor={snapshot.cursor}"
+            elif execution_progress_changed:
+                text += "\n\nExecution progress updated during this wait window."
+            else:
+                text += "\n\nNo new job-level events during this wait window."
+        elif view == "compact":
+            text = _render_compact_job_snapshot(snapshot, progress, include_message=False)
+        elif view == "summary":
+            text = _render_compact_job_snapshot(snapshot, progress, include_message=True)
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
@@ -513,7 +683,8 @@ class JobWaitHandler:
                     "job_id": snapshot.job_id,
                     "status": snapshot.status.value,
                     "cursor": snapshot.cursor,
-                    "changed": changed,
+                    "changed": response_changed,
+                    "view": view,
                     **progress,
                 },
             )

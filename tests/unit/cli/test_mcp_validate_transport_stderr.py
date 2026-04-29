@@ -32,7 +32,15 @@ def test_validate_transport_rejects_invalid(bad_transport: str) -> None:
 
 @pytest.mark.parametrize(
     "good_transport,expected",
-    [("stdio", "stdio"), ("sse", "sse"), ("STDIO", "stdio"), ("SSE", "sse")],
+    [
+        ("stdio", "stdio"),
+        ("sse", "sse"),
+        ("streamable-http", "streamable-http"),
+        ("streamable_http", "streamable-http"),
+        ("STDIO", "stdio"),
+        ("SSE", "sse"),
+        ("STREAMABLE-HTTP", "streamable-http"),
+    ],
 )
 def test_validate_transport_accepts_valid(good_transport: str, expected: str) -> None:
     """validate_transport must accept and lowercase known transports."""

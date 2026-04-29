@@ -40,6 +40,11 @@ from ouroboros.evaluation.consensus import (
     run_consensus_evaluation,
     run_deliberative_evaluation,
 )
+from ouroboros.evaluation.detector import (
+    DetectedCommands,
+    ensure_mechanical_toml,
+    has_mechanical_toml,
+)
 from ouroboros.evaluation.languages import (
     LanguagePreset,
     build_mechanical_config,
@@ -99,11 +104,14 @@ __all__ = [
     "Vote",
     "VoterRole",
     # Stage 1
-    "LanguagePreset",
+    "DetectedCommands",
+    "LanguagePreset",  # deprecated compat shim
     "MechanicalConfig",
     "MechanicalVerifier",
     "build_mechanical_config",
-    "detect_language",
+    "detect_language",  # deprecated compat shim
+    "ensure_mechanical_toml",
+    "has_mechanical_toml",
     "run_mechanical_verification",
     # Stage 2
     "DEFAULT_SEMANTIC_MODEL",

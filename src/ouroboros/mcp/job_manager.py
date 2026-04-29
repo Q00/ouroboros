@@ -11,8 +11,10 @@ from typing import Any
 from uuid import uuid4
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.runner import request_cancellation
-from ouroboros.orchestrator.session import SessionRepository
+from ouroboros.orchestrator.events import create_execution_terminal_event
+from ouroboros.orchestrator.heartbeat import is_holder_alive, is_owned_by_current_process
+from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -429,17 +431,102 @@ class JobManager:
         if snapshot.is_terminal:
             return snapshot
 
+        linked_session_repo: SessionRepository | None = None
+        linked_session_reconstructed = False
+        linked_session_started = False
+        linked_session_owned_by_current_process = False
+        linked_session_terminal = False
+        if snapshot.links.session_id:
+            linked_session_repo = SessionRepository(self._event_store)
+            session_result = await linked_session_repo.reconstruct_session(
+                snapshot.links.session_id
+            )
+            linked_session_reconstructed = session_result.is_ok
+            linked_session_terminal = session_result.is_ok and session_result.value.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }
+            try:
+                terminal_events = await self._event_store.query_events(
+                    aggregate_id=snapshot.links.session_id,
+                    limit=10,
+                )
+                linked_session_terminal = linked_session_terminal or any(
+                    event.type
+                    in {
+                        "orchestrator.session.completed",
+                        "orchestrator.session.failed",
+                        "orchestrator.session.cancelled",
+                    }
+                    for event in terminal_events
+                )
+            except Exception:
+                pass
+            linked_session_started = is_holder_alive(snapshot.links.session_id)
+            linked_session_owned_by_current_process = is_owned_by_current_process(
+                snapshot.links.session_id
+            )
+
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
+        should_persist_linked_cancel = False
         if snapshot.links.session_id:
-            await request_cancellation(snapshot.links.session_id)
-        else:
-            task = self._tasks.get(job_id)
-            if task is not None:
-                task.cancel()
-            runner_task = self._runner_tasks.get(job_id)
-            if runner_task is not None and not runner_task.done():
-                runner_task.cancel()
+            if not linked_session_terminal:
+                await request_cancellation(snapshot.links.session_id)
+                should_persist_linked_cancel = linked_session_reconstructed and (
+                    not linked_session_started or not linked_session_owned_by_current_process
+                )
+
+        cancelled_tasks: list[asyncio.Task[Any]] = []
+        task = self._tasks.get(job_id)
+        if snapshot.links.session_id is None and task is not None and not task.done():
+            task.cancel()
+            cancelled_tasks.append(task)
+        runner_task = self._runner_tasks.get(job_id)
+        if runner_task is not None and not runner_task.done():
+            runner_task.cancel()
+            cancelled_tasks.append(runner_task)
+        if cancelled_tasks:
+            await asyncio.wait(cancelled_tasks, timeout=5)
+        if snapshot.links.session_id and should_persist_linked_cancel:
+            repo = linked_session_repo or SessionRepository(self._event_store)
+            latest_session = await repo.reconstruct_session(snapshot.links.session_id)
+            if latest_session.is_err:
+                raise ValueError(
+                    "Failed to inspect linked session before cancellation: "
+                    f"{latest_session.error.message}"
+                )
+            latest_terminal = latest_session.is_ok and latest_session.value.status in {
+                SessionStatus.COMPLETED,
+                SessionStatus.FAILED,
+                SessionStatus.CANCELLED,
+            }
+            if not latest_terminal:
+                cancel_result = await repo.mark_cancelled(
+                    snapshot.links.session_id,
+                    reason="Background job cancelled",
+                    cancelled_by="mcp_job_manager",
+                )
+                if cancel_result.is_err:
+                    raise ValueError(
+                        f"Failed to mark linked session cancelled: {cancel_result.error.message}"
+                    )
+                if snapshot.links.execution_id:
+                    await self._event_store.append(
+                        create_execution_terminal_event(
+                            execution_id=snapshot.links.execution_id,
+                            session_id=snapshot.links.session_id,
+                            status="cancelled",
+                            error_message="Background job cancelled",
+                        )
+                    )
+        if (
+            snapshot.links.session_id
+            and not linked_session_started
+            and not is_holder_alive(snapshot.links.session_id)
+        ):
+            await clear_cancellation(snapshot.links.session_id)
 
         return await self.get_snapshot(job_id)
 

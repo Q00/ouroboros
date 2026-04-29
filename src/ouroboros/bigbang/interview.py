@@ -37,6 +37,19 @@ DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 
 # Legacy alias for backward compatibility
 MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS
+MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS = 3500
+INITIAL_CONTEXT_SUMMARY_QUESTION = (
+    "Your saved initial context is too long to safely send to the interview "
+    "model without risking CLI prompt failure. Please reply with a concise "
+    "summary of the full context, including goals, constraints, and success "
+    "criteria. I will use that summary for the next interview question."
+)
+INITIAL_CONTEXT_SUMMARY_REQUIRED = (
+    "[Initial context exceeds the prompt-safe size and no user summary has been "
+    "recorded yet. Ask the user to provide a concise summary before scoring or "
+    "generating a seed.]"
+)
+PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE = "\n\n[Context truncated for prompt safety.]"
 
 
 class InterviewPerspective(StrEnum):
@@ -155,18 +168,31 @@ class InterviewState(BaseModel):
         return self.status == InterviewStatus.COMPLETED
 
     @property
+    def needs_initial_context_summary(self) -> bool:
+        """True when oversized initial context has no recorded summary."""
+        if len(self.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
+            return False
+        return not any(
+            round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION
+            and bool(round_data.user_response)
+            for round_data in self.rounds
+        )
+
+    @property
     def can_reopen(self) -> bool:
         """True when a completed interview should be reopenable.
 
-        A completed interview is reopenable only when its stored ambiguity
-        score exceeds the seed-generation threshold — i.e. it was completed
-        prematurely and is now in a deadlock (can't generate seed, can't
-        resume).
+        A completed interview is reopenable when it is missing a required
+        long-context summary, or when its stored ambiguity score exceeds the
+        seed-generation threshold — i.e. it was completed prematurely and is
+        now in a deadlock (can't generate seed, can't resume).
         """
-        return (
-            self.is_complete
-            and self.ambiguity_score is not None
-            and self.ambiguity_score > self._SEED_READY_THRESHOLD
+        return self.is_complete and (
+            self.needs_initial_context_summary
+            or (
+                self.ambiguity_score is not None
+                and self.ambiguity_score > self._SEED_READY_THRESHOLD
+            )
         )
 
     def mark_updated(self) -> None:
@@ -192,6 +218,34 @@ class InterviewState(BaseModel):
         self.ambiguity_score = None
         self.ambiguity_breakdown = None
         self.mark_updated()
+
+
+def prompt_safe_initial_context(state: InterviewState) -> str:
+    """Return initial context safe for LLM prompts across interview consumers."""
+    if len(state.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
+        return state.initial_context
+    for round_data in reversed(state.rounds):
+        if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
+            return _truncate_prompt_safe_context(round_data.user_response)
+    return INITIAL_CONTEXT_SUMMARY_REQUIRED
+
+
+def _truncate_prompt_safe_context(context: str) -> str:
+    """Cap prompt context while leaving an explicit truncation marker."""
+    if len(context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
+        return context
+
+    content_budget = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS - len(
+        PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE
+    )
+    if content_budget <= 0:
+        return context[:MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS]
+    return context[:content_budget] + PROMPT_SAFE_CONTEXT_TRUNCATION_NOTICE
+
+
+def initial_context_summary_missing(state: InterviewState) -> bool:
+    """Return True when a long initial context still needs a user summary."""
+    return prompt_safe_initial_context(state) == INITIAL_CONTEXT_SUMMARY_REQUIRED
 
 
 @dataclass
@@ -235,6 +289,12 @@ class InterviewEngine:
     model: str = field(default_factory=get_clarification_model)
     temperature: float = 0.7
     max_tokens: int = 512
+    _MAX_TOTAL_PROMPT_CHARS = 4800
+    _MAX_SYSTEM_PROMPT_CHARS = 3500
+    _MIN_SYSTEM_PROMPT_CHARS = 1200
+    _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
+    _MAX_INITIAL_CONTEXT_TOTAL_CHARS = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+    _INITIAL_CONTEXT_SUMMARY_QUESTION = INITIAL_CONTEXT_SUMMARY_QUESTION
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -309,6 +369,9 @@ class InterviewEngine:
         Returns:
             Result containing the next question or error.
         """
+        if state.is_complete and state.needs_initial_context_summary:
+            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
+
         if state.is_complete:
             return Result.err(
                 ValidationError(
@@ -317,12 +380,35 @@ class InterviewEngine:
                     value=state.status,
                 )
             )
+        effective_initial_context = self._effective_initial_context(state)
+        if effective_initial_context is None:
+            return Result.ok(self._INITIAL_CONTEXT_SUMMARY_QUESTION)
 
         # Build the context from previous rounds
-        conversation_history = self._build_conversation_history(state)
+        conversation_history = self._build_conversation_history(
+            state,
+            initial_context=effective_initial_context,
+        )
+        preserve_prefix_messages = (
+            1 if len(effective_initial_context) > self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS else 0
+        )
+        conversation_history = self._trim_messages_to_budget(
+            conversation_history,
+            max_chars=self._MAX_TOTAL_PROMPT_CHARS - self._MIN_SYSTEM_PROMPT_CHARS,
+            preserve_prefix_messages=preserve_prefix_messages,
+        )
 
         # Generate next question
-        system_prompt = self._build_system_prompt(state)
+        history_chars = sum(len(message.content) for message in conversation_history)
+        system_prompt_budget = min(
+            self._MAX_SYSTEM_PROMPT_CHARS,
+            self._MAX_TOTAL_PROMPT_CHARS - history_chars,
+        )
+        system_prompt = self._build_system_prompt(
+            state,
+            initial_context=effective_initial_context,
+            max_chars=system_prompt_budget,
+        )
         messages = [
             Message(role=MessageRole.SYSTEM, content=system_prompt),
             *conversation_history,
@@ -521,20 +607,35 @@ class InterviewEngine:
                 )
             )
 
-    def _build_system_prompt(self, state: InterviewState) -> str:
+    def _build_system_prompt(
+        self,
+        state: InterviewState,
+        initial_context: str | None = None,
+        max_chars: int | None = None,
+    ) -> str:
         """Build the system prompt for question generation.
 
         Args:
             state: Current interview state.
+            initial_context: Optional prompt-safe context to use instead of
+                ``state.initial_context``.
+            max_chars: Optional cap for the returned system prompt. When omitted,
+                uses the standard system-prompt cap.
 
         Returns:
             The system prompt.
         """
         from ouroboros.agents.loader import load_agent_prompt
 
+        max_prompt_chars = max_chars or self._MAX_SYSTEM_PROMPT_CHARS
         round_info = f"Round {state.current_round_number}"
 
         base_prompt = load_agent_prompt("socratic-interviewer")
+
+        context_for_prompt = (
+            initial_context if initial_context is not None else state.initial_context
+        )
+        prompt_initial_context = self._initial_context_for_system_prompt(context_for_prompt)
 
         # For first round, add explicit instruction to start directly with a question
         if state.current_round_number == 1:
@@ -544,13 +645,13 @@ class InterviewEngine:
                 f'Do NOT introduce yourself. Do NOT say "I\'ll conduct" or "Let me ask". '
                 f"Just ask a specific, clarifying question immediately.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
-                f"Initial context: {state.initial_context}\n"
+                f"Initial context: {prompt_initial_context}\n"
             )
         else:
             dynamic_header = (
                 f"You are an expert requirements engineer conducting a Socratic interview.\n\n"
                 f"This is {round_info}. Your ONLY job is to ask questions that reduce ambiguity.\n\n"
-                f"Initial context: {state.initial_context}\n"
+                f"Initial context: {prompt_initial_context}\n"
             )
 
         # Answer prefix hints — always present so the question generator
@@ -575,31 +676,53 @@ class InterviewEngine:
 
         perspective_panel = self._build_perspective_panel_prompt(state)
 
-        # Cap total system prompt to prevent Agent SDK CLI empty responses.
-        # The bundled CLI can fail silently when the prompt exceeds ~5,000 chars.
-        _MAX_SYSTEM_PROMPT_CHARS = 4800
         _OVERHEAD = 20  # newlines, ellipsis, separators
 
-        # Budget for base_prompt after accounting for other sections
-        base_budget = (
-            _MAX_SYSTEM_PROMPT_CHARS - len(dynamic_header) - len(perspective_panel) - _OVERHEAD
-        )
-        if base_budget < 0:
-            # Header + panel already exceed budget — truncate both proportionally
-            total = len(dynamic_header) + len(perspective_panel)
-            ratio = max(0.0, (_MAX_SYSTEM_PROMPT_CHARS - _OVERHEAD) / total) if total > 0 else 0.0
-            dynamic_header = dynamic_header[: int(len(dynamic_header) * ratio)]
-            perspective_panel = perspective_panel[: int(len(perspective_panel) * ratio)]
+        # Preserve the dynamic header first; it contains the capped initial
+        # context and first-turn instructions. Trim the optional panel/base
+        # prompt before falling back to hard-truncating the header.
+        available_after_header = max_prompt_chars - len(dynamic_header) - _OVERHEAD
+        if available_after_header <= 0:
+            dynamic_header = dynamic_header[: max_prompt_chars - _OVERHEAD]
+            perspective_panel = ""
             base_budget = 0
+        elif len(perspective_panel) > available_after_header:
+            perspective_panel = perspective_panel[:available_after_header]
+            base_budget = 0
+        else:
+            base_budget = available_after_header - len(perspective_panel)
 
         trimmed_base = base_prompt[:base_budget] if base_budget < len(base_prompt) else base_prompt
         full_prompt = f"{dynamic_header}\n{trimmed_base}\n\n{perspective_panel}"
 
         # Hard-truncate as final safety net
-        if len(full_prompt) > _MAX_SYSTEM_PROMPT_CHARS:
-            full_prompt = full_prompt[:_MAX_SYSTEM_PROMPT_CHARS]
+        if len(full_prompt) > max_prompt_chars:
+            full_prompt = full_prompt[:max_prompt_chars]
 
         return full_prompt
+
+    def _initial_context_for_system_prompt(self, initial_context: str) -> str:
+        """Return the initial context portion safe to embed in system prompt."""
+        if len(initial_context) <= self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS:
+            return initial_context
+        return (
+            initial_context[: self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS]
+            + "\n\n[Initial context continues in the first user message.]"
+        )
+
+    def _initial_context_overflow_message(self, initial_context: str) -> str:
+        """Return overflow initial context as durable user-message content."""
+        if len(initial_context) <= self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS:
+            return ""
+        overflow = initial_context[self._MAX_INITIAL_CONTEXT_SYSTEM_CHARS :]
+        return f"Additional initial context omitted from the system prompt:\n{overflow}"
+
+    def _effective_initial_context(self, state: InterviewState) -> str | None:
+        """Return prompt-safe initial context, or None when a summary is needed."""
+        context = prompt_safe_initial_context(state)
+        if context == INITIAL_CONTEXT_SUMMARY_REQUIRED:
+            return None
+        return context
 
     def _build_ambiguity_snapshot_prompt(self, state: InterviewState) -> str:
         """Build prompt context from the latest ambiguity snapshot."""
@@ -784,7 +907,11 @@ class InterviewEngine:
     # Cap each user response to keep the total prompt within safe limits.
     _MAX_USER_RESPONSE_CHARS = 800
 
-    def _build_conversation_history(self, state: InterviewState) -> list[Message]:
+    def _build_conversation_history(
+        self,
+        state: InterviewState,
+        initial_context: str | None = None,
+    ) -> list[Message]:
         """Build conversation history from completed rounds.
 
         Long user responses are truncated to prevent Agent SDK CLI from
@@ -792,13 +919,24 @@ class InterviewEngine:
 
         Args:
             state: Current interview state.
+            initial_context: Prompt-safe initial context to use for overflow
+                instead of ``state.initial_context``.
 
         Returns:
             List of messages representing the conversation.
         """
         messages: list[Message] = []
+        context_for_prompt = (
+            initial_context if initial_context is not None else state.initial_context
+        )
+
+        overflow = self._initial_context_overflow_message(context_for_prompt)
+        if overflow:
+            messages.append(Message(role=MessageRole.USER, content=overflow))
 
         for round_data in state.rounds:
+            if round_data.question == self._INITIAL_CONTEXT_SUMMARY_QUESTION:
+                continue
             messages.append(Message(role=MessageRole.ASSISTANT, content=round_data.question))
             if round_data.user_response:
                 response = round_data.user_response
@@ -807,6 +945,51 @@ class InterviewEngine:
                 messages.append(Message(role=MessageRole.USER, content=response))
 
         return messages
+
+    def _trim_messages_to_budget(
+        self,
+        messages: list[Message],
+        *,
+        max_chars: int,
+        preserve_prefix_messages: int = 0,
+    ) -> list[Message]:
+        """Keep durable prefix messages plus newest conversation within a budget."""
+        if sum(len(message.content) for message in messages) <= max_chars:
+            return messages
+
+        prefix = messages[:preserve_prefix_messages]
+        remaining_messages = messages[preserve_prefix_messages:]
+        prefix_chars = sum(len(message.content) for message in prefix)
+        if prefix_chars >= max_chars:
+            retained_prefix: list[Message] = []
+            used_prefix_chars = 0
+            for message in prefix:
+                remaining = max_chars - used_prefix_chars
+                if remaining <= 0:
+                    break
+                if len(message.content) <= remaining:
+                    retained_prefix.append(message)
+                    used_prefix_chars += len(message.content)
+                else:
+                    retained_prefix.append(
+                        Message(role=message.role, content=message.content[:remaining])
+                    )
+                    break
+            return retained_prefix
+
+        retained: list[Message] = []
+        used_chars = prefix_chars
+        for message in reversed(remaining_messages):
+            remaining = max_chars - used_chars
+            if remaining <= 0:
+                break
+            if len(message.content) <= remaining:
+                retained.append(message)
+                used_chars += len(message.content)
+            else:
+                retained.append(Message(role=message.role, content=message.content[-remaining:]))
+                break
+        return [*prefix, *reversed(retained)]
 
     async def complete_interview(
         self, state: InterviewState

@@ -17,9 +17,11 @@ from uuid import uuid4
 
 from ouroboros.core.security import InputValidator
 from ouroboros.core.text import truncate_head_tail
+from ouroboros.evaluation.detector import ensure_mechanical_toml, has_mechanical_toml
 from ouroboros.evaluation.languages import build_mechanical_config
 from ouroboros.evaluation.mechanical import MechanicalConfig, run_command
 from ouroboros.evaluation.models import CheckType
+from ouroboros.providers.base import LLMAdapter
 
 _ARTIFACT_BASE_DIR = Path.home() / ".ouroboros" / "artifacts"
 _OUTPUT_EXCERPT_HEAD = 500
@@ -75,6 +77,40 @@ class ArtifactLocation:
     artifact_dir: Path
     artifact_key: str
     artifact_run_id: str
+
+
+async def _auto_detect_mechanical_toml(
+    working_dir: Path,
+    llm_adapter: LLMAdapter | None,
+    llm_backend: str | None = None,
+) -> None:
+    """Best-effort author ``mechanical.toml`` when it is missing.
+
+    Uses the caller-provided adapter when available; otherwise lazily
+    constructs a default via ``create_llm_adapter`` so existing callers
+    (evolve / run / execute) continue to get Stage 1 coverage without having
+    to thread an adapter through. ``llm_backend`` is forwarded to
+    ``ensure_mechanical_toml`` so Codex/OpenCode backends pick up the
+    ``"default"`` model sentinel instead of a Claude model name. Any failure
+    is swallowed — the evaluator simply runs with no Stage 1 commands,
+    matching the skip-gracefully contract.
+    """
+    adapter = llm_adapter
+    if adapter is None:
+        try:
+            from ouroboros.providers.factory import create_llm_adapter
+
+            # Build the default adapter *against the same backend* so the
+            # subsequent ``ensure_mechanical_toml(..., backend=...)`` call is
+            # not routed through a provider that cannot consume the sentinel
+            # model ("default") returned for Codex / OpenCode backends.
+            adapter = create_llm_adapter(backend=llm_backend, max_turns=1)
+        except Exception:  # noqa: BLE001 — adapter construction must never break QA
+            return
+    try:
+        await ensure_mechanical_toml(working_dir, adapter, backend=llm_backend)
+    except Exception:  # noqa: BLE001 — detector must never break QA
+        return
 
 
 def _configured_commands(config: MechanicalConfig) -> list[tuple[CheckType, tuple[str, ...]]]:
@@ -360,15 +396,26 @@ async def build_verification_artifacts(
     execution_id: str,
     execution_output: str,
     working_dir: Path,
+    llm_adapter: LLMAdapter | None = None,
+    llm_backend: str | None = None,
 ) -> VerificationArtifacts:
-    """Run canonical mechanical checks and build QA evidence strings."""
+    """Run canonical mechanical checks and build QA evidence strings.
+
+    Stage 1 commands are read from ``.ouroboros/mechanical.toml``. When the
+    file is missing, the AI detector is invoked once to author it — either
+    with ``llm_adapter`` if the caller provided one, or with a best-effort
+    default adapter from ``create_llm_adapter``. Any failure leaves Stage 1
+    with no commands, matching the documented "skip rather than phantom-fail"
+    contract.
+    """
     artifact_location = _artifact_dir_for(execution_id)
     artifact_dir = artifact_location.artifact_dir
     runs_dir = artifact_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=False)
 
-    config = build_mechanical_config(working_dir)
-    commands = _configured_commands(config)
+    # Capture the execution's git diff BEFORE authoring the detector toml so
+    # ``changed_files`` reflects what the agent produced, not the side-effect
+    # of the detector writing ``.ouroboros/mechanical.toml``.
     (
         changed_files,
         git_status,
@@ -376,6 +423,12 @@ async def build_verification_artifacts(
         git_state_available,
         git_state_error,
     ) = await _capture_git_state(working_dir, artifact_dir)
+
+    if not has_mechanical_toml(working_dir):
+        await _auto_detect_mechanical_toml(working_dir, llm_adapter, llm_backend)
+
+    config = build_mechanical_config(working_dir)
+    commands = _configured_commands(config)
 
     runs: list[VerificationRunArtifact] = []
     for index, (check_type, command) in enumerate(commands, start=1):

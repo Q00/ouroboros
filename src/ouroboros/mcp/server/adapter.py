@@ -38,7 +38,7 @@ from ouroboros.mcp.types import (
 
 log = structlog.get_logger(__name__)
 
-VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "sse"})
+VALID_TRANSPORTS: frozenset[str] = frozenset({"stdio", "sse", "streamable-http"})
 
 
 def _safe_cwd() -> Path:
@@ -66,7 +66,7 @@ def validate_transport(transport: str) -> str:
 
     Returns the lowercased transport if valid, raises ValueError otherwise.
     """
-    transport = transport.lower()
+    transport = transport.lower().replace("_", "-")
     if transport not in VALID_TRANSPORTS:
         msg = f"Invalid transport {transport!r}. Must be one of: {', '.join(sorted(VALID_TRANSPORTS))}"
         raise ValueError(msg)
@@ -554,9 +554,10 @@ class MCPServerAdapter:
         Uses the MCP SDK's FastMCP server implementation.
 
         Args:
-            transport: Transport type - "stdio" or "sse" (case-insensitive).
-            host: Host to bind to (SSE only). Defaults to "localhost".
-            port: Port to bind to (SSE only). Defaults to 8080.
+            transport: Transport type - "stdio", "sse", or "streamable-http"
+                (case-insensitive).
+            host: Host to bind to for network transports. Defaults to "localhost".
+            port: Port to bind to for network transports. Defaults to 8080.
 
         Raises:
             ValueError: If transport is invalid or incompatible with security config.
@@ -586,9 +587,10 @@ class MCPServerAdapter:
             msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
             raise ImportError(msg) from e
 
-        # Pass host/port at construction time — FastMCP reads these from
-        # its internal settings, so run_sse_async() alone won't pick them up.
-        if transport == "sse":
+        # Pass host/port at construction time for network transports — FastMCP
+        # reads these from its internal settings, so the run_* method alone
+        # won't pick them up.
+        if transport in {"sse", "streamable-http"}:
             self._mcp_server = FastMCP(
                 self._name,
                 host=host,
@@ -690,6 +692,8 @@ class MCPServerAdapter:
         # Run the server with the appropriate transport
         if transport == "sse":
             await self._mcp_server.run_sse_async()
+        elif transport == "streamable-http":
+            await self._mcp_server.run_streamable_http_async()
         else:
             await self._mcp_server.run_stdio_async()
 

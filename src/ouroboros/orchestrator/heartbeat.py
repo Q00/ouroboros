@@ -107,6 +107,42 @@ def release(session_id: str) -> None:
         pass
 
 
+def release_if_owned_by_current_process(session_id: str) -> bool:
+    """Release a session lock only when the current process owns it."""
+    if not is_owned_by_current_process(session_id):
+        return False
+
+    release(session_id)
+    return True
+
+
+def is_owned_by_current_process(session_id: str) -> bool:
+    """Return True when the current process owns the session lock."""
+    path = lock_path(session_id)
+    try:
+        content = path.read_text().strip()
+    except OSError:
+        return False
+
+    parts = content.split(":", 1)
+    try:
+        pid = int(parts[0])
+    except ValueError:
+        return False
+    if pid != os.getpid():
+        return False
+    if len(parts) > 1 and parts[1] != "None":
+        try:
+            recorded_start = float(parts[1])
+        except ValueError:
+            return False
+        current_start = _get_process_start_time(pid)
+        if current_start is not None and abs(current_start - recorded_start) > 2.0:
+            return False
+
+    return True
+
+
 def is_holder_alive(session_id: str) -> bool:
     """Check if the lock holder for a session is still alive.
 

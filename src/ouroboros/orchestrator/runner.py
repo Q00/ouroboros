@@ -87,6 +87,14 @@ from ouroboros.orchestrator.session import SessionRepository, SessionStatus, Ses
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
 from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.providers import create_llm_adapter
+from ouroboros.resilience.lateral import ThinkingPersona
+from ouroboros.resilience.recovery import (
+    RecoveryActionKind,
+    RecoveryPlanner,
+    RecoverySnapshot,
+    create_recovery_applied_event,
+    get_run_recovery_protocol_prompt,
+)
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -277,6 +285,7 @@ IMPORTANT: You are extending existing code, NOT creating a new project.
 
     ac_tracking = get_ac_tracking_prompt()
     strategy_fragment = strategy.get_system_prompt_fragment()
+    recovery_protocol = get_run_recovery_protocol_prompt()
 
     return f"""{strategy_fragment}
 
@@ -289,7 +298,9 @@ IMPORTANT: You are extending existing code, NOT creating a new project.
 ## Evaluation Principles
 {principles_text}
 
-{ac_tracking}"""
+{ac_tracking}
+
+{recovery_protocol}"""
 
 
 def build_task_prompt(
@@ -461,7 +472,9 @@ class OrchestratorRunner:
             execution_id: Execution ID to remove.
             session_id: Session ID to remove.
         """
-        from ouroboros.orchestrator.heartbeat import release as release_lock
+        from ouroboros.orchestrator.heartbeat import (
+            release_if_owned_by_current_process as release_lock,
+        )
 
         self._active_sessions.pop(execution_id, None)
         release_lock(session_id)
@@ -1334,6 +1347,24 @@ class OrchestratorRunner:
             )
             return False
 
+    async def _check_startup_cancellation(self, session_id: str) -> bool:
+        """Check cancellation before normal message-loop checkpoints exist."""
+        if await is_cancellation_requested(session_id):
+            return True
+        try:
+            events = await self._event_store.query_events(
+                aggregate_id=session_id,
+                event_type="orchestrator.session.cancelled",
+                limit=1,
+            )
+            return len(events) > 0
+        except Exception:
+            log.warning(
+                "orchestrator.runner.startup_cancellation_check_failed",
+                session_id=session_id,
+            )
+            return False
+
     async def _handle_cancellation(
         self,
         session_id: str,
@@ -1373,18 +1404,57 @@ class OrchestratorRunner:
         # Only mark cancelled if not already in a terminal state
         session_result = await self._session_repo.reconstruct_session(session_id)
         _terminal = {SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED}
-        if session_result.is_ok and session_result.value.status not in _terminal:
-            cancel_result = await self._session_repo.mark_cancelled(
-                session_id,
-                reason="Cancellation detected during execution",
-                cancelled_by="runner",
-            )
-            if cancel_result.is_err:
-                log.warning(
-                    "orchestrator.runner.mark_cancelled_failed",
-                    session_id=session_id,
-                    error=str(cancel_result.error),
+        session_already_terminal = session_result.is_ok and session_result.value.status in _terminal
+        if session_already_terminal:
+            terminal_status = session_result.value.status
+            final_message = f"Execution already {terminal_status.value}"
+            summary = {"terminal_status": terminal_status.value, **self._task_summary()}
+            if terminal_status == SessionStatus.CANCELLED:
+                summary["cancelled"] = True
+            try:
+                execution_terminal_events = await self._event_store.query_events(
+                    aggregate_id=execution_id,
+                    event_type="execution.terminal",
+                    limit=1,
                 )
+            except Exception:
+                execution_terminal_events = []
+            if not execution_terminal_events:
+                await self._event_store.append(
+                    create_execution_terminal_event(
+                        execution_id=execution_id,
+                        session_id=session_id,
+                        status=terminal_status.value,
+                        summary=summary if terminal_status == SessionStatus.COMPLETED else None,
+                        error_message=(
+                            final_message if terminal_status != SessionStatus.COMPLETED else None
+                        ),
+                        messages_processed=messages_processed,
+                    )
+                )
+            return Result.ok(
+                OrchestratorResult(
+                    success=terminal_status == SessionStatus.COMPLETED,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                    summary=summary,
+                    messages_processed=messages_processed,
+                    final_message=final_message,
+                    duration_seconds=duration,
+                )
+            )
+
+        cancel_result = await self._session_repo.mark_cancelled(
+            session_id,
+            reason="Cancellation detected during execution",
+            cancelled_by="runner",
+        )
+        if cancel_result is not None and cancel_result.is_err:
+            log.warning(
+                "orchestrator.runner.mark_cancelled_failed",
+                session_id=session_id,
+                error=str(cancel_result.error),
+            )
 
         # Mirror cancellation into execution stream for TUI.
         await self._event_store.append(
@@ -1531,6 +1601,13 @@ class OrchestratorRunner:
             # Register session for cancellation tracking
             self._register_session(exec_id, tracker.session_id)
             session_registered = True
+            if await self._check_startup_cancellation(tracker.session_id):
+                return await self._handle_cancellation(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=0,
+                    start_time=start_time,
+                )
 
             # Build prompts with strategy
             strategy = get_strategy(seed.task_type)
@@ -1574,6 +1651,20 @@ class OrchestratorRunner:
                     parallel_kwargs["externally_satisfied_acs"] = externally_satisfied_acs
 
                 return await self._execute_parallel(**parallel_kwargs)
+        except asyncio.CancelledError:
+            if session_registered and await is_cancellation_requested(tracker.session_id):
+                return await self._handle_cancellation(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=0,
+                    start_time=start_time,
+                )
+            self._cleanup_pre_execution_state(
+                exec_id,
+                tracker.session_id,
+                session_registered=session_registered,
+            )
+            raise
         except Exception as e:
             self._cleanup_pre_execution_state(
                 exec_id,
@@ -1599,23 +1690,32 @@ class OrchestratorRunner:
             last_tool: str | None = None
             last_completed_count = 0
             runtime_handle: RuntimeHandle | None = None
+            recovery_interventions_used = 0
+            recovery_personas: list[str] = []
 
             cancelled_result: Result[OrchestratorResult, OrchestratorError] | None = None
 
-            with Status(
-                f"[bold cyan]Executing: {seed.goal[:50]}...[/]",
-                console=self._console,
-                spinner="dots",
-            ) as status:
-                runtime_handle = self._seed_runtime_handle(
-                    self._inherited_runtime_handle, tool_catalog=tool_catalog
-                )
+            async def _consume_task_stream(
+                *,
+                prompt: str,
+                resume_handle: RuntimeHandle | None,
+                status: Any,
+            ) -> RuntimeHandle | None:
+                nonlocal cancelled_result
+                nonlocal final_message
+                nonlocal last_completed_count
+                nonlocal last_tool
+                nonlocal messages_processed
+                nonlocal success
+                nonlocal tracker
+
+                active_runtime_handle = resume_handle
                 async with aclosing(
                     self._adapter.execute_task(  # type: ignore[type-var]
-                        prompt=task_prompt,
+                        prompt=prompt,
                         tools=merged_tools,
                         system_prompt=system_prompt,
-                        resume_handle=runtime_handle,
+                        resume_handle=active_runtime_handle,
                     )
                 ) as message_stream:
                     async for message in message_stream:
@@ -1640,7 +1740,7 @@ class OrchestratorRunner:
                             tracker.session_id,
                         )
                         if message.resume_handle is not None:
-                            runtime_handle = message.resume_handle
+                            active_runtime_handle = message.resume_handle
 
                         # Update workflow state tracker
                         state_tracker.process_runtime_message(message)
@@ -1741,6 +1841,84 @@ class OrchestratorRunner:
                             final_message = message.content
                             success = not message.is_error
 
+                return active_runtime_handle
+
+            def _build_recovery_snapshot() -> RecoverySnapshot:
+                unfinished = [
+                    f"{ac.index}. {ac.content}"
+                    for ac in state_tracker.state.acceptance_criteria
+                    if ac.status.value != "completed"
+                ]
+                unfinished_text = "\n".join(unfinished[:5]) or "None"
+                problem_context = (
+                    f"Goal: {seed.goal}\n"
+                    f"Unfinished acceptance criteria:\n{unfinished_text}\n\n"
+                    f"Previous final message:\n{final_message[:1000]}"
+                )
+                current_approach = (
+                    "The first run attempted the seed normally and ended without "
+                    "satisfying the workflow. Continue from the current repository "
+                    "state, but avoid repeating the same failed path."
+                )
+                return RecoverySnapshot(
+                    problem_context=problem_context,
+                    current_approach=current_approach,
+                    messages_processed=messages_processed,
+                    completed_count=state_tracker.state.completed_count,
+                    total_count=state_tracker.state.total_count,
+                    final_error=final_message,
+                    used_personas=tuple(ThinkingPersona(persona) for persona in recovery_personas),
+                    interventions_used=recovery_interventions_used,
+                )
+
+            with Status(
+                f"[bold cyan]Executing: {seed.goal[:50]}...[/]",
+                console=self._console,
+                spinner="dots",
+            ) as status:
+                runtime_handle = self._seed_runtime_handle(
+                    self._inherited_runtime_handle, tool_catalog=tool_catalog
+                )
+                runtime_handle = await _consume_task_stream(
+                    prompt=task_prompt,
+                    resume_handle=runtime_handle,
+                    status=status,
+                )
+
+                if cancelled_result is None and not success and runtime_handle is not None:
+                    planner = RecoveryPlanner()
+                    recovery_action = planner.plan(_build_recovery_snapshot())
+                    if (
+                        recovery_action.kind == RecoveryActionKind.INJECT_LATERAL_DIRECTIVE
+                        and recovery_action.directive
+                        and recovery_action.persona is not None
+                    ):
+                        recovery_interventions_used += 1
+                        recovery_personas.append(recovery_action.persona.value)
+                        await self._event_store.append(
+                            create_recovery_applied_event(
+                                execution_id=exec_id,
+                                session_id=tracker.session_id,
+                                seed_id=seed.metadata.seed_id,
+                                action=recovery_action,
+                                messages_processed=messages_processed,
+                                completed_count=state_tracker.state.completed_count,
+                                total_count=state_tracker.state.total_count,
+                            )
+                        )
+                        status.stop()
+                        self._console.print(
+                            "[yellow]Recovery: "
+                            f"{recovery_action.pattern.value if recovery_action.pattern else 'unknown'} "
+                            f"-> {recovery_action.persona.value}[/yellow]"
+                        )
+                        status.start()
+                        runtime_handle = await _consume_task_stream(
+                            prompt=recovery_action.directive,
+                            resume_handle=runtime_handle,
+                            status=status,
+                        )
+
             # If cancelled, return the cancellation result now that the
             # generator has been properly closed via aclosing.
             if cancelled_result is not None:
@@ -1839,6 +2017,18 @@ class OrchestratorRunner:
                 )
             )
 
+        except asyncio.CancelledError:
+            if await is_cancellation_requested(tracker.session_id):
+                return await self._handle_cancellation(
+                    session_id=tracker.session_id,
+                    execution_id=exec_id,
+                    messages_processed=messages_processed,
+                    start_time=start_time,
+                )
+            self._unregister_session(exec_id, tracker.session_id)
+            if self._task_workspace is not None:
+                release_lock(self._task_workspace.lock_path)
+            raise
         except Exception as e:
             log.exception(
                 "orchestrator.runner.execute_failed",

@@ -18,7 +18,12 @@ from typing import Any
 from pydantic import BaseModel, Field
 import structlog
 
-from ouroboros.bigbang.interview import InterviewState
+from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
+    InterviewState,
+    initial_context_summary_missing,
+    prompt_safe_initial_context,
+)
 from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -322,6 +327,14 @@ class AmbiguityScorer:
         # Use brownfield flag from state if available
         is_brownfield = is_brownfield or getattr(state, "is_brownfield", False)
 
+        if initial_context_summary_missing(state):
+            return Result.err(
+                ProviderError(
+                    "Initial context summary required before ambiguity scoring",
+                    details={"interview_id": state.interview_id},
+                )
+            )
+
         # Build the context from interview
         context = self._build_interview_context(state)
 
@@ -463,9 +476,11 @@ class AmbiguityScorer:
         Returns:
             Formatted context string.
         """
-        parts = [f"Initial Context: {state.initial_context}"]
+        parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
         for round_data in state.rounds:
+            if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION:
+                continue
             parts.append(f"\nQ: {round_data.question}")
             if round_data.user_response:
                 parts.append(f"A: {round_data.user_response}")

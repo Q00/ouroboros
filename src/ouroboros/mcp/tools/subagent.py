@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 from typing import Any
 
 import structlog
@@ -45,6 +46,12 @@ from ouroboros.mcp.types import (
 )
 
 log = structlog.get_logger(__name__)
+
+_INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS = 600
+_INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS = 200
+_INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS = 900
+_INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS = 220
+_INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS = 300
 
 # ---------------------------------------------------------------------------
 # SubagentPayload dataclass
@@ -209,6 +216,123 @@ def should_dispatch_via_plugin(
         return False
     mode = (opencode_mode or "").strip().lower()
     return mode == "plugin"
+
+
+def _truncate_tail(text: str | None, max_chars: int) -> str:
+    """Keep prompt inputs bounded while preserving the most recent context."""
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return "[truncated]\n" + text[-max_chars:]
+
+
+def _truncate_head(text: str | None, max_chars: int) -> str:
+    """Keep prompt inputs bounded while preserving the opening context."""
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n[truncated]"
+
+
+def _truncate_prompt_line(line: str, max_content_chars: int) -> str:
+    """Bound one formatted transcript line without losing its Q/A label."""
+    marker = ":** "
+    if marker not in line:
+        return line if len(line) <= max_content_chars else line[:max_content_chars] + "..."
+
+    prefix, content = line.split(marker, 1)
+    prefix = f"{prefix}{marker}"
+    if len(content) <= max_content_chars:
+        return line
+    return f"{prefix}{content[:max_content_chars]}... [truncated]"
+
+
+_TRANSCRIPT_Q_MARKER_RE = re.compile(r"(?m)^\*\*Q\d+:\*\* ")
+_TRANSCRIPT_A_MARKER_RE = re.compile(r"(?m)^\*\*A\d+:\*\* ")
+
+
+def _compact_transcript_section(section: str, max_content_chars: int) -> str:
+    """Compact a marked Q/A section while preserving the marker."""
+    lines = section.splitlines()
+    if not lines:
+        return ""
+
+    marker = ":** "
+    first_line = lines[0]
+    if marker not in first_line:
+        return _truncate_tail(section, max_content_chars)
+
+    prefix, first_content = first_line.split(marker, 1)
+    prefix = f"{prefix}{marker}"
+    content_parts = [first_content, *lines[1:]]
+    content = "\n".join(content_parts).rstrip()
+    if len(content) <= max_content_chars:
+        return section
+    return f"{prefix}{content[:max_content_chars]}... [truncated]"
+
+
+def _compact_latest_transcript_round(round_text: str) -> str:
+    """Preserve the latest transcript round as Q/A sections while bounding content."""
+    answer_match = _TRANSCRIPT_A_MARKER_RE.search(round_text)
+    if answer_match is None:
+        return _compact_transcript_section(
+            round_text,
+            _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS,
+        )
+
+    question_section = round_text[: answer_match.start()].rstrip()
+    answer_section = round_text[answer_match.start() :].rstrip()
+    compacted_question = _compact_transcript_section(
+        question_section,
+        _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_QUESTION_CHARS,
+    )
+    compacted_answer = _compact_transcript_section(
+        answer_section,
+        _INTERVIEW_SUBAGENT_MAX_TRANSCRIPT_ANSWER_CHARS,
+    )
+    return f"{compacted_question}\n{compacted_answer}"
+
+
+def _compact_interview_transcript(transcript: str) -> str:
+    """Compact transcript history without splitting the latest Q/A block."""
+    question_matches = list(_TRANSCRIPT_Q_MARKER_RE.finditer(transcript))
+    if not question_matches:
+        return _truncate_tail(transcript, _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS)
+
+    latest_start = question_matches[-1].start()
+    latest_round = transcript[latest_start:].strip()
+    if not latest_round:
+        return ""
+
+    compacted_latest_round = _compact_latest_transcript_round(latest_round)
+    previous = transcript[:latest_start].strip()
+    if not previous:
+        return compacted_latest_round
+
+    previous_tail = _truncate_tail(
+        previous,
+        _INTERVIEW_SUBAGENT_MAX_PREVIOUS_TRANSCRIPT_CHARS,
+    )
+    return f"{previous_tail}\n\n{compacted_latest_round}"
+
+
+def _load_seed_closer_summary() -> str:
+    """Load the compact Seed Closer guard, tolerating older custom prompt overrides."""
+    from ouroboros.agents.loader import load_agent_section
+
+    try:
+        return load_agent_section("seed-closer", "CLOSURE GATE SUMMARY")
+    except (FileNotFoundError, KeyError):
+        try:
+            return _truncate_tail(load_agent_section("seed-closer", "YOUR APPROACH"), 900)
+        except (FileNotFoundError, KeyError):
+            return (
+                "- Do not treat ambiguity <= 0.2 as sufficient for closure.\n"
+                "- Do not close if unresolved decisions would materially change implementation.\n"
+                "- Ask the highest-impact follow-up question when a material gap remains."
+            )
 
 
 async def emit_subagent_dispatched_event(
@@ -381,10 +505,25 @@ def build_interview_subagent(
     from ouroboros.agents.loader import load_agent_prompt
 
     system_prompt = load_agent_prompt("socratic-interviewer")
+    seed_closer_summary = _load_seed_closer_summary()
 
     transcript_section = ""
     if transcript:
-        transcript_section = f"\n## Conversation History\n{transcript}\n"
+        bounded_transcript = _compact_interview_transcript(transcript)
+        transcript_section = f"\n## Conversation History\n{bounded_transcript}\n"
+
+    bounded_initial_context = _truncate_head(
+        initial_context,
+        _INTERVIEW_SUBAGENT_MAX_CONTEXT_CHARS,
+    )
+    bounded_answer = _truncate_tail(answer, _INTERVIEW_SUBAGENT_MAX_ANSWER_CHARS)
+
+    seed_ready_guard = f"""
+## Seed-ready Guard
+Before declaring ready, apply the canonical Seed Closer closure gate summary.
+Do not treat ambiguity <= 0.2 as sufficient for closure.
+
+{seed_closer_summary}"""
 
     if action == "start" and initial_context:
         prompt = f"""{system_prompt}
@@ -395,9 +534,10 @@ def build_interview_subagent(
 
 Start a Socratic interview to clarify requirements for the following project idea.
 Ask probing questions to reduce ambiguity. Score ambiguity after each exchange.
+{seed_ready_guard}
 
 ## Initial Context
-{initial_context}
+{bounded_initial_context}
 
 ## Session ID
 {session_id}
@@ -413,13 +553,14 @@ Begin the interview. Ask your first clarifying question."""
 
 Continue the Socratic interview. The user has answered your previous question.
 Analyze their answer, update your understanding, score current ambiguity,
-and ask the next clarifying question (or declare ready if ambiguity <= 0.2).
+and ask the next clarifying question or declare ready only after the Seed-ready Guard passes.
+{seed_ready_guard}
 
 ## Session ID
 {session_id}
 {transcript_section}
 ## User's Latest Answer
-{answer}
+{bounded_answer}
 
 Continue the interview."""
 
@@ -433,6 +574,8 @@ Continue the interview."""
 Resume the Socratic interview for session {session_id}.
 Review the conversation history and continue from where we left off.
 {transcript_section}
+{seed_ready_guard}
+
 ## Action: {action}
 
 Continue the interview."""

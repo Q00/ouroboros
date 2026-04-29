@@ -197,6 +197,67 @@ class TestMCPStartupAutoCleanup:
         mock_server.serve.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_streamable_http_advertises_endpoint_and_uses_stdout_startup(self, capfd) -> None:
+        """Streamable HTTP startup output advertises the client endpoint."""
+        orphaned_tracker = _make_tracker(
+            session_id="orch_orphan_http",
+            execution_id="exec_orphan_http",
+            status=SessionStatus.RUNNING,
+        )
+        cleanup_called = asyncio.Event()
+
+        mock_es = AsyncMock()
+        mock_es.initialize = AsyncMock()
+        mock_repo = AsyncMock()
+
+        async def cancel_orphans() -> list[SessionTracker]:
+            cleanup_called.set()
+            return [orphaned_tracker]
+
+        mock_repo.cancel_orphaned_sessions = AsyncMock(side_effect=cancel_orphans)
+
+        mock_server = MagicMock()
+        mock_server.info.tools = []
+
+        async def serve_side_effect(*args, **kwargs) -> None:
+            await cleanup_called.wait()
+            await asyncio.sleep(0.01)
+
+        mock_server.serve = AsyncMock(side_effect=serve_side_effect)
+
+        with (
+            patch("ouroboros.cli.commands.mcp._ensure_shell_env", lambda **_: None),
+            patch(
+                "ouroboros.persistence.event_store.EventStore",
+                return_value=mock_es,
+            ),
+            patch(
+                "ouroboros.orchestrator.session.SessionRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+            patch("ouroboros.mcp.bridge.create_bridge_from_env", return_value=None),
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            capfd.readouterr()
+            await _run_mcp_server("127.0.0.1", 9100, "streamable-http")
+
+        captured = capfd.readouterr()
+        assert "http://127.0.0.1:9100/mcp" in captured.out
+        assert "Auto-cancelled 1 orphaned session(s)" in captured.out
+        assert "http://127.0.0.1:9100/mcp" not in captured.err
+        assert "Auto-cancelled 1 orphaned session(s)" not in captured.err
+        mock_server.serve.assert_awaited_once_with(
+            transport="streamable-http",
+            host="127.0.0.1",
+            port=9100,
+        )
+
+    @pytest.mark.asyncio
     async def test_pending_background_cleanup_is_cancelled_on_shutdown(self) -> None:
         """Server shutdown should cancel an unfinished startup cleanup task."""
         cleanup_started = asyncio.Event()

@@ -62,7 +62,9 @@ async def test_handle_renders_final_completed_snapshot_after_session_completion(
     )
 
     handler = ACTreeHUDHandler(event_store=memory_event_store)
-    initial_result = await handler.handle({"session_id": "sess_completed_hud", "cursor": 0})
+    initial_result = await handler.handle(
+        {"session_id": "sess_completed_hud", "cursor": 0, "view": "tree"}
+    )
 
     assert initial_result.is_ok
     initial_cursor = initial_result.value.meta["cursor"]
@@ -77,7 +79,7 @@ async def test_handle_renders_final_completed_snapshot_after_session_completion(
     )
 
     completed_result = await handler.handle(
-        {"session_id": "sess_completed_hud", "cursor": initial_cursor}
+        {"session_id": "sess_completed_hud", "cursor": initial_cursor, "view": "tree"}
     )
 
     assert completed_result.is_ok
@@ -87,7 +89,7 @@ async def test_handle_renders_final_completed_snapshot_after_session_completion(
     assert tool_result.meta["status"] == "completed"
     assert tool_result.meta["changed"] is True
     assert tool_result.meta["cursor"] > initial_cursor
-    assert tool_result.text_content != f"No AC tree change since cursor {initial_cursor}."
+    assert not tool_result.text_content.startswith("unchanged cursor=")
     assert "Status: completed" in tool_result.text_content
     assert "Progress: 2/2 AC complete" in tool_result.text_content
     assert "Metrics: elapsed 2m 10s · 11 msgs · 4 tools · $0.05" in tool_result.text_content

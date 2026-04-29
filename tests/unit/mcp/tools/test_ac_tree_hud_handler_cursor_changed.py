@@ -58,7 +58,9 @@ async def test_handle_returns_full_render_when_progress_event_arrives_after_curs
     )
 
     handler = ACTreeHUDHandler(event_store=memory_event_store)
-    initial_result = await handler.handle({"session_id": "sess_changed", "cursor": 0})
+    initial_result = await handler.handle(
+        {"session_id": "sess_changed", "cursor": 0, "view": "tree"}
+    )
 
     assert initial_result.is_ok
     initial_cursor = initial_result.value.meta["cursor"]
@@ -96,7 +98,9 @@ async def test_handle_returns_full_render_when_progress_event_arrives_after_curs
         )
     )
 
-    changed_result = await handler.handle({"session_id": "sess_changed", "cursor": initial_cursor})
+    changed_result = await handler.handle(
+        {"session_id": "sess_changed", "cursor": initial_cursor, "view": "tree"}
+    )
 
     assert changed_result.is_ok
     tool_result = changed_result.value
@@ -104,7 +108,7 @@ async def test_handle_returns_full_render_when_progress_event_arrives_after_curs
     assert tool_result.meta["execution_id"] == "exec_changed"
     assert tool_result.meta["changed"] is True
     assert tool_result.meta["cursor"] > initial_cursor
-    assert tool_result.text_content != f"No AC tree change since cursor {initial_cursor}."
+    assert not tool_result.text_content.startswith("unchanged cursor=")
     assert "Progress: 1/2 AC complete" in tool_result.text_content
     assert "Activity: executing | Update second criterion" in tool_result.text_content
     assert "├─ ● AC 1: First criterion" in tool_result.text_content

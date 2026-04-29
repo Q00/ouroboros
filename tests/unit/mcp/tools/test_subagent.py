@@ -390,6 +390,17 @@ class TestBuildInterviewSubagent:
         )
         assert "Build a REST API" in p.prompt
 
+    def test_start_prompt_bounds_initial_context_from_head(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="start",
+            initial_context="PRIMARY GOAL: Build a REST API. " + ("details " * 1_000),
+        )
+        assert "PRIMARY GOAL: Build a REST API." in p.prompt
+        assert "[truncated]" in p.prompt
+        assert "details " * 200 not in p.prompt
+        assert len(p.prompt) < 5_000
+
     def test_answer_prompt_includes_answer(self) -> None:
         p = build_interview_subagent(
             session_id="sess-123",
@@ -397,6 +408,123 @@ class TestBuildInterviewSubagent:
             answer="Python with FastAPI",
         )
         assert "Python with FastAPI" in p.prompt
+
+    def test_answer_prompt_requires_seed_ready_guard(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Python with FastAPI",
+        )
+        assert "Do not treat ambiguity <= 0.2 as sufficient for closure" in p.prompt
+        assert "ownership/SSoT" in p.prompt
+        assert "declare ready if ambiguity <= 0.2" not in p.prompt
+
+    def test_answer_prompt_uses_seed_closer_as_guard_ssot(self, monkeypatch) -> None:
+        from ouroboros.agents import loader
+
+        def fake_load_agent_prompt(agent_name: str) -> str:
+            if agent_name == "socratic-interviewer":
+                return "SOCRATIC INTERVIEWER PROMPT"
+            raise FileNotFoundError(agent_name)
+
+        def fake_load_agent_section(agent_name: str, section: str) -> str:
+            if agent_name == "seed-closer" and section == "CLOSURE GATE SUMMARY":
+                return "CANONICAL SEED CLOSER SUMMARY"
+            raise KeyError(section)
+
+        monkeypatch.setattr(loader, "load_agent_prompt", fake_load_agent_prompt)
+        monkeypatch.setattr(loader, "load_agent_section", fake_load_agent_section)
+
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Python with FastAPI",
+        )
+
+        assert "SOCRATIC INTERVIEWER PROMPT" in p.prompt
+        assert "CANONICAL SEED CLOSER SUMMARY" in p.prompt
+
+    def test_answer_prompt_bounds_large_transcript_and_answer(self) -> None:
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="A" * 5_000,
+            transcript="T" * 5_000,
+        )
+
+        assert "[truncated]" in p.prompt
+        assert "A" * 1_000 not in p.prompt
+        assert "T" * 1_000 not in p.prompt
+        assert len(p.prompt) < 5_000
+
+    def test_answer_prompt_preserves_latest_transcript_round(self) -> None:
+        latest_question = "**Q7:** Should subscription control be server-side or client-side?"
+        latest_answer = "**A7:** Server-side should own the final decision."
+        transcript = (
+            f"**Q6:** {'older context ' * 80}\n"
+            f"**A6:** {'older answer ' * 80}\n\n"
+            f"{latest_question}\n{latest_answer}"
+        )
+
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Server-side should own the final decision.",
+            transcript=transcript,
+        )
+
+        assert latest_question in p.prompt
+        assert latest_answer in p.prompt
+        assert "older context " * 20 not in p.prompt
+
+    def test_answer_prompt_compacts_multiline_latest_round_by_markers(self) -> None:
+        latest_question = (
+            "**Q7:** Should subscription control be server-side or client-side?\n"
+            "Please decide this before Seed generation."
+        )
+        transcript = (
+            "**Q6:** Previous question\n"
+            "**A6:** Previous answer\n\n"
+            f"{latest_question}\n"
+            f"**A7:** Server-side should own it.\n\n{'code line\\n' * 500}"
+        )
+
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Server-side should own it.",
+            transcript=transcript,
+        )
+
+        assert "**Q7:** Should subscription control be server-side or client-side?" in p.prompt
+        assert "Please decide this before Seed generation." in p.prompt
+        assert "**A7:** Server-side should own it." in p.prompt
+        assert "code line\n" * 100 not in p.prompt
+        assert len(p.prompt) < 5_000
+
+    def test_answer_prompt_falls_back_when_seed_closer_summary_missing(self, monkeypatch) -> None:
+        from ouroboros.agents import loader
+
+        def fake_load_agent_prompt(agent_name: str) -> str:
+            if agent_name == "socratic-interviewer":
+                return "SOCRATIC INTERVIEWER PROMPT"
+            raise FileNotFoundError(agent_name)
+
+        def fake_load_agent_section(agent_name: str, section: str) -> str:
+            if agent_name == "seed-closer" and section == "YOUR APPROACH":
+                return "FALLBACK SEED CLOSER APPROACH"
+            raise KeyError(section)
+
+        monkeypatch.setattr(loader, "load_agent_prompt", fake_load_agent_prompt)
+        monkeypatch.setattr(loader, "load_agent_section", fake_load_agent_section)
+
+        p = build_interview_subagent(
+            session_id="sess-123",
+            action="answer",
+            answer="Python with FastAPI",
+        )
+
+        assert "FALLBACK SEED CLOSER APPROACH" in p.prompt
 
     def test_context_preserves_session_id(self) -> None:
         p = build_interview_subagent(

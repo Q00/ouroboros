@@ -131,7 +131,13 @@ def _ensure_shell_env(*, timeout: float = 10.0) -> None:
         cmd = [shell, "-l", "-c", dump_cmd]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            timeout=timeout,
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
         _stderr_console.print(f"[yellow]Warning: shell env load failed: {e}[/yellow]")
         return
@@ -179,7 +185,7 @@ async def _run_mcp_server(
     Args:
         host: Host to bind to.
         port: Port to bind to.
-        transport: Transport type (stdio or sse).
+        transport: Transport type (stdio, sse, or streamable-http).
         db_path: Optional path to EventStore database.
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
@@ -197,9 +203,12 @@ async def _run_mcp_server(
         transport = validate_transport(transport)
     except ValueError:
         _stderr_console.print(
-            f"[red]Invalid transport {transport!r}. Must be 'stdio' or 'sse'.[/red]"
+            "[red]Invalid transport "
+            f"{transport!r}. Must be 'stdio', 'sse', or 'streamable-http'.[/red]"
         )
         raise typer.Exit(code=1)
+
+    _console_out = _stderr_console if transport == "stdio" else Console()
 
     # Create EventStore with custom path if provided
     if db_path:
@@ -225,12 +234,12 @@ async def _run_mcp_server(
         try:
             cancelled = await repo.cancel_orphaned_sessions()
             if cancelled:
-                _stderr_console.print(
+                _console_out.print(
                     f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
                 )
         except Exception as e:
             # Auto-cleanup is best-effort — don't prevent server startup
-            _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+            _console_out.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
 
     cleanup_task = asyncio.create_task(
         _run_startup_cleanup(),
@@ -245,11 +254,11 @@ async def _run_mcp_server(
         try:
             results = await mcp_bridge.connect()
             connected = sum(1 for r in results.values() if r.is_ok)
-            _stderr_console.print(
+            _console_out.print(
                 f"[blue]MCP Bridge: {connected}/{len(results)} upstream server(s) connected[/blue]"
             )
         except Exception as e:
-            _stderr_console.print(f"[yellow]MCP Bridge connection failed: {e}[/yellow]")
+            _console_out.print(f"[yellow]MCP Bridge connection failed: {e}[/yellow]")
             mcp_bridge = None
 
     # Create server with all tools pre-registered via dependency injection.
@@ -269,7 +278,6 @@ async def _run_mcp_server(
 
     # Detect Codex seatbelt sandbox and warn about network restrictions.
     _sandbox_network_disabled = os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
-    _console_out = _stderr_console if transport == "stdio" else Console()
 
     if transport == "stdio":
         # In stdio mode, stdout is the JSON-RPC channel.
@@ -281,7 +289,10 @@ async def _run_mcp_server(
     else:
         print_success(f"MCP Server starting on {transport}...")
         print_info(f"Registered {tool_count} tools")
-        print_info(f"Listening on {host}:{port}")
+        if transport == "streamable-http":
+            print_info(f"Listening on http://{host}:{port}/mcp")
+        else:
+            print_info(f"Listening on {host}:{port}")
         print_info("Press Ctrl+C to stop")
 
     if _sandbox_network_disabled:
@@ -337,7 +348,7 @@ def serve(
         typer.Option(
             "--transport",
             "-t",
-            help="Transport type: stdio or sse.",
+            help="Transport type: stdio, sse, or streamable-http.",
         ),
     ] = "stdio",
     db: Annotated[
@@ -384,6 +395,9 @@ def serve(
 
         # Start with SSE transport on custom port
         ouroboros mcp serve --transport sse --port 9000
+
+        # Start with streamable HTTP transport for Codex CLI --url clients
+        ouroboros mcp serve --transport streamable-http --port 9000
 
         # Start with OpenCode runtime
         ouroboros mcp serve --runtime opencode

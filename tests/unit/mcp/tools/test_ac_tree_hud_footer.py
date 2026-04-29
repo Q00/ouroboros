@@ -86,7 +86,7 @@ async def test_handle_renders_footer_metrics_from_progress_event_payload(
     )
 
     handler = ACTreeHUDHandler(event_store=memory_event_store)
-    result = await handler.handle({"session_id": "sess_footer_event", "cursor": 0})
+    result = await handler.handle({"session_id": "sess_footer_event", "cursor": 0, "view": "tree"})
 
     assert result.is_ok
     assert "Metrics: elapsed 1m 05s · 8 msgs · 3 tools · $0.04" in result.value.text_content

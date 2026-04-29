@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewEngine,
     InterviewRound,
     InterviewState,
@@ -431,6 +432,60 @@ class TestAskNextQuestion:
         assert engine.classifications[0].category == QuestionCategory.DEVELOPMENT
 
     @pytest.mark.asyncio
+    async def test_pm_steering_wrapper_accepts_prompt_budget_kwargs(self, tmp_path: Path) -> None:
+        """PM prompt wrapper remains compatible with InterviewEngine prompt budgeting."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        planning_q = "Who are the target users?"
+
+        adapter.complete = AsyncMock(
+            side_effect=[
+                Result.ok(_mock_completion(planning_q)),
+                Result.ok(
+                    _mock_completion(
+                        json.dumps(
+                            {
+                                "category": "planning",
+                                "reframed_question": planning_q,
+                                "reasoning": "Target users are a PM concern",
+                                "defer_to_dev": False,
+                            }
+                        )
+                    )
+                ),
+            ]
+        )
+
+        state = InterviewState(
+            interview_id="test_pm_budget_kwargs",
+            initial_context=("A" * 3_489) + "TAIL_MARKER",
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        assert result.value == planning_q
+
+    @pytest.mark.asyncio
+    async def test_initial_context_summary_question_bypasses_classification(
+        self, tmp_path: Path
+    ) -> None:
+        """Long-context recovery prompt is returned verbatim, not classified."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_summary_recovery",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+        )
+
+        result = await engine.ask_next_question(state)
+
+        assert result.is_ok
+        assert result.value == INITIAL_CONTEXT_SUMMARY_QUESTION
+        adapter.complete.assert_not_called()
+        assert engine.classifications == []
+
+    @pytest.mark.asyncio
     async def test_deferred_question_returned_to_user(self, tmp_path: Path) -> None:
         """DEV-only questions marked as defer_to_dev are returned to the user."""
         adapter = _make_adapter()
@@ -632,6 +687,77 @@ class TestAskNextQuestion:
         assert result.output_type == ClassifierOutputType.DECIDE_LATER
         # Returned to user so they can choose to answer or defer
         assert result.question_for_pm == "How should we handle scaling?"
+
+
+class TestPMInterviewContext:
+    """Test PM interview context construction."""
+
+    def test_context_uses_prompt_safe_initial_context_and_skips_summary_round(
+        self, tmp_path: Path
+    ) -> None:
+        """PM contexts avoid raw oversized initial context and synthetic summary Q&A."""
+        engine = _make_engine(tmp_path=tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_large_context",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response=("B" * 4_000) + "SUMMARY_TAIL",
+                ),
+                InterviewRound(
+                    round_number=2,
+                    question="Who are the target users?",
+                    user_response="Small teams",
+                ),
+            ],
+        )
+
+        context = engine._build_interview_context(state)
+
+        assert "Context truncated for prompt safety" in context
+        assert "RAW_TAIL" not in context
+        assert "SUMMARY_TAIL" not in context
+        assert INITIAL_CONTEXT_SUMMARY_QUESTION not in context
+        assert "Who are the target users?" in context
+        assert "Small teams" in context
+
+
+class TestCheckCompletion:
+    """Test PM interview completion checks."""
+
+    @pytest.mark.asyncio
+    async def test_summary_round_does_not_count_toward_minimum_rounds(self, tmp_path: Path) -> None:
+        """Initial-context summary recovery is not a substantive PM answer."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_summary_round_count",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="Concise product summary",
+                ),
+                InterviewRound(
+                    round_number=2,
+                    question="Who are the users?",
+                    user_response="Small teams",
+                ),
+                InterviewRound(
+                    round_number=3,
+                    question="What problem do they have?",
+                    user_response="Tracking work",
+                ),
+            ],
+        )
+
+        result = await engine.check_completion(state)
+
+        assert result is None
+        adapter.complete.assert_not_called()
 
 
 class TestRecordResponse:
@@ -914,6 +1040,56 @@ class TestPMSeedGeneration:
 
         result = await engine.generate_pm_seed(state)
         assert result.is_err
+
+    @pytest.mark.asyncio
+    async def test_summary_only_interview_returns_empty_error(self, tmp_path: Path) -> None:
+        """Synthetic summary recovery alone is not substantive PM interview content."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_summary_only_pm_seed",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            status=InterviewStatus.COMPLETED,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                    user_response="Concise product summary",
+                ),
+            ],
+        )
+
+        result = await engine.generate_pm_seed(state)
+
+        assert result.is_err
+        assert "empty interview" in result.error.message
+        adapter.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_large_context_without_summary_returns_summary_required(
+        self, tmp_path: Path
+    ) -> None:
+        """PM seed generation enforces the long-context summary requirement."""
+        adapter = _make_adapter()
+        engine = _make_engine(adapter, tmp_path)
+        state = InterviewState(
+            interview_id="test_pm_seed_missing_summary",
+            initial_context=("A" * 4_000) + "RAW_TAIL",
+            status=InterviewStatus.COMPLETED,
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="Who are the target users?",
+                    user_response="Small teams",
+                ),
+            ],
+        )
+
+        result = await engine.generate_pm_seed(state)
+
+        assert result.is_err
+        assert "summary required" in result.error.message
+        adapter.complete.assert_not_called()
 
 
 class TestSavePMSeed:
