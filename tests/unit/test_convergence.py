@@ -889,3 +889,187 @@ class TestValidationGate:
             validation_output="Validation skipped: no project directory",
         )
         assert signal.converged
+
+
+class TestIdeaContractWonderNoGap:
+    """Tests for the Idea-contract / Wonder fast-path convergence signal."""
+
+    def _evolved_lineage(self) -> OntologyLineage:
+        """Lineage that evolved once (B→A) and then drifted (A→C) — no stable pair."""
+        return _lineage_with_schemas(SCHEMA_B, SCHEMA_A, SCHEMA_C)
+
+    def _passing_evaluation(self) -> EvaluationSummary:
+        return EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=3,
+            score=0.95,
+            drift_score=0.0,
+            reward_hacking_risk=0.0,
+        )
+
+    def test_converges_when_wonder_has_no_gap_and_contract_passes(self) -> None:
+        """should_continue=False with no questions/tensions converges immediately."""
+        lineage = self._evolved_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+        wonder = WonderOutput(
+            questions=(),
+            ontology_tensions=(),
+            should_continue=False,
+            reasoning="Contract satisfied; no remaining ontological gap.",
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=wonder,
+            latest_evaluation=self._passing_evaluation(),
+        )
+
+        assert signal.converged
+        assert "Idea contract converged" in signal.reason
+
+    def test_does_not_converge_when_wonder_has_questions_despite_should_stop(self) -> None:
+        """Contradictory Wonder (stop=False but with questions) must NOT converge here.
+
+        Mirrors the loop.py override: should_continue=False with non-empty
+        questions represents unresolved gaps, so the loop continues to Reflect.
+        Convergence must align with that decision.
+        """
+        lineage = self._evolved_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+        wonder = WonderOutput(
+            questions=("What about edge case X?",),
+            ontology_tensions=(),
+            should_continue=False,
+            reasoning="Contradictory: said stop but still has questions.",
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=wonder,
+            latest_evaluation=self._passing_evaluation(),
+        )
+
+        assert not signal.converged
+        assert "Idea contract converged" not in signal.reason
+
+    def test_does_not_converge_when_wonder_has_tensions_despite_should_stop(self) -> None:
+        """Tensions also block the Idea-contract fast path even if should_continue is False."""
+        lineage = self._evolved_lineage()
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+        wonder = WonderOutput(
+            questions=(),
+            ontology_tensions=("Field A contradicts field B.",),
+            should_continue=False,
+            reasoning="Has unresolved tension.",
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=wonder,
+            latest_evaluation=self._passing_evaluation(),
+        )
+
+        assert not signal.converged
+        assert "Idea contract converged" not in signal.reason
+
+
+class TestWonderFastPathLoopIntegration:
+    """Loop short-circuit on Wonder no-gap must produce a convergeable result.
+
+    Regression for the dead-lock identified in PR #497 review:
+    - loop.py:1092 returns a completed generation early when Wonder has no gap.
+    - Previously that result carried no evaluation_summary, so convergence with
+      eval_gate_enabled rejected it as "no evaluation summary available", and the
+      lineage looped until stagnation/max_generations.
+    The fix carries prev_gen.evaluation_summary forward on the fast path.
+    """
+
+    def test_fast_path_result_inherits_prev_evaluation_for_convergence(self) -> None:
+        """Carry-forward evaluation summary makes Idea-contract convergence reachable."""
+        from ouroboros.core.seed import (
+            EvaluationPrinciple,
+            ExitCondition,
+            Seed,
+            SeedMetadata,
+        )
+        from ouroboros.evolution.loop import GenerationResult
+
+        passing_eval = EvaluationSummary(
+            final_approved=True,
+            highest_stage_passed=3,
+            score=0.95,
+            drift_score=0.0,
+            reward_hacking_risk=0.0,
+        )
+
+        prev_gen = GenerationRecord(
+            generation_number=1,
+            seed_id="seed_1",
+            ontology_snapshot=SCHEMA_A,
+            phase=GenerationPhase.COMPLETED,
+            evaluation_summary=passing_eval,
+        )
+        current_gen = GenerationRecord(
+            generation_number=2,
+            seed_id="seed_2",
+            ontology_snapshot=SCHEMA_A,
+            phase=GenerationPhase.COMPLETED,
+            evaluation_summary=passing_eval,
+        )
+        lineage = _lineage_with_generations(prev_gen, current_gen)
+
+        seed = Seed(
+            goal="test",
+            task_type="code",
+            constraints=("Python",),
+            acceptance_criteria=("Works",),
+            ontology_schema=SCHEMA_A,
+            evaluation_principles=(EvaluationPrinciple(name="c", description="c", weight=1.0),),
+            exit_conditions=(ExitCondition(name="e", description="e", evaluation_criteria="e"),),
+            metadata=SeedMetadata(seed_id="seed_2", parent_seed_id="seed_1", ambiguity_score=0.1),
+        )
+
+        wonder_no_gap = WonderOutput(
+            questions=(),
+            ontology_tensions=(),
+            should_continue=False,
+            reasoning="Contract satisfied; nothing more to learn.",
+        )
+
+        # Fast-path GenerationResult as produced by loop.py after the fix.
+        fast_path_result = GenerationResult(
+            generation_number=2,
+            seed=seed,
+            execution_output="prev output",
+            evaluation_summary=passing_eval,
+            wonder_output=wonder_no_gap,
+            phase=GenerationPhase.COMPLETED,
+            success=True,
+        )
+
+        criteria = ConvergenceCriteria(
+            convergence_threshold=0.95,
+            min_generations=2,
+            eval_gate_enabled=True,
+        )
+
+        signal = criteria.evaluate(
+            lineage,
+            latest_wonder=fast_path_result.wonder_output,
+            latest_evaluation=fast_path_result.evaluation_summary,
+        )
+
+        assert signal.converged
+        assert "Idea contract converged" in signal.reason

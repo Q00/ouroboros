@@ -162,11 +162,17 @@ class ConvergenceCriteria:
             )
 
         # Signal 1: Idea contract satisfied and Wonder reports no substantive gap.
+        # Mirror loop.py's contradictory-Wonder override: should_continue=False is
+        # only a true "no gap" signal when there are also no remaining questions
+        # or ontology tensions. Otherwise the loop would short-circuit while
+        # leaving unresolved gaps on the table.
         if (
             self.eval_gate_enabled
             and latest_evaluation is not None
             and latest_wonder is not None
             and latest_wonder.should_continue is False
+            and not latest_wonder.questions
+            and not latest_wonder.ontology_tensions
         ):
             return ConvergenceSignal(
                 converged=True,

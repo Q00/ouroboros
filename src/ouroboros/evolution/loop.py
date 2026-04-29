@@ -1089,16 +1089,26 @@ class EvolutionaryLoop:
                 )
                 if wonder_result.is_ok:
                     wonder_output = wonder_result.value
-                    if not wonder_output.should_continue and not wonder_output.questions:
-                        # Only early-return if Wonder has NO questions at all.
-                        # If questions exist, we must continue to Reflect even if
-                        # should_continue=false, because the questions represent
+                    if (
+                        not wonder_output.should_continue
+                        and not wonder_output.questions
+                        and not wonder_output.ontology_tensions
+                    ):
+                        # Only early-return if Wonder has NO questions or tensions
+                        # at all. If either exist, we must continue to Reflect even
+                        # if should_continue=false, because they represent
                         # ontological gaps that need to be addressed.
+                        # Carry the previous generation's evaluation_summary and
+                        # execution_output forward so the convergence eval gate has
+                        # the contract evidence it needs to declare success on this
+                        # zero-mutation path.
                         logger.info("evolution.wonder.nothing_to_learn")
                         return Result.ok(
                             GenerationResult(
                                 generation_number=generation_number,
                                 seed=current_seed,
+                                execution_output=prev_gen.execution_output,
+                                evaluation_summary=prev_gen.evaluation_summary,
                                 wonder_output=wonder_output,
                                 phase=GenerationPhase.COMPLETED,
                                 success=True,
