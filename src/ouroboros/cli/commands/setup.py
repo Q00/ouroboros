@@ -268,17 +268,34 @@ def _is_codex_ouroboros_worker_profile_header(line: str) -> bool:
 
 
 def _trim_managed_codex_worker_profile_comments(lines: list[str]) -> None:
-    """Remove the managed worker-profile comment block immediately before a table."""
-    while lines and not lines[-1].strip():
-        lines.pop()
+    """Excise every managed worker-profile comment block from ``lines``.
 
-    comment_index = len(lines)
-    for expected in reversed(_CODEX_WORKER_PROFILE_COMMENT_LINES):
-        if comment_index == 0 or lines[comment_index - 1] != expected:
-            return
-        comment_index -= 1
+    The previous implementation only matched a managed block when it
+    sat *immediately* above ``[profiles.ouroboros-worker]``. If an
+    operator inserted their own comment between the managed block and
+    the table, the trim missed it and the upsert prepended another
+    managed block on every rerun -- drifting the file. This walks the
+    full list and removes every contiguous run that exactly matches
+    the managed comment lines (plus a single trailing blank line if
+    present), so the upsert can always re-emit one fresh block above
+    the header without stacking.
+    """
+    expected = list(_CODEX_WORKER_PROFILE_COMMENT_LINES)
+    block_len = len(expected)
+    if block_len == 0:
+        return
 
-    del lines[comment_index:]
+    index = 0
+    while index <= len(lines) - block_len:
+        if lines[index : index + block_len] == expected:
+            end = index + block_len
+            if end < len(lines) and not lines[end].strip():
+                end += 1
+            del lines[index:end]
+            # Don't advance index: an adjacent block (e.g. left over
+            # from a previous corrupt rerun) should also be removed.
+        else:
+            index += 1
 
 
 def _upsert_codex_worker_profile_section(raw: str) -> tuple[str, bool]:

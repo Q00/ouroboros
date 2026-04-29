@@ -332,6 +332,65 @@ class TestCodexSetup:
         between = contents[predecessor_index:worker_index]
         assert "Ouroboros Agent OS runtime profile for Codex worker subprocesses." in between
 
+    def test_register_codex_worker_profile_idempotent_when_user_inserts_own_comment(
+        self, tmp_path: Path
+    ) -> None:
+        """Operator-inserted comments between the managed block and the header
+        must not cause the managed block to stack on each rerun.
+
+        Layout flagged by the post-rebase reviewer bot:
+
+            # Ouroboros Agent OS runtime profile for Codex worker subprocesses.
+            # ... (managed)
+            # operator-authored note
+            [profiles.ouroboros-worker]
+
+        The previous trim only matched a managed block immediately
+        adjacent to the header, so each rerun would prepend a fresh
+        managed block above the operator comment, drifting the file.
+        Lock idempotence for this layout.
+        """
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "# Ouroboros Agent OS runtime profile for Codex worker subprocesses.",
+                    "# Activated when ~/.ouroboros/config.yaml sets "
+                    "`orchestrator.runtime_profile: worker`",
+                    "# (or the OUROBOROS_RUNTIME_PROFILE=worker env var). Add per-worker Codex",
+                    "# overrides below — for example a different model, sandbox, or notify hook —",
+                    "# without affecting interactive `codex` sessions that share this config file.",
+                    "",
+                    "# Operator note: keep this profile aligned with prod-staging.",
+                    "[profiles.ouroboros-worker]",
+                    'model = "o3-mini"',
+                    "",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_worker_profile()
+            after_first = codex_config.read_text(encoding="utf-8")
+            setup_cmd._register_codex_worker_profile()
+            after_second = codex_config.read_text(encoding="utf-8")
+
+        # Managed block appears exactly once across all reruns -- no
+        # stacking, regardless of the operator-inserted comment in
+        # between.
+        for snapshot in (after_first, after_second):
+            assert snapshot.count("Ouroboros Agent OS runtime profile") == 1
+            assert "# Operator note: keep this profile aligned with prod-staging." in snapshot
+            assert 'model = "o3-mini"' in snapshot
+            assert snapshot.count("[profiles.ouroboros-worker]") == 1
+
+        # And the second rerun is byte-identical to the first -- the
+        # file has reached a fixed point, no churn.
+        assert after_second == after_first
+
     def test_register_codex_worker_profile_skips_invalid_toml(self, tmp_path: Path) -> None:
         """Malformed TOML should produce an error message and leave the file alone."""
         codex_config = tmp_path / ".codex" / "config.toml"
