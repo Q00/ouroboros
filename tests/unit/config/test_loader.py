@@ -616,11 +616,8 @@ class TestRuntimeHelperLookups:
     @pytest.mark.parametrize(
         "config_content",
         [
-            "economics:\n  default_tier: invalid_tier\n"
-            "orchestrator:\n  max_parallel_workers: 5\n",
-            "orchestrator:\n"
-            "  runtime_backend: invalid_backend\n"
-            "  max_parallel_workers: 5\n",
+            "economics:\n  default_tier: invalid_tier\norchestrator:\n  max_parallel_workers: 5\n",
+            "orchestrator:\n  runtime_backend: invalid_backend\n  max_parallel_workers: 5\n",
         ],
     )
     def test_get_max_parallel_workers_reads_cap_despite_unrelated_invalid_config(
