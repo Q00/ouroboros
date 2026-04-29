@@ -113,8 +113,38 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 - Installs managed Ouroboros rules into `~/.codex/rules/`
 - Installs managed Ouroboros skills into `~/.codex/skills/`
 - Registers the Ouroboros MCP/env hookup in `~/.codex/config.toml` when absent, refreshes setup-managed stdio blocks, and preserves user-managed URL/custom entries by default
+- Registers a managed `[profiles.ouroboros-worker]` section in the same file so Agent OS worker subprocesses can opt out of interactive Codex defaults without losing the MCP/env hookup
 
 `~/.codex/config.toml` is not where Ouroboros per-role model overrides belong. Keep `clarification`, `qa`, `semantic`, and `consensus` model settings in `~/.ouroboros/config.yaml`. If you manage a long-running URL-based Ouroboros MCP server, keep that URL entry in `~/.codex/config.toml`; `ouroboros setup --runtime codex` preserves it by default. Use `--mcp-mode stdio` only when you intentionally want setup to replace the entry with the managed command-spawned server.
+
+### Worker subprocess isolation (Agent OS `runtime_profile`)
+
+Interactive `codex` sessions and Ouroboros-managed worker subprocesses sometimes want different defaults — for example a different model, sandbox, or notify hook. Set the orchestrator-level runtime profile to `worker` to opt every Ouroboros-spawned `codex exec` invocation into the managed `[profiles.ouroboros-worker]` block:
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: codex
+  runtime_profile:
+    backend_profile: worker   # optional; default unset preserves today's behavior
+```
+
+Or via the environment for one-off runs:
+
+```bash
+OUROBOROS_RUNTIME_PROFILE=worker ouroboros run workflow --runtime codex seed.yaml
+```
+
+Customize the worker overrides directly in `~/.codex/config.toml`:
+
+```toml
+[profiles.ouroboros-worker]
+model = "o3-mini"
+notify = []
+sandbox = "workspace-write"
+```
+
+When `runtime_profile` is unset (the default), Ouroboros emits `codex exec` exactly as before — no profile flag, full user-config inheritance. This is the Codex-side mapping of the cross-runtime Agent OS profile contract; OpenCode, Hermes, Claude Code, and LiteLLM mappings will follow as separate slices.
 
 ### `ooo` Skill Availability on Codex
 

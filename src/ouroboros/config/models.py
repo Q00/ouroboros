@@ -281,6 +281,12 @@ class OrchestratorConfig(BaseModel, frozen=True):
 
     Attributes:
         runtime_backend: Agent runtime backend to use for orchestrator execution.
+        runtime_profile: Optional Agent OS runtime profile. When set, every
+            backend that supports profiles loads its mapped profile (e.g. Codex
+            ``--profile ouroboros-worker``). Default ``None`` preserves the
+            backend's normal user-config behavior. Phase 1 only ships
+            ``"worker"``; future values should appear here as they earn a
+            mapping in each runtime adapter.
         permission_mode: Default permission mode for local agent runtimes.
         opencode_permission_mode: Default permission mode for OpenCode agent runtimes.
         cli_path: Path to Claude CLI binary. Supports:
@@ -312,6 +318,7 @@ class OrchestratorConfig(BaseModel, frozen=True):
     """
 
     runtime_backend: Literal["claude", "codex", "opencode", "hermes", "gemini"] = "claude"
+    runtime_profile: Literal["worker"] | None = None
     permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = "acceptEdits"
     opencode_permission_mode: Literal["default", "acceptEdits", "bypassPermissions"] = (
         "bypassPermissions"

@@ -54,6 +54,7 @@ from ouroboros.config.loader import (
     get_opencode_mode,
     get_qa_model,
     get_reflect_model,
+    get_runtime_profile,
     get_semantic_model,
     get_wonder_model,
     load_config,
@@ -132,6 +133,7 @@ __all__ = [
     "get_double_diamond_model",
     "get_ontology_analysis_model",
     "get_reflect_model",
+    "get_runtime_profile",
     "get_semantic_model",
     "get_wonder_model",
     # Model helpers

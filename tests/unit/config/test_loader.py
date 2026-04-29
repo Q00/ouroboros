@@ -33,6 +33,7 @@ from ouroboros.config.loader import (
     get_opencode_cli_path,
     get_qa_model,
     get_reflect_model,
+    get_runtime_profile,
     get_semantic_model,
     get_wonder_model,
     load_config,
@@ -438,6 +439,39 @@ class TestRuntimeHelperLookups:
             ),
         ):
             assert get_codex_cli_path() == "/tmp/codex"
+
+    def test_get_runtime_profile_defaults_to_none(self) -> None:
+        """No env, no config — runtime_profile resolves to None (no behavior change)."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(orchestrator=OrchestratorConfig()),
+            ),
+        ):
+            assert get_runtime_profile() is None
+
+    def test_get_runtime_profile_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Environment variable overrides config for runtime_profile."""
+        monkeypatch.setenv("OUROBOROS_RUNTIME_PROFILE", "worker")
+        with patch(
+            "ouroboros.config.loader.load_config",
+            return_value=OuroborosConfig(orchestrator=OrchestratorConfig()),
+        ):
+            assert get_runtime_profile() == "worker"
+
+    def test_get_runtime_profile_falls_back_to_config(self) -> None:
+        """Config is used when env override is absent."""
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "ouroboros.config.loader.load_config",
+                return_value=OuroborosConfig(
+                    orchestrator=OrchestratorConfig(runtime_profile="worker")
+                ),
+            ),
+        ):
+            assert get_runtime_profile() == "worker"
 
     def test_get_opencode_cli_path_prefers_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Environment variable overrides config for OpenCode CLI path."""

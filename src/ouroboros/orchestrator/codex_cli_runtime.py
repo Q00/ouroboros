@@ -57,6 +57,27 @@ _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
 _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 _MAX_LINE_BUFFER_BYTES = 50 * 1024 * 1024  # 50 MB
 
+# Maps the orchestrator-level runtime_profile name to the Codex-side
+# ``--profile`` value. Phase 1 only ships ``worker``; new entries should land
+# alongside the matching ``[profiles.<name>]`` section written by setup.
+_RUNTIME_PROFILE_TO_CODEX_PROFILE: dict[str, str] = {
+    "worker": "ouroboros-worker",
+}
+
+
+def _resolve_codex_profile(runtime_profile: str | None) -> str | None:
+    """Map an orchestrator runtime_profile to a Codex --profile name."""
+    if not runtime_profile:
+        return None
+    mapped = _RUNTIME_PROFILE_TO_CODEX_PROFILE.get(runtime_profile)
+    if mapped is None:
+        log.warning(
+            "codex_cli_runtime.runtime_profile_unmapped",
+            runtime_profile=runtime_profile,
+            hint="No Codex backend mapping; running without --profile.",
+        )
+    return mapped
+
 
 class CodexCliRuntime:
     """Agent runtime that shells out to the locally installed Codex CLI."""
@@ -89,6 +110,7 @@ class CodexCliRuntime:
         skills_dir: str | Path | None = None,
         skill_dispatcher: SkillDispatchHandler | None = None,
         llm_backend: str | None = None,
+        runtime_profile: str | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._permission_mode = self._resolve_permission_mode(permission_mode)
@@ -97,6 +119,8 @@ class CodexCliRuntime:
         self._skills_dir = self._resolve_skills_dir(skills_dir)
         self._skill_dispatcher = skill_dispatcher
         self._llm_backend = llm_backend or self._default_llm_backend
+        self._runtime_profile = runtime_profile
+        self._codex_profile = _resolve_codex_profile(runtime_profile)
         self._builtin_mcp_handlers: dict[str, Any] | None = None
 
         log.info(
@@ -105,6 +129,8 @@ class CodexCliRuntime:
             permission_mode=permission_mode,
             model=model,
             cwd=self._cwd,
+            runtime_profile=runtime_profile,
+            codex_profile=self._codex_profile,
             skills_dir=(
                 str(self._skills_dir) if self._skills_dir is not None else self._skills_package_uri
             ),
@@ -553,6 +579,9 @@ class CodexCliRuntime:
     ) -> list[str]:
         """Build the CLI command args.  Prompt is fed via stdin separately."""
         command = [self._cli_path, "exec"]
+
+        if self._codex_profile:
+            command.extend(["--profile", self._codex_profile])
 
         command.extend(
             [

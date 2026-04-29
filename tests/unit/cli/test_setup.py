@@ -156,6 +156,47 @@ class TestCodexSetup:
 
         assert not (tmp_path / ".codex" / "config.toml").exists()
 
+    def test_register_codex_worker_profile_writes_section(self, tmp_path: Path) -> None:
+        """First-time setup creates the [profiles.ouroboros-worker] block."""
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_worker_profile()
+
+        config_path = tmp_path / ".codex" / "config.toml"
+        contents = config_path.read_text(encoding="utf-8")
+
+        assert "[profiles.ouroboros-worker]" in contents
+        assert "Ouroboros Agent OS runtime profile for Codex worker subprocesses." in contents
+        assert "orchestrator.runtime_profile.backend_profile: worker" in contents
+
+    def test_register_codex_worker_profile_preserves_mcp_section(self, tmp_path: Path) -> None:
+        """Worker-profile registration must not touch the existing MCP block."""
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            # Seed the file with the managed MCP block first.
+            setup_cmd._register_codex_mcp_server()
+            setup_cmd._register_codex_worker_profile()
+
+        contents = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+        assert contents.count("[mcp_servers.ouroboros]") == 1
+        assert contents.count("[mcp_servers.ouroboros.env]") == 1
+        assert contents.count("[profiles.ouroboros-worker]") == 1
+        # MCP block stays before the profile block (the order setup writes them).
+        assert contents.index("[mcp_servers.ouroboros]") < contents.index(
+            "[profiles.ouroboros-worker]"
+        )
+
+    def test_register_codex_worker_profile_is_idempotent(self, tmp_path: Path) -> None:
+        """Re-running setup should leave a single managed worker-profile block."""
+        with patch("pathlib.Path.home", return_value=tmp_path):
+            setup_cmd._register_codex_worker_profile()
+            setup_cmd._register_codex_worker_profile()
+
+        contents = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+        assert contents.count("[profiles.ouroboros-worker]") == 1
+        # Comment header is also written exactly once.
+        assert contents.count("Ouroboros Agent OS runtime profile") == 1
+
     def test_install_codex_artifacts_installs_rules_and_skills(self, tmp_path: Path) -> None:
         """Codex setup should install both managed rules and managed skills."""
         rules_path = tmp_path / ".codex" / "rules"
@@ -189,6 +230,9 @@ class TestCodexSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._install_codex_artifacts") as mock_install,
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server") as mock_register,
+            patch(
+                "ouroboros.cli.commands.setup._register_codex_worker_profile"
+            ) as mock_register_profile,
             patch("ouroboros.cli.commands.setup.print_info") as mock_info,
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")
@@ -200,6 +244,7 @@ class TestCodexSetup:
         assert config_dict["llm"]["backend"] == "codex"
         mock_install.assert_called_once_with()
         mock_register.assert_called_once_with(mode="auto")
+        mock_register_profile.assert_called_once_with()
 
         info_messages = [call.args[0] for call in mock_info.call_args_list]
         assert any("Config saved to" in message for message in info_messages)
@@ -244,6 +289,7 @@ class TestCodexSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")
 
@@ -275,6 +321,7 @@ class TestCodexSetup:
             patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
             patch("ouroboros.cli.commands.setup._install_codex_artifacts"),
             patch("ouroboros.cli.commands.setup._register_codex_mcp_server"),
+            patch("ouroboros.cli.commands.setup._register_codex_worker_profile"),
             patch("ouroboros.cli.commands.setup._ensure_claude_mcp_entry") as mock_claude,
         ):
             setup_cmd._setup_codex("/usr/local/bin/codex")

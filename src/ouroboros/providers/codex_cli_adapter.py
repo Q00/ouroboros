@@ -49,6 +49,28 @@ from ouroboros.providers.codex_cli_stream import (
 log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
+
+# Mirrors orchestrator.codex_cli_runtime: orchestrator-level runtime_profile
+# names map to a Codex ``--profile`` value. Keep these two tables in sync.
+_RUNTIME_PROFILE_TO_CODEX_PROFILE: dict[str, str] = {
+    "worker": "ouroboros-worker",
+}
+
+
+def _resolve_codex_profile(runtime_profile: str | None) -> str | None:
+    """Map an orchestrator runtime_profile to a Codex --profile name."""
+    if not runtime_profile:
+        return None
+    mapped = _RUNTIME_PROFILE_TO_CODEX_PROFILE.get(runtime_profile)
+    if mapped is None:
+        log.warning(
+            "codex_cli_adapter.runtime_profile_unmapped",
+            runtime_profile=runtime_profile,
+            hint="No Codex backend mapping; running without --profile.",
+        )
+    return mapped
+
+
 _RETRYABLE_ERROR_PATTERNS = (
     "rate limit",
     "temporarily unavailable",
@@ -84,6 +106,7 @@ class CodexCliLLMAdapter:
         max_retries: int = 3,
         ephemeral: bool = True,
         timeout: float | None = None,
+        runtime_profile: str | None = None,
     ) -> None:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
@@ -94,6 +117,8 @@ class CodexCliLLMAdapter:
         self._max_retries = max_retries
         self._ephemeral = ephemeral
         self._timeout = timeout if timeout and timeout > 0 else None
+        self._runtime_profile = runtime_profile
+        self._codex_profile = _resolve_codex_profile(runtime_profile)
 
     def _resolve_permission_mode(self, permission_mode: str | None) -> str:
         """Validate and normalize the adapter permission mode."""
@@ -355,16 +380,19 @@ class CodexCliLLMAdapter:
 
         The prompt is always fed via stdin to avoid ARG_MAX limits.
         """
-        command = [
-            self._cli_path,
-            "exec",
-            "--json",
-            "--skip-git-repo-check",
-            "-C",
-            self._cwd,
-            "--output-last-message",
-            output_last_message_path,
-        ]
+        command = [self._cli_path, "exec"]
+        if self._codex_profile:
+            command.extend(["--profile", self._codex_profile])
+        command.extend(
+            [
+                "--json",
+                "--skip-git-repo-check",
+                "-C",
+                self._cwd,
+                "--output-last-message",
+                output_last_message_path,
+            ]
+        )
 
         command.extend(self._build_permission_args())
 
