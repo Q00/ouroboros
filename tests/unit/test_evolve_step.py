@@ -507,13 +507,15 @@ class TestEvolveStepConvergence:
             )
         )
 
-        # Gen 3 returns identical ontology to Gen 2 (similarity=1.0)
+        # Gen 3 returns identical ontology to Gen 2 (similarity=1.0).
+        # Wonder reports no remaining gap (no questions, no tensions, stop) so
+        # the stability branch can converge.
         seed_v3 = make_seed(seed_id="seed_conv_3", parent_seed_id="seed_conv_2")
         gen_result = GenerationResult(
             generation_number=3,
             seed=seed_v3,
             evaluation_summary=make_eval_summary(),
-            wonder_output=make_wonder_output(should_continue=False),
+            wonder_output=make_wonder_output(questions=(), should_continue=False),
             ontology_delta=OntologyDelta(similarity=1.0),
             phase=GenerationPhase.COMPLETED,
             success=True,

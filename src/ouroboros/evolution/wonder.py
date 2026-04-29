@@ -4,7 +4,8 @@ The Wonder phase is the philosophical heart of the evolutionary loop.
 It examines the current ontology, evaluation results, and execution output
 to identify gaps, tensions, and unanswered questions.
 
-Inspired by Socrates' method: Wonder → "How should I live?" → "What IS 'live'?"
+Inspired by Socrates' method and Plato's Cave: ontology is a shadow/lens,
+while the human-origin Seed is the Idea the loop must align to.
 The WonderEngine asks: "Given what we learned, what do we still not know?"
 """
 
@@ -110,8 +111,10 @@ class WonderEngine:
         return """You are the Wonder Engine of Ouroboros, an evolutionary development system.
 
 Your role is to examine the current state of a project's ontology and its evaluation results,
-then identify what we STILL DON'T KNOW. You practice Socratic questioning:
-not just asking "what went wrong" but "what assumptions are we making?"
+then identify what we STILL DON'T KNOW about satisfying the origin Seed contract.
+You practice Socratic questioning and Plato's Cave discipline: ontology is a
+shadow/lens, not the Idea itself. The Idea is the human-origin Seed goal,
+constraints, and acceptance criteria.
 
 You must respond with a JSON object (no markdown, no code fences):
 {
@@ -124,7 +127,7 @@ You must respond with a JSON object (no markdown, no code fences):
 Guidelines:
 - questions: What gaps remain? What assumptions haven't been tested?
 - ontology_tensions: Where does the current ontology CONTRADICT itself or the seed's goal?
-- should_continue: Set to true if you generated ANY questions or tensions. Set to false ONLY if there are genuinely NO remaining questions within the seed's scope
+- should_continue: Set to true only for substantive in-scope gaps that affect Seed contract alignment. Set to false if evaluation passes and there are genuinely NO remaining contract gaps.
 - reasoning: Brief explanation of why these questions/tensions matter
 
 SCOPE GUARD — this is critical:
@@ -135,6 +138,7 @@ SCOPE GUARD — this is critical:
 - "This concept is not modeled" is NOT a valid tension unless the seed requires it (explicitly or implicitly).
 - Prefer deepening existing fields over adding new ones.
 - If the current ontology covers the seed's acceptance criteria AND evaluation shows no regressions or failures, set should_continue to false.
+- Do not ask questions just because the ontology could be richer. A complete-enough lens is enough when the Seed contract is satisfied.
 
 Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions (how to code it)."""
 
@@ -173,6 +177,7 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
             parts.append(f"  Approved: {eval_summary.final_approved}")
             parts.append(f"  Score: {eval_summary.score}")
             parts.append(f"  Drift: {eval_summary.drift_score}")
+            parts.append(f"  Reward Hacking Risk: {eval_summary.reward_hacking_risk}")
             if eval_summary.failure_reason:
                 parts.append(f"  Failure: {eval_summary.failure_reason}")
             if eval_summary.feedback_metadata:
@@ -230,7 +235,9 @@ Focus on ONTOLOGICAL questions (what IS the thing?) not implementation questions
         parts.append(
             "Within the seed's goal and constraints, identify what we still don't know. "
             "What assumptions are hidden? Where does the ontology contradict the seed? "
-            "Do NOT propose concepts beyond the seed's scope — incompleteness is normal."
+            "Do NOT propose concepts beyond the seed's scope — incompleteness is normal. "
+            "If the artifact already satisfies the Seed contract and no substantive "
+            "gap remains, return no questions/tensions and should_continue=false."
         )
 
         return "\n".join(parts)

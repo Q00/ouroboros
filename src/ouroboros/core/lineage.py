@@ -26,6 +26,7 @@ class LineageStatus(StrEnum):
 
     ACTIVE = "active"
     CONVERGED = "converged"
+    STAGNATED = "stagnated"
     EXHAUSTED = "exhausted"
     ABORTED = "aborted"
 
@@ -336,6 +337,7 @@ class GenerationRecord(BaseModel, frozen=True):
     failure_error: str | None = None
     last_completed_phase: str | None = None
     partial_state: dict[str, Any] | None = None
+    validation_output: str | None = None
 
     @model_validator(mode="before")
     @classmethod

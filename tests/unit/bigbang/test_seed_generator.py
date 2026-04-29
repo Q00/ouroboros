@@ -26,6 +26,7 @@ from ouroboros.bigbang.seed_generator import (
 )
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
+from ouroboros.core.lineage import MutationAction
 from ouroboros.core.seed import (
     EvaluationPrinciple,
     ExitCondition,
@@ -35,6 +36,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
+from ouroboros.evolution.reflect import OntologyMutation, ReflectOutput
 from ouroboros.providers.base import CompletionResponse, UsageInfo
 
 
@@ -728,6 +730,66 @@ class TestSeedGeneratorRobustParsing:
             assert result.is_err
             assert "after 2 attempts" in str(result.error)
             assert mock_adapter.complete.call_count == 2
+
+
+class TestSeedGeneratorFromReflect:
+    """Test Gen 2+ Seed generation from Reflect output."""
+
+    def test_generate_from_reflect_preserves_parent_seed_contract(self) -> None:
+        """Reflect may propose refined contract fields, but they are not auto-applied."""
+        parent_seed = Seed(
+            goal="Build a task manager",
+            constraints=("Python 3.14+", "No database"),
+            acceptance_criteria=("Tasks can be created", "Tasks can be listed"),
+            ontology_schema=OntologySchema(
+                name="TaskManager",
+                description="Task management domain",
+                fields=(
+                    OntologyField(
+                        name="tasks",
+                        field_type="array",
+                        description="List of tasks",
+                    ),
+                ),
+            ),
+            evaluation_principles=(
+                EvaluationPrinciple(name="completeness", description="All requirements met"),
+            ),
+            exit_conditions=(
+                ExitCondition(
+                    name="done",
+                    description="All criteria pass",
+                    evaluation_criteria="100%",
+                ),
+            ),
+            metadata=SeedMetadata(seed_id="seed-parent", ambiguity_score=0.1),
+        )
+        reflect_output = ReflectOutput(
+            refined_goal="Build a task manager and calendar",
+            refined_constraints=("Python 3.14+", "Use Postgres"),
+            refined_acs=("Tasks can be created", "Calendar sync works"),
+            ontology_mutations=(
+                OntologyMutation(
+                    action=MutationAction.ADD,
+                    field_name="priority",
+                    field_type="string",
+                    description="Task priority",
+                    reason="Clarifies task ordering lens",
+                ),
+            ),
+            reasoning="proposal",
+        )
+        generator = SeedGenerator(llm_adapter=AsyncMock())
+
+        result = generator.generate_from_reflect(parent_seed, reflect_output)
+
+        assert result.is_ok
+        seed = result.value
+        assert seed.goal == parent_seed.goal
+        assert seed.constraints == parent_seed.constraints
+        assert seed.acceptance_criteria == parent_seed.acceptance_criteria
+        assert {field.name for field in seed.ontology_schema.fields} == {"tasks", "priority"}
+        assert seed.metadata.parent_seed_id == "seed-parent"
 
 
 class TestSeedGeneratorSaveAndLoad:

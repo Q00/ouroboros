@@ -1,10 +1,10 @@
 """ReflectEngine - the core of ontological evolution.
 
 The Reflect phase examines execution results + current ontology + wonder output
-and produces refined ACs + ontology mutations for the next Seed.
+and produces ontology mutations for the next Seed.
 
-This is where the Ouroboros eats its tail: the output of evaluation becomes
-the input for the next generation's seed specification.
+This is where Ouroboros examines the shadows on the cave wall: ontology can
+change as a conceptual lens, but the human-origin Seed contract remains fixed.
 
 Replaces the "contextual interview" approach for Gen 2+. Interview is Gen 1 only;
 Reflect handles all subsequent generations autonomously.
@@ -49,8 +49,9 @@ class OntologyMutation(BaseModel, frozen=True):
 class ReflectOutput(BaseModel, frozen=True):
     """Output of the Reflect phase -- feeds directly into SeedGenerator.
 
-    Contains everything needed to create the next generation's Seed:
-    refined goal, constraints, acceptance criteria, and ontology mutations.
+    The refined_* fields remain for compatibility and proposal display, but
+    SeedGenerator preserves the parent Seed's goal/constraints/ACs and applies
+    only ontology mutations automatically.
     """
 
     refined_goal: str
@@ -64,11 +65,10 @@ class ReflectOutput(BaseModel, frozen=True):
 class ReflectEngine:
     """Reflects on execution results and proposes ontological evolution.
 
-    This is where the Ouroboros eats its tail:
+    This is where Ouroboros tests the ontology lens against the origin Seed:
     - Examines what was built vs what was intended
     - Identifies ontology gaps exposed by execution
-    - Proposes refined ACs that address wonder questions
-    - Mutates ontology based on learned knowledge
+    - Proposes ontology mutations only when they improve Seed contract alignment
 
     When evaluation is fully approved (score >= 0.8, no drift), outputs
     minimal changes to allow convergence.
@@ -145,16 +145,17 @@ class ReflectEngine:
         return """You are the Reflect Engine of Ouroboros, an evolutionary development system.
 
 Your role is to examine what was built, how it was evaluated, and what we still don't know,
-then propose SPECIFIC changes to the ontology and acceptance criteria for the next generation.
+then propose SPECIFIC changes to the ontology as a conceptual lens for the next generation.
 
-You practice ontological thinking: not just "what went wrong" but "what IS the thing we're building,
-and how should our understanding of it evolve?"
+You practice Plato's Cave discipline: ontology is a shadow/lens, not the Idea itself.
+The Idea is the human-origin Seed contract: goal, constraints, and acceptance criteria.
+Ontology may evolve only when doing so improves alignment with that contract.
 
 You must respond with a JSON object (no markdown, no code fences):
 {
-    "refined_goal": "the goal, possibly refined based on what we learned",
-    "refined_constraints": ["constraint 1", "constraint 2", ...],
-    "refined_acs": ["acceptance criterion 1", "criterion 2", ...],
+    "refined_goal": "proposal only; normally copy the current Seed goal",
+    "refined_constraints": ["proposal only; normally copy current constraints"],
+    "refined_acs": ["proposal only; normally copy current acceptance criteria"],
     "ontology_mutations": [
         {"action": "add|modify|remove", "field_name": "name", "field_type": "type", "description": "desc", "reason": "why"},
         ...
@@ -163,14 +164,16 @@ You must respond with a JSON object (no markdown, no code fences):
 }
 
 Guidelines:
-- If Wonder questions exist, you MUST propose at least one ontology_mutation that addresses them
-- If evaluation score >= 0.8 and approved, keep changes focused but still evolve the ontology based on Wonder insights
-- If evaluation score < 0.8 or not approved, propose more aggressive mutations to address failures
-- Each mutation must have a clear reason tied to evaluation findings or wonder questions
-- refined_acs should address the wonder questions and ontology tensions
+- Do NOT rewrite the Seed's goal, constraints, or acceptance criteria. Keep refined_* as proposals/echoes only.
+- Wonder questions do NOT automatically justify ontology mutation.
+- Propose ontology_mutations only when they improve alignment with the origin Seed contract.
+- If evaluation is approved, score is strong, ACs pass, and Wonder has no substantive in-scope gap, an empty ontology_mutations list is valid and preferred.
+- If evaluation score < 0.8, not approved, drift is high, reward-hacking risk is high, or ACs fail, propose focused mutations tied to those contract-alignment gaps.
+- Each mutation must have a clear reason tied to Seed contract alignment, evaluation findings, or a substantive Wonder gap.
+- refined_acs may describe suggestions, but they are not applied automatically.
 - Do NOT change things that are working well -- only evolve what needs evolution
 - action must be exactly one of: "add", "modify", "remove"
-- An empty ontology_mutations list is ONLY acceptable when there are no Wonder questions
+- An empty ontology_mutations list is acceptable when the current lens already supports the Seed contract.
 """
 
     def _build_prompt(
@@ -195,6 +198,7 @@ Guidelines:
         parts.append(f"  Approved: {eval_summary.final_approved}")
         parts.append(f"  Score: {eval_summary.score}")
         parts.append(f"  Drift: {eval_summary.drift_score}")
+        parts.append(f"  Reward Hacking Risk: {eval_summary.reward_hacking_risk}")
         if eval_summary.failure_reason:
             parts.append(f"  Failure: {eval_summary.failure_reason}")
         if eval_summary.feedback_metadata:
@@ -276,15 +280,17 @@ Guidelines:
                     f"\n## WARNING: STAGNATION DETECTED"
                     f"\n  The ontology has NOT changed for {stagnant_count} consecutive generation(s)."
                     f"\n  Previous Reflect phases produced ZERO effective mutations."
-                    f"\n  You MUST propose concrete ontology mutations based on the Wonder questions above."
-                    f"\n  Translate each Wonder question into at least one add/modify/remove mutation."
+                    f"\n  Do not mutate for motion alone."
+                    f"\n  Propose mutations only if they improve origin Seed contract alignment."
                 )
 
         parts.append("\n## Your Task")
         parts.append(
-            "Based on the evaluation results and wonder questions, propose specific "
-            "changes to the goal, constraints, acceptance criteria, and ontology "
-            "for the next generation. Be precise and actionable."
+            "Based on the evaluation results and wonder questions, decide whether the "
+            "ontology lens needs mutation to better align with the origin Seed contract. "
+            "Keep the Seed goal, constraints, and acceptance criteria intact; refined_* "
+            "fields are proposals/echoes only. Empty ontology_mutations is valid when "
+            "evaluation already passes and Wonder exposes no substantive contract gap."
         )
 
         return "\n".join(parts)

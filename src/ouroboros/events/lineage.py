@@ -55,6 +55,7 @@ def lineage_generation_completed(
     execution_output: str | None = None,
     parent_seed_id: str | None = None,
     seed_quality_canary_feedback: list[dict] | None = None,
+    validation_output: str | None = None,
 ) -> BaseEvent:
     """Create event when a generation completes successfully."""
     data = {
@@ -72,6 +73,8 @@ def lineage_generation_completed(
         data["seed_json"] = seed_json
     if execution_output is not None:
         data["execution_output"] = execution_output[:10_000]
+    if validation_output is not None:
+        data["validation_output"] = validation_output[:5_000]
     return BaseEvent(
         type="lineage.generation.completed",
         aggregate_type="lineage",

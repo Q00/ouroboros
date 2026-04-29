@@ -100,6 +100,7 @@ class LineageProjector:
                     created_at=event.timestamp,
                     seed_json=data.get("seed_json"),
                     execution_output=data.get("execution_output"),
+                    validation_output=data.get("validation_output"),
                 )
                 generations[gen_num] = record
 
@@ -175,7 +176,7 @@ class LineageProjector:
 
             elif event.type == "lineage.stagnated":
                 if lineage is not None:
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
+                    lineage = lineage.with_status(LineageStatus.STAGNATED)
 
             elif event.type == "lineage.rewound":
                 data = event.data

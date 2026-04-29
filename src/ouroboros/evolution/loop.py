@@ -179,7 +179,17 @@ class EvolutionaryLoop:
             enable_oscillation_detection=self.config.enable_oscillation_detection,
             eval_gate_enabled=self.config.eval_gate_enabled,
             eval_min_score=self.config.eval_min_score,
+            # Only require Wonder evidence for convergence when this loop
+            # actually has a WonderEngine wired in. Loops constructed without
+            # one (some tests, simple synchronous flows) don't produce Wonder
+            # output, so demanding it would prevent convergence entirely.
+            wonder_required=self.wonder_engine is not None,
         )
+
+    @staticmethod
+    def _is_stagnation_route(reason: str) -> bool:
+        """Return whether a convergence reason should route to STAGNATED."""
+        return "Stagnation" in reason or "Oscillation" in reason or "Repetitive feedback" in reason
 
     def _install_sigint_handler(self) -> None:
         """Replace SIGINT handler with graceful shutdown flag."""
@@ -355,6 +365,7 @@ class EvolutionaryLoop:
                 wonder_questions=result.wonder_output.questions if result.wonder_output else (),
                 phase=result.phase,
                 execution_output=result.execution_output,
+                validation_output=result.validation_output,
             )
             lineage = lineage.with_generation(record)
 
@@ -377,6 +388,7 @@ class EvolutionaryLoop:
                         for feedback in record.seed_quality_canary_feedback
                     ]
                     or None,
+                    validation_output=result.validation_output,
                 )
             )
 
@@ -419,7 +431,7 @@ class EvolutionaryLoop:
                         )
                     )
                     lineage = lineage.with_status(LineageStatus.EXHAUSTED)
-                elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
+                elif self._is_stagnation_route(conv_signal.reason):
                     await self.event_store.append(
                         lineage_stagnated(
                             lineage.lineage_id,
@@ -428,7 +440,7 @@ class EvolutionaryLoop:
                             self.config.stagnation_window,
                         )
                     )
-                    lineage = lineage.with_status(LineageStatus.CONVERGED)
+                    lineage = lineage.with_status(LineageStatus.STAGNATED)
                 else:
                     await self.event_store.append(
                         lineage_converged(
@@ -440,6 +452,17 @@ class EvolutionaryLoop:
                     )
                     lineage = lineage.with_status(LineageStatus.CONVERGED)
 
+                break
+            elif self._is_stagnation_route(conv_signal.reason):
+                await self.event_store.append(
+                    lineage_stagnated(
+                        lineage.lineage_id,
+                        generation_number,
+                        conv_signal.reason,
+                        self.config.stagnation_window,
+                    )
+                )
+                lineage = lineage.with_status(LineageStatus.STAGNATED)
                 break
 
             # Prepare for next generation
@@ -518,7 +541,11 @@ class EvolutionaryLoop:
                 return Result.err(OuroborosError("Failed to project lineage from events"))
 
             # Check if lineage is already terminated
-            if lineage.status in (LineageStatus.CONVERGED, LineageStatus.EXHAUSTED):
+            if lineage.status in (
+                LineageStatus.CONVERGED,
+                LineageStatus.STAGNATED,
+                LineageStatus.EXHAUSTED,
+            ):
                 return Result.err(
                     OuroborosError(
                         f"Lineage already terminated with status: {lineage.status.value}"
@@ -726,6 +753,7 @@ class EvolutionaryLoop:
             phase=result.phase,
             seed_json=json.dumps(result.seed.to_dict()),
             execution_output=result.execution_output,
+            validation_output=result.validation_output,
         )
         lineage = lineage.with_generation(record)
 
@@ -747,6 +775,7 @@ class EvolutionaryLoop:
                     for feedback in record.seed_quality_canary_feedback
                 ]
                 or None,
+                validation_output=result.validation_output,
             )
         )
 
@@ -780,7 +809,7 @@ class EvolutionaryLoop:
                 )
                 lineage = lineage.with_status(LineageStatus.EXHAUSTED)
                 action = StepAction.EXHAUSTED
-            elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
+            elif self._is_stagnation_route(conv_signal.reason):
                 await self.event_store.append(
                     lineage_stagnated(
                         lineage.lineage_id,
@@ -789,7 +818,7 @@ class EvolutionaryLoop:
                         self.config.stagnation_window,
                     )
                 )
-                lineage = lineage.with_status(LineageStatus.CONVERGED)
+                lineage = lineage.with_status(LineageStatus.STAGNATED)
                 action = StepAction.STAGNATED
             else:
                 await self.event_store.append(
@@ -802,6 +831,17 @@ class EvolutionaryLoop:
                 )
                 lineage = lineage.with_status(LineageStatus.CONVERGED)
                 action = StepAction.CONVERGED
+        elif self._is_stagnation_route(conv_signal.reason):
+            await self.event_store.append(
+                lineage_stagnated(
+                    lineage.lineage_id,
+                    generation_number,
+                    conv_signal.reason,
+                    self.config.stagnation_window,
+                )
+            )
+            lineage = lineage.with_status(LineageStatus.STAGNATED)
+            action = StepAction.STAGNATED
 
         return Result.ok(
             StepResult(
@@ -897,7 +937,13 @@ class EvolutionaryLoop:
         partial_state: dict[str, Any] = {}
         try:
             if wonder_output:
+                # Persist the full Wonder shape, not just questions —
+                # ontology_tensions and should_continue are first-class signals
+                # for "keep evolving" so resume must restore all three to
+                # avoid silently dropping unresolved gaps.
                 partial_state["wonder_questions"] = list(wonder_output.questions)
+                partial_state["wonder_tensions"] = list(wonder_output.ontology_tensions)
+                partial_state["wonder_should_continue"] = bool(wonder_output.should_continue)
             if reflect_output:
                 partial_state["reflect_output"] = reflect_output.model_dump(mode="json")
             if execution_output:
@@ -1001,11 +1047,35 @@ class EvolutionaryLoop:
             )
             if interrupted_gen and interrupted_gen.partial_state:
                 ps = interrupted_gen.partial_state
-                if _should_skip("wondering") and ps.get("wonder_questions"):
-                    wonder_output = WonderOutput(
-                        questions=tuple(ps["wonder_questions"]),
-                        should_continue=True,
-                    )
+                if _should_skip("wondering"):
+                    # Restore Wonder if any of its three "keep evolving"
+                    # signals was persisted: questions, ontology_tensions, or
+                    # should_continue. Older interrupt records only carry
+                    # `wonder_questions`, so falling back on that key alone
+                    # remains backwards compatible while newer records also
+                    # carry tensions and the explicit continue flag.
+                    persisted_questions = ps.get("wonder_questions") or []
+                    persisted_tensions = ps.get("wonder_tensions") or []
+                    persisted_should_continue = ps.get("wonder_should_continue")
+                    if (
+                        persisted_questions
+                        or persisted_tensions
+                        or persisted_should_continue is not None
+                    ):
+                        wonder_output = WonderOutput(
+                            questions=tuple(persisted_questions),
+                            ontology_tensions=tuple(persisted_tensions),
+                            # Default to True only when the flag was not
+                            # persisted at all (legacy records). With the
+                            # flag persisted, honor it verbatim so a saved
+                            # `should_continue=False` plus tensions still
+                            # routes through Reflect as an unresolved gap.
+                            should_continue=(
+                                True
+                                if persisted_should_continue is None
+                                else bool(persisted_should_continue)
+                            ),
+                        )
                 if _should_skip("reflecting") and ps.get("reflect_output"):
                     try:
                         reflect_output = ReflectOutput.model_validate(ps["reflect_output"])
@@ -1016,6 +1086,14 @@ class EvolutionaryLoop:
                         )
                 if _should_skip("executing") and ps.get("execution_output"):
                     restored_execution_output = ps["execution_output"]
+                # Validation runs at the tail of the executing phase (before
+                # the post-executing shutdown checkpoint), so its output must
+                # be restored whenever execute is being skipped — not only on
+                # the evaluating-phase resume path. Without this, an interrupt
+                # between validation and evaluation would lose validator
+                # evidence and resume would silently re-run validation.
+                if _should_skip("executing") and ps.get("validation_output"):
+                    restored_validation_output = ps["validation_output"]
                 if _should_skip("evaluating") and ps.get("evaluation_summary"):
                     try:
                         restored_evaluation_summary = EvaluationSummary.model_validate(
@@ -1058,16 +1136,30 @@ class EvolutionaryLoop:
                 )
                 if wonder_result.is_ok:
                     wonder_output = wonder_result.value
-                    if not wonder_output.should_continue and not wonder_output.questions:
-                        # Only early-return if Wonder has NO questions at all.
-                        # If questions exist, we must continue to Reflect even if
-                        # should_continue=false, because the questions represent
+                    if (
+                        not wonder_output.should_continue
+                        and not wonder_output.questions
+                        and not wonder_output.ontology_tensions
+                    ):
+                        # Only early-return if Wonder has NO questions or tensions
+                        # at all. If either exist, we must continue to Reflect even
+                        # if should_continue=false, because they represent
                         # ontological gaps that need to be addressed.
+                        # Carry the previous generation's evaluation_summary,
+                        # execution_output, and validation_output forward so every
+                        # convergence gate (eval, AC, drift, validation) has the
+                        # contract evidence it needs on this zero-mutation path.
+                        # Without validation_output, the validation gate is
+                        # silently skipped and a previously failing validation
+                        # would be bypassed.
                         logger.info("evolution.wonder.nothing_to_learn")
                         return Result.ok(
                             GenerationResult(
                                 generation_number=generation_number,
                                 seed=current_seed,
+                                execution_output=prev_gen.execution_output,
+                                evaluation_summary=prev_gen.evaluation_summary,
+                                validation_output=prev_gen.validation_output,
                                 wonder_output=wonder_output,
                                 phase=GenerationPhase.COMPLETED,
                                 success=True,
@@ -1340,9 +1432,11 @@ class EvolutionaryLoop:
                 return Result.err(OuroborosError(f"Execution error: {e}"))
 
         # Validate phase - reconcile parallel execution artifacts
-        # Skip if restored from checkpoint (resume after evaluating)
+        # Skip if restored from checkpoint. Validation completes at the tail
+        # of the executing phase, so a saved validation_output is reusable
+        # whenever execute (or any later phase) is being skipped on resume.
         validation_output: str | None = restored_validation_output
-        if validation_output and _should_skip("evaluating"):
+        if validation_output and (_should_skip("executing") or _should_skip("evaluating")):
             logger.info(
                 "evolution.generation.validation_restored_from_checkpoint",
                 extra={"generation": generation_number},
@@ -1376,7 +1470,12 @@ class EvolutionaryLoop:
                 )
                 validation_output = f"Validation skipped: {e}"
 
-        # Check for graceful shutdown after executing
+        # Check for graceful shutdown after executing.
+        # Validation has already run by this point, so its output must be
+        # checkpointed here too — otherwise a SIGINT between validation and
+        # evaluation would lose the validator result and resume would re-run
+        # validation, potentially producing a different outcome or dropping
+        # the failure evidence the convergence gate depends on.
         interrupted = await self._check_shutdown(
             lineage.lineage_id,
             generation_number,
@@ -1385,6 +1484,7 @@ class EvolutionaryLoop:
             wonder_output=wonder_output,
             reflect_output=reflect_output,
             execution_output=execution_output,
+            validation_output=validation_output,
         )
         if interrupted:
             return Result.ok(interrupted)
