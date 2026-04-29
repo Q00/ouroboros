@@ -192,19 +192,22 @@ class BrownfieldHandler:
         )
 
     async def _get_store(self) -> BrownfieldStore:
-        """Return the injected store or create and initialize a new one."""
-        if self._store is not None:
-            if not self._store_ready and getattr(self._store, "_engine", None) is None:
-                await self._store.initialize()
-                self._store_ready = True
-            elif getattr(self._store, "_engine", None) is not None:
-                self._store_ready = True
-            return self._store
-        store = BrownfieldStore()
-        await store.initialize()
-        self._store = store
-        self._store_ready = True
-        return store
+        """Return the injected store or create and initialize a new one.
+
+        ``_store_ready`` flips to ``True`` only after a successful
+        ``initialize()`` so a partially-initialized shared store retries on the
+        next request instead of being treated as ready forever.
+        """
+        if self._store is None:
+            store = BrownfieldStore()
+            await store.initialize()
+            self._store = store
+            self._store_ready = True
+            return store
+        if not self._store_ready:
+            await self._store.initialize()
+            self._store_ready = True
+        return self._store
 
     async def handle(
         self,

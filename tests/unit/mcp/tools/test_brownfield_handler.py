@@ -375,6 +375,26 @@ class TestBrownfieldHandlerDispatch:
 
         store.initialize.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_failed_shared_init_recovers_on_next_request(self) -> None:
+        """A failed shared-store init must not wedge the handler.
+
+        Regression for the readiness contract: ``_store_ready`` may only flip to
+        ``True`` after ``initialize()`` returns successfully, so the next
+        request retries instead of inheriting a half-initialized store.
+        """
+        store = _make_store_stub(repos=[_REPO_A], default=_REPO_A)
+        store.initialize.side_effect = [RuntimeError("transient init failure"), None]
+        handler = BrownfieldHandler(_store=store)
+
+        first = await handler.handle({"action": "query"})
+        assert not first.is_ok
+        assert "transient init failure" in str(first.error)
+
+        second = await handler.handle({"action": "query"})
+        assert second.is_ok
+        assert store.initialize.await_count == 2
+
 
 # ── Pagination tests ──────────────────────────────────────────────
 
