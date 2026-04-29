@@ -82,6 +82,7 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 | `ooo help` | — |
 | `ooo update` | PyPI version check + upgrade |
 | `ooo publish` | `gh` CLI — Seed to GitHub Issues |
+| `ooo resume-session` | Restore previous Claude Code session context |
 
 ## Agents
 
