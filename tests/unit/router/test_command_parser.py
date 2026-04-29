@@ -154,6 +154,16 @@ def test_parse_ooo_command_accepts_multiline_slash_payload() -> None:
     )
 
 
+def test_parse_ooo_command_preserves_multiline_payload_leading_whitespace() -> None:
+    payload = "  goal: test\n  constraints:\n    - keep it simple"
+
+    assert parse_ooo_command(f"/ouroboros:run\n{payload}") == ParsedOooCommand(
+        skill_name="run",
+        command_prefix="/ouroboros:run",
+        remainder=payload,
+    )
+
+
 def test_parsed_ooo_command_type_is_immutable_normalized_command_data() -> None:
     parsed = TypesParsedOooCommand(
         skill_name="run",
