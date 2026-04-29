@@ -59,6 +59,7 @@ _WINDOWS_UNC_PATH_PAYLOAD_PATTERN = re.compile(r"^\\\\[^\\/\s]+[\\/][^\\/\s]+")
 _REQUIRED_MCP_FRONTMATTER_KEYS = ("mcp_tool", "mcp_args")
 _MCP_FRONTMATTER_VALUE_TYPES = "string, finite number, boolean, null, list, or mapping"
 _PACKAGED_SKILL_CACHE: TemporaryDirectory[str] | None = None
+_QUOTE_CHARS = {"'", '"'}
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +260,26 @@ def normalize_mcp_frontmatter(
     )
 
 
+def _strip_matching_quotes(value: str) -> str:
+    """Remove one pair of matching shell quotes from a token."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in _QUOTE_CHARS:
+        return value[1:-1]
+    return value
+
+
+def _normalize_windows_literal_payload(remainder: str) -> str | None:
+    """Normalize Windows-path payloads without treating backslashes as escapes."""
+    try:
+        lexer = shlex.shlex(remainder, posix=False)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        parts = list(lexer)
+    except ValueError:
+        parts = remainder.split()
+    normalized = [_strip_matching_quotes(part) for part in parts]
+    return " ".join(normalized) if normalized else None
+
+
 def extract_first_argument(remainder: str | None) -> str | None:
     """Extract the full argument payload following a skill command prefix.
 
@@ -279,7 +300,7 @@ def extract_first_argument(remainder: str | None) -> str | None:
     if _WINDOWS_DRIVE_PATH_PAYLOAD_PATTERN.match(
         stripped_remainder
     ) or _WINDOWS_UNC_PATH_PAYLOAD_PATTERN.match(stripped_remainder):
-        return stripped_remainder
+        return _normalize_windows_literal_payload(stripped_remainder)
     try:
         parts = shlex.split(remainder)
     except ValueError:

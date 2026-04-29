@@ -277,6 +277,48 @@ def test_valid_dispatch_preserves_windows_path_backslashes(
     assert result.mcp_args["seed_path"] == seed_path
 
 
+def test_valid_dispatch_preserves_windows_backslashes_and_normalizes_quotes(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    runtime_cwd = tmp_path / "workspace"
+    _write_dispatchable_skill(skills_dir, "run")
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt=r'ooo run C:\temp\seed.yaml "two words"',
+            cwd=runtime_cwd,
+            skills_dir=skills_dir,
+        )
+    )
+
+    expected_argument = r"C:\temp\seed.yaml two words"
+    assert isinstance(result, Resolved)
+    assert result.first_argument == expected_argument
+    assert result.mcp_args["seed_path"] == expected_argument
+
+
+def test_valid_dispatch_preserves_unc_backslashes_and_normalizes_quotes(
+    tmp_path: Path,
+) -> None:
+    skills_dir = tmp_path / "skills"
+    runtime_cwd = tmp_path / "workspace"
+    _write_dispatchable_skill(skills_dir, "run")
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt=r'ooo run \\server\share\seed.yaml "two words"',
+            cwd=runtime_cwd,
+            skills_dir=skills_dir,
+        )
+    )
+
+    expected_argument = r"\\server\share\seed.yaml two words"
+    assert isinstance(result, Resolved)
+    assert result.first_argument == expected_argument
+    assert result.mcp_args["seed_path"] == expected_argument
+
+
 def test_valid_dispatch_normalizes_windows_forward_slash_paths(
     tmp_path: Path,
 ) -> None:
