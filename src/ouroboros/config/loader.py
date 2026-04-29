@@ -57,6 +57,7 @@ _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
 _PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
 _PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
+_DEFAULT_MAX_PARALLEL_WORKERS = 3
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
     "openrouter/anthropic/claude-opus-4-6",
@@ -482,8 +483,8 @@ def get_agent_permission_mode(backend: str | None = None) -> str:
         return "bypassPermissions" if _uses_opencode_backend(backend) else "acceptEdits"
 
 
-def _coerce_max_parallel_workers(value: Any, *, config_key: str) -> int:
-    """Coerce a worker-cap setting without validating unrelated config keys."""
+def _parse_max_parallel_workers(value: Any, *, config_key: str) -> int:
+    """Parse a worker-cap setting without validating unrelated config keys."""
     if isinstance(value, bool):
         raise ConfigError(
             f"{config_key} must be a positive integer",
@@ -527,7 +528,7 @@ def get_max_parallel_workers() -> int:
     """
     env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
     if env_value:
-        return _coerce_max_parallel_workers(
+        return _parse_max_parallel_workers(
             env_value,
             config_key="OUROBOROS_MAX_PARALLEL_WORKERS",
         )
@@ -535,7 +536,7 @@ def get_max_parallel_workers() -> int:
     config_path = get_config_dir() / "config.yaml"
     if not config_path.exists():
         # No config file means no worker-cap override; use the built-in default.
-        return 3
+        return _DEFAULT_MAX_PARALLEL_WORKERS
 
     try:
         with config_path.open() as f:
@@ -549,7 +550,7 @@ def get_max_parallel_workers() -> int:
 
     if config_dict is None:
         # Empty config means no worker-cap override; use the built-in default.
-        return 3
+        return _DEFAULT_MAX_PARALLEL_WORKERS
     if not isinstance(config_dict, dict):
         raise ConfigError(
             "Configuration file must contain a mapping",
@@ -560,7 +561,7 @@ def get_max_parallel_workers() -> int:
     orchestrator_config = config_dict.get("orchestrator")
     if orchestrator_config is None:
         # Missing orchestrator section means no worker-cap override.
-        return 3
+        return _DEFAULT_MAX_PARALLEL_WORKERS
     if not isinstance(orchestrator_config, dict):
         raise ConfigError(
             "orchestrator must be a mapping",
@@ -570,9 +571,9 @@ def get_max_parallel_workers() -> int:
         )
     if "max_parallel_workers" not in orchestrator_config:
         # Missing worker-cap key means no override; invalid values still raise below.
-        return 3
+        return _DEFAULT_MAX_PARALLEL_WORKERS
 
-    return _coerce_max_parallel_workers(
+    return _parse_max_parallel_workers(
         orchestrator_config["max_parallel_workers"],
         config_key="orchestrator.max_parallel_workers",
     )

@@ -214,8 +214,8 @@ async def test_run_orchestrator_passes_artifact_and_reference_to_qa(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_run_orchestrator_passes_resolved_depth_cap_to_runner(tmp_path: Path) -> None:
-    """CLI orchestration should pass the resolved decomposition cap into the runner."""
+async def test_run_orchestrator_passes_resolved_execution_caps_to_runner(tmp_path: Path) -> None:
+    """CLI orchestration should pass resolved execution caps into the runner."""
     seed_file = tmp_path / "seed.yaml"
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
 
@@ -242,6 +242,7 @@ async def test_run_orchestrator_passes_resolved_depth_cap_to_runner(tmp_path: Pa
         patch(
             "ouroboros.orchestrator.OrchestratorRunner", return_value=mock_runner
         ) as mock_runner_cls,
+        patch("ouroboros.cli.commands.run._resolve_max_parallel_workers", return_value=7),
         patch("ouroboros.persistence.event_store.EventStore") as mock_event_store_cls,
         patch(
             "ouroboros.cli.commands.run.build_verification_artifacts",
@@ -258,6 +259,7 @@ async def test_run_orchestrator_passes_resolved_depth_cap_to_runner(tmp_path: Pa
         await _run_orchestrator(seed_file)
 
     assert mock_runner_cls.call_args.kwargs["max_decomposition_depth"] == 3
+    assert mock_runner_cls.call_args.kwargs["max_parallel_workers"] == 7
 
 
 @pytest.mark.asyncio
