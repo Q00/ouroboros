@@ -261,25 +261,62 @@ def normalize_mcp_frontmatter(
     )
 
 
+def _try_extract_quoted_windows_literal_payload(stripped: str) -> str | None:
+    """Strip a leading quote pair around a Windows literal path payload.
+
+    Quoting is the natural way to pass UNC or drive-letter paths that contain
+    spaces (e.g. ``"\\\\server\\share\\dir name\\seed.yaml" --strict``).
+    POSIX ``shlex`` would interpret the embedded backslashes as escape
+    characters and corrupt the path, so we peek inside a leading quote pair,
+    verify the inner token matches :data:`_WINDOWS_LITERAL_PATH_PATTERN`, and
+    only then preserve the path verbatim (mirroring the unquoted Windows
+    literal carve-out). The closing quote must be followed by either
+    end-of-string or whitespace, so an embedded mid-token quote like
+    ``"C:\\Pro"gram Files\\seed.yaml`` cannot silently truncate the payload to
+    a ``C:\\Pro`` prefix.
+    """
+    if not stripped or stripped[0] not in ('"', "'"):
+        return None
+    quote = stripped[0]
+    closing_index = stripped.find(quote, 1)
+    if closing_index == -1:
+        return None
+    after_close = stripped[closing_index + 1 :]
+    if after_close and not after_close[0].isspace():
+        return None
+    inner = stripped[1:closing_index]
+    if not _WINDOWS_LITERAL_PATH_PATTERN.match(inner):
+        return None
+    tail = after_close.lstrip()
+    return f"{inner} {tail}" if tail else inner
+
+
 def extract_first_argument(remainder: str | None) -> str | None:
     """Extract the full argument payload following a skill command prefix.
 
     The legacy name is preserved for API stability, but the semantics cover the
     whole remainder. Multiline payloads are preserved exactly for inline
-    content such as Seed YAML. Single-line payloads still use shell-style
-    tokenization purely to strip matching quotes and escape sequences, then
-    tokens are rejoined with single spaces so natural-language usage like
-    ``ooo interview add dark mode to settings`` yields the full phrase rather
-    than just ``add``. Quoted forms such as ``ooo interview "add dark mode"``
-    produce the same unquoted result. If shell tokenization fails (unterminated
-    quote), a whitespace split is used as fallback.
+    content such as Seed YAML. Windows literal path payloads (drive-letter or
+    UNC) are preserved verbatim, including the case where the user wraps the
+    path in quotes — the natural form for UNC paths that contain spaces. Other
+    single-line payloads still use shell-style tokenization purely to strip
+    matching quotes and escape sequences, then tokens are rejoined with single
+    spaces so natural-language usage like ``ooo interview add dark mode to
+    settings`` yields the full phrase rather than just ``add``. Quoted forms
+    such as ``ooo interview "add dark mode"`` produce the same unquoted
+    result. If shell tokenization fails (unterminated quote), a whitespace
+    split is used as fallback.
     """
     if remainder is None or not remainder.strip():
         return None
     if re.search(r"[\r\n].*\S", remainder):
         return remainder
-    if _WINDOWS_LITERAL_PATH_PATTERN.match(remainder.strip()):
+    stripped = remainder.strip()
+    if _WINDOWS_LITERAL_PATH_PATTERN.match(stripped):
         return remainder
+    quoted_windows = _try_extract_quoted_windows_literal_payload(stripped)
+    if quoted_windows is not None:
+        return quoted_windows
     try:
         parts = shlex.split(remainder)
     except ValueError:

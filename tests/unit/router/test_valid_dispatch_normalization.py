@@ -446,6 +446,61 @@ def test_valid_dispatch_preserves_windows_unc_path_payload(tmp_path: Path) -> No
     )
 
 
+@pytest.mark.parametrize(
+    ("prompt", "expected_argument"),
+    [
+        pytest.param(
+            r'ooo run "C:\Program Files\app\seed.yaml" --strict',
+            r"C:\Program Files\app\seed.yaml --strict",
+            id="quoted-drive-with-spaces",
+        ),
+        pytest.param(
+            r'ooo run "\\server\share\dir name\seed.yaml" --strict',
+            r"\\server\share\dir name\seed.yaml --strict",
+            id="quoted-unc-with-spaces",
+        ),
+        pytest.param(
+            r"ooo run 'C:\Program Files\app\seed.yaml' --strict",
+            r"C:\Program Files\app\seed.yaml --strict",
+            id="single-quoted-drive-with-spaces",
+        ),
+        pytest.param(
+            r"ooo run '\\server\share\dir name\seed.yaml' --strict",
+            r"\\server\share\dir name\seed.yaml --strict",
+            id="single-quoted-unc-with-spaces",
+        ),
+        pytest.param(
+            r'ooo run "C:\Program Files\app\seed.yaml"',
+            r"C:\Program Files\app\seed.yaml",
+            id="quoted-drive-without-tail",
+        ),
+    ],
+)
+def test_valid_dispatch_preserves_quoted_windows_path_backslashes(
+    tmp_path: Path,
+    prompt: str,
+    expected_argument: str,
+) -> None:
+    """Windows literal paths wrapped in quotes (the natural form for paths
+    containing spaces) must reach ``$1`` with backslashes intact, not be
+    silently corrupted by POSIX ``shlex``."""
+    skills_dir = tmp_path / "skills"
+    runtime_cwd = tmp_path / "workspace"
+    _write_dispatchable_skill(skills_dir, "run")
+
+    result = resolve_skill_dispatch(
+        ResolveRequest(
+            prompt=prompt,
+            cwd=runtime_cwd,
+            skills_dir=skills_dir,
+        )
+    )
+
+    assert isinstance(result, Resolved)
+    assert result.first_argument == expected_argument
+    assert result.mcp_args["seed_path"] == expected_argument
+
+
 def test_valid_dispatch_without_argument_normalizes_first_argument_template_to_empty_string(
     tmp_path: Path,
 ) -> None:
