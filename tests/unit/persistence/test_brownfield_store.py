@@ -108,6 +108,51 @@ class TestBrownfieldStoreInitialization:
         with pytest.raises(PersistenceError):
             await s.list()
 
+    @pytest.mark.asyncio
+    async def test_failed_initialize_rolls_back_to_uninitialized(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A failed initialize() must leave the store explicitly un-initialized.
+
+        Regression for the readiness contract: a partial init (engine
+        attached but schema not yet created or migrations not yet applied)
+        must not be exposed as ready. The next call to ``initialize()``
+        should be free to retry, and intermediate operations must raise
+        ``PersistenceError`` rather than running against a half-built engine.
+        """
+        db_path = tmp_path / "partial.db"
+        s = BrownfieldStore(f"sqlite+aiosqlite:///{db_path}")
+
+        async def _boom(_engine):
+            raise RuntimeError("simulated migration failure")
+
+        # Force run_migrations to fail after the engine is created and
+        # schema metadata has been attached — exactly the half-initialized
+        # window that motivated the readiness flag.
+        monkeypatch.setattr(
+            "ouroboros.persistence.migrations.runner.run_migrations",
+            _boom,
+        )
+
+        with pytest.raises(RuntimeError, match="simulated migration failure"):
+            await s.initialize()
+
+        # Engine must be disposed and the readiness flag cleared so
+        # subsequent operations cannot silently use a broken engine.
+        assert s._engine is None
+        assert s._initialized is False
+        with pytest.raises(PersistenceError):
+            await s.list()
+
+        # A retry — once the underlying issue is fixed — must succeed
+        # cleanly without leaking a stale engine reference.
+        monkeypatch.undo()
+        await s.initialize()
+        assert s._initialized is True
+        repos = await s.list()
+        assert repos == []
+        await s.close()
+
 
 # ── Single Register ──────────────────────────────────────────────
 

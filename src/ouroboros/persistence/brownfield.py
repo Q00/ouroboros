@@ -139,12 +139,15 @@ class BrownfieldStore:
             database_url = f"sqlite+aiosqlite:///{db_path}"
         self._database_url = database_url
         self._engine: AsyncEngine | None = None
+        self._initialized: bool = False
 
     @classmethod
     def from_engine(cls, engine: AsyncEngine) -> BrownfieldStore:
         """Create a BrownfieldStore from an existing async engine.
 
-        Useful when sharing a database connection with EventStore.
+        Useful when sharing a database connection with EventStore. The
+        provided engine is assumed to already be schema-ready, so the
+        returned store is marked as initialized without running ``initialize``.
 
         Args:
             engine: An existing SQLAlchemy AsyncEngine instance.
@@ -155,26 +158,57 @@ class BrownfieldStore:
         store = cls.__new__(cls)
         store._database_url = str(engine.url)
         store._engine = engine
+        store._initialized = True
         return store
 
     async def initialize(self) -> None:
         """Initialize the database connection and create tables if needed.
 
-        This method is idempotent - calling it multiple times is safe.
+        Sets ``self._initialized`` to True only after both schema creation
+        and migrations succeed end-to-end. On any failure, the store is
+        left in an explicitly un-initialized state (``_initialized`` False
+        and any locally created engine disposed) so the next caller can
+        retry safely instead of inheriting a half-initialized engine.
+
+        Once initialization has succeeded the call becomes a no-op, so
+        callers may invoke ``initialize`` defensively (e.g. on every
+        request) without re-running schema creation.
         """
-        if self._engine is None:
+        if self._initialized:
+            return
+
+        engine_was_locally_created = self._engine is None
+        if engine_was_locally_created:
             self._engine = create_async_engine(
                 self._database_url,
                 echo=False,
             )
 
-        async with self._engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
+        try:
+            assert self._engine is not None  # for type-checkers
+            async with self._engine.begin() as conn:
+                await conn.run_sync(metadata.create_all)
 
-        # Apply any pending migrations for schema evolution
-        from ouroboros.persistence.migrations.runner import run_migrations
+            # Apply any pending migrations for schema evolution
+            from ouroboros.persistence.migrations.runner import run_migrations
 
-        await run_migrations(self._engine)
+            await run_migrations(self._engine)
+        except BaseException:
+            # Roll back to a clean un-initialized state so the next caller
+            # can retry without inheriting a half-initialized engine.
+            self._initialized = False
+            if engine_was_locally_created and self._engine is not None:
+                engine_to_dispose = self._engine
+                self._engine = None
+                try:
+                    await engine_to_dispose.dispose()
+                except Exception:
+                    # Best-effort cleanup; failure to dispose must not mask
+                    # the original initialization error.
+                    pass
+            raise
+
+        self._initialized = True
 
     def _ensure_initialized(self, operation: str) -> AsyncEngine:
         """Check that the store is initialized and return the engine.
@@ -182,7 +216,7 @@ class BrownfieldStore:
         Raises:
             PersistenceError: If the store is not initialized.
         """
-        if self._engine is None:
+        if not self._initialized or self._engine is None:
             raise PersistenceError(
                 "BrownfieldStore not initialized. Call initialize() first.",
                 operation=operation,
@@ -668,7 +702,12 @@ class BrownfieldStore:
             ) from e
 
     async def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection.
+
+        Resets ``self._initialized`` so a subsequent ``initialize()`` call
+        can rebuild a fresh engine on the same store instance.
+        """
         if self._engine is not None:
             await self._engine.dispose()
             self._engine = None
+        self._initialized = False
