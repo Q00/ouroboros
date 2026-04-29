@@ -53,6 +53,21 @@ from ouroboros.router import extract_first_argument
             "goal: test\nconstraints:\n  - keep it simple\nacceptance_criteria:\n  - works",
             id="multiline-inline-content-preserved",
         ),
+        pytest.param(
+            r"C:\temp\seed.yaml --strict",
+            r"C:\temp\seed.yaml --strict",
+            id="windows-drive-path-preserved",
+        ),
+        pytest.param(
+            r"\\server\share\seed.yaml --strict",
+            r"\\server\share\seed.yaml --strict",
+            id="windows-unc-path-preserved",
+        ),
+        pytest.param(
+            "  C:\\temp\\seed.yaml --strict",
+            "  C:\\temp\\seed.yaml --strict",
+            id="windows-drive-path-with-incidental-leading-whitespace-preserved",
+        ),
     ],
 )
 def test_extract_first_argument_returns_full_argument_payload(
