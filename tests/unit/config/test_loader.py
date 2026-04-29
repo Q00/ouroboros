@@ -588,6 +588,59 @@ class TestRuntimeHelperLookups:
         ):
             assert get_max_parallel_workers() == 5
 
+    @pytest.mark.parametrize(
+        "config_content",
+        [
+            "economics:\n  default_tier: invalid_tier\n",
+            "orchestrator:\n  runtime_backend: invalid_backend\n",
+        ],
+    )
+    def test_get_max_parallel_workers_ignores_unrelated_invalid_config(
+        self,
+        config_content: str,
+        tmp_path: Path,
+    ) -> None:
+        """Worker-cap lookup should not validate unrelated config sections."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            config_content,
+            encoding="utf-8",
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        ):
+            assert get_max_parallel_workers() == 3
+
+    @pytest.mark.parametrize(
+        "config_content",
+        [
+            "economics:\n  default_tier: invalid_tier\n"
+            "orchestrator:\n  max_parallel_workers: 5\n",
+            "orchestrator:\n"
+            "  runtime_backend: invalid_backend\n"
+            "  max_parallel_workers: 5\n",
+        ],
+    )
+    def test_get_max_parallel_workers_reads_cap_despite_unrelated_invalid_config(
+        self,
+        config_content: str,
+        tmp_path: Path,
+    ) -> None:
+        """A valid worker cap should not be blocked by unrelated invalid fields."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            config_content,
+            encoding="utf-8",
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+        ):
+            assert get_max_parallel_workers() == 5
+
     def test_get_max_parallel_workers_defaults_when_config_missing(
         self,
         tmp_path: Path,
@@ -621,6 +674,23 @@ class TestRuntimeHelperLookups:
 
         assert exc_info.value.config_key == "orchestrator.max_parallel_workers"
         assert "max_parallel_workers" in str(exc_info.value)
+
+    def test_get_max_parallel_workers_rejects_malformed_config_yaml(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Malformed config YAML should still fail clearly."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("orchestrator:\n  max_parallel_workers: [\n", encoding="utf-8")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            get_max_parallel_workers()
+
+        assert "Failed to parse configuration file" in str(exc_info.value)
 
 
 class TestLLMHelperLookups:

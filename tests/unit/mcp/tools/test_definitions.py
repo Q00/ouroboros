@@ -133,22 +133,21 @@ class TestExecuteSeedHandler:
         assert "max_parallel_workers" in str(result.error)
         assert "Invalid parallel worker configuration" not in str(result.error)
 
-    async def test_handle_reports_unrelated_config_error_with_same_prefix(self) -> None:
-        """Unrelated config failures should use the same handler-context prefix."""
+    async def test_handle_reports_parse_config_error_with_same_prefix(self) -> None:
+        """Non-worker config failures should use the same handler-context prefix."""
         handler = ExecuteSeedHandler()
 
         with patch(
             "ouroboros.mcp.tools.execution_handlers.get_max_parallel_workers",
             side_effect=ConfigError(
-                "Configuration validation failed: economics.default_tier",
-                config_key="economics.default_tier",
+                "Failed to parse configuration file: invalid YAML",
             ),
         ):
             result = await handler.handle({"seed_content": VALID_SEED_YAML})
 
         assert result.is_err
         assert "Execution handler config error" in str(result.error)
-        assert "economics.default_tier" in str(result.error)
+        assert "Failed to parse configuration file" in str(result.error)
         assert "Invalid parallel worker configuration" not in str(result.error)
 
     def test_execute_seed_handler_factory_accepts_runtime_backend(self) -> None:

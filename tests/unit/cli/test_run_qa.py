@@ -152,6 +152,19 @@ def test_resolve_max_parallel_workers_rejects_invalid_config(
     assert exc_info.value.exit_code == 1
 
 
+def test_resolve_max_parallel_workers_ignores_unrelated_invalid_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrelated invalid config should not block CLI worker-cap resolution."""
+    monkeypatch.delenv("OUROBOROS_MAX_PARALLEL_WORKERS", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("economics:\n  default_tier: invalid_tier\n", encoding="utf-8")
+
+    with patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path):
+        assert _resolve_max_parallel_workers() == 3
+
+
 @pytest.mark.asyncio
 async def test_run_orchestrator_passes_artifact_and_reference_to_qa(tmp_path: Path) -> None:
     """CLI QA should use the generated verification artifact and raw reference."""
