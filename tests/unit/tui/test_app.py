@@ -279,6 +279,58 @@ class TestOuroborosTUIMessageHandlers:
         }
         assert app.state.ac_tree["nodes"]["ac_1"]["children_ids"] == ["ac_1_sub_1"]
 
+    def test_decomposition_event_preserves_existing_parent_siblings(self) -> None:
+        """Decomposition children should append to the parent without replacing siblings."""
+        app = OuroborosTUI()
+        app.state.ac_tree = {
+            "root_id": "root",
+            "nodes": {
+                "root": {
+                    "id": "root",
+                    "content": "Acceptance Criteria",
+                    "children_ids": ["ac_parent"],
+                },
+                "ac_parent": {
+                    "id": "ac_parent",
+                    "content": "Composite AC",
+                    "status": "executing",
+                    "children_ids": ["ac_existing"],
+                },
+                "ac_existing": {
+                    "id": "ac_existing",
+                    "content": "Existing child",
+                    "status": "pending",
+                    "parent_id": "ac_parent",
+                    "children_ids": [],
+                },
+            },
+        }
+
+        app._update_state_from_event(
+            BaseEvent(
+                type="ac.decomposition.completed",
+                aggregate_type="ac_decomposition",
+                aggregate_id="ac_parent",
+                data={
+                    "execution_id": "exec_123",
+                    "child_ac_ids": ["ac_generated", "ac_existing"],
+                    "child_contents": ["Generated child", "Existing child updated"],
+                    "depth": 1,
+                    "reasoning": "Split child work",
+                },
+            )
+        )
+
+        parent = app.state.ac_tree["nodes"]["ac_parent"]
+        generated = app.state.ac_tree["nodes"]["ac_generated"]
+
+        assert parent["children_ids"] == ["ac_existing", "ac_generated"]
+        assert generated["parent_id"] == "ac_parent"
+        assert generated["content"] == "Generated child"
+        assert generated["depth"] == 2
+        assert app.state.ac_tree["nodes"]["ac_existing"]["content"] == "Existing child"
+        assert app.state.ac_tree["nodes"]["ac_existing"]["parent_id"] == "ac_parent"
+
     def test_on_pause_requested(self) -> None:
         """Test handling PauseRequested message."""
         app = OuroborosTUI()

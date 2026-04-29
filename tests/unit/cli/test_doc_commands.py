@@ -155,6 +155,7 @@ def test_skill_resume_commands_parse(argv: list[str]) -> None:
 # "No such command".
 CLAUDE_MD_BACKED_BY_CLI: list[list[str]] = [
     ["run", "--help"],
+    ["rlm", "--help"],
     ["init", "--help"],
     ["config", "--help"],
     ["status", "--help"],

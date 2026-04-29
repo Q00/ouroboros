@@ -1,0 +1,202 @@
+{
+  "schema_version": "rlm.long_context_truncation_fixture.v1",
+  "fixture_id": "rlm-long-context-truncation-v1",
+  "description": "Deterministic long-context target that exceeds the configured chunk budget and declares the facts an RLM completion must retain after bounded truncation.",
+  "target": {
+    "path": "long_context_truncation_target.txt",
+    "encoding": "utf-8",
+    "line_count": 12,
+    "lines": [
+      "FACT:LC-001 command isolation is mandatory: ooo rlm is the only allowed entrypoint for this recursive run.",
+      "filler-001 deterministic padding for the first retained chunk.",
+      "FACT:LC-002 Hermes must be invoked through execute_task_to_result with an empty tools list.",
+      "filler-002 deterministic padding for the second retained chunk.",
+      "FACT:LC-003 the AC tree depth cap is 5 and the ambiguity threshold is 0.2.",
+      "filler-003 deterministic padding for the third retained chunk.",
+      "FACT:LC-004 trace replay must link rlm_node_id, ac_node_id, call_id, and parent_call_id.",
+      "filler-004 deterministic padding for the fourth retained chunk.",
+      "FACT:LC-005 overflow fact beyond the truncation budget: tail evidence must not be claimed as retained.",
+      "filler-005 deterministic overflow padding that should be omitted.",
+      "FACT:LC-006 overflow fact beyond the truncation budget: unselected chunks must not appear in completion evidence.",
+      "filler-006 deterministic overflow padding that should be omitted."
+    ]
+  },
+  "recursive_run": {
+    "schema_version": "rlm.recursive_fixture_config.v1",
+    "initial_prompt": "Analyze the long-context truncation fixture recursively, cite every retained fact, and report the truncation boundary without claiming omitted facts.",
+    "initial_state": {
+      "run_id": "rlm_generation_0",
+      "run_state": "initialized",
+      "root_rlm_node_id": "rlm_node_root",
+      "root_ac_node_id": "rlm_ac_root",
+      "root_node_state": "queued",
+      "root_ac_status": "pending",
+      "root_ac_content": "Analyze the long-context truncation fixture recursively, cite every retained fact, and report the truncation boundary without claiming omitted facts.",
+      "work_queue": [
+        "rlm_node_root"
+      ],
+      "max_depth": 5,
+      "ambiguity_threshold": 0.2,
+      "max_iterations": 8
+    },
+    "iteration_limits": {
+      "max_depth": 5,
+      "ambiguity_threshold": 0.2,
+      "chunk_line_limit": 2,
+      "max_atomic_chunks": 4,
+      "max_iterations": 8
+    },
+    "expected_outputs": {
+      "status": "completed",
+      "target_kind": "path",
+      "termination_reason": "parent_synthesis_completed",
+      "hermes_subcall_count": 5,
+      "selected_chunk_ids": [
+        "long_context_truncation_target.txt:1-2",
+        "long_context_truncation_target.txt:3-4",
+        "long_context_truncation_target.txt:5-6",
+        "long_context_truncation_target.txt:7-8"
+      ],
+      "omitted_chunk_ids": [
+        "long_context_truncation_target.txt:9-10",
+        "long_context_truncation_target.txt:11-12"
+      ],
+      "required_fact_ids": [
+        "LC-001",
+        "LC-002",
+        "LC-003",
+        "LC-004"
+      ],
+      "forbidden_fact_ids": [
+        "LC-005",
+        "LC-006"
+      ],
+      "required_output_fields": [
+        "mode",
+        "verdict",
+        "confidence",
+        "result",
+        "evidence_references",
+        "residual_gaps"
+      ]
+    }
+  },
+  "truncation_config": {
+    "chunk_line_limit": 2,
+    "max_atomic_chunks": 4,
+    "expected_selected_chunk_ids": [
+      "long_context_truncation_target.txt:1-2",
+      "long_context_truncation_target.txt:3-4",
+      "long_context_truncation_target.txt:5-6",
+      "long_context_truncation_target.txt:7-8"
+    ],
+    "expected_omitted_chunk_ids": [
+      "long_context_truncation_target.txt:9-10",
+      "long_context_truncation_target.txt:11-12"
+    ],
+    "truncation_boundary": {
+      "last_retained_line": 8,
+      "omitted_line_count": 4
+    }
+  },
+  "expected_retained_facts": [
+    {
+      "fact_id": "LC-001",
+      "line": 1,
+      "chunk_id": "long_context_truncation_target.txt:1-2",
+      "text": "FACT:LC-001 command isolation is mandatory: ooo rlm is the only allowed entrypoint for this recursive run.",
+      "must_appear_in": [
+        "chunk_prompt",
+        "parent_synthesis_prompt",
+        "completion_evidence"
+      ]
+    },
+    {
+      "fact_id": "LC-002",
+      "line": 3,
+      "chunk_id": "long_context_truncation_target.txt:3-4",
+      "text": "FACT:LC-002 Hermes must be invoked through execute_task_to_result with an empty tools list.",
+      "must_appear_in": [
+        "chunk_prompt",
+        "parent_synthesis_prompt",
+        "completion_evidence"
+      ]
+    },
+    {
+      "fact_id": "LC-003",
+      "line": 5,
+      "chunk_id": "long_context_truncation_target.txt:5-6",
+      "text": "FACT:LC-003 the AC tree depth cap is 5 and the ambiguity threshold is 0.2.",
+      "must_appear_in": [
+        "chunk_prompt",
+        "parent_synthesis_prompt",
+        "completion_evidence"
+      ]
+    },
+    {
+      "fact_id": "LC-004",
+      "line": 7,
+      "chunk_id": "long_context_truncation_target.txt:7-8",
+      "text": "FACT:LC-004 trace replay must link rlm_node_id, ac_node_id, call_id, and parent_call_id.",
+      "must_appear_in": [
+        "chunk_prompt",
+        "parent_synthesis_prompt",
+        "completion_evidence"
+      ]
+    }
+  ],
+  "expected_omitted_facts": [
+    {
+      "fact_id": "LC-005",
+      "line": 9,
+      "chunk_id": "long_context_truncation_target.txt:9-10",
+      "text": "FACT:LC-005 overflow fact beyond the truncation budget: tail evidence must not be claimed as retained."
+    },
+    {
+      "fact_id": "LC-006",
+      "line": 11,
+      "chunk_id": "long_context_truncation_target.txt:11-12",
+      "text": "FACT:LC-006 overflow fact beyond the truncation budget: unselected chunks must not appear in completion evidence."
+    }
+  ],
+  "completion_requirements": [
+    {
+      "requirement_id": "cite-every-retained-fact",
+      "description": "A valid completion must cite every retained fact by using evidence from the selected chunk IDs only.",
+      "required_fact_ids": [
+        "LC-001",
+        "LC-002",
+        "LC-003",
+        "LC-004"
+      ],
+      "must_cite_chunk_ids": [
+        "long_context_truncation_target.txt:1-2",
+        "long_context_truncation_target.txt:3-4",
+        "long_context_truncation_target.txt:5-6",
+        "long_context_truncation_target.txt:7-8"
+      ],
+      "required_output_fields": [
+        "mode",
+        "verdict",
+        "confidence",
+        "result",
+        "evidence_references",
+        "residual_gaps"
+      ],
+      "minimum_confidence": 0.8
+    },
+    {
+      "requirement_id": "respect-truncation-boundary",
+      "description": "A valid completion must not claim facts that live beyond the retained truncation boundary.",
+      "must_not_claim_fact_ids": [
+        "LC-005",
+        "LC-006"
+      ],
+      "must_report_truncation": true,
+      "truncation_boundary": {
+        "last_retained_line": 8,
+        "omitted_line_count": 4
+      }
+    }
+  ]
+}

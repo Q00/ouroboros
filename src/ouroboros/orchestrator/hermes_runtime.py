@@ -13,11 +13,13 @@ from collections.abc import AsyncIterator, Mapping
 import contextlib
 from dataclasses import replace
 from datetime import UTC, datetime
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 from typing import Any
+from uuid import uuid4
 
 from ouroboros.config import get_hermes_cli_path
 from ouroboros.core.errors import ProviderError
@@ -42,9 +44,14 @@ from ouroboros.router import (
 log = get_logger(__name__)
 
 _INTERVIEW_SESSION_METADATA_KEY = "ouroboros_interview_session_id"
+HERMES_SUBCALL_ID_ENV_VAR = "OUROBOROS_HERMES_SUBCALL_ID"
 
 # Hermes session ID format: YYYYMMDD_HHMMSS_xxxxxx
 _HERMES_SESSION_ID_PATTERN = re.compile(r"^session_id:\s+(?P<session_id>\d{8}_\d{6}_[a-f0-9]+)\s*$")
+_HERMES_SUBCALL_ID_PATTERN = re.compile(r"^(?:hermes|rlm)_subcall_[a-f0-9]{32}$")
+_HERMES_SUBCALL_ID_LINE_PATTERN = re.compile(
+    r"^\s*-?\s*subcall_id:\s+(?P<subcall_id>(?:hermes|rlm)_subcall_[a-f0-9]{32})\s*$"
+)
 _REASONING_HEADER_PREFIX = "┌─ Reasoning"
 _REASONING_BOX_PREFIXES = ("│", "├", "└")
 _HERMES_BANNER_LINE_PATTERN = re.compile(r"^[╭┌].*Hermes.*[╮┐]$")
@@ -92,6 +99,48 @@ def _parse_quiet_output(output: str) -> tuple[str, str | None]:
 
     content = "\n".join(content_lines)
     return _strip_reasoning_prelude(content), session_id
+
+
+def _new_hermes_subcall_id() -> str:
+    """Return a unique Hermes invocation boundary identifier."""
+    return f"hermes_subcall_{uuid4().hex}"
+
+
+def _valid_hermes_subcall_id(value: object) -> str | None:
+    """Return a syntactically valid sub-call ID string."""
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    return candidate if _HERMES_SUBCALL_ID_PATTERN.fullmatch(candidate) else None
+
+
+def _extract_hermes_subcall_id_from_prompt(prompt: str) -> str | None:
+    """Extract an outer-scaffold sub-call ID from an RLM prompt envelope."""
+    try:
+        parsed = json.loads(prompt)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, Mapping):
+        trace = parsed.get("trace")
+        call_context = parsed.get("call_context")
+        for value in (
+            parsed.get("subcall_id"),
+            trace.get("subcall_id") if isinstance(trace, Mapping) else None,
+            call_context.get("subcall_id") if isinstance(call_context, Mapping) else None,
+        ):
+            subcall_id = _valid_hermes_subcall_id(value)
+            if subcall_id is not None:
+                return subcall_id
+
+    for line in prompt.splitlines():
+        match = _HERMES_SUBCALL_ID_LINE_PATTERN.fullmatch(line)
+        if match is not None:
+            return match.group("subcall_id")
+
+    return None
 
 
 class HermesCliRuntime(AgentRuntime):
@@ -164,10 +213,14 @@ class HermesCliRuntime(AgentRuntime):
 
         return shutil.which(self._default_cli_name) or self._default_cli_name
 
-    def _build_child_env(self) -> dict[str, str]:
+    def _build_child_env(self, *, subcall_id: str | None = None) -> dict[str, str]:
         """Build an isolated environment for child runtime processes."""
         env = os.environ.copy()
-        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
+        for key in (
+            "OUROBOROS_AGENT_RUNTIME",
+            "OUROBOROS_LLM_BACKEND",
+            HERMES_SUBCALL_ID_ENV_VAR,
+        ):
             env.pop(key, None)
 
         try:
@@ -180,6 +233,8 @@ class HermesCliRuntime(AgentRuntime):
             raise RuntimeError(msg)
 
         env["_OUROBOROS_DEPTH"] = str(depth)
+        if subcall_id is not None:
+            env[HERMES_SUBCALL_ID_ENV_VAR] = subcall_id
         return env
 
     def _build_runtime_handle(
@@ -382,6 +437,7 @@ class HermesCliRuntime(AgentRuntime):
                 yield message
             return
 
+        subcall_id = _extract_hermes_subcall_id_from_prompt(prompt) or _new_hermes_subcall_id()
         full_prompt = self._compose_prompt(prompt, system_prompt, tools)
 
         args = [self._cli_path, "chat"]
@@ -401,7 +457,7 @@ class HermesCliRuntime(AgentRuntime):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._cwd,
-            env=self._build_child_env(),
+            env=self._build_child_env(subcall_id=subcall_id),
         )
 
         stdout_task = asyncio.create_task(
@@ -433,7 +489,11 @@ class HermesCliRuntime(AgentRuntime):
             yield AgentMessage(
                 type="result",
                 content=f"Hermes execution failed:\n{e}",
-                data={"subtype": "error", "error_type": "TimeoutError"},
+                data={
+                    "subtype": "error",
+                    "error_type": "TimeoutError",
+                    "subcall_id": subcall_id,
+                },
                 resume_handle=handle,
             )
             return
@@ -446,7 +506,7 @@ class HermesCliRuntime(AgentRuntime):
             yield AgentMessage(
                 type="result",
                 content=f"Hermes execution failed:\n{failure_content}",
-                data={"subtype": "error", "exit_code": returncode},
+                data={"subtype": "error", "exit_code": returncode, "subcall_id": subcall_id},
                 resume_handle=handle,
             )
             return
@@ -458,7 +518,7 @@ class HermesCliRuntime(AgentRuntime):
         yield AgentMessage(
             type="result",
             content=clean_content,
-            data={"subtype": "success", "session_id": session_id},
+            data={"subtype": "success", "session_id": session_id, "subcall_id": subcall_id},
             resume_handle=new_handle,
         )
 

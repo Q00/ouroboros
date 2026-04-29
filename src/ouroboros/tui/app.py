@@ -338,20 +338,25 @@ class OuroborosTUI(App[None]):
             if parent_ac_id in nodes:
                 # Update parent to show decomposed status
                 nodes[parent_ac_id]["status"] = "decomposed"
-                nodes[parent_ac_id]["children_ids"] = child_ac_ids
+                existing_children = list(nodes[parent_ac_id].get("children_ids", []))
+                for child_id in child_ac_ids:
+                    if child_id not in existing_children:
+                        existing_children.append(child_id)
+                nodes[parent_ac_id]["children_ids"] = existing_children
 
                 # Add child nodes
                 for _i, (child_id, child_content) in enumerate(
                     zip(child_ac_ids, child_contents, strict=False)
                 ):
+                    existing_child = nodes.get(child_id, {})
                     nodes[child_id] = {
                         "id": child_id,
-                        "content": child_content,
-                        "status": "pending",
-                        "depth": depth + 1,
+                        "content": existing_child.get("content", child_content),
+                        "status": existing_child.get("status", "pending"),
+                        "depth": existing_child.get("depth", depth + 1),
                         "parent_id": parent_ac_id,
-                        "is_atomic": False,
-                        "children_ids": [],
+                        "is_atomic": existing_child.get("is_atomic", False),
+                        "children_ids": existing_child.get("children_ids", []),
                     }
 
                 self._state.ac_tree["nodes"] = nodes

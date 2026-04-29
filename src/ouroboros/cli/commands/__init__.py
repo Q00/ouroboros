@@ -8,4 +8,5 @@ This module contains the command group implementations:
 - mcp: MCP server management
 - pm: Generate Product Requirements Documents
 - setup: Brownfield repository scanning and registration
+- rlm: Run the isolated Recursive Language Model MVP path
 """

@@ -17,6 +17,7 @@ When the user types any of these commands, read the corresponding SKILL.md file 
 | `ooo interview ...` | Read `skills/interview/SKILL.md` and follow it |
 | `ooo seed` | Read `skills/seed/SKILL.md` and follow it |
 | `ooo run` | Read `skills/run/SKILL.md` and follow it |
+| `ooo rlm ...` | Read `skills/rlm/SKILL.md` and follow it |
 | `ooo evaluate` or `ooo eval` | Read `skills/evaluate/SKILL.md` and follow it |
 | `ooo evolve ...` | Read `skills/evolve/SKILL.md` and follow it |
 | `ooo unstuck` or `ooo stuck` or `ooo lateral` | Read `skills/unstuck/SKILL.md` and follow it |
@@ -71,6 +72,7 @@ Each command loads its agent/MCP on-demand. Details in each skill file.
 | `ooo interview` | `ouroboros:socratic-interviewer` |
 | `ooo seed` | `ouroboros:seed-architect` |
 | `ooo run` | MCP required |
+| `ooo rlm` | Dual-layer Recursive Language Model MVP |
 | `ooo evolve` | MCP: `evolve_step` |
 | `ooo evaluate` | `ouroboros:evaluator` |
 | `ooo qa` | `ouroboros:qa-judge` |

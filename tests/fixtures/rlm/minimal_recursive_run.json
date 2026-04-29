@@ -1,0 +1,137 @@
+{
+  "schema_version": "rlm.minimal_recursive_run_fixture.v1",
+  "generation_id": "rlm_generation_fixture_minimal",
+  "description": "Minimal replay fixture for one parent Hermes sub-call that creates one child AC and one child Hermes call linked back to the parent.",
+  "parent": {
+    "call_id": "rlm_call_fixture_parent",
+    "subcall_id": "rlm_subcall_fixture_parent",
+    "trace_id": "rlm_trace_rlm_call_fixture_parent",
+    "rlm_node_id": "rlm_node_fixture_parent",
+    "ac_node_id": "rlm_ac_fixture_parent"
+  },
+  "child": {
+    "call_id": "rlm_call_fixture_child_001",
+    "subcall_id": "rlm_subcall_fixture_child_001",
+    "trace_id": "rlm_trace_rlm_call_fixture_child_001",
+    "parent_trace_id": "rlm_trace_rlm_call_fixture_parent",
+    "causal_parent_event_id": "rlm_call_fixture_parent",
+    "rlm_node_id": "rlm_node_fixture_child_001",
+    "ac_node_id": "rlm_ac_fixture_child_001",
+    "selected_chunk_ids": [
+      "fixture.py:1-1"
+    ]
+  },
+  "ac_tree": {
+    "root_id": "rlm_ac_fixture_parent",
+    "max_depth": 5,
+    "nodes": {
+      "rlm_ac_fixture_parent": {
+        "id": "rlm_ac_fixture_parent",
+        "content": "Fixture parent AC requiring recursive decomposition",
+        "depth": 0,
+        "parent_id": null,
+        "status": "decomposed",
+        "is_atomic": false,
+        "children_ids": [
+          "rlm_ac_fixture_child_001"
+        ],
+        "execution_id": null,
+        "originating_subcall_trace_id": null,
+        "metadata": {
+          "rlm_node_id": "rlm_node_fixture_parent",
+          "stable_identity": "rlm-fixture:parent"
+        }
+      },
+      "rlm_ac_fixture_child_001": {
+        "id": "rlm_ac_fixture_child_001",
+        "content": "Fixture child AC produced by the parent Hermes sub-call",
+        "depth": 1,
+        "parent_id": "rlm_ac_fixture_parent",
+        "status": "pending",
+        "is_atomic": true,
+        "children_ids": [],
+        "execution_id": null,
+        "originating_subcall_trace_id": "rlm_trace_rlm_call_fixture_parent",
+        "metadata": {
+          "rlm_node_id": "rlm_node_fixture_child_001",
+          "source": "rlm.fixture.minimal_recursive_run",
+          "stable_identity": "rlm-fixture:child:001",
+          "originating_subcall_trace_id": "rlm_trace_rlm_call_fixture_parent",
+          "rlm_parent_call_id": "rlm_call_fixture_parent",
+          "rlm_parent_subcall_id": "rlm_subcall_fixture_parent",
+          "rlm_call_depth": 1,
+          "rlm_child_call_context": {
+            "call_id": "rlm_call_fixture_child_001",
+            "parent_call_id": "rlm_call_fixture_parent",
+            "parent_subcall_id": "rlm_subcall_fixture_parent",
+            "depth": 1
+          }
+        }
+      }
+    }
+  },
+  "trace_records": [
+    {
+      "schema_version": "rlm.trace.v1",
+      "trace_id": "rlm_trace_rlm_call_fixture_parent",
+      "subcall_id": "rlm_subcall_fixture_parent",
+      "parent_trace_id": null,
+      "causal_parent_event_id": null,
+      "call_id": "rlm_call_fixture_parent",
+      "parent_call_id": null,
+      "runtime": "hermes",
+      "mode": "decompose_ac",
+      "generation_id": "rlm_generation_fixture_minimal",
+      "rlm_node_id": "rlm_node_fixture_parent",
+      "ac_node_id": "rlm_ac_fixture_parent",
+      "depth": 0,
+      "selected_chunk_ids": [
+        "fixture.py:1-1"
+      ],
+      "generated_child_ac_node_ids": [
+        "rlm_ac_fixture_child_001"
+      ],
+      "resume_handle_id": null,
+      "runtime_handle_id": null,
+      "prompt": "fixture parent decomposition prompt",
+      "completion": "fixture parent decomposition completion",
+      "prompt_hash": null,
+      "response_hash": null,
+      "success": true,
+      "exit_code": 0,
+      "elapsed_ms": 1,
+      "adapter_error": null,
+      "system_prompt_hash": null
+    },
+    {
+      "schema_version": "rlm.trace.v1",
+      "trace_id": "rlm_trace_rlm_call_fixture_child_001",
+      "subcall_id": "rlm_subcall_fixture_child_001",
+      "parent_trace_id": "rlm_trace_rlm_call_fixture_parent",
+      "causal_parent_event_id": "rlm_call_fixture_parent",
+      "call_id": "rlm_call_fixture_child_001",
+      "parent_call_id": "rlm_call_fixture_parent",
+      "runtime": "hermes",
+      "mode": "execute_atomic",
+      "generation_id": "rlm_generation_fixture_minimal",
+      "rlm_node_id": "rlm_node_fixture_child_001",
+      "ac_node_id": "rlm_ac_fixture_child_001",
+      "depth": 1,
+      "selected_chunk_ids": [
+        "fixture.py:1-1"
+      ],
+      "generated_child_ac_node_ids": [],
+      "resume_handle_id": null,
+      "runtime_handle_id": null,
+      "prompt": "fixture child atomic prompt",
+      "completion": "fixture child atomic completion",
+      "prompt_hash": null,
+      "response_hash": null,
+      "success": true,
+      "exit_code": 0,
+      "elapsed_ms": 1,
+      "adapter_error": null,
+      "system_prompt_hash": null
+    }
+  ]
+}

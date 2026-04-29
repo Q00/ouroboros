@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -15,7 +16,11 @@ from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 import ouroboros.orchestrator.hermes_runtime as hermes_runtime_module
-from ouroboros.orchestrator.hermes_runtime import HermesCliRuntime, _parse_quiet_output
+from ouroboros.orchestrator.hermes_runtime import (
+    HERMES_SUBCALL_ID_ENV_VAR,
+    HermesCliRuntime,
+    _parse_quiet_output,
+)
 from ouroboros.router import Resolved, ResolveRequest, SkillDispatchRouter
 
 
@@ -755,6 +760,59 @@ class TestHermesCliRuntime:
         assert messages[0].content == "Finished work"
         assert messages[0].resume_handle is not None
         assert messages[0].resume_handle.native_session_id == "20260413_120000_deadbeef"
+        assert messages[0].data["subcall_id"].startswith("hermes_subcall_")
+
+    @pytest.mark.asyncio
+    async def test_execute_task_generates_unique_subcall_ids_at_hermes_boundary(
+        self,
+    ) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        processes = [
+            _FakeProcess("First\nsession_id: 20260413_120000_deadbeef\n"),
+            _FakeProcess("Second\nsession_id: 20260413_120001_deadbeef\n"),
+        ]
+        envs: list[dict[str, str]] = []
+
+        async def record_exec(*_: object, **kwargs: object) -> _FakeProcess:
+            env = kwargs["env"]
+            assert isinstance(env, dict)
+            envs.append(env)
+            return processes.pop(0)
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            side_effect=record_exec,
+        ):
+            first_messages = [message async for message in runtime.execute_task("Do one thing")]
+            second_messages = [
+                message async for message in runtime.execute_task("Do another thing")
+            ]
+
+        first_subcall_id = first_messages[0].data["subcall_id"]
+        second_subcall_id = second_messages[0].data["subcall_id"]
+        assert isinstance(first_subcall_id, str)
+        assert isinstance(second_subcall_id, str)
+        assert first_subcall_id.startswith("hermes_subcall_")
+        assert second_subcall_id.startswith("hermes_subcall_")
+        assert first_subcall_id != second_subcall_id
+        assert envs[0][HERMES_SUBCALL_ID_ENV_VAR] == first_subcall_id
+        assert envs[1][HERMES_SUBCALL_ID_ENV_VAR] == second_subcall_id
+
+    @pytest.mark.asyncio
+    async def test_execute_task_reuses_rlm_prompt_subcall_id_at_boundary(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp/project")
+        process = _FakeProcess("Finished work\nsession_id: 20260413_120000_deadbeef\n")
+        rlm_subcall_id = "rlm_subcall_" + "a" * 32
+        prompt = json.dumps({"trace": {"subcall_id": rlm_subcall_id}})
+
+        with patch(
+            "ouroboros.orchestrator.hermes_runtime.asyncio.create_subprocess_exec",
+            return_value=process,
+        ) as mock_exec:
+            messages = [message async for message in runtime.execute_task(prompt)]
+
+        assert messages[0].data["subcall_id"] == rlm_subcall_id
+        assert mock_exec.call_args.kwargs["env"][HERMES_SUBCALL_ID_ENV_VAR] == rlm_subcall_id
 
     @pytest.mark.asyncio
     async def test_execute_task_falls_through_on_recoverable_dispatch_failure(
@@ -1070,12 +1128,20 @@ class TestHermesCliRuntimeChildEnv:
             {
                 "OUROBOROS_AGENT_RUNTIME": "hermes",
                 "OUROBOROS_LLM_BACKEND": "claude_code",
+                HERMES_SUBCALL_ID_ENV_VAR: "rlm_subcall_" + "a" * 32,
             },
         ):
             env = runtime._build_child_env()
 
         assert "OUROBOROS_AGENT_RUNTIME" not in env
         assert "OUROBOROS_LLM_BACKEND" not in env
+        assert HERMES_SUBCALL_ID_ENV_VAR not in env
+
+    def test_sets_current_hermes_subcall_id(self) -> None:
+        runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp")
+        env = runtime._build_child_env(subcall_id="rlm_subcall_" + "b" * 32)
+
+        assert env[HERMES_SUBCALL_ID_ENV_VAR] == "rlm_subcall_" + "b" * 32
 
     def test_increments_depth(self) -> None:
         runtime = HermesCliRuntime(cli_path="hermes", cwd="/tmp")

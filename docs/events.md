@@ -84,6 +84,80 @@ Emitted when an individual Acceptance Criterion finishes execution.
 | `ac_id` | `string` | Acceptance criterion identifier |
 | `status` | `string` | `"passed"` or `"failed"` |
 
+### ac.decomposition.completed
+
+Emitted when a parent Acceptance Criterion is decomposed into child ACs.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `execution_id` | `string` | Execution identifier associated with the decomposition |
+| `child_ac_ids` | `string[]` | Generated child Acceptance Criterion identifiers |
+| `child_contents` | `string[]` | Generated child Acceptance Criterion statements |
+| `child_ac_nodes` | `object[]?` | Materialized child AC nodes for replay; each node includes `originating_subcall_trace_id` when created from a Hermes/RLM sub-call trace |
+| `hermes_subquestion_results` | `object[]?` | Structured Hermes decomposition results mapped to generated child AC IDs |
+| `depth` | `integer` | Parent AC depth before decomposition |
+| `reasoning` | `string` | Decomposition rationale |
+
+### rlm.hermes.call.started
+
+Emitted by the isolated `ooo rlm` path before Ouroboros invokes Hermes as the
+inner language model.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema_version` | `string` | RLM trace schema, currently `"rlm.trace.v1"` |
+| `trace_id` | `string?` | Stable trace-record identifier for this persisted sub-call record |
+| `subcall_id` | `string?` | Ouroboros-owned stable sub-call identity; defaults to `hermes.call_id` when not separately assigned |
+| `parent_trace_id` | `string?` | Stable parent trace-record identifier for reconstructing recursive trace ancestry |
+| `causal_parent_event_id` | `string?` | EventStore event ID that causally scheduled or preceded this sub-call |
+| `generation_id` | `string?` | RLM run/generation identifier |
+| `mode` | `string` | Hermes sub-call mode, such as `"decompose_ac"` or `"execute_atomic"` |
+| `rlm_node` | `object?` | Linked RLM node metadata, including `id` and `depth` when available |
+| `ac_node` | `object?` | Linked AC node metadata, including `id`, `depth`, and `child_ids` when generated child AC nodes are recorded |
+| `context.selected_chunk_ids` | `string[]` | Context chunks supplied to this Hermes call |
+| `recursion.generated_child_ac_node_ids` | `string[]` | Generated child AC node IDs created by the outer scaffold from this sub-call |
+| `replay.creates_ac_node_ids` | `string[]` | Replay-oriented alias for generated child AC node IDs |
+| `hermes.call_id` | `string?` | Hermes sub-call identifier |
+| `hermes.subcall_id` | `string?` | Stable sub-call identity duplicated in the Hermes fragment for flat trace readers |
+| `hermes.parent_call_id` | `string?` | Parent Hermes call identifier for recursive/chunk calls |
+| `hermes.runtime` | `string` | Runtime adapter name, normally `"hermes"` |
+| `hermes.resume_handle_id` | `string?` | Readable resume handle identifier when available |
+| `hermes.runtime_handle_id` | `string?` | Readable runtime handle identifier when available |
+| `hermes.prompt` | `string` | Rendered prompt envelope sent to Hermes |
+| `hermes.prompt_hash` | `string?` | Stable hash of the prompt payload |
+| `hermes.system_prompt_hash` | `string?` | Stable hash of the system-prompt policy when recorded |
+| `hermes.depth` | `integer` | Recursive Hermes call depth |
+
+### rlm.hermes.call.completed
+
+Emitted by the isolated `ooo rlm` path after a Hermes inner-model sub-call
+returns or fails.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema_version` | `string` | RLM trace schema, currently `"rlm.trace.v1"` |
+| `trace_id` | `string?` | Stable trace-record identifier for this persisted sub-call record |
+| `subcall_id` | `string?` | Ouroboros-owned stable sub-call identity; defaults to `hermes.call_id` when not separately assigned |
+| `parent_trace_id` | `string?` | Stable parent trace-record identifier for reconstructing recursive trace ancestry |
+| `causal_parent_event_id` | `string?` | EventStore event ID that causally scheduled or preceded this sub-call |
+| `generation_id` | `string?` | RLM run/generation identifier |
+| `mode` | `string` | Hermes sub-call mode, such as `"decompose_ac"` or `"execute_atomic"` |
+| `rlm_node` | `object?` | Linked RLM node metadata, including `id` and `depth` when available |
+| `ac_node` | `object?` | Linked AC node metadata, including `id`, `depth`, and `child_ids` when generated child AC nodes are recorded |
+| `context.selected_chunk_ids` | `string[]` | Context chunks supplied to this Hermes call |
+| `recursion.generated_child_ac_node_ids` | `string[]` | Generated child AC node IDs created by the outer scaffold from this sub-call |
+| `replay.creates_ac_node_ids` | `string[]` | Replay-oriented alias for generated child AC node IDs |
+| `hermes.call_id` | `string?` | Hermes sub-call identifier |
+| `hermes.subcall_id` | `string?` | Stable sub-call identity duplicated in the Hermes fragment for flat trace readers |
+| `hermes.parent_call_id` | `string?` | Parent Hermes call identifier for recursive/chunk calls |
+| `hermes.completion` | `string` | Raw Hermes final message |
+| `hermes.response_hash` | `string?` | Stable hash of the completion payload |
+| `hermes.success` | `boolean?` | Whether the Hermes sub-call completed successfully |
+| `hermes.exit_code` | `integer?` | Normalized process/task exit code |
+| `hermes.elapsed_ms` | `integer?` | Elapsed call time in milliseconds when available |
+| `hermes.adapter_error` | `object?` | Adapter/provider error details when the call fails |
+| `hermes.runtime_handle_id` | `string?` | Readable runtime handle identifier when available |
+
 ### mcp.job.cancelled
 
 Emitted when a background MCP job is cancelled.

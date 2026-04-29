@@ -172,6 +172,36 @@ class TestDecomposedEvent:
 
         assert event.data["child_count"] == 5
 
+    def test_event_can_include_serialized_child_ac_nodes(self):
+        """Decomposition events can carry materialized child AC nodes for replay."""
+        from ouroboros.events.decomposition import create_ac_decomposed_event
+
+        child_nodes = [
+            {
+                "id": "ac_child1",
+                "content": "Child 1",
+                "depth": 1,
+                "parent_id": "ac_parent",
+                "status": "pending",
+                "is_atomic": False,
+                "children_ids": [],
+                "execution_id": None,
+                "metadata": {"title": "Child 1"},
+            }
+        ]
+
+        event = create_ac_decomposed_event(
+            parent_ac_id="ac_parent",
+            execution_id="exec_123",
+            child_ac_ids=["ac_child1"],
+            child_contents=["Child 1"],
+            depth=0,
+            reasoning="Test",
+            child_ac_nodes=child_nodes,
+        )
+
+        assert event.data["child_ac_nodes"] == child_nodes
+
 
 class TestMarkedAtomicEvent:
     """Tests for create_ac_marked_atomic_event factory."""

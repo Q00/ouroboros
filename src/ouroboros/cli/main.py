@@ -22,6 +22,7 @@ from ouroboros.cli.commands import (
     mcp,
     pm,
     resume,
+    rlm,
     run,
     setup,
     status,
@@ -51,6 +52,7 @@ app.add_typer(tui.app, name="tui")
 app.add_typer(pm.app, name="pm")
 app.add_typer(resume.app, name="resume")
 app.add_typer(uninstall.app, name="uninstall")
+app.command(name="rlm")(rlm.command)
 
 
 # Top-level convenience aliases

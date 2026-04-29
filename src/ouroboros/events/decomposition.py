@@ -10,6 +10,8 @@ Event naming follows dot.notation.past_tense convention.
 
 from __future__ import annotations
 
+from typing import Any
+
 from ouroboros.events.base import BaseEvent
 
 
@@ -60,6 +62,8 @@ def create_ac_decomposed_event(
     child_contents: list[str],
     depth: int,
     reasoning: str,
+    hermes_subquestion_results: list[dict[str, Any]] | None = None,
+    child_ac_nodes: list[dict[str, Any]] | None = None,
 ) -> BaseEvent:
     """Factory for AC decomposition event.
 
@@ -72,22 +76,32 @@ def create_ac_decomposed_event(
         child_contents: List of child AC content strings.
         depth: Current depth in the AC tree.
         reasoning: Explanation of the decomposition strategy.
+        hermes_subquestion_results: Optional structured Hermes sub-question
+            records attached to the generated child AC IDs for RLM trace replay.
+        child_ac_nodes: Optional serialized child AC nodes materialized by the
+            outer scaffold for trace replay.
 
     Returns:
         BaseEvent with type "ac.decomposition.completed".
     """
+    data: dict[str, Any] = {
+        "execution_id": execution_id,
+        "child_ac_ids": child_ac_ids,
+        "child_contents": child_contents,
+        "child_count": len(child_ac_ids),
+        "depth": depth,
+        "reasoning": reasoning,
+    }
+    if hermes_subquestion_results is not None:
+        data["hermes_subquestion_results"] = hermes_subquestion_results
+    if child_ac_nodes is not None:
+        data["child_ac_nodes"] = child_ac_nodes
+
     return BaseEvent(
         type="ac.decomposition.completed",
         aggregate_type="ac_decomposition",
         aggregate_id=parent_ac_id,
-        data={
-            "execution_id": execution_id,
-            "child_ac_ids": child_ac_ids,
-            "child_contents": child_contents,
-            "child_count": len(child_ac_ids),
-            "depth": depth,
-            "reasoning": reasoning,
-        },
+        data=data,
     )
 
 

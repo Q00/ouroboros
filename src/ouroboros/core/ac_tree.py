@@ -44,6 +44,8 @@ class ACNode:
         is_atomic: Whether this AC is atomic (no further decomposition).
         children_ids: Tuple of child AC IDs (immutable).
         execution_id: Associated execution ID if executing/completed.
+        originating_subcall_trace_id: Trace record ID of the Hermes sub-call
+            that originated this AC node, when created by RLM recursion.
         metadata: Additional context (e.g., complexity_score, reasoning).
     """
 
@@ -55,6 +57,7 @@ class ACNode:
     is_atomic: bool = False
     children_ids: tuple[str, ...] = field(default_factory=tuple)
     execution_id: str | None = None
+    originating_subcall_trace_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
@@ -98,6 +101,7 @@ class ACNode:
             is_atomic=self.is_atomic,
             children_ids=self.children_ids,
             execution_id=self.execution_id,
+            originating_subcall_trace_id=self.originating_subcall_trace_id,
             metadata=self.metadata,
         )
 
@@ -120,6 +124,7 @@ class ACNode:
             is_atomic=is_atomic,
             children_ids=self.children_ids,
             execution_id=self.execution_id,
+            originating_subcall_trace_id=self.originating_subcall_trace_id,
             metadata=self.metadata,
         )
 
@@ -141,8 +146,21 @@ class ACNode:
             is_atomic=False,
             children_ids=children_ids,
             execution_id=self.execution_id,
+            originating_subcall_trace_id=self.originating_subcall_trace_id,
             metadata=self.metadata,
         )
+
+    def with_appended_children(self, children_ids: tuple[str, ...]) -> ACNode:
+        """Return a new ACNode with new child IDs appended once.
+
+        Existing children keep their relative order so previously linked
+        siblings are not disturbed when a decomposition adds more child nodes.
+        """
+        merged_children = list(self.children_ids)
+        for child_id in children_ids:
+            if child_id not in merged_children:
+                merged_children.append(child_id)
+        return self.with_children(tuple(merged_children))
 
     def with_execution_id(self, execution_id: str) -> ACNode:
         """Return a new ACNode with execution ID set.
@@ -162,8 +180,35 @@ class ACNode:
             is_atomic=self.is_atomic,
             children_ids=self.children_ids,
             execution_id=execution_id,
+            originating_subcall_trace_id=self.originating_subcall_trace_id,
             metadata=self.metadata,
         )
+
+
+def _normalized_identity_text(value: object) -> str:
+    """Return a stable text key component for AC identity matching."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.casefold().split())
+
+
+def _ac_node_identity_keys(node: ACNode) -> set[str]:
+    """Return stable identity keys that can identify duplicate child AC nodes."""
+    keys: set[str] = set()
+    metadata = node.metadata if isinstance(node.metadata, dict) else {}
+    stable_identity = metadata.get("stable_identity")
+    if isinstance(stable_identity, str) and stable_identity.strip():
+        keys.add(stable_identity.strip())
+
+    content_key = _normalized_identity_text(node.content)
+    if content_key:
+        keys.add(f"ac_child_content.v1:{node.parent_id or ''}:{content_key}")
+
+    statement_key = _normalized_identity_text(metadata.get("statement"))
+    if statement_key:
+        keys.add(f"ac_child_content.v1:{node.parent_id or ''}:{statement_key}")
+
+    return keys
 
 
 @dataclass(slots=True)
@@ -183,6 +228,22 @@ class ACTree:
     nodes: dict[str, ACNode] = field(default_factory=dict)
     max_depth: int = 5
 
+    def find_duplicate_child(self, node: ACNode) -> ACNode | None:
+        """Find an existing sibling child node with the same stable identity."""
+        if node.parent_id is None:
+            return None
+
+        identity_keys = _ac_node_identity_keys(node)
+        if not identity_keys:
+            return None
+
+        for existing in self.nodes.values():
+            if existing.id == node.id or existing.parent_id != node.parent_id:
+                continue
+            if identity_keys & _ac_node_identity_keys(existing):
+                return existing
+        return None
+
     def add_node(self, node: ACNode) -> None:
         """Add a node to the tree.
 
@@ -196,7 +257,30 @@ class ACTree:
             msg = f"Node depth {node.depth} exceeds max depth {self.max_depth}"
             raise ValueError(msg)
 
+        duplicate_child = self.find_duplicate_child(node)
+        if duplicate_child is not None:
+            if node.parent_id in self.nodes:
+                parent = self.nodes[node.parent_id]
+                self.nodes[node.parent_id] = parent.with_appended_children((duplicate_child.id,))
+            return
+
+        known_child_ids = tuple(
+            child_id
+            for child_id, child in self.nodes.items()
+            if child.parent_id == node.id and child_id != node.id
+        )
+        if known_child_ids:
+            node = node.with_appended_children(known_child_ids)
+
         self.nodes[node.id] = node
+
+        if (
+            node.parent_id is not None
+            and node.parent_id in self.nodes
+            and node.parent_id != node.id
+        ):
+            parent = self.nodes[node.parent_id]
+            self.nodes[node.parent_id] = parent.with_appended_children((node.id,))
 
         # Set root if this is the first node or depth 0
         if self.root_id is None or node.depth == 0:
@@ -363,6 +447,7 @@ class ACTree:
                     "is_atomic": node.is_atomic,
                     "children_ids": list(node.children_ids),
                     "execution_id": node.execution_id,
+                    "originating_subcall_trace_id": node.originating_subcall_trace_id,
                     "metadata": node.metadata,
                 }
                 for ac_id, node in self.nodes.items()
@@ -394,6 +479,7 @@ class ACTree:
                 is_atomic=node_data.get("is_atomic", False),
                 children_ids=tuple(node_data.get("children_ids", [])),
                 execution_id=node_data.get("execution_id"),
+                originating_subcall_trace_id=node_data.get("originating_subcall_trace_id"),
                 metadata=node_data.get("metadata", {}),
             )
             tree.nodes[node.id] = node

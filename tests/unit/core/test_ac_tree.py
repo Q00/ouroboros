@@ -53,6 +53,7 @@ class TestACNodeCreation:
         assert node.is_atomic is False
         assert node.children_ids == ()
         assert node.execution_id is None
+        assert node.originating_subcall_trace_id is None
         assert node.metadata == {}
 
     def test_acnode_create_with_depth_and_parent(self):
@@ -78,6 +79,7 @@ class TestACNodeCreation:
             is_atomic=True,
             children_ids=(),
             execution_id="exec_123",
+            originating_subcall_trace_id="rlm_trace_decompose_parent",
             metadata={"complexity": 0.5},
         )
 
@@ -85,6 +87,7 @@ class TestACNodeCreation:
         assert node.status == ACStatus.ATOMIC
         assert node.is_atomic is True
         assert node.execution_id == "exec_123"
+        assert node.originating_subcall_trace_id == "rlm_trace_decompose_parent"
         assert node.metadata == {"complexity": 0.5}
 
 
@@ -146,6 +149,16 @@ class TestACNodeWithMethods:
         assert updated.status == ACStatus.DECOMPOSED
         assert updated.is_atomic is False
 
+    def test_with_appended_children_preserves_existing_siblings(self):
+        """with_appended_children() should append new children without duplicates."""
+        original = ACNode.create(content="Test AC").with_children(("ac_child1",))
+
+        updated = original.with_appended_children(("ac_child2", "ac_child1"))
+
+        assert updated.children_ids == ("ac_child1", "ac_child2")
+        assert updated.status == ACStatus.DECOMPOSED
+        assert updated.is_atomic is False
+
     def test_with_execution_id(self):
         """with_execution_id() should set execution_id and status to EXECUTING."""
         original = ACNode.create(content="Test AC")
@@ -153,6 +166,31 @@ class TestACNodeWithMethods:
 
         assert updated.execution_id == "exec_123"
         assert updated.status == ACStatus.EXECUTING
+
+    def test_with_methods_preserve_originating_subcall_trace_id(self):
+        """ACNode transition helpers should preserve trace provenance."""
+        original = ACNode(
+            id="ac_child",
+            content="Child AC",
+            depth=1,
+            originating_subcall_trace_id="rlm_trace_decompose_parent",
+        )
+
+        assert (
+            original.with_status(ACStatus.ATOMIC).originating_subcall_trace_id
+            == "rlm_trace_decompose_parent"
+        )
+        assert (
+            original.with_atomic(True).originating_subcall_trace_id == "rlm_trace_decompose_parent"
+        )
+        assert (
+            original.with_children(("ac_grandchild",)).originating_subcall_trace_id
+            == "rlm_trace_decompose_parent"
+        )
+        assert (
+            original.with_execution_id("exec_123").originating_subcall_trace_id
+            == "rlm_trace_decompose_parent"
+        )
 
 
 class TestACTreeBasicOperations:
@@ -192,6 +230,100 @@ class TestACTreeBasicOperations:
         tree.add_node(root)  # Then add root
 
         assert tree.root_id == root.id
+
+    def test_add_node_links_child_to_existing_parent_without_replacing_siblings(self):
+        """add_node() should link a child to its parent and keep existing siblings."""
+        tree = ACTree()
+        parent = ACNode(
+            id="ac_parent",
+            content="Parent AC",
+            depth=0,
+            children_ids=("ac_existing",),
+        )
+        child = ACNode(
+            id="ac_generated",
+            content="Generated child AC",
+            depth=1,
+            parent_id="ac_parent",
+        )
+
+        tree.add_node(parent)
+        tree.add_node(child)
+        tree.add_node(child)
+
+        assert tree.nodes["ac_generated"].parent_id == "ac_parent"
+        assert tree.nodes["ac_parent"].children_ids == ("ac_existing", "ac_generated")
+
+    def test_add_node_links_existing_child_when_parent_arrives_later(self):
+        """add_node() should merge previously added children into a later parent."""
+        tree = ACTree()
+        child = ACNode(
+            id="ac_generated",
+            content="Generated child AC",
+            depth=1,
+            parent_id="ac_parent",
+        )
+        parent = ACNode(
+            id="ac_parent",
+            content="Parent AC",
+            depth=0,
+            children_ids=("ac_existing",),
+        )
+
+        tree.add_node(child)
+        tree.add_node(parent)
+
+        assert tree.nodes["ac_parent"].children_ids == ("ac_existing", "ac_generated")
+
+    def test_add_node_skips_duplicate_child_by_stable_identity(self):
+        """add_node() should skip a child that matches an existing sibling identity."""
+        tree = ACTree()
+        parent = ACNode(id="ac_parent", content="Parent AC", depth=0)
+        original = ACNode(
+            id="ac_original",
+            content="Implement shared child behavior.",
+            depth=1,
+            parent_id="ac_parent",
+            metadata={"stable_identity": "child_ac_identity:shared"},
+        )
+        duplicate = ACNode(
+            id="ac_duplicate",
+            content="Different wording from a repeated decomposition.",
+            depth=1,
+            parent_id="ac_parent",
+            metadata={"stable_identity": "child_ac_identity:shared"},
+        )
+
+        tree.add_node(parent)
+        tree.add_node(original)
+        tree.add_node(duplicate)
+
+        assert "ac_duplicate" not in tree.nodes
+        assert tree.nodes["ac_parent"].children_ids == ("ac_original",)
+
+    def test_add_node_skips_duplicate_child_by_normalized_statement(self):
+        """add_node() should match duplicate children even without metadata IDs."""
+        tree = ACTree()
+        parent = ACNode(id="ac_parent", content="Parent AC", depth=0)
+        original = ACNode(
+            id="ac_original",
+            content="Implement shared child behavior.",
+            depth=1,
+            parent_id="ac_parent",
+        )
+        duplicate = ACNode(
+            id="ac_duplicate",
+            content="  implement   SHARED child behavior. ",
+            depth=1,
+            parent_id="ac_parent",
+        )
+
+        tree.add_node(parent)
+        tree.add_node(original)
+        tree.add_node(duplicate)
+
+        assert "ac_duplicate" not in tree.nodes
+        assert tree.nodes["ac_parent"].children_ids == ("ac_original",)
 
     def test_add_node_rejects_exceeding_depth(self):
         """add_node() should reject nodes exceeding max_depth."""
@@ -428,6 +560,7 @@ class TestACTreeSerialization:
             content="Test AC",
             depth=0,
             status=ACStatus.PENDING,
+            originating_subcall_trace_id="rlm_trace_decompose_parent",
             metadata={"key": "value"},
         )
         tree.add_node(node)
@@ -438,6 +571,9 @@ class TestACTreeSerialization:
         assert data["max_depth"] == 5
         assert "ac_test" in data["nodes"]
         assert data["nodes"]["ac_test"]["content"] == "Test AC"
+        assert (
+            data["nodes"]["ac_test"]["originating_subcall_trace_id"] == "rlm_trace_decompose_parent"
+        )
         assert data["nodes"]["ac_test"]["metadata"] == {"key": "value"}
 
     def test_from_dict(self):
@@ -455,6 +591,7 @@ class TestACTreeSerialization:
                     "is_atomic": False,
                     "children_ids": [],
                     "execution_id": None,
+                    "originating_subcall_trace_id": "rlm_trace_decompose_parent",
                     "metadata": {},
                 },
             },
@@ -465,6 +602,7 @@ class TestACTreeSerialization:
         assert tree.root_id == "ac_test"
         assert tree.max_depth == 3
         assert tree.get_node("ac_test").content == "Test AC"
+        assert tree.get_node("ac_test").originating_subcall_trace_id == "rlm_trace_decompose_parent"
 
     def test_roundtrip_serialization(self):
         """Tree should survive serialization roundtrip."""
@@ -475,6 +613,7 @@ class TestACTreeSerialization:
             depth=0,
             status=ACStatus.COMPLETED,
             children_ids=("ac_child1", "ac_child2"),
+            originating_subcall_trace_id="rlm_trace_root",
             metadata={"complexity": 0.8},
         )
         original.add_node(node)
@@ -488,4 +627,5 @@ class TestACTreeSerialization:
         assert restored_node.content == node.content
         assert restored_node.status == node.status
         assert restored_node.children_ids == node.children_ids
+        assert restored_node.originating_subcall_trace_id == node.originating_subcall_trace_id
         assert restored_node.metadata == node.metadata

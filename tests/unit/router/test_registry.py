@@ -83,6 +83,14 @@ name: execute
     assert execute.skill_name == "execute"
 
 
+def test_packaged_registry_resolves_rlm_skill() -> None:
+    """The packaged skill registry exposes the new ooo rlm command."""
+    with resolve_skill_dispatch_target("rlm") as target:
+        assert isinstance(target, SkillDispatchTarget)
+        assert target.skill_name == "rlm"
+        assert target.skill_path.name == "SKILL.md"
+
+
 def test_registry_normalizes_canonical_alias_arrays(tmp_path: Path) -> None:
     skills_dir = tmp_path / "skills"
     skill_path = _write_skill(

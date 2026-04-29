@@ -34,6 +34,7 @@ Ouroboros is a **requirement crystallization engine** for AI workflows. It trans
 | `ooo interview` | Socratic requirement clarification | Plugin |
 | `ooo seed` | Generate validated seed spec | Plugin |
 | `ooo run` | Execute seed workflow | MCP |
+| `ooo rlm` | Dual-layer Recursive Language Model MVP | CLI |
 | `ooo evaluate` | 3-stage verification | MCP |
 | `ooo unstuck` | 5 lateral thinking personas | Plugin |
 | `ooo status` | Session status + drift check | MCP |

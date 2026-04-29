@@ -60,6 +60,14 @@ from ouroboros.router.types import ParsedOooCommand as TypesParsedOooCommand
             ),
         ),
         (
+            "ooo rlm src",
+            ParsedOooCommand(
+                skill_name="rlm",
+                command_prefix="ooo rlm",
+                remainder="src",
+            ),
+        ),
+        (
             "  /OUROBOROS:status",
             ParsedOooCommand(
                 skill_name="status",
