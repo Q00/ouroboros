@@ -547,6 +547,12 @@ def get_max_parallel_workers() -> int:
             config_file=str(config_path),
             details={"yaml_error": str(e)},
         ) from e
+    except OSError as e:
+        raise ConfigError(
+            f"Failed to read configuration file: {e}",
+            config_file=str(config_path),
+            details={"os_error": str(e), "error_type": type(e).__name__},
+        ) from e
 
     if config_dict is None:
         # Empty config means no worker-cap override; use the built-in default.

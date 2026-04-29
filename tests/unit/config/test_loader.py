@@ -689,6 +689,46 @@ class TestRuntimeHelperLookups:
 
         assert "Failed to parse configuration file" in str(exc_info.value)
 
+    def test_get_max_parallel_workers_normalizes_directory_at_config_path(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A directory at the config path should surface as ConfigError, not OSError."""
+        config_path = tmp_path / "config.yaml"
+        config_path.mkdir()
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            get_max_parallel_workers()
+
+        assert "Failed to read configuration file" in str(exc_info.value)
+        assert exc_info.value.details["error_type"] == "IsADirectoryError"
+
+    def test_get_max_parallel_workers_normalizes_os_error_on_open(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Any OSError from opening the config file should surface as ConfigError."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("orchestrator:\n  max_parallel_workers: 5\n", encoding="utf-8")
+
+        def _raise_os_error(*_args: object, **_kwargs: object) -> None:
+            raise PermissionError(13, "Permission denied")
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("ouroboros.config.loader.get_config_dir", return_value=tmp_path),
+            patch.object(Path, "open", _raise_os_error),
+            pytest.raises(ConfigError) as exc_info,
+        ):
+            get_max_parallel_workers()
+
+        assert "Failed to read configuration file" in str(exc_info.value)
+        assert exc_info.value.details["error_type"] == "PermissionError"
+
 
 class TestLLMHelperLookups:
     """Tests for LLM backend and model helper lookups."""
