@@ -109,6 +109,8 @@ timeline: list[TimelineEntry] = ledger.replay_timeline(contract_id)
 2. `control.directive.emitted` with `target_type="contract"` and `target_id=<contract_id>`.
 3. Runtime I/O events (`tool.call.*`, `llm.call.*`, and future runtime event families) whose payload or `extra` contains `contract_id=<contract_id>` / `correlation_id`.
 
+Layer 0 returns this union in the EventStore's current canonical order (`timestamp`, then row `id`). It is a raw audit slice, not a strict causal ordering guarantee across aggregates; consumers that need causal/rendered order must use Layer 2 `replay_timeline(contract_id)`, where the projector can apply `caused_by`, `correlation_id`, and domain-specific ordering rules. A future append-sequence column may strengthen Layer 0 without changing the API shape.
+
 Therefore Step 2's implementation work includes adding contract correlation to runtime I/O event factories/adapters whenever work is executing inside a contract. Without that correlation, Layer 0 must omit the event rather than guessing from lineage/session scope.
 
 **Invariants** (re-cited from upstream RFCs so this RFC stays consistent):
@@ -135,9 +137,11 @@ Step 2 — additive event family + contract-targeted directives
         Update contract-serving directive emitters to write control.directive.emitted
         with target_type=contract and target_id=<contract_id>; update tool.call.*
         and llm.call.* producers to carry contract_id/correlation_id in payload
-        or extra when emitted inside a contract. Lineage/session targets may still
-        be emitted as secondary views, but contract replay depends on the contract
-        correlation from day one.
+        or extra when emitted inside a contract. A single directive decision must
+        still produce one control.directive.emitted row; when contract replay is
+        required, the row targets the contract and any lineage/session association
+        is stored as correlation metadata in extra rather than duplicated as a
+        secondary directive event.
         No event_version bump is required for the new contract.* event family;
         the factories use the current payload event_version, and only incompatible
         changes to an existing payload contract bump event_version per #436.
@@ -232,7 +236,7 @@ erDiagram
 
 ## Sequence diagram — one contract's lifecycle through the Ledger
 
-For contract-rooted replay, directive events emitted while serving a contract MUST be written with `target_type="contract"` and `target_id=<contract_id>`. Lineage-level directive events remain valid for lineage replay, but they are not sufficient to reconstruct a single contract's audit stream from `ledger.replay_timeline(contract_id)`.
+For contract-rooted replay, directive events emitted while serving a contract MUST be written once with `target_type="contract"` and `target_id=<contract_id>`. If the same decision also needs lineage/session context, that context belongs in `extra` correlation fields; implementations must not duplicate the directive row with a second lineage/session target because L5's raw 1:1 audit invariant would be lost.
 
 
 ```mermaid
