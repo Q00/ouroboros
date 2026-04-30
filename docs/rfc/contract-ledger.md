@@ -122,8 +122,12 @@ Step 1 — additive code only
         Works against new contract-tagged data immediately, no schema change.
         Historical timelines remain partial until the optional backfill in Step 3.
 
-Step 2 — additive event family
+Step 2 — additive event family + contract-targeted directives
         New factories: contract.created / completed / failed / dependency.recorded.
+        Update contract-serving directive emitters to write control.directive.emitted
+        with target_type=contract and target_id=<contract_id>; lineage/session
+        targets may still be emitted as secondary views, but contract replay depends
+        on the contract target from day one.
         No event_version bump is required for the new contract.* event family;
         the factories use the current payload event_version, and only incompatible
         changes to an existing payload contract bump event_version per #436.
@@ -144,21 +148,31 @@ Step 5 — slow consumer migration
         deprecation window. No flag day.
 ```
 
-**Backfill mapping rule (first draft).**
+**Backfill mapping rule (deterministic first draft).**
 
-| Existing event field | Maps to | Notes |
+Backfill uses one precedence rule so rerunning it over the same historical journal is idempotent:
+
+1. If an event already carries `contract_id`, use that `contract_id`.
+2. Otherwise, if it carries `(lineage_id, generation_number)`, map it to a synthetic contract key `legacy:lineage:<lineage_id>:gen:<generation_number>`.
+3. Otherwise, if it carries only `execution_id`, map it to `legacy:execution:<execution_id>`.
+4. Otherwise, map it to `legacy:event:<event_id>` and mark it `synthetic=true`, `provenance="backfill:ambiguous"`.
+
+Synthetic `contract_id`s are derived as `uuid5(OuroborosBackfillNamespace, synthetic_contract_key)` (or an equivalent documented deterministic namespace hash), never from a fresh ULID seed. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
+
+| Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
-| `aggregate_type=lineage`, `aggregate_id=<lineage_id>` | one contract per lineage generation | A new `contract_id` per generation; `parent_ac` edges connect generations |
-| `execution_id` (orchestrator session) | one contract per execution | `contract_id` derived from `execution_id` + ULID seed |
-| Pre-#492 sessions with no directive events | no synthetic directive emission | Backfill records contract envelope but leaves directive timeline empty |
-| Ambiguous boundaries | `synthetic=true` + `provenance="backfill"` flag | Flagged in TUI as inferred, not authoritative |
+| Existing `contract_id` | existing `contract_id` | No synthetic identity; projector reads the native contract stream |
+| `lineage_id` + `generation_number` | `legacy:lineage:<lineage_id>:gen:<generation_number>` | Preferred historical boundary; one contract per lineage generation |
+| `execution_id` only | `legacy:execution:<execution_id>` | Fallback for sessions without lineage generation evidence |
+| Insufficient fields | `legacy:event:<event_id>` | Marked ambiguous and visible in TUI; not silently merged |
+| Pre-#492 sessions with no directive events | same key rule, no synthetic directive emission | Backfill records contract envelope but leaves directive timeline empty |
 
-This table is the **first draft**; the L7 sub-thread on [#513](https://github.com/Q00/ouroboros/issues/513) is the canonical place to extend it for additional edge cases.
+This table is the **first draft**; the L7 sub-thread on [#513](https://github.com/Q00/ouroboros/issues/513) is the canonical place to extend it for additional edge cases without changing the deterministic precedence above.
 
 **Rationale.** Migrations that require a flag day or destructive schema change tend to be deferred indefinitely; making backfill *opt-in* keeps 1.0 unblocked while preserving the option to retrofit history when a user actually wants it. RFC #476 S4's additive-only rule is honored throughout.
 
 **Risks.**
-- Backfill mapping ambiguity. Mitigation: `synthetic=true` + `provenance="backfill"` flag makes inferred contracts visible in the TUI rather than silent.
+- Backfill mapping ambiguity. Mitigation: deterministic precedence plus `synthetic=true` + `provenance="backfill:ambiguous"` for fallback event-level contracts makes inferred boundaries visible in the TUI rather than silent.
 - Materialized view drift on long-running installs. Mitigation: `ouroboros ledger verify` plus `ledger rebuild`.
 - AC tree vs contract dependency conflation. Mitigation: distinct accessors (L3) plus the distinction table above.
 - CheckpointStore relationship confusion. Mitigation: this RFC explicitly states the Ledger does **not** absorb [#338](https://github.com/Q00/ouroboros/pull/338)'s CheckpointStore — CheckpointStore stores pause/resume state for AgentProcess, which is a separate concern from the audit Ledger.
