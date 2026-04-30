@@ -85,7 +85,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
   },
   "runtime_id": "codex_cli",              // which harness produced the result
   "duration_ms": 12345,
-  "events_emitted_count": 17,             // body via EventStore query, not inline
+  "events_emitted_count": 17,             // Coordinator-computed persisted event count
   "extra": {}
 }
 ```
@@ -154,9 +154,9 @@ This is the single decision that introduces fresh semantics; all others either i
 **Decision.**
 
 - **FIFO per `contract_id`.** Directives within one contract chain are delivered and journaled in emission order. Cross-contract ordering is *not* guaranteed; that is the parallelism unlock.
-- **At-least-once delivery.** Timeout → the Coordinator emits `retry` while budget remains and dispatches a fresh attempt under the same `contract_id` with a new `correlation_id` and `parent_correlation_id` pointing at the timed-out attempt. No exactly-once machinery.
+- **At-least-once delivery with fencing.** Timeout → the Coordinator first fences the timed-out `(contract_id, correlation_id)` so any later frames from that attempt are ignored, emits `retry` while budget remains, and dispatches a fresh attempt under the same `contract_id` with a new `correlation_id` and `parent_correlation_id` pointing at the fenced attempt. No exactly-once machinery.
 - **Idempotency obligation on handlers.** A handler that receives a duplicate `(contract_id, correlation_id)` replays the cached stream and final result for that exact attempt instead of re-executing. Cache lifetime equals the contract's lifetime (cleared at completion or cancellation).
-- **Stream replay on reconnect.** For streamable-http runtimes, the runtime cache is append-only per `(contract_id, correlation_id)` and contains every emitted intermediate event plus the final envelope once available. A reconnect for the same attempt receives the cached prefix first, with the original event ids/call ids, then resumes streaming only if the original attempt is still running. The Coordinator appends by stable event identity and treats duplicate streamed events as no-ops. For stdio runtimes, replay is only available when the adapter can prove the subprocess is still alive and can accept a duplicate request frame; otherwise EOF/pipe loss is D7 runtime loss, not reconnect.
+- **Stream replay on reconnect.** For streamable-http runtimes, the runtime cache is append-only per `(contract_id, correlation_id)` and contains every emitted intermediate event plus the final envelope once available. A reconnect for the same unfenced attempt receives the cached prefix first, with the original event ids/call ids, then resumes streaming only if the original attempt is still running. The Coordinator appends by stable event identity, treats duplicate streamed events as no-ops, and drops all frames from fenced attempts. For stdio runtimes, replay is only available when the adapter can prove the subprocess is still alive and can accept a duplicate request frame; otherwise EOF/pipe loss is D7 runtime loss, not reconnect.
 - **LLM non-determinism resolution.** Duplicate delivery of the same `(contract_id, correlation_id)` returns the cache; retry execution gets a new `correlation_id` so it can run fresh while remaining under the same contract. *Intentional* user re-execution allocates a new `contract_id` (matches `--force-rerun` semantics in [#512](https://github.com/Q00/ouroboros/issues/512) C5).
 
 **Cache backend.** Filesystem-keyed under `.ouroboros/cache/contracts/<contract_id>/` so it aligns with Disposable Memory's content-addressed `artifact_ref` story. SQLite-backed alternatives are deferred until usage evidence demands them.
@@ -189,7 +189,7 @@ on_timeout = "retry"        # "retry" or "cancel"
 | Schema validation failure on result envelope | `cancel` | Malformed envelope is not retryable |
 | Runtime explicitly returned `wait` | propagate `wait` | External input dependency surfaced to operator |
 
-The retry budget reuses the existing resilience layer's accounting — no new budget surface is introduced.
+The retry budget reuses the existing resilience layer's accounting — no new budget surface is introduced. Attempt fencing is Coordinator-owned and keyed by `(contract_id, correlation_id)` so FIFO per contract is preserved even if a timed-out runtime later writes to the old stream.
 
 ## Sequence diagram — one contract round trip
 
