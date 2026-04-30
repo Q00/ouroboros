@@ -253,6 +253,10 @@ class AgentProcessHandle:
             await self._emit_directive(Directive.CANCEL, reason)
         self._completed_event.set()
 
+    def mark_work_exited(self) -> None:
+        """Mark the underlying work task as exited without changing lifecycle status."""
+        self._completed_event.set()
+
     async def _set_status(self, new_status: AgentProcessStatus, *, reason: str) -> None:
         if new_status == self._status:
             return
@@ -260,7 +264,7 @@ class AgentProcessHandle:
         directive = _TRANSITION_DIRECTIVE.get(new_status)
         if directive is not None and self._emit_directive is not None:
             await self._emit_directive(directive, reason)
-        if new_status in _TERMINAL_STATUSES:
+        if new_status in {AgentProcessStatus.COMPLETED, AgentProcessStatus.FAILED}:
             self._completed_event.set()
 
 
@@ -320,22 +324,27 @@ class AgentProcess:
         # spawn marker even if the loop fails before the first
         # cooperative checkpoint.
         if emit is not None:
-            await emit(Directive.CONTINUE, f"{intent}: spawned")
+            await emit(Directive.CONTINUE, "spawned")
 
         async def _runner() -> None:
             try:
                 await work_fn(handle)
             except asyncio.CancelledError:
-                await handle.cancel(reason=f"{intent}: cancelled by event loop")
+                await handle.cancel(reason="cancelled by event loop")
+                handle.mark_work_exited()
                 raise
             except BaseException as exc:  # noqa: BLE001 — runtime must capture every failure
-                await handle.mark_failed(
-                    reason=f"{intent}: work raised {type(exc).__name__}: {exc!s}"
-                )
+                if handle.status() in _TERMINAL_STATUSES:
+                    handle.mark_work_exited()
+                else:
+                    await handle.mark_failed(reason=f"work raised {type(exc).__name__}: {exc!s}")
                 logger.exception("agent_process.work_failed", extra={"process_id": pid})
                 return
             else:
-                await handle.mark_completed(reason=f"{intent}: work returned")
+                if handle.status() is AgentProcessStatus.CANCELLED:
+                    handle.mark_work_exited()
+                else:
+                    await handle.mark_completed(reason="work returned")
 
         # Spawn but do not await — the caller drives lifecycle through
         # the handle.

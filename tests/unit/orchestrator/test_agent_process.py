@@ -268,3 +268,46 @@ async def test_status_is_running_immediately_after_spawn() -> None:
     await asyncio.wait_for(started.wait(), timeout=1.0)
     assert handle.status() is AgentProcessStatus.RUNNING
     await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_wait_until_complete_waits_for_cancelled_work_to_exit() -> None:
+    process = AgentProcess(event_store=None)
+    release = asyncio.Event()
+    exited = asyncio.Event()
+
+    async def work(handle):
+        while not handle.should_cancel():
+            await asyncio.sleep(0)
+        await release.wait()
+        exited.set()
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await handle.cancel(reason="stop requested")
+
+    waiter = asyncio.create_task(handle.wait_until_complete(timeout=1.0))
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+    assert not exited.is_set()
+
+    release.set()
+    final = await waiter
+    assert final is AgentProcessStatus.CANCELLED
+    assert exited.is_set()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_reasons_are_prefixed_once() -> None:
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):
+        return None
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await handle.wait_until_complete(timeout=1.0)
+
+    reasons = [event.data["reason"] for event in store.appended]
+    assert "ralph: spawned" in reasons
+    assert "ralph: work returned" in reasons
+    assert all("ralph: ralph:" not in reason for reason in reasons)
