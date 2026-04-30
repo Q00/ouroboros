@@ -106,8 +106,8 @@ timeline: list[TimelineEntry] = ledger.replay_timeline(contract_id)
 **Layer 0 query rule.** `ledger.replay_events(contract_id)` is not a direct call to the current `EventStore.replay(aggregate_type, aggregate_id)` primitive. It is a Ledger query over the shared event_store that returns every event with one of these correlations, in journal order:
 
 1. `aggregate_type="contract"` and `aggregate_id=<contract_id>` (`contract.*` envelope events).
-2. `control.directive.emitted` whose aggregate target is the contract (`target_type="contract"`, `target_id=<contract_id>`). Lineage/session/execution context, when needed, is carried in `extra` correlation fields for projectors rather than by retargeting the decision.
-3. Runtime I/O events (`tool.call.*`, `llm.call.*`, and future runtime event families) whose payload or `extra` contains `contract_id=<contract_id>`; `correlation_id` may be present for ordering/causality but is not a substitute for `contract_id`.
+2. `control.directive.emitted` whose aggregate target is the contract (`target_type="contract"`, `target_id=<contract_id>`). Lineage/session/execution context, when needed, stays in the existing first-class payload correlation fields (`session_id`, `execution_id`, `lineage_id`, `generation_number`, `phase`); `extra` is only for supplemental correlation that has no canonical payload field.
+3. Runtime I/O events (today `orchestrator.tool.called`, plus normalized `tool.call.*`, `llm.call.*`, and future runtime event families) whose payload or `extra` contains `contract_id=<contract_id>`; `correlation_id` may be present for ordering/causality but is not a substitute for `contract_id`.
 4. For synthetic backfilled contracts, historical rows that do not carry `contract_id` but whose stable invocation boundary maps to the same deterministic synthetic contract key from L7. Generation-only or execution-only ambiguous markers do not pull broad historical rows into Layer 0.
 
 Layer 0 returns this union in the EventStore's current canonical order (`timestamp`, then event UUID `id`). It is a raw audit slice, not a strict causal ordering guarantee across aggregates; consumers that need causal/rendered order must use Layer 2 `replay_timeline(contract_id)`, where the projector can apply `caused_by`, `correlation_id`, and domain-specific ordering rules. A future append-sequence column may strengthen Layer 0 without changing the API shape.
@@ -140,11 +140,13 @@ Step 2 — additive event family + contract-targeted directives
         contract-targeted directives. Only after those readers can join
         contract/<contract_id> directive streams back through extra lineage/session
         correlation may contract-serving directive emitters target contract/<contract_id>
-        for decisions whose object is the contract. Update tool.call.* / llm.call.*
-        producers to carry contract_id in payload or extra when emitted inside a
-        contract. A single directive decision must still produce one
-        control.directive.emitted row; lineage/session/execution context lives in
-        extra correlation fields. Compatibility is provided by the already-landed
+        for decisions whose object is the contract. Update current runtime I/O
+        producers (`orchestrator.tool.called`) and normalized/future tool.call.* /
+        llm.call.* producers to carry contract_id in payload or extra when emitted
+        inside a contract. A single directive decision must still produce one
+        control.directive.emitted row; lineage/session/execution context remains
+        in the existing first-class payload correlation fields, with extra used
+        only for supplemental correlation. Compatibility is provided by the already-landed
         dual-read helpers, not by duplicating directive rows.
         No event_version bump is required for the new contract.* event family;
         the factories use the current payload event_version, and only incompatible
@@ -251,7 +253,7 @@ erDiagram
 
 ## Sequence diagram — one contract's lifecycle through the Ledger
 
-For contract-rooted replay, directive events whose decision object is a contract MUST be written once with `target_type="contract"` and `target_id=<contract_id>`. If the same decision also needs lineage/session/execution context, that context belongs in `extra` correlation fields; implementations must not duplicate the directive row with a second target because L5's raw 1:1 audit invariant would be lost.
+For contract-rooted replay, directive events whose decision object is a contract MUST be written once with `target_type="contract"` and `target_id=<contract_id>`. If the same decision also needs lineage/session/execution context, that context belongs in the existing first-class payload correlation fields (`session_id`, `execution_id`, `lineage_id`, `generation_number`, `phase`); `extra` is reserved for supplemental keys without canonical fields. Implementations must not duplicate the directive row with a second target because L5's raw 1:1 audit invariant would be lost.
 
 
 ```mermaid
@@ -265,8 +267,8 @@ sequenceDiagram
     O->>E: append contract.created
     E->>P: notify
     P->>V: upsert(contract_id, status="running")
-    O->>E: append control.directive.emitted (target=contract/<contract_id>, extra.lineage_id=<id>)
-    O->>E: append tool.call.* / llm.call.* (contract_id=<contract_id>)
+    O->>E: append control.directive.emitted (target=contract/<contract_id>, lineage_id=<id>)
+    O->>E: append orchestrator.tool.called / tool.call.* / llm.call.* (contract_id=<contract_id>)
     O->>E: append contract.dependency.recorded (from=<parent>, to=<child>)
     E->>P: notify
     P->>V: update audit_trail aggregate
