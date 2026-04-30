@@ -37,7 +37,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ouroboros.events.base import BaseEvent
@@ -55,9 +55,12 @@ class SubscriptionHandle:
     """Opaque token returned by :meth:`ControlBus.subscribe`.
 
     Callers pass it back to :meth:`ControlBus.unsubscribe` to detach.
+    Handles are scoped to the bus that created them so identical local
+    integer IDs from different buses cannot detach each other.
     """
 
     _id: int
+    _owner: Any
 
 
 @dataclass(slots=True)
@@ -80,6 +83,8 @@ class ControlBus:
 
     _subscriptions: list[_Subscription] = field(default_factory=list)
     _next_id: int = 0
+    _owner: object = field(default_factory=object)
+    _tasks: set[asyncio.Task[None]] = field(default_factory=set)
     _spawn: Callable[[Awaitable[None]], asyncio.Task[None]] | None = None
 
     def subscribe(self, predicate: Predicate, handler: Handler) -> SubscriptionHandle:
@@ -97,7 +102,7 @@ class ControlBus:
             A :class:`SubscriptionHandle` accepted by
             :meth:`unsubscribe`.
         """
-        handle = SubscriptionHandle(_id=self._next_id)
+        handle = SubscriptionHandle(_id=self._next_id, _owner=self._owner)
         self._next_id += 1
         self._subscriptions.append(
             _Subscription(handle=handle, predicate=predicate, handler=handler)
@@ -110,6 +115,8 @@ class ControlBus:
         Idempotent: detaching an unknown or already-removed handle is a
         no-op.
         """
+        if handle._owner is not self._owner:
+            return
         self._subscriptions = [sub for sub in self._subscriptions if sub.handle != handle]
 
     def publish(self, event: BaseEvent) -> tuple[asyncio.Task[None], ...]:
@@ -140,7 +147,10 @@ class ControlBus:
     def _spawn_handler(self, handler: Handler, event: BaseEvent) -> asyncio.Task[None]:
         """Run *handler* on its own task with structured error isolation."""
         spawn = self._spawn or asyncio.ensure_future
-        return spawn(self._invoke_handler(handler, event))
+        task = spawn(self._invoke_handler(handler, event))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
 
     @staticmethod
     async def _invoke_handler(handler: Handler, event: BaseEvent) -> None:

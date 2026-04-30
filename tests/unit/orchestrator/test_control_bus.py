@@ -230,3 +230,42 @@ async def test_unsubscribe_stops_delivery() -> None:
     tasks = bus.publish(_directive_event())
     assert tasks == ()
     assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_rejects_foreign_handle_with_same_local_id() -> None:
+    bus_a = ControlBus()
+    bus_b = ControlBus()
+    seen: list[BaseEvent] = []
+
+    async def handler(event: BaseEvent) -> None:
+        seen.append(event)
+
+    handle_a = bus_a.subscribe(_is_directive, handler)
+    handle_b = bus_b.subscribe(_is_directive, handler)
+    assert handle_a._id == handle_b._id
+
+    bus_a.unsubscribe(handle_b)
+    tasks = bus_a.publish(_directive_event())
+    await asyncio.gather(*tasks)
+
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_retains_fire_and_forget_tasks_until_done() -> None:
+    bus = ControlBus()
+    release = asyncio.Event()
+
+    async def slow(event: BaseEvent) -> None:
+        await release.wait()
+
+    bus.subscribe(_is_directive, slow)
+    tasks = bus.publish(_directive_event())
+
+    assert len(tasks) == 1
+    assert len(bus._tasks) == 1
+    release.set()
+    await asyncio.gather(*tasks)
+    await asyncio.sleep(0)
+    assert bus._tasks == set()
