@@ -171,8 +171,8 @@ Step 5 — slow consumer migration
 Backfill uses one precedence rule so rerunning it over the same historical journal is idempotent:
 
 1. If an event already carries `contract_id`, use that `contract_id`.
-2. Otherwise, if it carries `(lineage_id, generation_number)`, map it to a synthetic contract key `legacy:lineage:<lineage_id>:gen:<generation_number>`.
-3. Otherwise, if it carries only `execution_id`, map it to `legacy:execution:<execution_id>`.
+2. Otherwise, if it carries an execution/call boundary (`execution_id` plus `correlation_id`, `call_id`, or another stable invocation id), map that boundary to `legacy:execution:<execution_id>:attempt:<stable_invocation_id>`.
+3. Otherwise, if it carries `(lineage_id, generation_number)` but no stable invocation boundary, map only the synthetic envelope marker to `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` and mark it ambiguous; do **not** merge all rows from that generation into one contract.
 4. Otherwise, map it to `legacy:event:<event_id>` and mark it `synthetic=true`, `provenance="backfill:ambiguous"`.
 
 Synthetic records still use `contract_id = ULID`. Backfill derives a deterministic ULID by taking the timestamp from the first event in the synthetic boundary and the 80-bit randomness field from `sha256("ouroboros-backfill:" + synthetic_contract_key)[:10]`. The human-readable `synthetic_contract_key` is stored separately in `extra.legacy_key` / `extra.backfill_key`; it is **not** substituted for `contract_id`. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
@@ -182,12 +182,13 @@ Backfill is idempotent by key, not by event UUID. Before appending any synthetic
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
 | Existing `contract_id` | existing `contract_id` | No synthetic identity; projector reads the native contract stream |
-| `lineage_id` + `generation_number` | `legacy:lineage:<lineage_id>:gen:<generation_number>` | Preferred historical boundary; one contract per lineage generation |
-| `execution_id` only | `legacy:execution:<execution_id>` | Fallback for sessions without lineage generation evidence |
+| `execution_id` + stable invocation id (`correlation_id`, `call_id`, etc.) | `legacy:execution:<execution_id>:attempt:<stable_invocation_id>` | Preferred historical boundary when native `contract_id` is missing |
+| `lineage_id` + `generation_number` without invocation evidence | `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` | Ambiguous marker only; does not merge an entire generation into one contract |
+| `execution_id` only | `legacy:event:<event_id>` | Too broad to infer a contract; use event-level ambiguous fallback |
 | Insufficient fields | `legacy:event:<event_id>` | Marked ambiguous and visible in TUI; not silently merged |
 | Pre-#492 sessions with no directive events | same key rule, no synthetic directive emission | Backfill records contract envelope but leaves directive timeline empty |
 
-This table is the **first draft**; the L7 sub-thread on [#513](https://github.com/Q00/ouroboros/issues/513) is the canonical place to extend it for additional edge cases without changing the deterministic precedence or ULID derivation above.
+This table is the **first draft**; the L7 sub-thread on [#513](https://github.com/Q00/ouroboros/issues/513) is the canonical place to extend it for additional edge cases without changing the deterministic precedence, conservative no-merge fallback, or ULID derivation above.
 
 **Rationale.** Migrations that require a flag day or destructive schema change tend to be deferred indefinitely; making backfill *opt-in* keeps 1.0 unblocked while preserving the option to retrofit history when a user actually wants it. RFC #476 S4's additive-only rule is honored throughout.
 
