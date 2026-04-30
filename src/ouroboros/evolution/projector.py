@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from ouroboros.core.lineage import (
+    ControlDirectiveEmission,
     EvaluationSummary,
     GenerationPhase,
     GenerationRecord,
@@ -51,6 +52,7 @@ class LineageProjector:
         lineage: OntologyLineage | None = None
         generations: dict[int, GenerationRecord] = {}
         rewind_history: list[RewindRecord] = []
+        directive_emissions: list[ControlDirectiveEmission] = []
 
         for event in events:
             if event.type == "lineage.created":
@@ -196,15 +198,42 @@ class LineageProjector:
                 if lineage is not None:
                     lineage = lineage.with_status(LineageStatus.ACTIVE)
 
+            elif event.type == "control.directive.emitted":
+                # Fold control-plane directives onto the lineage timeline
+                # alongside state events, per RFC #476 M2 / sub-RFC #511.
+                # The full event row remains in the EventStore; we project
+                # the audit-level summary so callers (TUI, reports) can
+                # render decisions without a second query.
+                data = event.data
+                directive_value = data.get("directive")
+                if not isinstance(directive_value, str) or not directive_value:
+                    # Silently skip malformed directive events rather than
+                    # corrupt the projection; the raw row is still queryable
+                    # via event_store directly for postmortem.
+                    continue
+                directive_emissions.append(
+                    ControlDirectiveEmission(
+                        directive=directive_value,
+                        reason=str(data.get("reason", "")),
+                        emitted_by=str(data.get("emitted_by", "")),
+                        timestamp=event.timestamp,
+                        generation_number=data.get("generation_number"),
+                        phase=data.get("phase"),
+                        is_terminal=bool(data.get("is_terminal", False)),
+                    )
+                )
+
         if lineage is None:
             return None
 
-        # Build final lineage with sorted generations and rewind history
+        # Build final lineage with sorted generations, rewind history, and
+        # any control-plane directive emissions that were folded in.
         sorted_records = tuple(generations[k] for k in sorted(generations.keys()))
         return lineage.model_copy(
             update={
                 "generations": sorted_records,
                 "rewind_history": tuple(rewind_history),
+                "directive_emissions": tuple(directive_emissions),
             }
         )
 
