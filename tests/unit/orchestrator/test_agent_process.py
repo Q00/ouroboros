@@ -16,6 +16,7 @@ from ouroboros.orchestrator.agent_process import (
     AgentProcess,
     AgentProcessStatus,
 )
+from ouroboros.persistence.event_store import EventStore
 
 
 class _FakeEventStore:
@@ -40,6 +41,24 @@ async def _wait_for_status(handle, status: AgentProcessStatus) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError(f"status did not become {status}")
+
+
+@pytest.mark.asyncio
+async def test_spawn_initializes_concrete_event_store_before_emitting() -> None:
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):
+        return None
+
+    try:
+        handle = await process.spawn(intent="ralph", work_fn=work)
+        await handle.wait_until_complete(timeout=1.0)
+        events = await store.replay("agent_process", handle.process_id)
+    finally:
+        await store.close()
+
+    assert [event.data["directive"] for event in events] == ["continue", "converge"]
 
 
 @pytest.mark.asyncio

@@ -120,6 +120,18 @@ class _AppendableEventStore(Protocol):
         ...
 
 
+async def _ensure_event_store_initialized(store: _AppendableEventStore) -> None:
+    """Initialize concrete EventStore-like objects before first append.
+
+    The real persistence EventStore requires ``initialize()`` before
+    ``append()``. Fakes used in tests usually do not expose that method,
+    so this stays duck-typed and no-ops when unavailable.
+    """
+    initialize = getattr(store, "initialize", None)
+    if callable(initialize):
+        await initialize()
+
+
 @dataclass(slots=True)
 class AgentProcessHandle:
     """Cooperative handle returned from :meth:`AgentProcess.spawn`.
@@ -377,6 +389,7 @@ class AgentProcess:
             directive: Directive, reason: str, lifecycle_status: AgentProcessStatus
         ) -> None:
             try:
+                await _ensure_event_store_initialized(store)
                 event = create_control_directive_emitted_event(
                     target_type=_TARGET_TYPE,
                     target_id=process_id,
