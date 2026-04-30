@@ -136,6 +136,7 @@ class AgentProcessHandle:
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     _paused_event: asyncio.Event = field(default_factory=asyncio.Event)
     _completed_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _cancel_reason: str = "cancel requested"
     _emit_directive: Callable[[Directive, str], Awaitable[None]] | None = None
 
     def __post_init__(self) -> None:
@@ -158,7 +159,6 @@ class AgentProcessHandle:
         if self._status in _TERMINAL_STATUSES:
             return
         self._paused_event.clear()
-        await self._set_status(AgentProcessStatus.PAUSED, reason="pause requested")
 
     async def resume(self) -> None:
         """Release a paused work loop.
@@ -166,10 +166,11 @@ class AgentProcessHandle:
         No-op when the process is not currently paused. Returns it to
         :attr:`AgentProcessStatus.RUNNING`.
         """
-        if self._status is not AgentProcessStatus.PAUSED:
+        if self._status in _TERMINAL_STATUSES or not self.should_pause():
             return
         self._paused_event.set()
-        await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
+        if self._status is AgentProcessStatus.PAUSED:
+            await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
 
     async def cancel(self, reason: str = "cancel requested") -> None:
         """Request a cooperative cancel.
@@ -180,11 +181,12 @@ class AgentProcessHandle:
         """
         if self._status in _TERMINAL_STATUSES:
             return
+        self._cancel_reason = reason
         self._cancel_event.set()
         # Clearing the paused-flag releases a paused loop so it can
-        # observe the cancel flag immediately.
+        # observe the cancel flag immediately. The CANCELLED transition
+        # itself is emitted only when the work task actually exits.
         self._paused_event.set()
-        await self._set_status(AgentProcessStatus.CANCELLED, reason=reason)
 
     async def replay(self) -> Any:
         """Replay the process timeline (slice 3 of #518; not yet implemented)."""
@@ -215,7 +217,11 @@ class AgentProcessHandle:
         The workflow loop calls this at every checkpoint; if the process
         is not paused the call returns immediately.
         """
+        if self.should_pause() and self._status is AgentProcessStatus.RUNNING:
+            await self._set_status(AgentProcessStatus.PAUSED, reason="pause acknowledged")
         await self._paused_event.wait()
+        if self._status is AgentProcessStatus.PAUSED and not self.should_cancel():
+            await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
 
     async def wait_until_complete(self, *, timeout: float | None = None) -> AgentProcessStatus:
         """Wait for a terminal status transition.
@@ -253,6 +259,13 @@ class AgentProcessHandle:
             await self._emit_directive(Directive.CANCEL, reason)
         self._completed_event.set()
 
+    async def mark_cancelled(self) -> None:
+        """Mark the process as cancelled after the work task has exited."""
+        if self._status in {AgentProcessStatus.COMPLETED, AgentProcessStatus.FAILED}:
+            return
+        await self._set_status(AgentProcessStatus.CANCELLED, reason=self._cancel_reason)
+        self._completed_event.set()
+
     def mark_work_exited(self) -> None:
         """Mark the underlying work task as exited without changing lifecycle status."""
         self._completed_event.set()
@@ -264,7 +277,7 @@ class AgentProcessHandle:
         directive = _TRANSITION_DIRECTIVE.get(new_status)
         if directive is not None and self._emit_directive is not None:
             await self._emit_directive(directive, reason)
-        if new_status in {AgentProcessStatus.COMPLETED, AgentProcessStatus.FAILED}:
+        if new_status in _TERMINAL_STATUSES:
             self._completed_event.set()
 
 
@@ -282,7 +295,7 @@ class AgentProcess:
 
     The factory:
 
-    * Allocates a new ``process_id`` per spawn (ULID-style hex).
+    * Allocates a new ``process_id`` per spawn (UUID4 hex).
     * Wires the lifecycle directive emitter so transitions land on the
       EventStore.
     * Drives the work function on the event loop and finalises the
@@ -331,7 +344,7 @@ class AgentProcess:
                 await work_fn(handle)
             except asyncio.CancelledError:
                 await handle.cancel(reason="cancelled by event loop")
-                handle.mark_work_exited()
+                await handle.mark_cancelled()
                 raise
             except BaseException as exc:  # noqa: BLE001 — runtime must capture every failure
                 if handle.status() in _TERMINAL_STATUSES:
@@ -341,8 +354,8 @@ class AgentProcess:
                 logger.exception("agent_process.work_failed", extra={"process_id": pid})
                 return
             else:
-                if handle.status() is AgentProcessStatus.CANCELLED:
-                    handle.mark_work_exited()
+                if handle.should_cancel():
+                    await handle.mark_cancelled()
                 else:
                     await handle.mark_completed(reason="work returned")
 

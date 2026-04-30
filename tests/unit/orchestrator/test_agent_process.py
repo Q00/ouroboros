@@ -34,6 +34,14 @@ def _directives(events: list[BaseEvent]) -> list[str]:
     return [e.data["directive"] for e in events if e.type == "control.directive.emitted"]
 
 
+async def _wait_for_status(handle, status: AgentProcessStatus) -> None:
+    for _ in range(100):
+        if handle.status() is status:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"status did not become {status}")
+
+
 @pytest.mark.asyncio
 async def test_spawn_emits_initial_running_directive() -> None:
     store = _FakeEventStore()
@@ -96,6 +104,32 @@ async def test_cancel_transitions_to_cancelled_and_emits_cancel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_status_and_directive_wait_for_work_exit() -> None:
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await asyncio.sleep(0.005)
+        await release.wait()
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await handle.cancel(reason="stop requested")
+
+    assert handle.status() is AgentProcessStatus.RUNNING
+    assert "cancel" not in _directives(store.appended)
+
+    release.set()
+    final = await handle.wait_until_complete(timeout=1.0)
+    assert final is AgentProcessStatus.CANCELLED
+    assert _directives(store.appended)[-1] == "cancel"
+
+
+@pytest.mark.asyncio
 async def test_pause_then_resume_transitions_emit_wait_continue() -> None:
     store = _FakeEventStore()
     process = AgentProcess(event_store=store)
@@ -113,9 +147,9 @@ async def test_pause_then_resume_transitions_emit_wait_continue() -> None:
     await asyncio.wait_for(started.wait(), timeout=1.0)
 
     await handle.pause()
-    assert handle.status() is AgentProcessStatus.PAUSED
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
     await handle.resume()
-    assert handle.status() is AgentProcessStatus.RUNNING
+    await _wait_for_status(handle, AgentProcessStatus.RUNNING)
     await handle.cancel(reason="end test")
 
     final = await handle.wait_until_complete(timeout=1.0)
