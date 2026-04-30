@@ -135,14 +135,17 @@ Step 1 — additive code only
 
 Step 2 — additive event family + contract-targeted directives
         New factories: contract.created / completed / failed / dependency.recorded.
-        Update contract-serving directive emitters to target contract/<contract_id>
-        for decisions whose object is the contract, and update tool.call.* /
-        llm.call.* producers to carry contract_id in payload or extra when
-        emitted inside a contract. A single directive decision must still produce
-        one control.directive.emitted row; lineage/session/execution context lives
-        in extra correlation fields. Compatibility is provided by Ledger/projector
-        dual-read helpers that join contract-targeted directives back into
-        lineage/session views, not by duplicating directive rows.
+        Rollout invariant: land and switch lineage/session/execution readers to
+        Ledger/projector dual-read helpers before any emitter starts writing
+        contract-targeted directives. Only after those readers can join
+        contract/<contract_id> directive streams back through extra lineage/session
+        correlation may contract-serving directive emitters target contract/<contract_id>
+        for decisions whose object is the contract. Update tool.call.* / llm.call.*
+        producers to carry contract_id in payload or extra when emitted inside a
+        contract. A single directive decision must still produce one
+        control.directive.emitted row; lineage/session/execution context lives in
+        extra correlation fields. Compatibility is provided by the already-landed
+        dual-read helpers, not by duplicating directive rows.
         No event_version bump is required for the new contract.* event family;
         the factories use the current payload event_version, and only incompatible
         changes to an existing payload contract bump event_version per #436.
@@ -160,11 +163,14 @@ Step 4 — materialized view (hot path optimization)
         contract_summaries table populated by the projector at write time.
         Recoverable from event_store. Never authoritative.
 
-Step 5 — slow consumer migration
-        TUI / MCP tools / evaluator move to ContractLedger API on their
-        own schedules. Legacy direct event_store reads remain valid for legacy
-        aggregate-targeted directives, but contract-targeted decisions require
-        Ledger dual-read helpers (contract aggregate + extra lineage/session
+Step 5 — non-critical consumer migration
+        TUI / MCP tools / evaluator surfaces that do not participate in
+        lineage/session/execution directive replay move to ContractLedger API on
+        their own schedules. Any reader that must render directive audit history
+        is already covered by the Step 2 rollout invariant before contract-targeted
+        directive writes begin. Legacy direct event_store reads remain valid for
+        legacy aggregate-targeted directives, but contract-targeted decisions
+        require Ledger dual-read helpers (contract aggregate + extra lineage/session
         correlation) to appear in lineage/session views. No storage flag day.
 ```
 
@@ -173,8 +179,8 @@ Step 5 — slow consumer migration
 Backfill uses one precedence rule so rerunning it over the same historical journal is idempotent:
 
 1. If an event already carries `contract_id`, use that `contract_id`.
-2. Otherwise, if it carries an execution/call boundary (`execution_id` plus `correlation_id`, `call_id`, or another stable invocation id), map that boundary to `legacy:execution:<execution_id>:attempt:<stable_invocation_id>`.
-3. Otherwise, if it carries `(lineage_id, generation_number)` but no stable invocation boundary, map only the synthetic envelope marker to `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` and mark it ambiguous; do **not** merge all rows from that generation into one contract.
+2. Otherwise, if it carries `execution_id`, select exactly one stable invocation id with this fixed field priority: `call_id` first, then `correlation_id`, then `invocation_id`, then `request_id`. Ignore lower-priority fields when a higher-priority field is present. If the selected field is present and non-empty, map the boundary to `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>`.
+3. Otherwise, if it carries `(lineage_id, generation_number)` but no stable invocation boundary selected by rule 2, map only the synthetic envelope marker to `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` and mark it ambiguous; do **not** merge all rows from that generation into one contract.
 4. Otherwise, map it to `legacy:event:<event_id>` and mark it `synthetic=true`, `provenance="backfill:ambiguous"`.
 
 Synthetic records still use `contract_id = ULID`. Backfill derives a deterministic ULID by taking the timestamp from the first event in the synthetic boundary and the 80-bit randomness field from `sha256("ouroboros-backfill:" + synthetic_contract_key)[:10]`. The human-readable `synthetic_contract_key` is stored separately in `extra.legacy_key` / `extra.backfill_key`; it is **not** substituted for `contract_id`. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
@@ -184,7 +190,7 @@ Backfill is idempotent by key, not by event UUID. Before appending any synthetic
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
 | Existing `contract_id` | existing `contract_id` | No synthetic identity; projector reads the native contract stream |
-| `execution_id` + stable invocation id (`correlation_id`, `call_id`, etc.) | `legacy:execution:<execution_id>:attempt:<stable_invocation_id>` | Preferred historical boundary when native `contract_id` is missing |
+| `execution_id` + selected stable invocation id | `legacy:execution:<execution_id>:attempt:<selected_field_name>:<selected_field_value>` | Preferred historical boundary when native `contract_id` is missing; select `call_id`, then `correlation_id`, then `invocation_id`, then `request_id` |
 | `lineage_id` + `generation_number` without invocation evidence | `legacy:lineage:<lineage_id>:gen:<generation_number>:event:<first_event_id>` | Ambiguous marker only; does not merge an entire generation into one contract |
 | `execution_id` only | `legacy:event:<event_id>` | Too broad to infer a contract; use event-level ambiguous fallback |
 | Insufficient fields | `legacy:event:<event_id>` | Marked ambiguous and visible in TUI; not silently merged |
