@@ -108,6 +108,7 @@ timeline: list[TimelineEntry] = ledger.replay_timeline(contract_id)
 1. `aggregate_type="contract"` and `aggregate_id=<contract_id>` (`contract.*` envelope events).
 2. `control.directive.emitted` whose payload/`extra` contains `contract_id=<contract_id>`; the row's aggregate target remains the owning lineage/session/execution unless the directive is natively contract-scoped.
 3. Runtime I/O events (`tool.call.*`, `llm.call.*`, and future runtime event families) whose payload or `extra` contains `contract_id=<contract_id>` / `correlation_id`.
+4. For synthetic backfilled contracts, historical rows that do not carry `contract_id` but whose `(lineage_id, generation_number)` or `execution_id` maps to the same deterministic synthetic contract key from L7.
 
 Layer 0 returns this union in the EventStore's current canonical order (`timestamp`, then event UUID `id`). It is a raw audit slice, not a strict causal ordering guarantee across aggregates; consumers that need causal/rendered order must use Layer 2 `replay_timeline(contract_id)`, where the projector can apply `caused_by`, `correlation_id`, and domain-specific ordering rules. A future append-sequence column may strengthen Layer 0 without changing the API shape.
 
@@ -148,8 +149,10 @@ Step 2 — additive event family + contract-targeted directives
 
 Step 3 — opt-in backfill (operator command)
         Walk historical event_store, infer contract boundaries from
-        (lineage_id, execution_id), emit synthetic contract.* events
-        with synthetic=true. User triggers via:
+        (lineage_id, execution_id), emit missing synthetic contract.* envelope
+        events with synthetic=true and extra.backfill_key=<synthetic_contract_key>.
+        Historical source rows are not rewritten; Layer 0 maps them through the
+        deterministic key rule below. User triggers via:
             ouroboros ledger backfill [--apply]
 
 Step 4 — materialized view (hot path optimization)
@@ -171,7 +174,9 @@ Backfill uses one precedence rule so rerunning it over the same historical journ
 3. Otherwise, if it carries only `execution_id`, map it to `legacy:execution:<execution_id>`.
 4. Otherwise, map it to `legacy:event:<event_id>` and mark it `synthetic=true`, `provenance="backfill:ambiguous"`.
 
-Synthetic records still use `contract_id = ULID`. Backfill derives a deterministic ULID by taking the timestamp from the first event in the synthetic boundary and the 80-bit randomness field from `sha256("ouroboros-backfill:" + synthetic_contract_key)[:10]`. The human-readable `synthetic_contract_key` is stored separately in `extra.legacy_key`; it is **not** substituted for `contract_id`. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
+Synthetic records still use `contract_id = ULID`. Backfill derives a deterministic ULID by taking the timestamp from the first event in the synthetic boundary and the 80-bit randomness field from `sha256("ouroboros-backfill:" + synthetic_contract_key)[:10]`. The human-readable `synthetic_contract_key` is stored separately in `extra.legacy_key` / `extra.backfill_key`; it is **not** substituted for `contract_id`. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
+
+Backfill is idempotent by key, not by event UUID. Before appending any synthetic `contract.*` event, the command queries for an existing synthetic event with the same `type`, `contract_id`, and `extra.backfill_key`; if present it skips the append. The journal remains append-only, but repeated backfill runs do not create duplicate synthetic envelopes for the same historical boundary.
 
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
