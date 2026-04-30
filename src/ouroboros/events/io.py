@@ -262,6 +262,9 @@ def create_tool_call_started_event(
     tool_name: str,
     args_hash: str,
     args_preview: str | None = None,
+    preview_cap: int = PREVIEW_DEFAULT_CHARS,
+    preview_hard_cap: int = PREVIEW_HARD_CAP_CHARS_TOOL,
+    privacy: PrivacyMode | None = None,
     caller: str | None = None,
     mcp_server: str | None = None,
     session_id: str | None = None,
@@ -281,7 +284,9 @@ def create_tool_call_started_event(
     _validate_call_id(call_id)
     args_preview = shape_preview(
         args_preview,
-        hard_cap=PREVIEW_HARD_CAP_CHARS_TOOL,
+        cap=preview_cap,
+        hard_cap=preview_hard_cap,
+        privacy=privacy,
     )
     data = _build_io_event_data(
         target_type=target_type,
@@ -321,6 +326,9 @@ def create_tool_call_returned_event(
     is_error: bool,
     result_hash: str | None = None,
     result_preview: str | None = None,
+    preview_cap: int = PREVIEW_DEFAULT_CHARS,
+    preview_hard_cap: int = PREVIEW_HARD_CAP_CHARS_TOOL,
+    privacy: PrivacyMode | None = None,
     error_kind: str | None = None,
     session_id: str | None = None,
     execution_id: str | None = None,
@@ -334,7 +342,9 @@ def create_tool_call_returned_event(
     _validate_call_id(call_id)
     result_preview = shape_preview(
         result_preview,
-        hard_cap=PREVIEW_HARD_CAP_CHARS_TOOL,
+        cap=preview_cap,
+        hard_cap=preview_hard_cap,
+        privacy=privacy,
     )
     data = _build_io_event_data(
         target_type=target_type,
@@ -374,6 +384,9 @@ def create_llm_call_requested_event(
     prompt_hash: str,
     caller: str | None = None,
     prompt_preview: str | None = None,
+    preview_cap: int = PREVIEW_DEFAULT_CHARS,
+    preview_hard_cap: int = PREVIEW_HARD_CAP_CHARS_LLM,
+    privacy: PrivacyMode | None = None,
     max_tokens: int | None = None,
     temperature: float | None = None,
     tool_choice: str | None = None,
@@ -387,7 +400,12 @@ def create_llm_call_requested_event(
     """Record the *start* of an outbound LLM call."""
     _validate_target(target_type, target_id)
     _validate_call_id(call_id)
-    prompt_preview = shape_preview(prompt_preview)
+    prompt_preview = shape_preview(
+        prompt_preview,
+        cap=preview_cap,
+        hard_cap=preview_hard_cap,
+        privacy=privacy,
+    )
     data = _build_io_event_data(
         target_type=target_type,
         target_id=target_id,
@@ -428,6 +446,9 @@ def create_llm_call_returned_event(
     duration_ms: int,
     is_error: bool,
     completion_preview: str | None = None,
+    preview_cap: int = PREVIEW_DEFAULT_CHARS,
+    preview_hard_cap: int = PREVIEW_HARD_CAP_CHARS_LLM,
+    privacy: PrivacyMode | None = None,
     completion_hash: str | None = None,
     finish_reason: str | None = None,
     token_count_in: int | None = None,
@@ -449,7 +470,12 @@ def create_llm_call_returned_event(
     """
     _validate_target(target_type, target_id)
     _validate_call_id(call_id)
-    completion_preview = shape_preview(completion_preview)
+    completion_preview = shape_preview(
+        completion_preview,
+        cap=preview_cap,
+        hard_cap=preview_hard_cap,
+        privacy=privacy,
+    )
     data = _build_io_event_data(
         target_type=target_type,
         target_id=target_id,
