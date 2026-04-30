@@ -193,17 +193,11 @@ class LineageProjector:
                         discarded_generations=discarded,
                     )
                 )
-                # Remove generations and directive emissions after the rewind
-                # point so the projected active timeline cannot retain stale
-                # branch decisions for discarded generations. Unscoped
-                # directives (generation_number=None) are session-level audit
-                # notes and remain visible.
+                # Remove active generations after the rewind point. Directive
+                # emissions remain in the projected audit timeline so reports
+                # can still explain discarded branches preserved in
+                # rewind_history.
                 generations = {k: v for k, v in generations.items() if k <= to_gen}
-                directive_emissions = [
-                    emission
-                    for emission in directive_emissions
-                    if emission.generation_number is None or emission.generation_number <= to_gen
-                ]
                 if lineage is not None:
                     lineage = lineage.with_status(LineageStatus.ACTIVE)
 

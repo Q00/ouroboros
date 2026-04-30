@@ -208,8 +208,8 @@ class TestDirectiveProjection:
         assert len(lineage.directive_emissions) == 2
         assert lineage.directive_emissions[-1].directive == "converge"
 
-    def test_rewind_truncates_directives_for_discarded_generations(self) -> None:
-        """Directive timeline follows active lineage after lineage.rewound."""
+    def test_rewind_retains_directives_for_discarded_generation_audit(self) -> None:
+        """Directive audit timeline still explains discarded rewind branches."""
         projector = LineageProjector()
         events = [
             _event("lineage.created", {"goal": "rewind directive pruning"}),
@@ -245,7 +245,7 @@ class TestDirectiveProjection:
         lineage = projector.project(events)
 
         assert lineage is not None
-        assert [e.directive for e in lineage.directive_emissions] == ["evolve", "wait"]
+        assert [e.directive for e in lineage.directive_emissions] == ["evolve", "retry", "wait"]
 
     def test_invalid_directive_correlation_shape_is_skipped(self) -> None:
         """Malformed optional fields should not abort lineage projection."""

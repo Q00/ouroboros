@@ -1,4 +1,4 @@
-def test_rewind_to_prunes_directives_for_discarded_generations() -> None:
+def test_rewind_to_retains_directives_for_discarded_generation_audit() -> None:
     from datetime import UTC, datetime
 
     from ouroboros.core.lineage import ControlDirectiveEmission, GenerationRecord, OntologyLineage
@@ -36,4 +36,4 @@ def test_rewind_to_prunes_directives_for_discarded_generations() -> None:
 
     rewound = lineage.rewind_to(1)
 
-    assert [e.directive for e in rewound.directive_emissions] == ["evolve"]
+    assert [e.directive for e in rewound.directive_emissions] == ["evolve", "retry"]
