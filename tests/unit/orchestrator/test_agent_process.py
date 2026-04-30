@@ -270,6 +270,34 @@ async def test_cancel_releases_paused_loop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pause_after_cancel_cannot_reblock_work_loop() -> None:
+    """Once cancel is requested, a later pause must not reintroduce blocking."""
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+    saw_cancel = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while True:
+            await handle.wait_unpaused()
+            if handle.should_cancel():
+                saw_cancel.set()
+                return
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.cancel(reason="cancel before pause")
+    await handle.pause()
+
+    await asyncio.wait_for(saw_cancel.wait(), timeout=1.0)
+    final = await handle.wait_until_complete(timeout=1.0)
+    assert final is AgentProcessStatus.CANCELLED
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_directive_carries_target_type_agent_process() -> None:
     store = _FakeEventStore()
     process = AgentProcess(event_store=store)

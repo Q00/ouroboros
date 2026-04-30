@@ -156,7 +156,7 @@ class AgentProcessHandle:
         and resumes only when :meth:`resume` is called. No-op when the
         process has already terminated.
         """
-        if self._status in _TERMINAL_STATUSES:
+        if self._status in _TERMINAL_STATUSES or self.should_cancel():
             return
         self._paused_event.clear()
 
