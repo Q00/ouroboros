@@ -2,7 +2,7 @@
 
 > Status: **Accepted** (Phase 2 of #476 Agent OS roadmap).
 > Closes [#513](https://github.com/Q00/ouroboros/issues/513).
-> Related: [#319](https://github.com/Q00/ouroboros/pull/319) (recursive AC decomposition / `ac_tree`), [#338](https://github.com/Q00/ouroboros/pull/338) (CheckpointStore), [#436](https://github.com/Q00/ouroboros/pull/436) (`event_version`), [#476](https://github.com/Q00/ouroboros/issues/476) M2 + S4, [docs/rfc/mesh.md](./mesh.md), [docs/rfc/disposable-memory.md](./disposable-memory.md).
+> Related: [#319](https://github.com/Q00/ouroboros/pull/319) (recursive AC decomposition / `ac_tree`), [#338](https://github.com/Q00/ouroboros/pull/338) (CheckpointStore), [#436](https://github.com/Q00/ouroboros/pull/436) (`event_version`), [#476](https://github.com/Q00/ouroboros/issues/476) M2 + S4, [#511](https://github.com/Q00/ouroboros/issues/511), [#512](https://github.com/Q00/ouroboros/issues/512).
 
 ## Summary
 
@@ -20,8 +20,8 @@ This document **does** decide:
 - Migration plan including opt-in backfill of historical event_store data.
 
 This document **does not** decide:
-- Mesh wire format (deferred to [docs/rfc/mesh.md](./mesh.md)).
-- Disposable Memory's storage layout for `artifact_ref` (deferred to [docs/rfc/disposable-memory.md](./disposable-memory.md)).
+- Mesh wire format (deferred to [#511](https://github.com/Q00/ouroboros/issues/511)).
+- Disposable Memory's storage layout for `artifact_ref` (deferred to [#512](https://github.com/Q00/ouroboros/issues/512)).
 - AgentProcess lifecycle verbs (deferred to [#518](https://github.com/Q00/ouroboros/issues/518)).
 - The relationship to CheckpointStore beyond stating that the Ledger does not absorb it.
 
@@ -29,9 +29,9 @@ This document **does not** decide:
 
 | Decision | Source | Used here as |
 |---|---|---|
-| `contract_id = ULID` | [mesh.md](./mesh.md) D2 | Primary key of the Ledger; sortable, log-friendly. |
-| `artifact_ref = "sha256:..."` | [disposable-memory.md](./disposable-memory.md) C2 | Stored as a reference in the Ledger; bodies remain in the artifact store. |
-| `target_type` vocabulary | events/control.py ([#492](https://github.com/Q00/ouroboros/pull/492)) | Authoritative source for `lineage / execution / session / agent_process`. |
+| `contract_id = ULID` | [#511](https://github.com/Q00/ouroboros/issues/511) D2 | Primary key of the Ledger; sortable, log-friendly. |
+| `artifact_ref = "sha256:..."` | [#512](https://github.com/Q00/ouroboros/issues/512) C2 | Stored as a reference in the Ledger; bodies remain in the artifact store. |
+| `target_type` contract | events/control.py ([#492](https://github.com/Q00/ouroboros/pull/492)) | Free-form string with known current producers such as `lineage`, `execution`, `session`, and `agent_process`; ledger projectors must not hard-code a closed enum. |
 
 ## Decisions
 
@@ -106,7 +106,7 @@ timeline: list[TimelineEntry] = ledger.replay_timeline(contract_id)
 **Invariants** (re-cited from upstream RFCs so this RFC stays consistent):
 
 - Replay does **not** re-execute LLM calls (#476 M3, [#518](https://github.com/Q00/ouroboros/issues/518) M6).
-- Replay does **not** re-fork sub-agents ([mesh.md](./mesh.md) D6, [disposable-memory.md](./disposable-memory.md) C5).
+- Replay does **not** re-fork sub-agents ([#511](https://github.com/Q00/ouroboros/issues/511) D6, [#512](https://github.com/Q00/ouroboros/issues/512) C5).
 - Force-rerun = allocate a new `contract_id`. Replay of the existing one is read-only.
 - All three layers read from the same `event_store` source. **No private replay store.**
 
@@ -227,23 +227,23 @@ sequenceDiagram
 
 | Subject | Source | This RFC's behaviour |
 |---|---|---|
-| `contract_id = ULID` | [mesh.md](./mesh.md) D2 | Inherited; primary key of the Ledger. |
-| `artifact_ref = "sha256:..."` | [disposable-memory.md](./disposable-memory.md) C2 | Inherited; stored as a reference, never inlined. |
-| `replay()` semantics | [mesh.md](./mesh.md) D6, [disposable-memory.md](./disposable-memory.md) C5 | Honored; no LLM re-execution, no sub-agent re-fork. |
+| `contract_id = ULID` | [#511](https://github.com/Q00/ouroboros/issues/511) D2 | Inherited; primary key of the Ledger. |
+| `artifact_ref = "sha256:..."` | [#512](https://github.com/Q00/ouroboros/issues/512) C2 | Inherited; stored as a reference, never inlined. |
+| `replay()` semantics | [#511](https://github.com/Q00/ouroboros/issues/511) D6, [#512](https://github.com/Q00/ouroboros/issues/512) C5 | Honored; no LLM re-execution, no sub-agent re-fork. |
 | CheckpointStore boundary | [#338](https://github.com/Q00/ouroboros/pull/338) | The Ledger does **not** absorb CheckpointStore. |
 | Additive-only schema | [#436](https://github.com/Q00/ouroboros/pull/436), #476 S4 | Honored throughout L7. |
 
 ## Pre-merge checklist
 
 - [ ] All 5 fresh decisions present (L2 / L3 / L5 / L6 / L7) with option + rationale + risks
-- [ ] Inherited-from list cites [mesh.md](./mesh.md) D2 and [disposable-memory.md](./disposable-memory.md) C2
+- [ ] Inherited-from list cites [#511](https://github.com/Q00/ouroboros/issues/511) D2 and [#512](https://github.com/Q00/ouroboros/issues/512) C2
 - [ ] AC tree vs contract dependency graph distinction table present
 - [ ] Backfill mapping table present (at least the four-row first draft above)
 - [ ] ER + sequence diagrams render
 - [ ] Cross-references resolve to existing issues / files
 - [ ] At least two maintainer approvals
 - [ ] L7 sub-thread resolved with the backfill mapping table extended for ambiguous boundaries (`synthetic=true` + `provenance="backfill"`)
-- [ ] `replay()` semantics match [mesh.md](./mesh.md) D6 (no LLM re-execution) and [disposable-memory.md](./disposable-memory.md) C5 (read artifact default)
+- [ ] `replay()` semantics match [#511](https://github.com/Q00/ouroboros/issues/511) D6 (no LLM re-execution) and [#512](https://github.com/Q00/ouroboros/issues/512) C5 (read artifact default)
 - [ ] CheckpointStore boundary explicit: Ledger does not absorb [#338](https://github.com/Q00/ouroboros/pull/338)
 
 ## Post-merge checklist
