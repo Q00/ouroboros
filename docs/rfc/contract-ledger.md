@@ -91,7 +91,7 @@ This is the same shape as L2 — raw lives in the journal, aggregates live in th
 `replay(contract_id)` is not a single signature, because three different consumers want three different shapes:
 
 ```python
-# Layer 0 — raw events. Always available, idempotent.
+# Layer 0 — contract-correlated raw events. Always available, idempotent.
 events: list[BaseEvent] = ledger.replay_events(contract_id)
 
 # Layer 1 — reconstituted state (uses the projector).
@@ -102,6 +102,14 @@ state: ContractState = ledger.replay_state(contract_id)
 # Layer 2 — render-ready timeline. The S2 Introspection feed.
 timeline: list[TimelineEntry] = ledger.replay_timeline(contract_id)
 ```
+
+**Layer 0 query rule.** `ledger.replay_events(contract_id)` is not a direct call to the current `EventStore.replay(aggregate_type, aggregate_id)` primitive. It is a Ledger query over the shared event_store that returns every event with one of these correlations, in journal order:
+
+1. `aggregate_type="contract"` and `aggregate_id=<contract_id>` (`contract.*` envelope events).
+2. `control.directive.emitted` with `target_type="contract"` and `target_id=<contract_id>`.
+3. Runtime I/O events (`tool.call.*`, `llm.call.*`, and future runtime event families) whose payload or `extra` contains `contract_id=<contract_id>` / `correlation_id`.
+
+Therefore Step 2's implementation work includes adding contract correlation to runtime I/O event factories/adapters whenever work is executing inside a contract. Without that correlation, Layer 0 must omit the event rather than guessing from lineage/session scope.
 
 **Invariants** (re-cited from upstream RFCs so this RFC stays consistent):
 
@@ -125,9 +133,11 @@ Step 1 — additive code only
 Step 2 — additive event family + contract-targeted directives
         New factories: contract.created / completed / failed / dependency.recorded.
         Update contract-serving directive emitters to write control.directive.emitted
-        with target_type=contract and target_id=<contract_id>; lineage/session
-        targets may still be emitted as secondary views, but contract replay depends
-        on the contract target from day one.
+        with target_type=contract and target_id=<contract_id>; update tool.call.*
+        and llm.call.* producers to carry contract_id/correlation_id in payload
+        or extra when emitted inside a contract. Lineage/session targets may still
+        be emitted as secondary views, but contract replay depends on the contract
+        correlation from day one.
         No event_version bump is required for the new contract.* event family;
         the factories use the current payload event_version, and only incompatible
         changes to an existing payload contract bump event_version per #436.
@@ -237,7 +247,7 @@ sequenceDiagram
     E->>P: notify
     P->>V: upsert(contract_id, status="running")
     O->>E: append control.directive.emitted (target=contract/<contract_id>)
-    O->>E: append tool.call.* / llm.call.*
+    O->>E: append tool.call.* / llm.call.* (contract_id=<contract_id>)
     O->>E: append contract.dependency.recorded (from=<parent>, to=<child>)
     E->>P: notify
     P->>V: update audit_trail aggregate
