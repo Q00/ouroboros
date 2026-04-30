@@ -26,6 +26,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from ouroboros.orchestrator_stage import VALID_STAGE_KEYS
+
 
 class ModelConfig(BaseModel, frozen=True):
     """Configuration for a single LLM model.
@@ -330,16 +332,46 @@ class LoggingConfig(BaseModel, frozen=True):
     include_reasoning: bool = True
 
 
-class RuntimeProfileConfig(BaseModel, frozen=True):
-    """Runtime profile configuration shared by backend profiles and stage routing.
+VALID_RUNTIME_BACKENDS = frozenset(
+    {
+        "claude",
+        "claude_code",
+        "codex",
+        "codex_cli",
+        "opencode",
+        "opencode_cli",
+        "hermes",
+        "hermes_cli",
+        "gemini",
+        "gemini_cli",
+    }
+)
 
-    ``backend_profile`` carries backend-native profile names such as PR #505's
-    Codex ``worker`` mapping. Unknown names are intentionally accepted here so
-    backend-local resolvers can warn and fall back without making the shared
-    config object reject future backend slices. ``default`` and ``stages``
-    reserve the same object shape used by the stage-routing contract from PR
-    #538 so the public ``orchestrator.runtime_profile`` key has one stable
-    table/object form.
+
+class RuntimeProfileConfig(BaseModel, frozen=True):
+    """Runtime profile configuration (issue #519 / M4 / S3).
+
+    The Agent OS architecture diagram agreed in #476 lets each pipeline
+    stage (``interview`` / ``execute`` / ``evaluate`` / ``reflect``) be
+    served by a different harness. This block exposes that decision as
+    a configuration surface; the resolution helper in
+    ``ouroboros.orchestrator.stage`` reads it.
+
+    This object also reserves ``backend_profile`` for backend-native
+    profile selection (for example PR #505's Codex ``worker`` profile),
+    so the public ``orchestrator.runtime_profile`` key has one stable
+    object shape instead of conflicting string-vs-table meanings.
+
+    Attributes:
+        backend_profile: Optional backend-native profile name. Stage
+            routing does not interpret it; backend adapters may map it
+            to their own profile mechanism.
+        default: Optional runtime backend that serves any stage missing
+            from ``stages``. ``None`` means "fall through to the
+            orchestrator's top-level ``runtime_backend``".
+        stages: Explicit per-stage mapping. Keys must be members of the
+            closed stage vocabulary; unknown keys raise ``ValueError``
+            during Pydantic validation at startup.
     """
 
     backend_profile: str | None = None
@@ -349,13 +381,47 @@ class RuntimeProfileConfig(BaseModel, frozen=True):
     @field_validator("backend_profile")
     @classmethod
     def _validate_backend_profile(cls, value: str | None) -> str | None:
-        """Normalize backend-native profile names without constraining vocabulary."""
+        """Normalize optional backend-native profile names."""
         if value is None:
             return None
         candidate = value.strip()
         if not candidate:
             raise ValueError("runtime_profile.backend_profile must not be empty")
         return candidate
+
+    @field_validator("default")
+    @classmethod
+    def _validate_default_backend(cls, value: str | None) -> str | None:
+        """Reject invalid runtime_profile.default backend names at startup."""
+        if value is None:
+            return None
+        return _validate_runtime_backend(value, field_name="runtime_profile.default")
+
+    @field_validator("stages")
+    @classmethod
+    def _validate_stage_keys(cls, value: dict[str, str]) -> dict[str, str]:
+        """Reject unknown stage names and invalid backend names at startup."""
+        validated: dict[str, str] = {}
+        for key, backend in value.items():
+            if key not in VALID_STAGE_KEYS:
+                valid_list = ", ".join(sorted(VALID_STAGE_KEYS))
+                raise ValueError(
+                    f"Unknown runtime_profile.stages key: {key!r}. Valid keys are: {valid_list}.",
+                )
+            validated[key] = _validate_runtime_backend(
+                backend,
+                field_name=f"runtime_profile.stages[{key!r}]",
+            )
+        return validated
+
+
+def _validate_runtime_backend(value: str, *, field_name: str) -> str:
+    """Validate runtime_profile backend names against orchestrator backends."""
+    candidate = value.strip().lower()
+    if candidate not in VALID_RUNTIME_BACKENDS:
+        valid_list = ", ".join(sorted(VALID_RUNTIME_BACKENDS))
+        raise ValueError(f"{field_name} must be one of: {valid_list}")
+    return candidate
 
 
 class OrchestratorConfig(BaseModel, frozen=True):

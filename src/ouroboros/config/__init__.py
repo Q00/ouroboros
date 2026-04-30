@@ -110,6 +110,7 @@ __all__ = [
     "DriftConfig",
     "LoggingConfig",
     "OrchestratorConfig",
+    "RuntimeProfileConfig",
     # Loader functions
     "load_config",
     "load_credentials",
