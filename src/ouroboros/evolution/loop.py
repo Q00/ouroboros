@@ -35,6 +35,7 @@ from ouroboros.core.lineage import (
 )
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
+from ouroboros.events.control import create_control_directive_emitted_event
 from ouroboros.events.lineage import (
     lineage_converged,
     lineage_created,
@@ -49,6 +50,10 @@ from ouroboros.events.lineage import (
     lineage_wonder_degraded,
 )
 from ouroboros.evolution.convergence import ConvergenceCriteria, ConvergenceSignal
+from ouroboros.evolution.directive_mapping import (
+    is_terminal_directive,
+    step_action_to_directive,
+)
 from ouroboros.evolution.projector import LineageProjector
 from ouroboros.evolution.reflect import ReflectEngine, ReflectOutput
 from ouroboros.evolution.watchdog import (
@@ -253,6 +258,55 @@ class EvolutionaryLoop:
     def reset_project_dir(self, token: Token[str | None]) -> None:
         """Restore the previous task-local project directory context."""
         self._project_dir_context.reset(token)
+
+    async def _emit_step_directive(
+        self,
+        action: StepAction,
+        *,
+        lineage_id: str,
+        generation_number: int,
+        phase: str,
+        reason: str,
+        retry_budget_remaining: int = 1,
+    ) -> None:
+        """Emit ``control.directive.emitted`` at a ``StepAction`` decision point.
+
+        Slice 1 of #472 — translates the local ``StepAction`` outcome onto
+        the shared :class:`Directive` vocabulary and persists the
+        translation so projectors (#514) can render the decision lane
+        alongside ``lineage.*`` state events. ``StepAction.CONTINUE``
+        deliberately produces no event (the underlying
+        ``lineage.generation.completed`` event already records the
+        no-op continuation; emitting on every CONTINUE would flood the
+        journal).
+
+        Args:
+            action: Outcome being returned to the caller.
+            lineage_id: Target aggregate id (required by the factory).
+            generation_number: Correlation field for projector
+                interleaving.
+            phase: Current pipeline phase string for the projector.
+            reason: Short audit-level rationale.
+            retry_budget_remaining: Forwarded to
+                :func:`step_action_to_directive` for the
+                ``StepAction.FAILED`` branch.
+        """
+        directive = step_action_to_directive(action, retry_budget_remaining=retry_budget_remaining)
+        if directive is None:
+            return
+        await self.event_store.append(
+            create_control_directive_emitted_event(
+                target_type="lineage",
+                target_id=lineage_id,
+                emitted_by="evolver",
+                directive=directive,
+                reason=reason,
+                lineage_id=lineage_id,
+                generation_number=generation_number,
+                phase=phase,
+                extra={"step_action": str(action), "is_terminal": is_terminal_directive(directive)},
+            )
+        )
 
     async def run(
         self,
@@ -671,6 +725,13 @@ class EvolutionaryLoop:
                 ontology_similarity=0.0,
                 generation=generation_number,
             )
+            await self._emit_step_directive(
+                StepAction.FAILED,
+                lineage_id=lineage.lineage_id,
+                generation_number=generation_number,
+                phase="executing",
+                reason=conv_signal.reason,
+            )
             return Result.ok(
                 StepResult(
                     generation_result=failed_gen,
@@ -696,6 +757,13 @@ class EvolutionaryLoop:
                 ontology_similarity=0.0,
                 generation=generation_number,
             )
+            await self._emit_step_directive(
+                StepAction.FAILED,
+                lineage_id=lineage.lineage_id,
+                generation_number=generation_number,
+                phase="executing",
+                reason=conv_signal.reason,
+            )
             return Result.ok(
                 StepResult(
                     generation_result=failed_gen,
@@ -715,6 +783,13 @@ class EvolutionaryLoop:
                 reason="Generation interrupted by SIGINT",
                 ontology_similarity=0.0,
                 generation=generation_number,
+            )
+            await self._emit_step_directive(
+                StepAction.INTERRUPTED,
+                lineage_id=lineage.lineage_id,
+                generation_number=generation_number,
+                phase="interrupted",
+                reason=conv_signal.reason,
             )
             return Result.ok(
                 StepResult(
@@ -814,6 +889,13 @@ class EvolutionaryLoop:
                 lineage = lineage.with_status(LineageStatus.CONVERGED)
                 action = StepAction.CONVERGED
 
+        await self._emit_step_directive(
+            action,
+            lineage_id=lineage.lineage_id,
+            generation_number=generation_number,
+            phase=str(result.phase),
+            reason=conv_signal.reason,
+        )
         return Result.ok(
             StepResult(
                 generation_result=result,
