@@ -37,6 +37,7 @@ from __future__ import annotations
 from enum import StrEnum
 import hashlib
 import os
+import re
 import secrets
 import time
 from typing import Any, Final
@@ -72,6 +73,7 @@ PRIVACY_ENV_VAR: Final[str] = "OUROBOROS_IO_JOURNAL_PREVIEWS"
 
 #: Crockford base32 alphabet used by ULID. Excluded letters: I L O U.
 _ULID_ALPHABET: Final[str] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+_ULID_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 
 
 class PrivacyMode(StrEnum):
@@ -170,6 +172,8 @@ def shape_preview(
     if mode is PrivacyMode.OFF:
         return None
     if mode is PrivacyMode.REDACTED:
+        if text.startswith("<redacted len=") and text.endswith(">"):
+            return text
         return REDACTION_MARKER_TEMPLATE.format(length=len(text))
     return truncate_preview(text, cap, hard_cap=hard_cap)
 
@@ -240,6 +244,11 @@ def _validate_target(target_type: str, target_id: str) -> None:
         raise ValueError("I/O Journal events require a non-empty target_id.")
 
 
+def _validate_call_id(call_id: str) -> None:
+    if not _ULID_RE.fullmatch(call_id):
+        raise ValueError("I/O Journal events require call_id to be a 26-character ULID.")
+
+
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
@@ -269,6 +278,11 @@ def create_tool_call_started_event(
     to the same hash without repeatedly hashing per-call.
     """
     _validate_target(target_type, target_id)
+    _validate_call_id(call_id)
+    args_preview = shape_preview(
+        args_preview,
+        hard_cap=PREVIEW_HARD_CAP_CHARS_TOOL,
+    )
     data = _build_io_event_data(
         target_type=target_type,
         target_id=target_id,
@@ -317,6 +331,11 @@ def create_tool_call_returned_event(
 ) -> BaseEvent:
     """Record the *completion* of a tool dispatch (paired by ``call_id``)."""
     _validate_target(target_type, target_id)
+    _validate_call_id(call_id)
+    result_preview = shape_preview(
+        result_preview,
+        hard_cap=PREVIEW_HARD_CAP_CHARS_TOOL,
+    )
     data = _build_io_event_data(
         target_type=target_type,
         target_id=target_id,
@@ -367,6 +386,8 @@ def create_llm_call_requested_event(
 ) -> BaseEvent:
     """Record the *start* of an outbound LLM call."""
     _validate_target(target_type, target_id)
+    _validate_call_id(call_id)
+    prompt_preview = shape_preview(prompt_preview)
     data = _build_io_event_data(
         target_type=target_type,
         target_id=target_id,
@@ -427,6 +448,8 @@ def create_llm_call_returned_event(
     later projector PR can normalise without changing the event schema.
     """
     _validate_target(target_type, target_id)
+    _validate_call_id(call_id)
+    completion_preview = shape_preview(completion_preview)
     data = _build_io_event_data(
         target_type=target_type,
         target_id=target_id,

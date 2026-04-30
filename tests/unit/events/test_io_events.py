@@ -170,7 +170,7 @@ class TestToolCallStartedFactory:
         event = create_tool_call_started_event(
             target_type="execution",
             target_id="exec_123",
-            call_id="01HXAB",
+            call_id=new_call_id(),
             tool_name="filesystem.read",
             args_hash=content_hash('{"path": "/etc/hosts"}'),
         )
@@ -178,7 +178,7 @@ class TestToolCallStartedFactory:
         assert event.aggregate_type == "execution"
         assert event.aggregate_id == "exec_123"
         assert event.data["tool_name"] == "filesystem.read"
-        assert event.data["call_id"] == "01HXAB"
+        assert _ULID_PATTERN.match(event.data["call_id"]) is not None
         assert event.data["args_hash"].startswith("sha256:")
         assert "args_preview" not in event.data
         assert "session_id" not in event.data
@@ -187,7 +187,7 @@ class TestToolCallStartedFactory:
         event = create_tool_call_started_event(
             target_type="execution",
             target_id="exec_123",
-            call_id="01HXAB",
+            call_id=new_call_id(),
             tool_name="filesystem.read",
             args_hash="sha256:abc",
             session_id="sess_x",
@@ -202,7 +202,7 @@ class TestToolCallStartedFactory:
             create_tool_call_started_event(
                 target_type="",
                 target_id="x",
-                call_id="01",
+                call_id=new_call_id(),
                 tool_name="t",
                 args_hash="sha256:x",
             )
@@ -210,7 +210,7 @@ class TestToolCallStartedFactory:
             create_tool_call_started_event(
                 target_type="execution",
                 target_id="",
-                call_id="01",
+                call_id=new_call_id(),
                 tool_name="t",
                 args_hash="sha256:x",
             )
@@ -221,14 +221,14 @@ class TestToolCallReturnedFactory:
         event = create_tool_call_returned_event(
             target_type="execution",
             target_id="exec_123",
-            call_id="01HXAB",
+            call_id=new_call_id(),
             tool_name="filesystem.read",
             duration_ms=12,
             is_error=False,
             result_hash="sha256:def",
         )
         assert event.type == "tool.call.returned"
-        assert event.data["call_id"] == "01HXAB"
+        assert _ULID_PATTERN.match(event.data["call_id"]) is not None
         assert event.data["duration_ms"] == 12
         assert event.data["is_error"] is False
         assert "error_kind" not in event.data
@@ -258,7 +258,7 @@ class TestLLMCallRequestedFactory:
         event = create_llm_call_requested_event(
             target_type="execution",
             target_id="exec_123",
-            call_id="01HX",
+            call_id=new_call_id(),
             model_id="claude-opus-4",
             prompt_hash="sha256:p",
         )
@@ -272,7 +272,7 @@ class TestLLMCallRequestedFactory:
         event = create_llm_call_requested_event(
             target_type="execution",
             target_id="exec_123",
-            call_id="01HX",
+            call_id=new_call_id(),
             model_id="claude-opus-4",
             prompt_hash="sha256:p",
             prompt_preview="hello",
@@ -293,7 +293,7 @@ class TestLLMCallReturnedFactory:
         event = create_llm_call_returned_event(
             target_type="execution",
             target_id="exec_123",
-            call_id="01HX",
+            call_id=new_call_id(),
             model_id="claude-opus-4",
             prompt_hash="sha256:p",
             duration_ms=512,
@@ -315,7 +315,7 @@ class TestLLMCallReturnedFactory:
             event = create_llm_call_returned_event(
                 target_type="execution",
                 target_id="exec_123",
-                call_id="01HX",
+                call_id=new_call_id(),
                 model_id="x",
                 prompt_hash="sha256:p",
                 duration_ms=1,
@@ -337,32 +337,51 @@ def test_shape_preview_can_be_used_by_callers(monkeypatch: pytest.MonkeyPatch) -
     event = create_llm_call_requested_event(
         target_type="execution",
         target_id="exec_123",
-        call_id="01HX",
+        call_id=new_call_id(),
         model_id="claude-opus-4",
         prompt_hash=content_hash(text),
-        prompt_preview=shape_preview(text),
+        prompt_preview=text,
     )
     assert event.data["prompt_preview"] == REDACTION_MARKER_TEMPLATE.format(length=len(text))
     assert event.data["prompt_hash"].startswith("sha256:")
 
 
-def test_factory_does_not_implicitly_truncate() -> None:
-    """The factory persists previews verbatim; truncation is the caller's job.
+def test_factory_applies_privacy_and_preview_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Factories enforce the journal privacy policy at the boundary."""
+    monkeypatch.setenv(PRIVACY_ENV_VAR, "off")
+    event = create_llm_call_requested_event(
+        target_type="execution",
+        target_id="exec_123",
+        call_id=new_call_id(),
+        model_id="claude-opus-4",
+        prompt_hash="sha256:p",
+        prompt_preview="secret prompt",
+    )
+    assert "prompt_preview" not in event.data
 
-    Pinning this contract prevents a future refactor from quietly dropping
-    bytes inside the factory and surprising callers that already shaped
-    their preview.
-    """
+    monkeypatch.setenv(PRIVACY_ENV_VAR, "on")
     long_preview = "x" * 10_000
     event = create_llm_call_requested_event(
         target_type="execution",
         target_id="exec_123",
-        call_id="01HX",
+        call_id=new_call_id(),
         model_id="claude-opus-4",
         prompt_hash="sha256:p",
         prompt_preview=long_preview,
     )
-    assert event.data["prompt_preview"] == long_preview
+    assert event.data["prompt_preview"].startswith("x" * 256)
+    assert "truncated len=9744" in event.data["prompt_preview"]
+
+
+def test_factory_rejects_malformed_call_id() -> None:
+    with pytest.raises(ValueError, match="call_id"):
+        create_llm_call_requested_event(
+            target_type="execution",
+            target_id="exec_123",
+            call_id="not-a-ulid",
+            model_id="claude-opus-4",
+            prompt_hash="sha256:p",
+        )
 
 
 # Strip a leftover env var from earlier tests so process-wide state stays
