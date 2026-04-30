@@ -78,8 +78,8 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
   "correlation_id": "01HXAC...",         // mirrored from request
   "parent_correlation_id": null,          // mirrored from request when present
   "result": {
-    "status": "ok",                       // "ok" | "error" | "wait"
-    "next_directive": "converge",          // continue | converge | wait | cancel
+    "status": "ok",                       // "ok" | "error"
+    "next_directive": "converge",          // required: see state-machine table below
     "artifact_ref": "sha256:abc123...",   // content hash; body fetched separately
     "error": null                         // Error object below when status="error"
   },
@@ -101,13 +101,24 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 }
 ```
 
-The Coordinator uses `retryable` plus its own retry budget to decide whether to emit `retry` or `cancel`; runtimes do not decide budget state.
+The Coordinator uses `retryable` plus its own retry budget to decide whether to emit `retry` or accept the runtime's terminal `cancel`; runtimes do not decide budget state.
+
+**Result state machine.** Legal combinations are intentionally small:
+
+| `result.status` | `result.next_directive` | Meaning |
+|---|---|---|
+| `ok` | `continue` | Successful non-terminal progress; Coordinator journals `continue` |
+| `ok` | `converge` | Successful terminal completion; Coordinator journals `converge` |
+| `ok` | `wait` | Runtime needs external input; Coordinator journals `wait` |
+| `error` | `cancel` | Runtime failed this attempt; Coordinator either journals `cancel` or, when `error.retryable=true` and budget remains, fences this attempt and journals `retry` for a new correlation id |
+
+All other combinations are schema-invalid. In particular, `wait` is a directive, not a third status value, and error results always include the typed `error` object above.
 
 **Why ULID.** Sortable, log-friendly, 26-char ASCII, and synthesizable in 10 lines without a new dependency. Replaces UUIDv4 wherever event chains need to be reconstructed in order. `parent_correlation_id` is nullable on first attempt and set to the previous attempt's `correlation_id` when the Coordinator dispatches a retry, so retry ancestry is represented in-band.
 
 **Why `runtime_events_emitted_count` instead of inline events.** Disposable Memory's promise is that the *main session ledger holds only `contract_id + artifact_ref`*. Streaming the runtime-reported frame count keeps the wire small and gives the Coordinator a sanity check against the events it actually persisted; the authoritative body is fetched from the EventStore by a projector when needed. The Coordinator's post-result lifecycle directive is not included in this runtime-authored count. This preserves the bloat-guard invariant from [#512](https://github.com/Q00/ouroboros/issues/512) at the wire layer.
 
-**Final directive mapping.** The runtime sets `result.next_directive` to the control-plane decision the Coordinator must journal for the final response: `converge` for successful terminal completion, `continue` for successful non-terminal progress, `wait` when external input is required, and `cancel` for terminal failure/cancellation. Retry-budget decisions remain Coordinator/resilience-layer policy; a retryable runtime failure is reported as `status="error"` with retryable error metadata, and the Coordinator decides whether to emit `retry` and dispatch another attempt. `result.status` remains the coarse transport/result class; `next_directive` is the normative journal mapping for non-retry outcomes.
+**Final directive mapping.** The runtime sets `result.next_directive` according to the state-machine table above. Retry-budget decisions remain Coordinator/resilience-layer policy; a retryable runtime failure is reported as `status="error"`, `next_directive="cancel"`, and `error.retryable=true`, and the Coordinator decides whether to emit `retry` and dispatch another attempt instead of accepting the cancellation. `result.status` remains the coarse transport/result class; `next_directive` is the normative journal mapping unless Coordinator retry policy overrides a retryable error.
 
 **`extra` governance.** Adding a key to `extra` requires a one-line justification in the PR body, identical to the narrow-membership commitment for `AgentRuntimeContext` in #476 Q1. This stops slot sprawl over time.
 
