@@ -58,7 +58,8 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 {
   "schema_version": 1,
   "contract_id": "01HXAB...",            // ULID, 26 chars, sortable, no extra dependency
-  "correlation_id": "01HXAC...",         // monotonic per chain
+  "correlation_id": "01HXAC...",         // attempt id within this contract
+  "parent_correlation_id": null,          // set on retry attempts
   "target_type": "lineage",              // open string; known values live in events/control.py
   "target_id": "ralph-...-v3",
   "directive": "evaluate",               // core.directive.Directive.value (lowercase)
@@ -75,6 +76,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
   "schema_version": 1,
   "contract_id": "01HXAB...",            // mirrored from request
   "correlation_id": "01HXAC...",         // mirrored from request
+  "parent_correlation_id": null,          // mirrored from request when present
   "result": {
     "status": "ok",                       // "ok" | "error" | "wait"
     "next_directive": "converge",          // continue | converge | wait | cancel
@@ -88,7 +90,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 }
 ```
 
-**Why ULID.** Sortable, log-friendly, 26-char ASCII, and synthesizable in 10 lines without a new dependency. Replaces UUIDv4 wherever event chains need to be reconstructed in order.
+**Why ULID.** Sortable, log-friendly, 26-char ASCII, and synthesizable in 10 lines without a new dependency. Replaces UUIDv4 wherever event chains need to be reconstructed in order. `parent_correlation_id` is nullable on first attempt and set to the previous attempt's `correlation_id` when the Coordinator dispatches a retry, so retry ancestry is represented in-band.
 
 **Why `events_emitted_count` instead of inline events.** Disposable Memory's promise is that the *main session ledger holds only `contract_id + artifact_ref`*. Streaming an event count keeps the wire small; the body is fetched from the EventStore by a projector when needed. This preserves the bloat-guard invariant from [#512](https://github.com/Q00/ouroboros/issues/512) at the wire layer.
 
