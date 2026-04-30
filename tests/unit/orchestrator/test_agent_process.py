@@ -127,6 +127,7 @@ async def test_cancel_status_and_directive_wait_for_work_exit() -> None:
     final = await handle.wait_until_complete(timeout=1.0)
     assert final is AgentProcessStatus.CANCELLED
     assert _directives(store.appended)[-1] == "cancel"
+    assert store.appended[-1].data["extra"]["lifecycle_status"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -180,6 +181,7 @@ async def test_failed_work_marks_status_and_emits_cancel() -> None:
     assert _directives(store.appended)[-1] == "cancel"
     failed_event = store.appended[-1]
     assert "_SimulatedFailure" in failed_event.data["reason"]
+    assert failed_event.data["extra"]["lifecycle_status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -314,6 +316,7 @@ async def test_lifecycle_directive_carries_target_type_agent_process() -> None:
         assert event.data["target_type"] == "agent_process"
         assert event.data["emitted_by"] == "agent_process"
         assert event.data["extra"]["intent"] == "evolve_step"
+        assert "lifecycle_status" in event.data["extra"]
 
 
 @pytest.mark.asyncio

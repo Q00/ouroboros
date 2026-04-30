@@ -137,7 +137,7 @@ class AgentProcessHandle:
     _paused_event: asyncio.Event = field(default_factory=asyncio.Event)
     _completed_event: asyncio.Event = field(default_factory=asyncio.Event)
     _cancel_reason: str = "cancel requested"
-    _emit_directive: Callable[[Directive, str], Awaitable[None]] | None = None
+    _emit_directive: Callable[[Directive, str, AgentProcessStatus], Awaitable[None]] | None = None
 
     def __post_init__(self) -> None:
         # The paused-event is "set" when the loop is *not* paused so a
@@ -236,37 +236,36 @@ class AgentProcessHandle:
     # Status transition machinery
     # ------------------------------------------------------------------
 
-    async def mark_completed(self, *, reason: str = "work loop returned") -> None:
+    async def _mark_completed(self, *, reason: str = "work loop returned") -> None:
         """Mark the process as completed and emit the lifecycle directive."""
         if self._status in _TERMINAL_STATUSES:
             return
         await self._set_status(AgentProcessStatus.COMPLETED, reason=reason)
 
-    async def mark_failed(self, *, reason: str) -> None:
-        """Mark the process as failed and emit a ``CANCEL`` directive.
+    async def _mark_failed(self, *, reason: str, force: bool = False) -> None:
+        """Mark the process as failed and persist structured lifecycle status.
 
         ``FAILED`` does not have a canonical Directive in the current
-        vocabulary; the lifecycle directive is ``CANCEL`` so projections
-        treat it as terminal. The actual *reason* string carries the
-        diagnostic detail.
+        vocabulary, so the directive remains ``CANCEL`` while the journal
+        stores ``extra.lifecycle_status=failed`` for replay/projectors.
+        ``force=True`` is used by the runner exception path so a leaked
+        internal terminal transition cannot hide a later work failure.
         """
-        if self._status in _TERMINAL_STATUSES:
+        if self._status in _TERMINAL_STATUSES and not force:
             return
-        # Manually set status before emission so the directive carries
-        # the FAILED label even though the directive itself is CANCEL.
         self._status = AgentProcessStatus.FAILED
         if self._emit_directive is not None:
-            await self._emit_directive(Directive.CANCEL, reason)
+            await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
         self._completed_event.set()
 
-    async def mark_cancelled(self) -> None:
+    async def _mark_cancelled(self) -> None:
         """Mark the process as cancelled after the work task has exited."""
         if self._status in {AgentProcessStatus.COMPLETED, AgentProcessStatus.FAILED}:
             return
         await self._set_status(AgentProcessStatus.CANCELLED, reason=self._cancel_reason)
         self._completed_event.set()
 
-    def mark_work_exited(self) -> None:
+    def _mark_work_exited(self) -> None:
         """Mark the underlying work task as exited without changing lifecycle status."""
         self._completed_event.set()
 
@@ -276,7 +275,7 @@ class AgentProcessHandle:
         self._status = new_status
         directive = _TRANSITION_DIRECTIVE.get(new_status)
         if directive is not None and self._emit_directive is not None:
-            await self._emit_directive(directive, reason)
+            await self._emit_directive(directive, reason, new_status)
         if new_status in _TERMINAL_STATUSES:
             self._completed_event.set()
 
@@ -337,27 +336,29 @@ class AgentProcess:
         # spawn marker even if the loop fails before the first
         # cooperative checkpoint.
         if emit is not None:
-            await emit(Directive.CONTINUE, "spawned")
+            await emit(Directive.CONTINUE, "spawned", AgentProcessStatus.RUNNING)
 
         async def _runner() -> None:
             try:
                 await work_fn(handle)
             except asyncio.CancelledError:
                 await handle.cancel(reason="cancelled by event loop")
-                await handle.mark_cancelled()
+                await handle._mark_cancelled()
                 raise
             except BaseException as exc:  # noqa: BLE001 — runtime must capture every failure
                 if handle.status() in _TERMINAL_STATUSES:
-                    handle.mark_work_exited()
+                    await handle._mark_failed(
+                        reason=f"work raised {type(exc).__name__}: {exc!s}", force=True
+                    )
                 else:
-                    await handle.mark_failed(reason=f"work raised {type(exc).__name__}: {exc!s}")
+                    await handle._mark_failed(reason=f"work raised {type(exc).__name__}: {exc!s}")
                 logger.exception("agent_process.work_failed", extra={"process_id": pid})
                 return
             else:
                 if handle.should_cancel():
-                    await handle.mark_cancelled()
+                    await handle._mark_cancelled()
                 else:
-                    await handle.mark_completed(reason="work returned")
+                    await handle._mark_completed(reason="work returned")
 
         # Spawn but do not await — the caller drives lifecycle through
         # the handle.
@@ -366,13 +367,15 @@ class AgentProcess:
 
     def _make_emitter(
         self, *, intent: str, process_id: str
-    ) -> Callable[[Directive, str], Awaitable[None]] | None:
+    ) -> Callable[[Directive, str, AgentProcessStatus], Awaitable[None]] | None:
         """Build the directive-emit callable used by the handle."""
         store = self.event_store
         if store is None:
             return None
 
-        async def emit(directive: Directive, reason: str) -> None:
+        async def emit(
+            directive: Directive, reason: str, lifecycle_status: AgentProcessStatus
+        ) -> None:
             try:
                 event = create_control_directive_emitted_event(
                     target_type=_TARGET_TYPE,
@@ -380,7 +383,7 @@ class AgentProcess:
                     emitted_by=_EMITTED_BY,
                     directive=directive,
                     reason=f"{intent}: {reason}" if reason else intent,
-                    extra={"intent": intent},
+                    extra={"intent": intent, "lifecycle_status": lifecycle_status.value},
                 )
                 await store.append(event)
             except Exception:  # noqa: BLE001 — observational-first
