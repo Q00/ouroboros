@@ -81,18 +81,31 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
     "status": "ok",                       // "ok" | "error" | "wait"
     "next_directive": "converge",          // continue | converge | wait | cancel
     "artifact_ref": "sha256:abc123...",   // content hash; body fetched separately
-    "error": null                         // populated when status="error"
+    "error": null                         // Error object below when status="error"
   },
   "runtime_id": "codex_cli",              // which harness produced the result
   "duration_ms": 12345,
-  "events_emitted_count": 17,             // Coordinator-computed persisted event count
+  "runtime_events_emitted_count": 17,     // runtime-reported event frames sent before result
   "extra": {}
 }
 ```
 
+**Error object.** When `result.status="error"`, `result.error` MUST be an object with at least:
+
+```jsonc
+{
+  "code": "deadline_exceeded",       // stable machine-readable discriminator
+  "message": "runtime exceeded deadline",
+  "retryable": true,                  // Coordinator policy input
+  "details": {}                       // additive-only diagnostic slot
+}
+```
+
+The Coordinator uses `retryable` plus its own retry budget to decide whether to emit `retry` or `cancel`; runtimes do not decide budget state.
+
 **Why ULID.** Sortable, log-friendly, 26-char ASCII, and synthesizable in 10 lines without a new dependency. Replaces UUIDv4 wherever event chains need to be reconstructed in order. `parent_correlation_id` is nullable on first attempt and set to the previous attempt's `correlation_id` when the Coordinator dispatches a retry, so retry ancestry is represented in-band.
 
-**Why `events_emitted_count` instead of inline events.** Disposable Memory's promise is that the *main session ledger holds only `contract_id + artifact_ref`*. Streaming an event count keeps the wire small; the body is fetched from the EventStore by a projector when needed. This preserves the bloat-guard invariant from [#512](https://github.com/Q00/ouroboros/issues/512) at the wire layer.
+**Why `runtime_events_emitted_count` instead of inline events.** Disposable Memory's promise is that the *main session ledger holds only `contract_id + artifact_ref`*. Streaming the runtime-reported frame count keeps the wire small and gives the Coordinator a sanity check against the events it actually persisted; the authoritative body is fetched from the EventStore by a projector when needed. The Coordinator's post-result lifecycle directive is not included in this runtime-authored count. This preserves the bloat-guard invariant from [#512](https://github.com/Q00/ouroboros/issues/512) at the wire layer.
 
 **Final directive mapping.** The runtime sets `result.next_directive` to the control-plane decision the Coordinator must journal for the final response: `converge` for successful terminal completion, `continue` for successful non-terminal progress, `wait` when external input is required, and `cancel` for terminal failure/cancellation. Retry-budget decisions remain Coordinator/resilience-layer policy; a retryable runtime failure is reported as `status="error"` with retryable error metadata, and the Coordinator decides whether to emit `retry` and dispatch another attempt. `result.status` remains the coarse transport/result class; `next_directive` is the normative journal mapping for non-retry outcomes.
 
@@ -208,7 +221,7 @@ sequenceDiagram
     C->>E: append
     R-->>C: stream: tool.call.started + tool.call.returned
     C->>E: append (×2)
-    R-->>C: result envelope (status=ok, next_directive=converge, artifact_ref="sha256:...", events_emitted_count=4)
+    R-->>C: result envelope (status=ok, next_directive=converge, artifact_ref="sha256:...", runtime_events_emitted_count=4)
     C->>E: append (control.directive.emitted converge)
     C-->>O: AgentProcessHandle(replay-able by contract_id)
 ```
