@@ -207,3 +207,42 @@ class TestDirectiveProjection:
         assert lineage.status == LineageStatus.CONVERGED
         assert len(lineage.directive_emissions) == 2
         assert lineage.directive_emissions[-1].directive == "converge"
+
+    def test_rewind_truncates_directives_for_discarded_generations(self) -> None:
+        """Directive timeline follows active lineage after lineage.rewound."""
+        projector = LineageProjector()
+        events = [
+            _event("lineage.created", {"goal": "rewind directive pruning"}),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "evolve",
+                    "reason": "Gen 1 decision.",
+                    "emitted_by": "evolver",
+                    "generation_number": 1,
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "retry",
+                    "reason": "Discarded Gen 2 decision.",
+                    "emitted_by": "evolver",
+                    "generation_number": 2,
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "wait",
+                    "reason": "Unscoped audit note.",
+                    "emitted_by": "orchestrator",
+                },
+            ),
+            _event("lineage.rewound", {"from_generation": 2, "to_generation": 1}),
+        ]
+
+        lineage = projector.project(events)
+
+        assert lineage is not None
+        assert [e.directive for e in lineage.directive_emissions] == ["evolve", "wait"]
