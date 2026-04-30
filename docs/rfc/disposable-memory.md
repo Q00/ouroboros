@@ -40,7 +40,7 @@ This document **does not** decide:
 
 ### C1 — Execution model: harness invocation, no new Python process layer
 
-**Decision.** A sub-agent spawn is a **bounded harness invocation** on top of the existing pattern in `providers/{codex,opencode,hermes,gemini}_cli_adapter.py`. The disposable boundary is the harness child process; the spawn passes a constrained context, the harness produces a result envelope, and the child exits when the contract completes.
+**Decision.** A sub-agent spawn is a **bounded harness invocation** on top of the existing provider/runtime pattern in `providers/{codex,opencode,gemini}_cli_adapter.py` and `orchestrator/hermes_runtime.py`. The disposable boundary is the harness child process; the spawn passes a constrained context, the harness produces a result envelope, and the child exits when the contract completes.
 
 This RFC does **not** add a Python `multiprocessing` or `os.fork` layer.
 
@@ -87,10 +87,12 @@ ouroboros artifacts prune --ttl 30d    # override default TTL of 90 days
 
 **Algorithm.**
 
-1. Walk the EventStore once and collect every `artifact_ref` ever referenced. These are *reachable*.
-2. For each file under `.ouroboros/artifacts/`, mark for deletion if `mtime` exceeds the TTL **and** the hash is not reachable.
-3. Write an `artifact.tombstoned` event before deletion so future replays surface *"this artifact was pruned; use `--force-rerun` to recompute"* rather than a silent missing-file error.
-4. Tombstones for still-reachable `artifact_ref`s are retained as part of the replay contract. Tombstones for artifacts no longer referenced by any retained event may be compacted by an explicit ledger-compaction workflow, not by the normal artifact prune path.
+1. Walk the EventStore once and build a reverse index: `artifact_ref -> set(contract_id)` plus each contract's retention state.
+2. Protect every artifact referenced by an active contract or by a contract still inside the replay-retention window. These are *active reachable* and are never removed by normal prune.
+3. Mark a file under `.ouroboros/artifacts/` for deletion only when its `mtime` exceeds the TTL **and** every referencing contract is outside the artifact-body retention window, or the operator explicitly opts into tombstoning replay bodies with `--allow-replay-tombstone`.
+4. Before deleting a content-addressed blob, write a contract-scoped `artifact.tombstoned` event (or durable per-contract tombstone manifest entry) for **each** referencing contract. This fan-out is required because a single deduplicated hash may be shared by many contracts.
+5. Delete the blob only after those tombstones are durable. Future replay surfaces *"this artifact was pruned; use `--force-rerun` to recompute"* from the contract's own event stream/manifest rather than a silent missing-file error.
+6. Tombstones for still-referenced contracts are retained as part of the replay contract. Tombstones for artifacts whose referencing contracts are also out of retention may be compacted by an explicit ledger-compaction workflow, not by the normal artifact prune path.
 
 **Why local-first / opt-in.** Local-first means GC is never on the hot path; users opt in by running the command. Default policy is conservative (data preservation > disk reclaim). `ouroboros artifacts prune` without `--apply` is a dry-run that prints the candidate list — this is the operator's safety net before destructive action.
 
@@ -124,7 +126,7 @@ There is *no* implicit accessor that returns a sub-agent's transcript "for free.
 
 **`--force-rerun`.** Allocates a **new `contract_id`** and runs the work again. This is exactly the rule from [#511](https://github.com/Q00/ouroboros/issues/511) D6: intentional re-execution is a new contract, accidental re-execution via retry is the same contract. Replay inherits that rule rather than inventing a third one.
 
-**Tombstoned artifact path.** If the artifact has been pruned (C3), the default replay surfaces the tombstone and asks the user to opt into rerun. **No silent fallback to rerun** — this would corrupt the *replay* verb's promise of determinism.
+**Tombstoned artifact path.** If the artifact has been pruned (C3), the default replay first checks the contract-scoped tombstone event/manifest and surfaces that tombstone before asking the user to opt into rerun. **No silent fallback to rerun** — this would corrupt the *replay* verb's promise of determinism.
 
 ## Out of scope (explicit)
 
