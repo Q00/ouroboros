@@ -464,9 +464,15 @@ class OntologyLineage(BaseModel, frozen=True):
             raise ValueError(f"Generation {generation_number} out of range [1, {max_gen}]")
 
         truncated = tuple(g for g in self.generations if g.generation_number <= generation_number)
+        retained_directives = tuple(
+            emission
+            for emission in self.directive_emissions
+            if emission.generation_number is None or emission.generation_number <= generation_number
+        )
         return self.model_copy(
             update={
                 "generations": truncated,
+                "directive_emissions": retained_directives,
                 "status": LineageStatus.ACTIVE,
             }
         )

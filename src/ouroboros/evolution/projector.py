@@ -220,15 +220,24 @@ class LineageProjector:
                     # corrupt the projection; the raw row is still queryable
                     # via event_store directly for postmortem.
                     continue
+                generation_number = data.get("generation_number")
+                if generation_number is not None and not isinstance(generation_number, int):
+                    continue
+                phase = data.get("phase")
+                if phase is not None and not isinstance(phase, str):
+                    continue
+                is_terminal = data.get("is_terminal", False)
+                if not isinstance(is_terminal, bool):
+                    continue
                 directive_emissions.append(
                     ControlDirectiveEmission(
                         directive=directive_value,
                         reason=str(data.get("reason", "")),
                         emitted_by=str(data.get("emitted_by", "")),
                         timestamp=event.timestamp,
-                        generation_number=data.get("generation_number"),
-                        phase=data.get("phase"),
-                        is_terminal=bool(data.get("is_terminal", False)),
+                        generation_number=generation_number,
+                        phase=phase,
+                        is_terminal=is_terminal,
                     )
                 )
 

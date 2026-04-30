@@ -246,3 +246,33 @@ class TestDirectiveProjection:
 
         assert lineage is not None
         assert [e.directive for e in lineage.directive_emissions] == ["evolve", "wait"]
+
+    def test_invalid_directive_correlation_shape_is_skipped(self) -> None:
+        """Malformed optional fields should not abort lineage projection."""
+        projector = LineageProjector()
+        events = [
+            _event("lineage.created", {"goal": "invalid directive shape"}),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "retry",
+                    "reason": "Bad generation number.",
+                    "emitted_by": "evolver",
+                    "generation_number": "two",
+                },
+            ),
+            _event(
+                "control.directive.emitted",
+                {
+                    "directive": "continue",
+                    "reason": "Healthy row.",
+                    "emitted_by": "evolver",
+                    "generation_number": 1,
+                },
+            ),
+        ]
+
+        lineage = projector.project(events)
+
+        assert lineage is not None
+        assert [e.directive for e in lineage.directive_emissions] == ["continue"]
