@@ -56,7 +56,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 import logging
-from typing import Any, Final
+from typing import Any, Final, Protocol
 from uuid import uuid4
 
 from ouroboros.core.directive import Directive
@@ -109,7 +109,7 @@ _TRANSITION_DIRECTIVE: Final[dict[AgentProcessStatus, Directive]] = {
 }
 
 
-class _AppendableEventStore:
+class _AppendableEventStore(Protocol):
     """Structural type for the recorder's ``event_store`` argument.
 
     Defined here instead of imported so the module has no runtime
