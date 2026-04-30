@@ -68,7 +68,8 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
   "contract_id": "01HXAB...",            // mirrored from request
   "correlation_id": "01HXAC...",         // mirrored from request
   "result": {
-    "status": "ok",                       // "ok" | "error"
+    "status": "ok",                       // "ok" | "error" | "wait"
+    "next_directive": "converge",          // continue | converge | wait | cancel | retry
     "artifact_ref": "sha256:abc123...",   // content hash; body fetched separately
     "error": null                         // populated when status="error"
   },
@@ -83,17 +84,19 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 
 **Why `events_emitted_count` instead of inline events.** Disposable Memory's promise is that the *main session ledger holds only `contract_id + artifact_ref`*. Streaming an event count keeps the wire small; the body is fetched from the EventStore by a projector when needed. This preserves the bloat-guard invariant from [#512](https://github.com/Q00/ouroboros/issues/512) at the wire layer.
 
+**Final directive mapping.** The runtime sets `result.next_directive` to the control-plane decision the Coordinator must journal for the final response: `converge` for successful terminal completion, `continue` for successful non-terminal progress, `wait` when external input is required, `retry` for retryable runtime-signaled failure while budget remains, and `cancel` for terminal failure/cancellation. `result.status` remains the coarse transport/result class; `next_directive` is the normative journal mapping.
+
 **`extra` governance.** Adding a key to `extra` requires a one-line justification in the PR body, identical to the narrow-membership commitment for `AgentRuntimeContext` in #476 Q1. This stops slot sprawl over time.
 
 ### D3 — Polling vs push: streamable-http hybrid
 
-**Decision.** A request opens a POST against the Coordinator endpoint. The server streams *intermediate events* (`tool.call.*`, `llm.call.*` from [#517](https://github.com/Q00/ouroboros/issues/517)) and the *final result envelope* on the same connection, then closes.
+**Decision.** The Coordinator is the client for contract dispatch: it opens `POST /mesh/contract` against the selected runtime endpoint. The runtime server streams *intermediate events* (`tool.call.*`, `llm.call.*` from [#517](https://github.com/Q00/ouroboros/issues/517)) and the *final result envelope* on the same connection, then closes. Runtimes never POST new work back to the Coordinator in this phase.
 
-**Rationale.** The slide framing of *"tool schema, polling, ResultEvent that act like IPC"* maps cleanly onto streamable-http: polling is implicit in the streaming response. No long-poll loop to tune, no SSE-only one-way limitation, no command channel separate from the data channel.
+**Rationale.** The slide framing of *"tool schema, polling, ResultEvent that act like IPC"* maps cleanly onto streamable-http: polling is implicit in the runtime's streaming response to the Coordinator's dispatch request. No long-poll loop to tune, no SSE-only one-way limitation, no command channel separate from the data channel.
 
 **Risks.**
 - A single long-running stream ties up one connection per in-flight contract. Mitigation: `deadline_ms` is enforced server-side as a relative timeout from request receipt; abandoned streams are closed when the timeout expires regardless of client behavior.
-- Reconnect semantics. Mitigation: clients reconnect with the same `(contract_id, correlation_id)`; D6 idempotency makes reconnection safe.
+- Reconnect semantics. Mitigation: the Coordinator reconnects to the same runtime endpoint with the same `(contract_id, correlation_id)`; D6 stream replay and Coordinator-side duplicate suppression make reconnection safe.
 
 ### D4 — Coordinator topology: embedded with abstract interface
 
@@ -139,8 +142,9 @@ This is the single decision that introduces fresh semantics; all others either i
 
 - **FIFO per `contract_id`.** Directives within one contract chain are delivered and journaled in emission order. Cross-contract ordering is *not* guaranteed; that is the parallelism unlock.
 - **At-least-once delivery.** Timeout → the Coordinator retries the same `(contract_id, correlation_id)` while budget remains. No exactly-once machinery.
-- **Idempotency obligation on handlers.** A handler that receives a duplicate `(contract_id, correlation_id)` returns the cached result instead of re-executing. Cache lifetime equals the contract's lifetime (cleared at completion or cancellation).
-- **LLM non-determinism resolution.** The *first* response is cached by `(contract_id, correlation_id)`; retries return the cache. *Intentional* re-execution allocates a new `contract_id` (matches `--force-rerun` semantics in [#512](https://github.com/Q00/ouroboros/issues/512) C5).
+- **Idempotency obligation on handlers.** A handler that receives a duplicate `(contract_id, correlation_id)` replays the cached stream and final result instead of re-executing. Cache lifetime equals the contract's lifetime (cleared at completion or cancellation).
+- **Stream replay on retry/reconnect.** The runtime cache is append-only per `(contract_id, correlation_id)` and contains every emitted intermediate event plus the final envelope once available. A reconnect receives the cached prefix first, with the original event ids/call ids, then resumes streaming only if the original attempt is still running. The Coordinator appends by stable event identity and treats duplicate streamed events as no-ops.
+- **LLM non-determinism resolution.** The *first* response and intermediate event sequence are cached by `(contract_id, correlation_id)`; retries return the cache. *Intentional* re-execution allocates a new `contract_id` (matches `--force-rerun` semantics in [#512](https://github.com/Q00/ouroboros/issues/512) C5).
 
 **Cache backend.** Filesystem-keyed under `.ouroboros/cache/contracts/<contract_id>/` so it aligns with Disposable Memory's content-addressed `artifact_ref` story. SQLite-backed alternatives are deferred until usage evidence demands them.
 
@@ -190,8 +194,8 @@ sequenceDiagram
     C->>E: append
     R-->>C: stream: tool.call.started + tool.call.returned
     C->>E: append (×2)
-    R-->>C: result envelope (status=ok, artifact_ref="sha256:...", events_emitted_count=4)
-    C->>E: append (control.directive.emitted CONTINUE)
+    R-->>C: result envelope (status=ok, next_directive=converge, artifact_ref="sha256:...", events_emitted_count=4)
+    C->>E: append (control.directive.emitted converge)
     C-->>O: AgentProcessHandle(replay-able by contract_id)
 ```
 
