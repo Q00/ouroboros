@@ -31,7 +31,7 @@ This document **does not** decide:
 |---|---|---|
 | `contract_id = ULID` | [#511](https://github.com/Q00/ouroboros/issues/511) D2 | Primary key of the Ledger; sortable, log-friendly. |
 | `artifact_ref = "sha256:..."` | [#512](https://github.com/Q00/ouroboros/issues/512) C2 | Stored as a reference in the Ledger; bodies remain in the artifact store. |
-| `target_type` contract | events/control.py ([#492](https://github.com/Q00/ouroboros/pull/492)) | Free-form string with known current producers such as `lineage`, `execution`, `session`, and `agent_process`; ledger projectors must not hard-code a closed enum. |
+| `target_type` contract | events/control.py ([#492](https://github.com/Q00/ouroboros/pull/492)) | Free-form string with producers such as `lineage`, `execution`, and `session`; forward-compatible targets like `agent_process` / `contract` may be introduced additively, so ledger projectors must not hard-code a closed enum. |
 
 ## Decisions
 
@@ -157,7 +157,7 @@ Backfill uses one precedence rule so rerunning it over the same historical journ
 3. Otherwise, if it carries only `execution_id`, map it to `legacy:execution:<execution_id>`.
 4. Otherwise, map it to `legacy:event:<event_id>` and mark it `synthetic=true`, `provenance="backfill:ambiguous"`.
 
-Synthetic `contract_id`s are derived as `uuid5(OuroborosBackfillNamespace, synthetic_contract_key)` (or an equivalent documented deterministic namespace hash), never from a fresh ULID seed. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
+Synthetic records still use `contract_id = ULID`. Backfill derives a deterministic ULID by taking the timestamp from the first event in the synthetic boundary and the 80-bit randomness field from `sha256("ouroboros-backfill:" + synthetic_contract_key)[:10]`. The human-readable `synthetic_contract_key` is stored separately in `extra.legacy_key`; it is **not** substituted for `contract_id`. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
 
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
@@ -167,7 +167,7 @@ Synthetic `contract_id`s are derived as `uuid5(OuroborosBackfillNamespace, synth
 | Insufficient fields | `legacy:event:<event_id>` | Marked ambiguous and visible in TUI; not silently merged |
 | Pre-#492 sessions with no directive events | same key rule, no synthetic directive emission | Backfill records contract envelope but leaves directive timeline empty |
 
-This table is the **first draft**; the L7 sub-thread on [#513](https://github.com/Q00/ouroboros/issues/513) is the canonical place to extend it for additional edge cases without changing the deterministic precedence above.
+This table is the **first draft**; the L7 sub-thread on [#513](https://github.com/Q00/ouroboros/issues/513) is the canonical place to extend it for additional edge cases without changing the deterministic precedence or ULID derivation above.
 
 **Rationale.** Migrations that require a flag day or destructive schema change tend to be deferred indefinitely; making backfill *opt-in* keeps 1.0 unblocked while preserving the option to retrofit history when a user actually wants it. RFC #476 S4's additive-only rule is honored throughout.
 
