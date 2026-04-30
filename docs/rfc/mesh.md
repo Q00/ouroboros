@@ -17,8 +17,8 @@ This document **does** decide:
 
 This document **does not** decide:
 - Per-runtime profile mappings (deferred to [#519](https://github.com/Q00/ouroboros/issues/519)).
-- Disposable Memory's process model and artifact backend (deferred to [docs/rfc/disposable-memory.md](./disposable-memory.md) / [#512](https://github.com/Q00/ouroboros/issues/512)).
-- Contract Ledger schema (deferred to [docs/rfc/contract-ledger.md](./contract-ledger.md) / [#513](https://github.com/Q00/ouroboros/issues/513)).
+- Disposable Memory's process model and artifact backend (deferred to [#512](https://github.com/Q00/ouroboros/issues/512); the companion RFC lands separately).
+- Contract Ledger schema (deferred to [#513](https://github.com/Q00/ouroboros/issues/513); the companion RFC lands separately).
 - The migration of `mcp_manager` plumbing to `AgentRuntimeContext + ControlBus` (tracked in [#474](https://github.com/Q00/ouroboros/issues/474) / [#475](https://github.com/Q00/ouroboros/issues/475)).
 
 ## Constraints inherited from #476
@@ -53,7 +53,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
   "correlation_id": "01HXAC...",         // monotonic per chain
   "target_type": "lineage",              // values declared in events/control.py: session | execution | lineage | agent_process
   "target_id": "ralph-...-v3",
-  "directive": "EVALUATE",               // core.directive.Directive
+  "directive": "evaluate",               // core.directive.Directive.value (lowercase)
   "emitted_by": "orchestrator",
   "deadline_ms": 60000,                  // absolute milliseconds
   "extra": {}                             // additive-only growth slot
@@ -81,7 +81,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 
 **Why ULID.** Sortable, log-friendly, 26-char ASCII, and synthesizable in 10 lines without a new dependency. Replaces UUIDv4 wherever event chains need to be reconstructed in order.
 
-**Why `events_emitted_count` instead of inline events.** Disposable Memory's promise is that the *main session ledger holds only `contract_id + artifact_ref`*. Streaming an event count keeps the wire small; the body is fetched from the EventStore by a projector when needed. This preserves the bloat-guard invariant from [docs/rfc/disposable-memory.md](./disposable-memory.md) at the wire layer.
+**Why `events_emitted_count` instead of inline events.** Disposable Memory's promise is that the *main session ledger holds only `contract_id + artifact_ref`*. Streaming an event count keeps the wire small; the body is fetched from the EventStore by a projector when needed. This preserves the bloat-guard invariant from [#512](https://github.com/Q00/ouroboros/issues/512) at the wire layer.
 
 **`extra` governance.** Adding a key to `extra` requires a one-line justification in the PR body, identical to the narrow-membership commitment for `AgentRuntimeContext` in #476 Q1. This stops slot sprawl over time.
 
@@ -107,13 +107,13 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 
 ### D5 — Runtime registration: startup + #476 Q4 invariant verbatim
 
-**Startup handshake.** At orchestrator start, the Coordinator reads the binding table from [#519](https://github.com/Q00/ouroboros/issues/519) (`runtime_profile.stages`), opens a streamable-http channel per declared runtime, and each runtime advertises:
+**Startup handshake.** At orchestrator start, the Coordinator reads the binding table from [#519](https://github.com/Q00/ouroboros/issues/519) (`runtime_profile.stages`), opens one channel per declared runtime using that runtime's resolved transport (streamable-http for in-process/server runtimes, stdio multiplex through the Mesh adapter for stdin/stdout CLI runtimes), and each runtime advertises:
 
 ```jsonc
 {
   "runtime_id": "codex_cli",
   "version": "0.31.0",
-  "supported_directives": ["EVALUATE", "EVOLVE", "RETRY", "CANCEL", "CONVERGE"],
+  "supported_directives": ["evaluate", "evolve", "retry", "cancel", "converge"],
   "supported_target_types": ["lineage", "execution", "agent_process"],
   "capabilities": [/* CapabilityRegistry wire format */]
 }
@@ -140,7 +140,7 @@ This is the single decision that introduces fresh semantics; all others either i
 - **FIFO per `contract_id`.** Directives within one contract chain are delivered and journaled in emission order. Cross-contract ordering is *not* guaranteed; that is the parallelism unlock.
 - **At-least-once delivery.** Timeout or connection drop → the Coordinator retries the same `(contract_id, correlation_id)`. No exactly-once machinery.
 - **Idempotency obligation on handlers.** A handler that receives a duplicate `(contract_id, correlation_id)` returns the cached result instead of re-executing. Cache lifetime equals the contract's lifetime (cleared at completion or cancellation).
-- **LLM non-determinism resolution.** The *first* response is cached by `(contract_id, correlation_id)`; retries return the cache. *Intentional* re-execution allocates a new `contract_id` (matches `--force-rerun` semantics in [docs/rfc/disposable-memory.md](./disposable-memory.md) C5).
+- **LLM non-determinism resolution.** The *first* response is cached by `(contract_id, correlation_id)`; retries return the cache. *Intentional* re-execution allocates a new `contract_id` (matches `--force-rerun` semantics in [#512](https://github.com/Q00/ouroboros/issues/512) C5).
 
 **Cache backend.** Filesystem-keyed under `.ouroboros/cache/contracts/<contract_id>/` so it aligns with Disposable Memory's content-addressed `artifact_ref` story. SQLite-backed alternatives are deferred until usage evidence demands them.
 
@@ -199,8 +199,8 @@ sequenceDiagram
 
 | Subject | Source | This RFC's behaviour |
 |---|---|---|
-| `contract_id = ULID` | this RFC, D2 | Inherited by [contract-ledger.md](./contract-ledger.md) |
-| `artifact_ref = "sha256:..."` | [disposable-memory.md](./disposable-memory.md) C2 | Used in result envelope (D2) |
+| `contract_id = ULID` | this RFC, D2 | Inherited by [#513](https://github.com/Q00/ouroboros/issues/513) |
+| `artifact_ref = "sha256:..."` | [#512](https://github.com/Q00/ouroboros/issues/512) C2 | Used in result envelope (D2) |
 | Replay does not re-execute LLM calls | #476 M3 + #518 | Honored by D6 idempotency cache |
 | `target_type` vocabulary | events/control.py (#492) | Authoritative in this RFC's D2 |
 | `policy.capabilities.changed` invariant | #476 Q4 | Reused verbatim in D5 |
