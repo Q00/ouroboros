@@ -55,7 +55,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
   "target_id": "ralph-...-v3",
   "directive": "evaluate",               // core.directive.Directive.value (lowercase)
   "emitted_by": "orchestrator",
-  "deadline_ms": 60000,                  // absolute milliseconds
+  "deadline_ms": 60000,                  // relative timeout duration in milliseconds
   "extra": {}                             // additive-only growth slot
 }
 ```
@@ -92,7 +92,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 **Rationale.** The slide framing of *"tool schema, polling, ResultEvent that act like IPC"* maps cleanly onto streamable-http: polling is implicit in the streaming response. No long-poll loop to tune, no SSE-only one-way limitation, no command channel separate from the data channel.
 
 **Risks.**
-- A single long-running stream ties up one connection per in-flight contract. Mitigation: `deadline_ms` is enforced server-side; abandoned streams are closed when the deadline expires regardless of client behavior.
+- A single long-running stream ties up one connection per in-flight contract. Mitigation: `deadline_ms` is enforced server-side as a relative timeout from request receipt; abandoned streams are closed when the timeout expires regardless of client behavior.
 - Reconnect semantics. Mitigation: clients reconnect with the same `(contract_id, correlation_id)`; D6 idempotency makes reconnection safe.
 
 ### D4 — Coordinator topology: embedded with abstract interface
@@ -138,7 +138,7 @@ This is the single decision that introduces fresh semantics; all others either i
 **Decision.**
 
 - **FIFO per `contract_id`.** Directives within one contract chain are delivered and journaled in emission order. Cross-contract ordering is *not* guaranteed; that is the parallelism unlock.
-- **At-least-once delivery.** Timeout or connection drop → the Coordinator retries the same `(contract_id, correlation_id)`. No exactly-once machinery.
+- **At-least-once delivery.** Timeout → the Coordinator retries the same `(contract_id, correlation_id)` while budget remains. No exactly-once machinery.
 - **Idempotency obligation on handlers.** A handler that receives a duplicate `(contract_id, correlation_id)` returns the cached result instead of re-executing. Cache lifetime equals the contract's lifetime (cleared at completion or cancellation).
 - **LLM non-determinism resolution.** The *first* response is cached by `(contract_id, correlation_id)`; retries return the cache. *Intentional* re-execution allocates a new `contract_id` (matches `--force-rerun` semantics in [#512](https://github.com/Q00/ouroboros/issues/512) C5).
 
@@ -159,17 +159,17 @@ Configurable per stage via the binding table from [#519](https://github.com/Q00/
 runtime = "claude_code"
 timeout_ms = 90000
 retry_budget = 2
-on_timeout = "RETRY"        # "RETRY" or "CANCEL"
+on_timeout = "retry"        # "retry" or "cancel"
 ```
 
 **Failure → Directive mapping.**
 
 | Failure mode | Directive | Notes |
 |---|---|---|
-| Runtime exceeded `deadline_ms` | `RETRY` while budget remains, then `CANCEL` | Budget owned by the existing resilience layer |
-| Runtime crash / connection drop | `CANCEL` immediately | Cooperative trust: do not assume retry safety after process death |
-| Schema validation failure on result envelope | `CANCEL` | Malformed envelope is not retryable |
-| Runtime explicitly returned `WAIT` | propagate `WAIT` | External input dependency surfaced to operator |
+| Runtime exceeded `deadline_ms` | `retry` while budget remains, then `cancel` | Budget owned by the existing resilience layer |
+| Runtime crash / connection drop | `cancel` immediately | Cooperative trust: do not assume retry safety after process death; this is not the D6 retry path |
+| Schema validation failure on result envelope | `cancel` | Malformed envelope is not retryable |
+| Runtime explicitly returned `wait` | propagate `wait` | External input dependency surfaced to operator |
 
 The retry budget reuses the existing resilience layer's accounting — no new budget surface is introduced.
 
@@ -183,7 +183,7 @@ sequenceDiagram
     participant E as EventStore
 
     O->>C: spawn(intent, AgentRuntimeContext)
-    C->>R: POST /mesh/contract\nrequest envelope (contract_id, target=lineage/<id>, directive=EVALUATE)
+    C->>R: POST /mesh/contract\nrequest envelope (contract_id, target=lineage/<id>, directive=evaluate)
     R-->>C: stream: llm.call.requested
     C->>E: append (target_type=lineage, target_id=<id>)
     R-->>C: stream: llm.call.returned (prompt_hash, completion_preview)
