@@ -119,11 +119,14 @@ timeline: list[TimelineEntry] = ledger.replay_timeline(contract_id)
 ```
 Step 1 — additive code only
         Introduce ContractLedgerProjector. Read-only over event_store.
-        Works against existing data immediately, no schema change.
+        Works against new contract-tagged data immediately, no schema change.
+        Historical timelines remain partial until the optional backfill in Step 3.
 
 Step 2 — additive event family
         New factories: contract.created / completed / failed / dependency.recorded.
-        event_version bump per #436. Existing categories unchanged.
+        No event_version bump is required for the new contract.* event family;
+        the factories use the current payload event_version, and only incompatible
+        changes to an existing payload contract bump event_version per #436.
 
 Step 3 — opt-in backfill (operator command)
         Walk historical event_store, infer contract boundaries from
@@ -174,8 +177,13 @@ erDiagram
     EVENT_STORE {
         string aggregate_type
         string aggregate_id
+        json payload
+    }
+    EVENT_PAYLOAD {
         int event_version
     }
+    EVENT_STORE ||--|| EVENT_PAYLOAD : "contains payload"
+
     CONTRACT_PROJECTION {
         ULID contract_id
         int PROJECTION_VERSION
@@ -200,6 +208,9 @@ erDiagram
 
 ## Sequence diagram — one contract's lifecycle through the Ledger
 
+For contract-rooted replay, directive events emitted while serving a contract MUST be written with `target_type="contract"` and `target_id=<contract_id>`. Lineage-level directive events remain valid for lineage replay, but they are not sufficient to reconstruct a single contract's audit stream from `ledger.replay_timeline(contract_id)`.
+
+
 ```mermaid
 sequenceDiagram
     participant O as Orchestrator
@@ -211,7 +222,7 @@ sequenceDiagram
     O->>E: append contract.created
     E->>P: notify
     P->>V: upsert(contract_id, status="running")
-    O->>E: append control.directive.emitted (target=lineage/<id>)
+    O->>E: append control.directive.emitted (target=contract/<contract_id>)
     O->>E: append tool.call.* / llm.call.*
     O->>E: append contract.dependency.recorded (from=<parent>, to=<child>)
     E->>P: notify
