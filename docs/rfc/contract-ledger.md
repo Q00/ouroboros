@@ -63,7 +63,7 @@ A contract dependency graph is something different: **runtime-recorded edges bet
   - `result_input` — A's result envelope feeds B
   - `parent_ac` — B is a sub-contract spawned to satisfy a sub-AC of A
 - The `ContractLedgerProjector` exposes both graphs through *separate* accessors:
-  - `ledger.ac_tree(contract_id) → ACNode`
+  - `ledger.ac_tree(contract_id) → ACTree` (full decomposition tree/state for the contract's AC scope)
   - `ledger.dependency_graph(contract_id) → ContractDependencyGraph`
 
 **Distinction at a glance.**
@@ -140,8 +140,9 @@ Step 2 — additive event family + contract-targeted directives
         llm.call.* producers to carry contract_id in payload or extra when
         emitted inside a contract. A single directive decision must still produce
         one control.directive.emitted row; lineage/session/execution context lives
-        in extra correlation fields so existing projectors can opt into those
-        relationships without duplicating directive rows.
+        in extra correlation fields. Compatibility is provided by Ledger/projector
+        dual-read helpers that join contract-targeted directives back into
+        lineage/session views, not by duplicating directive rows.
         No event_version bump is required for the new contract.* event family;
         the factories use the current payload event_version, and only incompatible
         changes to an existing payload contract bump event_version per #436.
@@ -161,8 +162,10 @@ Step 4 — materialized view (hot path optimization)
 
 Step 5 — slow consumer migration
         TUI / MCP tools / evaluator move to ContractLedger API on their
-        own schedules. Direct event_store reads remain valid for a long
-        deprecation window. No flag day.
+        own schedules. Legacy direct event_store reads remain valid for legacy
+        aggregate-targeted directives, but contract-targeted decisions require
+        Ledger dual-read helpers (contract aggregate + extra lineage/session
+        correlation) to appear in lineage/session views. No storage flag day.
 ```
 
 **Backfill mapping rule (deterministic first draft).**
