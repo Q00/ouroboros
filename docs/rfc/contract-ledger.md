@@ -148,8 +148,9 @@ Step 2 — additive event family + contract-targeted directives
         changes to an existing payload contract bump event_version per #436.
 
 Step 3 — opt-in backfill (operator command)
-        Walk historical event_store, infer contract boundaries from
-        (lineage_id, execution_id), emit missing synthetic contract.* envelope
+        Walk historical event_store, infer contract boundaries using the
+        deterministic precedence below — especially (lineage_id, generation_number)
+        before execution_id — and emit missing synthetic contract.* envelope
         events with synthetic=true and extra.backfill_key=<synthetic_contract_key>.
         Historical source rows are not rewritten; Layer 0 maps them through the
         deterministic key rule below. User triggers via:
@@ -176,7 +177,7 @@ Backfill uses one precedence rule so rerunning it over the same historical journ
 
 Synthetic records still use `contract_id = ULID`. Backfill derives a deterministic ULID by taking the timestamp from the first event in the synthetic boundary and the 80-bit randomness field from `sha256("ouroboros-backfill:" + synthetic_contract_key)[:10]`. The human-readable `synthetic_contract_key` is stored separately in `extra.legacy_key` / `extra.backfill_key`; it is **not** substituted for `contract_id`. Generation-derived contracts may also emit `parent_ac` / lineage continuation edges when the predecessor generation is known; execution-derived contracts stay execution-scoped unless later evidence links them to a lineage generation.
 
-Backfill is idempotent by key, not by event UUID. Before appending any synthetic `contract.*` event, the command queries for an existing synthetic event with the same `type`, `contract_id`, and `extra.backfill_key`; if present it skips the append. The journal remains append-only, but repeated backfill runs do not create duplicate synthetic envelopes for the same historical boundary.
+Backfill is idempotent by key, not by event UUID. Before appending any synthetic `contract.*` event, the command queries for an existing synthetic event with the same `type`, `contract_id`, and `extra.backfill_key`; if present it skips the append. Synthetic envelope timestamps are historical, not backfill-time: `contract.created` uses the first event timestamp in the boundary, terminal envelopes use the last event timestamp, and dependency events use the source event timestamp that established the edge. The journal remains append-only, but repeated backfill runs do not create duplicate synthetic envelopes for the same historical boundary or reorder them after the history they summarize.
 
 | Existing event evidence | Synthetic contract key | Notes |
 |---|---|---|
