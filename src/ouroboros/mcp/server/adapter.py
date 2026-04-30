@@ -324,6 +324,7 @@ class MCPServerAdapter:
         self._prompt_handlers: dict[str, PromptHandler] = {}
         self._mcp_server: Any = None
         self._owned_resources: list[Any] = []  # objects with async close()
+        self._runtime_context: AgentRuntimeContext | None = None
 
         # Initialize security layer
         self._security = SecurityLayer(
@@ -698,6 +699,15 @@ class MCPServerAdapter:
             await self._mcp_server.run_streamable_http_async()
         else:
             await self._mcp_server.run_stdio_async()
+
+    @property
+    def runtime_context(self) -> AgentRuntimeContext | None:
+        """Return the session-scoped runtime context owned by this server."""
+        return self._runtime_context
+
+    def set_runtime_context(self, context: AgentRuntimeContext) -> None:
+        """Attach the session-scoped runtime context to the server object graph."""
+        self._runtime_context = context
 
     def register_owned_resource(self, resource: Any) -> None:
         """Register a resource whose ``close()`` will be called on shutdown."""
@@ -1474,6 +1484,7 @@ def create_ouroboros_server(
         mcp_bridge=mcp_bridge,
         control=ControlBus(),
     )
+    server.set_runtime_context(agent_runtime_context)
 
     # Inject the bridge from the runtime context into every
     # BridgeAwareMixin handler. ``inject_runtime_context`` is byte-
