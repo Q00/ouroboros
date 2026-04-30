@@ -40,7 +40,7 @@ This document **does not** decide:
 - Runtime → Coordinator: zero or more `{"frame":"event","body": <BaseEvent-compatible event>}` frames.
 - Runtime → Coordinator: exactly one `{"frame":"result","body": <result envelope>}` frame, then EOF for that contract invocation.
 
-The stdio adapter owns process startup and maps these frames to the same logical stream the HTTP adapter exposes. There is no `/mesh/contract` URL on stdio; the request envelope is the dispatch boundary.
+The stdio adapter owns per-invocation process startup and maps these frames to the same logical stream the HTTP adapter exposes. Registration for stdio runtimes is not performed on this one-shot invocation stream; the adapter obtains capabilities from a static descriptor or a separate short-lived `{"frame":"register"}` discovery process before any contract dispatch. There is no `/mesh/contract` URL on stdio; the request envelope is the dispatch boundary.
 
 **Rationale.** Reusing `streamable-http` keeps a single transport story across the codebase; UDS would force a Windows-incompatible split; raw TCP would invite firewall prompts on every workstation; SSE alone cannot carry bidirectional traffic; long-poll would require its own tuning loop. `stdio multiplex` covers exactly the runtimes whose existing pattern already speaks stdio.
 
@@ -77,7 +77,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
   "correlation_id": "01HXAC...",         // mirrored from request
   "result": {
     "status": "ok",                       // "ok" | "error" | "wait"
-    "next_directive": "converge",          // continue | converge | wait | cancel | retry
+    "next_directive": "converge",          // continue | converge | wait | cancel
     "artifact_ref": "sha256:abc123...",   // content hash; body fetched separately
     "error": null                         // populated when status="error"
   },
@@ -92,7 +92,7 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 
 **Why `events_emitted_count` instead of inline events.** Disposable Memory's promise is that the *main session ledger holds only `contract_id + artifact_ref`*. Streaming an event count keeps the wire small; the body is fetched from the EventStore by a projector when needed. This preserves the bloat-guard invariant from [#512](https://github.com/Q00/ouroboros/issues/512) at the wire layer.
 
-**Final directive mapping.** The runtime sets `result.next_directive` to the control-plane decision the Coordinator must journal for the final response: `converge` for successful terminal completion, `continue` for successful non-terminal progress, `wait` when external input is required, `retry` for retryable runtime-signaled failure while budget remains, and `cancel` for terminal failure/cancellation. `result.status` remains the coarse transport/result class; `next_directive` is the normative journal mapping.
+**Final directive mapping.** The runtime sets `result.next_directive` to the control-plane decision the Coordinator must journal for the final response: `converge` for successful terminal completion, `continue` for successful non-terminal progress, `wait` when external input is required, and `cancel` for terminal failure/cancellation. Retry-budget decisions remain Coordinator/resilience-layer policy; a retryable runtime failure is reported as `status="error"` with retryable error metadata, and the Coordinator decides whether to emit `retry` and dispatch another attempt. `result.status` remains the coarse transport/result class; `next_directive` is the normative journal mapping for non-retry outcomes.
 
 **`extra` governance.** Adding a key to `extra` requires a one-line justification in the PR body, identical to the narrow-membership commitment for `AgentRuntimeContext` in #476 Q1. This stops slot sprawl over time.
 
@@ -118,14 +118,14 @@ Two envelopes — request (Coordinator → runtime) and result (runtime → Coor
 
 ### D5 — Runtime registration: startup + #476 Q4 invariant verbatim
 
-**Startup handshake.** At orchestrator start, the Coordinator reads the binding table from [#519](https://github.com/Q00/ouroboros/issues/519) (`runtime_profile.stages`), opens one channel per declared runtime using that runtime's resolved transport (streamable-http for in-process/server runtimes, stdio multiplex through the Mesh adapter for stdin/stdout CLI runtimes), and each runtime advertises:
+**Startup handshake.** At orchestrator start, the Coordinator reads the binding table from [#519](https://github.com/Q00/ouroboros/issues/519) (`runtime_profile.stages`) and resolves capabilities per runtime. Streamable-http runtimes use a persistent registration channel. Stdio runtimes register through the Mesh adapter's static descriptor or a separate short-lived discovery process; the one-shot contract invocation stream from D1 is not held open for registration. Each runtime advertises:
 
 ```jsonc
 {
   "runtime_id": "codex_cli",
   "version": "0.31.0",
   "accepted_input_directives": ["continue", "evaluate", "evolve", "unstuck", "retry", "compact", "wait", "cancel", "converge"],
-  "emitted_result_directives": ["continue", "converge", "wait", "retry", "cancel"],
+  "emitted_result_directives": ["continue", "converge", "wait", "cancel"],
   "supported_target_types": ["lineage", "execution", "agent_process"],
   "capabilities": [/* CapabilityRegistry wire format */]
 }
@@ -152,17 +152,17 @@ This is the single decision that introduces fresh semantics; all others either i
 **Decision.**
 
 - **FIFO per `contract_id`.** Directives within one contract chain are delivered and journaled in emission order. Cross-contract ordering is *not* guaranteed; that is the parallelism unlock.
-- **At-least-once delivery.** Timeout → the Coordinator retries the same `(contract_id, correlation_id)` while budget remains. No exactly-once machinery.
-- **Idempotency obligation on handlers.** A handler that receives a duplicate `(contract_id, correlation_id)` replays the cached stream and final result instead of re-executing. Cache lifetime equals the contract's lifetime (cleared at completion or cancellation).
-- **Stream replay on retry/reconnect.** For streamable-http runtimes, the runtime cache is append-only per `(contract_id, correlation_id)` and contains every emitted intermediate event plus the final envelope once available. A reconnect receives the cached prefix first, with the original event ids/call ids, then resumes streaming only if the original attempt is still running. The Coordinator appends by stable event identity and treats duplicate streamed events as no-ops. For stdio runtimes, replay is only available when the adapter can prove the subprocess is still alive and can accept a duplicate request frame; otherwise EOF/pipe loss is D7 runtime loss, not reconnect.
-- **LLM non-determinism resolution.** The *first* response and intermediate event sequence are cached by `(contract_id, correlation_id)`; retries return the cache. *Intentional* re-execution allocates a new `contract_id` (matches `--force-rerun` semantics in [#512](https://github.com/Q00/ouroboros/issues/512) C5).
+- **At-least-once delivery.** Timeout → the Coordinator emits `retry` while budget remains and dispatches a fresh attempt under the same `contract_id` with a new `correlation_id` and `parent_correlation_id` pointing at the timed-out attempt. No exactly-once machinery.
+- **Idempotency obligation on handlers.** A handler that receives a duplicate `(contract_id, correlation_id)` replays the cached stream and final result for that exact attempt instead of re-executing. Cache lifetime equals the contract's lifetime (cleared at completion or cancellation).
+- **Stream replay on reconnect.** For streamable-http runtimes, the runtime cache is append-only per `(contract_id, correlation_id)` and contains every emitted intermediate event plus the final envelope once available. A reconnect for the same attempt receives the cached prefix first, with the original event ids/call ids, then resumes streaming only if the original attempt is still running. The Coordinator appends by stable event identity and treats duplicate streamed events as no-ops. For stdio runtimes, replay is only available when the adapter can prove the subprocess is still alive and can accept a duplicate request frame; otherwise EOF/pipe loss is D7 runtime loss, not reconnect.
+- **LLM non-determinism resolution.** Duplicate delivery of the same `(contract_id, correlation_id)` returns the cache; retry execution gets a new `correlation_id` so it can run fresh while remaining under the same contract. *Intentional* user re-execution allocates a new `contract_id` (matches `--force-rerun` semantics in [#512](https://github.com/Q00/ouroboros/issues/512) C5).
 
 **Cache backend.** Filesystem-keyed under `.ouroboros/cache/contracts/<contract_id>/` so it aligns with Disposable Memory's content-addressed `artifact_ref` story. SQLite-backed alternatives are deferred until usage evidence demands them.
 
 **Why this matters.** Replay from the journal is the *replay* verb in #476's north star. If FIFO per contract is not honored, replays diverge from the recorded run. If at-least-once is not honored, transient failures produce silent gaps. If idempotency is not enforced, retries produce duplicate work and user-visible non-determinism. All three exist together or not at all.
 
 **Risks.**
-- Idempotency cache vs. genuine re-execution intent. Mitigation: the rule "retries reuse the cache; new runs allocate new `contract_id`" is documented in this RFC and enforced by the Disposable Memory replay default.
+- Idempotency cache vs. genuine re-execution intent. Mitigation: the rule "duplicate deliveries reuse the cache; timeout retries get a new `correlation_id`; user-requested reruns allocate a new `contract_id`" is documented in this RFC and enforced by the Disposable Memory replay default.
 - Cache eviction during a long contract. Mitigation: cache lifetime = contract lifetime, not a TTL; eviction only happens on contract completion or cancellation.
 
 ### D7 — Timeout and failure: per-stage policy + Directive mapping
@@ -181,7 +181,7 @@ on_timeout = "retry"        # "retry" or "cancel"
 
 | Failure mode | Directive | Notes |
 |---|---|---|
-| Runtime exceeded `deadline_ms` | `retry` while budget remains, then `cancel` | Budget owned by the existing resilience layer |
+| Runtime exceeded `deadline_ms` | Coordinator emits `retry` with a new `correlation_id` while budget remains, then `cancel` | Budget owned by the existing resilience layer; runtime does not decide retry budget |
 | Streamable-http connection drop while runtime remains alive | no new directive; reconnect via D6 | Coordinator replays cached prefix and resumes the in-flight stream for the same `(contract_id, correlation_id)` |
 | Stdio EOF/pipe loss or runtime process crash / lost runtime identity | `cancel` immediately | Cooperative trust: do not assume retry safety after process death; this is not the D6 reconnect path |
 | Schema validation failure on result envelope | `cancel` | Malformed envelope is not retryable |
