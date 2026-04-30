@@ -22,8 +22,8 @@ class TestStepActionMapping:
     def test_converged_maps_to_converge(self) -> None:
         assert step_action_to_directive(StepAction.CONVERGED) == Directive.CONVERGE
 
-    def test_stagnated_maps_to_unstuck(self) -> None:
-        assert step_action_to_directive(StepAction.STAGNATED) == Directive.UNSTUCK
+    def test_stagnated_maps_to_converge(self) -> None:
+        assert step_action_to_directive(StepAction.STAGNATED) == Directive.CONVERGE
 
     def test_exhausted_maps_to_cancel(self) -> None:
         assert step_action_to_directive(StepAction.EXHAUSTED) == Directive.CANCEL
@@ -45,7 +45,7 @@ class TestStepActionMapping:
     def test_string_value_accepted(self) -> None:
         """The function accepts the StepAction value verbatim (StrEnum semantics)."""
         assert step_action_to_directive("converged") == Directive.CONVERGE
-        assert step_action_to_directive("stagnated") == Directive.UNSTUCK
+        assert step_action_to_directive("stagnated") == Directive.CONVERGE
         assert step_action_to_directive("continue") is None
 
     def test_unknown_action_value_returns_none(self) -> None:
